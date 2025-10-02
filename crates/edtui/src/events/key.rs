@@ -1,6 +1,6 @@
 use crate::actions::cpaste::PasteOverSelection;
 use crate::actions::delete::DeleteToEndOfLine;
-use crate::actions::motion::{MoveHalfPageDown, MoveToFirstRow, MoveToLastRow};
+use crate::actions::motion::{FindCharBackward, FindCharForward, MoveHalfPageDown, MoveToFirstRow, MoveToLastRow, TillCharBackward, TillCharForward};
 use crate::actions::search::StartSearch;
 use crate::actions::{
     Action, Append, AppendCharToSearch, AppendNewline, ChangeInnerBetween, ChangeInnerWord,
@@ -59,6 +59,16 @@ impl From<CTKeyEvent> for KeyEvent {
 pub struct KeyEventHandler {
     lookup: Vec<KeyEvent>,
     register: HashMap<KeyEventRegister, Action>,
+    /// Pending find/till operation waiting for a character
+    pending_find: Option<PendingFind>,
+}
+
+#[derive(Clone, Debug, Copy)]
+enum PendingFind {
+    FindForward,
+    FindBackward,
+    TillForward,
+    TillBackward,
 }
 
 impl Default for KeyEventHandler {
@@ -357,6 +367,7 @@ impl Default for KeyEventHandler {
         Self {
             lookup: Vec::new(),
             register,
+            pending_find: None,
         }
     }
 }
@@ -368,6 +379,7 @@ impl KeyEventHandler {
         Self {
             lookup: Vec::new(),
             register,
+            pending_find: None,
         }
     }
 
@@ -476,16 +488,43 @@ impl KeyEventHandler {
         T: Into<KeyEvent> + Copy,
     {
         let mode = state.mode;
+        let key_event = key.into();
 
-        match key.into() {
+        // Handle pending find/till operation
+        if let Some(pending) = self.pending_find.take() {
+            if let KeyEvent::Char(ch) = key_event {
+                match pending {
+                    PendingFind::FindForward => FindCharForward { ch }.execute(state),
+                    PendingFind::FindBackward => FindCharBackward { ch }.execute(state),
+                    PendingFind::TillForward => TillCharForward { ch }.execute(state),
+                    PendingFind::TillBackward => TillCharBackward { ch }.execute(state),
+                }
+            }
+            return;
+        }
+
+        match key_event {
             // Always insert characters in insert mode
             KeyEvent::Char(c) if mode == EditorMode::Insert => InsertChar(c).execute(state),
             KeyEvent::Tab if mode == EditorMode::Insert => InsertChar('\t').execute(state),
             // Always add characters to search in search mode
             KeyEvent::Char(c) if mode == EditorMode::Search => AppendCharToSearch(c).execute(state),
+            // Handle f/F/t/T keys in Normal and Visual modes
+            KeyEvent::Char('f') if mode == EditorMode::Normal || mode == EditorMode::Visual => {
+                self.pending_find = Some(PendingFind::FindForward);
+            }
+            KeyEvent::Char('F') if mode == EditorMode::Normal || mode == EditorMode::Visual => {
+                self.pending_find = Some(PendingFind::FindBackward);
+            }
+            KeyEvent::Char('t') if mode == EditorMode::Normal || mode == EditorMode::Visual => {
+                self.pending_find = Some(PendingFind::TillForward);
+            }
+            KeyEvent::Char('T') if mode == EditorMode::Normal || mode == EditorMode::Visual => {
+                self.pending_find = Some(PendingFind::TillBackward);
+            }
             // Else lookup an action from the register
             _ => {
-                if let Some(mut action) = self.get(key.into(), mode) {
+                if let Some(mut action) = self.get(key_event, mode) {
                     action.execute(state);
                 }
             }
@@ -757,6 +796,7 @@ impl KeyEventHandler {
         Self {
             lookup: Vec::new(),
             register,
+            pending_find: None,
         }
     }
 }

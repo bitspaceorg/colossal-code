@@ -432,6 +432,144 @@ impl Execute for MoveHalfPageUp {
     }
 }
 
+/// Find character forward on current line (f in vim)
+#[derive(Clone, Debug, Copy)]
+pub struct FindCharForward {
+    pub ch: char,
+}
+
+impl Execute for FindCharForward {
+    fn execute(&mut self, state: &mut EditorState) {
+        let row_index = state.cursor.row;
+        let Some(line) = state.lines.get(jagged::index::RowIndex::new(row_index)) else {
+            return;
+        };
+
+        let start_col = state.cursor.col;
+
+        // Search forward from current position (exclusive)
+        for col in (start_col + 1)..line.len() {
+            if let Some(&ch) = line.get(col) {
+                if ch == self.ch {
+                    state.cursor.col = col;
+                    state.set_desired_col(None);
+
+                    if state.mode == EditorMode::Visual {
+                        set_selection(&mut state.selection, state.cursor);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Find character backward on current line (F in vim)
+#[derive(Clone, Debug, Copy)]
+pub struct FindCharBackward {
+    pub ch: char,
+}
+
+impl Execute for FindCharBackward {
+    fn execute(&mut self, state: &mut EditorState) {
+        let row_index = state.cursor.row;
+        let Some(line) = state.lines.get(jagged::index::RowIndex::new(row_index)) else {
+            return;
+        };
+
+        let start_col = state.cursor.col;
+
+        // Search backward from current position (exclusive)
+        if start_col > 0 {
+            for col in (0..start_col).rev() {
+                if let Some(&ch) = line.get(col) {
+                    if ch == self.ch {
+                        state.cursor.col = col;
+                        state.set_desired_col(None);
+
+                        if state.mode == EditorMode::Visual {
+                            set_selection(&mut state.selection, state.cursor);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Till character forward on current line (t in vim) - stops before the character
+#[derive(Clone, Debug, Copy)]
+pub struct TillCharForward {
+    pub ch: char,
+}
+
+impl Execute for TillCharForward {
+    fn execute(&mut self, state: &mut EditorState) {
+        let row_index = state.cursor.row;
+        let Some(line) = state.lines.get(jagged::index::RowIndex::new(row_index)) else {
+            return;
+        };
+
+        let start_col = state.cursor.col;
+
+        // Search forward from current position (exclusive)
+        for col in (start_col + 1)..line.len() {
+            if let Some(&ch) = line.get(col) {
+                if ch == self.ch {
+                    // Stop one character before the match
+                    state.cursor.col = col.saturating_sub(1);
+                    state.set_desired_col(None);
+
+                    if state.mode == EditorMode::Visual {
+                        set_selection(&mut state.selection, state.cursor);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Till character backward on current line (T in vim) - stops before the character
+#[derive(Clone, Debug, Copy)]
+pub struct TillCharBackward {
+    pub ch: char,
+}
+
+impl Execute for TillCharBackward {
+    fn execute(&mut self, state: &mut EditorState) {
+        let row_index = state.cursor.row;
+        let Some(line) = state.lines.get(jagged::index::RowIndex::new(row_index)) else {
+            return;
+        };
+
+        let start_col = state.cursor.col;
+
+        // Search backward from current position (exclusive)
+        if start_col > 0 {
+            for col in (0..start_col).rev() {
+                if let Some(&ch) = line.get(col) {
+                    if ch == self.ch {
+                        // Stop one character after the match (towards cursor)
+                        if col + 1 < line.len() {
+                            state.cursor.col = col + 1;
+                        } else {
+                            state.cursor.col = col;
+                        }
+                        state.set_desired_col(None);
+
+                        if state.mode == EditorMode::Visual {
+                            set_selection(&mut state.selection, state.cursor);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq)]
 pub(crate) enum CharacterClass {
     Unknown,
