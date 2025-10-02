@@ -332,6 +332,11 @@ impl Default for KeyEventHandler {
                 KeyEventRegister::n(vec![KeyEvent::Char('V')]),
                 SelectLine.into(),
             ),
+            // Select the line in visual mode (V in visual mode switches to visual line)
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('V')]),
+                SelectLine.into(),
+            ),
             // Copy
             (
                 KeyEventRegister::v(vec![KeyEvent::Char('y')]),
@@ -740,6 +745,11 @@ impl KeyEventHandler {
             // Select line
             (
                 KeyEventRegister::n(vec![KeyEvent::Char('V')]),
+                SelectLine.into(),
+            ),
+            // Select the line in visual mode (V in visual mode switches to visual line)
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('V')]),
                 SelectLine.into(),
             ),
         ]);
