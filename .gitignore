@@ -1,0 +1,15 @@
+# Compiled source
+/target/
+**/*.rs.bk
+
+# Cargo lock files (if you're building a library, ignore; if binary app, keep)
+/Cargo.lock
+
+# Backup & temporary files
+*.swp
+*.swo
+*~
+*.tmp
+
+# Ignore every target/ directory everywhere
+**/target/

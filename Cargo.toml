@@ -1,0 +1,15 @@
+[package]
+name = "tui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+color-eyre = "0.6.5"
+ratatui = "0.29.0"
+unicode-width = "0.1.13"
+edtui = {path= "./crates/edtui"}
+cli-clipboard = "0.4.0"
+clipboard = "0.5.0"
+
+[features]
+syntax-highlighting = ["edtui/syntax-highlighting"]
