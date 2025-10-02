@@ -2,6 +2,9 @@
 /target/
 **/*.rs.bk
 
+# logs
+./*.log
+
 # Cargo lock files (if you're building a library, ignore; if binary app, keep)
 /Cargo.lock
 

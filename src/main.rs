@@ -1192,6 +1192,7 @@ impl App {
                 if !self.editor.state.search_matches().is_empty() {
                     let pattern_len = self.editor.state.search_pattern_len();
                     let selected_match_index = self.editor.state.search_selected_index();
+                    let cursor_pos = self.editor.state.cursor;
                     for (match_idx, &match_pos) in self.editor.state.search_matches().iter().enumerate() {
                         let row = match_pos.row;
                         let col = match_pos.col;
@@ -1200,10 +1201,13 @@ impl App {
                             let visible_row = row - scroll_offset;
                             let y = messages_area.y + visible_row as u16;
                             let line = &message_lines[row];
-                            // Determine if this is the currently selected match (using n/N)
-                            let is_selected_match = selected_match_index == Some(match_idx);
-                            let highlight_color = if is_selected_match {
-                                Color::Magenta // Current selected match (via n/N)
+                            // Determine if cursor is within this match
+                            let cursor_in_match = cursor_pos.row == row &&
+                                                  cursor_pos.col >= col &&
+                                                  cursor_pos.col < col + pattern_len;
+                            // Only highlight match under cursor as Magenta, all others as Cyan
+                            let highlight_color = if cursor_in_match {
+                                Color::Magenta // Match under cursor
                             } else {
                                 Color::Cyan // Other matches
                             };
@@ -1230,8 +1234,8 @@ impl App {
                 if self.editor.state.mode == edtui::EditorMode::Visual {
                     if let Some(selection) = &self.editor.state.selection {
                         let is_line_mode = selection.line_mode;
-                        let sel_start = selection.start;
-                        let sel_end = self.editor.state.cursor;
+                        let sel_start = selection.start();
+                        let sel_end = selection.end();
                         let (start, end) = if sel_start.row < sel_end.row ||
                                                (sel_start.row == sel_end.row && sel_start.col <= sel_end.col) {
                             (sel_start, sel_end)
