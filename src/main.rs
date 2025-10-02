@@ -12,6 +12,7 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use edtui::clipboard::ClipboardTrait;
 mod rich_editor;
 use rich_editor::{RichEditor, create_rich_content_from_messages};
 
@@ -524,30 +525,23 @@ impl App {
                                     continue;
                                 }
                                 // Capture state before event for yank detection
-                                let was_in_visual = self.editor.state.mode == edtui::EditorMode::Visual;
+                                let old_clipboard_content = self.editor.state.clip.get_text();
                                 let old_selection = self.editor.state.selection.clone();
                                 let old_cursor = self.editor.state.cursor;
 
                                 // Let edtui handle all keybinds natively (including gg/G/Ctrl+d/Ctrl+u with column preservation)
                                 self.editor.handle_event(Event::Key(key));
 
-                                // Detect yank operations (y or yy)
-                                // Yank in visual mode: was in visual, had selection, pressed 'y', now back to normal
-                                let is_yank = (was_in_visual && old_selection.is_some() &&
-                                              key.code == KeyCode::Char('y') &&
-                                              self.editor.state.mode == edtui::EditorMode::Normal) ||
-                                              // yy in normal mode: check for yy
-                                              (key.code == KeyCode::Char('y') &&
-                                               self.editor.state.mode == edtui::EditorMode::Normal &&
-                                               !was_in_visual);
-
-                                if is_yank {
+                                // Detect yank operations by checking if clipboard content changed
+                                let new_clipboard_content = self.editor.state.clip.get_text();
+                                if new_clipboard_content != old_clipboard_content && !new_clipboard_content.is_empty() {
                                     // Flash the yanked content
-                                    if let Some(sel) = old_selection.clone() {
-                                        // Visual mode yank - flash the selection
+                                    if let Some(sel) = old_selection {
+                                        // Had a selection - flash it
                                         self.flash_highlight = Some((sel, std::time::Instant::now()));
                                     } else {
-                                        // yy - flash the current line
+                                        // No selection - must be yy (yank line)
+                                        // Flash the current line
                                         let line_selection = edtui::state::selection::Selection::new(
                                             edtui::Index2::new(old_cursor.row, 0),
                                             edtui::Index2::new(old_cursor.row, self.editor.state.lines.len_col(old_cursor.row).unwrap_or(0).saturating_sub(1))
