@@ -1099,12 +1099,14 @@ impl App {
                 // Use at least 10 rows to ensure half-page scrolling works
                 self.editor.state.set_viewport_rows((messages_area.height as usize).max(10));
 
-                // Calculate the wrap width (must match the rendered message width)
-                let max_width = messages_area.width as usize - 4;
+                // Use fixed 80 character wrap width for readability and consistent line counting
+                // This ensures the navigation buffer line count matches the visual display
+                let wrap_width = 80;
 
                 // Regenerate editor content with correct width to match rendered output
-                let rich_content = create_rich_content_from_messages(&self.messages, TIPS, self.visible_tips, MESSAGE_BORDER_SET);
-                let plain_content = rich_editor::create_plain_content_for_editor(&self.messages, TIPS, self.visible_tips, max_width);
+                // Both rich and plain content must use the same wrap width for line counts to match
+                let rich_content = create_rich_content_from_messages(&self.messages, TIPS, self.visible_tips, MESSAGE_BORDER_SET, wrap_width);
+                let plain_content = rich_editor::create_plain_content_for_editor(&self.messages, TIPS, self.visible_tips, wrap_width);
 
                 // Preserve ALL state before regenerating content (this fixes search, clipboard, text objects, etc.)
                 let old_cursor_row = self.editor.state.cursor.row;
@@ -1154,9 +1156,10 @@ impl App {
                         message_lines.push(Line::from("")); // Empty line after tips (only if there are messages)
                     }
                 }
-                // Render messages
+                // Render messages with wrap_width + 4 to account for borders in render_message_with_max_width
+                // (render_message_with_max_width subtracts 4 from max_width to get content_width)
                 for message in &self.messages {
-                    message_lines.extend(self.render_message_with_max_width(message, max_width, None).lines);
+                    message_lines.extend(self.render_message_with_max_width(message, wrap_width + 4, None).lines);
                 }
                 // Calculate scroll offset based on edtui's cursor position
                 let cursor_row = self.editor.state.cursor.row;

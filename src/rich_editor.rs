@@ -87,9 +87,9 @@ impl RichEditor {
 }
 // Helper function to create rich content from messages with proper styling
 // This creates the visual content with borders
-pub fn create_rich_content_from_messages(messages: &[String], tips: &[&str], visible_tips: usize, border_set: ratatui::symbols::border::Set) -> Vec<Line<'static>> {
+pub fn create_rich_content_from_messages(messages: &[String], tips: &[&str], visible_tips: usize, border_set: ratatui::symbols::border::Set, wrap_width: usize) -> Vec<Line<'static>> {
     let mut content = Vec::new();
-   
+
     // Add tips with proper formatting and styling (replicating render_tips functionality)
     for &tip in tips.iter().take(visible_tips) {
         let mut spans = Vec::new();
@@ -124,16 +124,16 @@ pub fn create_rich_content_from_messages(messages: &[String], tips: &[&str], vis
         }
         content.push(Line::from(spans));
     }
-   
+
     // Add messages with proper borders, spacing, and dark gray margin
     for (i, message) in messages.iter().enumerate() {
         // Add a gap between tips and first message only, no gap between messages
         if i == 0 && visible_tips > 0 {
             content.push(Line::from(vec![Span::raw("")]));
         }
-       
-        // Split long messages into multiple lines if needed
-        let wrapped_lines = wrap_text_simple(message, 80); // 80 character limit for messages
+
+        // Split long messages into multiple lines using the provided width
+        let wrapped_lines = wrap_text_simple(message, wrap_width);
        
         for (line_idx, wrapped_line) in wrapped_lines.iter().enumerate() {
             if line_idx == 0 {
@@ -183,7 +183,7 @@ pub fn create_rich_content_from_messages(messages: &[String], tips: &[&str], vis
 }
 // Helper function to create plain content for edtui navigation
 // MUST match rendered output EXACTLY character-by-character
-pub fn create_plain_content_for_editor(messages: &[String], tips: &[&str], visible_tips: usize, _wrap_width: usize) -> String {
+pub fn create_plain_content_for_editor(messages: &[String], tips: &[&str], visible_tips: usize, wrap_width: usize) -> String {
     let mut content = Vec::new();
 
     // Add tips - matching render_tips() exactly
@@ -198,8 +198,8 @@ pub fn create_plain_content_for_editor(messages: &[String], tips: &[&str], visib
 
     // Add messages with borders - EXACT same structure as create_rich_content_from_messages
     for message in messages.iter() {
-        // Wrap at 80 chars
-        let wrapped_lines = wrap_text_simple(message, 80);
+        // Wrap using the provided width (accounting for borders: content area - 4 for borders/padding)
+        let wrapped_lines = wrap_text_simple(message, wrap_width);
 
         for (line_idx, wrapped_line) in wrapped_lines.iter().enumerate() {
             if line_idx == 0 {
@@ -225,34 +225,52 @@ pub fn create_plain_content_for_editor(messages: &[String], tips: &[&str], visib
 
     content.join("\n")
 }
-/// Simple text wrapping function
+/// Text wrapping function that preserves newlines and wraps long lines
 fn wrap_text_simple(text: &str, max_width: usize) -> Vec<String> {
-    if text.chars().count() <= max_width {
-        return vec![text.to_string()];
-    }
-   
-    let mut lines = Vec::new();
-    let mut current_line = String::new();
-   
-    for word in text.split_whitespace() {
-        if current_line.is_empty() {
-            current_line = word.to_string();
-        } else if current_line.chars().count() + 1 + word.chars().count() <= max_width {
-            current_line.push(' ');
-            current_line.push_str(word);
+    let mut all_lines = Vec::new();
+
+    // First, split by newlines to preserve original line structure
+    // Using split('\n') instead of lines() to preserve trailing empty lines
+    for line in text.split('\n') {
+        if line.chars().count() <= max_width {
+            // Line fits within width, keep as-is
+            all_lines.push(line.to_string());
         } else {
-            lines.push(current_line);
-            current_line = word.to_string();
+            // Line is too long, word-wrap it
+            let mut current_line = String::new();
+            for word in line.split_whitespace() {
+                // Handle words longer than max_width by breaking them up
+                if word.chars().count() > max_width {
+                    // Push current line if it has content
+                    if !current_line.is_empty() {
+                        all_lines.push(current_line);
+                        current_line = String::new();
+                    }
+                    // Break up the long word into max_width chunks
+                    let chars: Vec<char> = word.chars().collect();
+                    for chunk in chars.chunks(max_width) {
+                        all_lines.push(chunk.iter().collect());
+                    }
+                } else if current_line.is_empty() {
+                    current_line = word.to_string();
+                } else if current_line.chars().count() + 1 + word.chars().count() <= max_width {
+                    current_line.push(' ');
+                    current_line.push_str(word);
+                } else {
+                    all_lines.push(current_line);
+                    current_line = word.to_string();
+                }
+            }
+            if !current_line.is_empty() {
+                all_lines.push(current_line);
+            }
         }
     }
-   
-    if !current_line.is_empty() {
-        lines.push(current_line);
+
+    // Handle empty input
+    if all_lines.is_empty() {
+        all_lines.push(String::new());
     }
-   
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-   
-    lines
+
+    all_lines
 }
