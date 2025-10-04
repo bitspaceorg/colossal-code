@@ -105,6 +105,7 @@ impl<'a> EditorTheme<'a> {
 pub(crate) const WHITE: Color = Color::Rgb(255, 255, 255);
 pub(crate) const BLACK: Color = Color::Rgb(0, 0, 0);
 pub(crate) const DARK_GRAY: Color = Color::Rgb(16, 17, 22);
+pub(crate) const LIGHT_GRAY: Color = Color::Rgb(172, 172, 212);
 pub(crate) const YELLOW: Color = Color::Rgb(250, 204, 21);
 pub(crate) const BLUE: Color = Color::Rgb(59, 130, 246);
 pub(crate) const MAGENTA: Color = Color::Rgb(217, 70, 239);

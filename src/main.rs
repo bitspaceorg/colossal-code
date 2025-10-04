@@ -15,6 +15,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use edtui::clipboard::ClipboardTrait;
 mod rich_editor;
 use rich_editor::{RichEditor, create_rich_content_from_messages};
+mod survey;
+use survey::{Survey, SurveyQuestion};
 
 /// Custom border set for messages
 const MESSAGE_BORDER_SET: symbols::border::Set = symbols::border::Set {
@@ -42,6 +44,35 @@ pub enum Mode {
     Command,
     Visual,
     Search,
+}
+
+/// AI Assistant modes (cycled with Shift+Tab)
+#[derive(Clone, Copy, PartialEq)]
+enum AssistantMode {
+    None,
+    Yolo,
+    Plan,
+    AutoAccept,
+}
+
+impl AssistantMode {
+    fn next(&self) -> Self {
+        match self {
+            AssistantMode::None => AssistantMode::Yolo,
+            AssistantMode::Yolo => AssistantMode::Plan,
+            AssistantMode::Plan => AssistantMode::AutoAccept,
+            AssistantMode::AutoAccept => AssistantMode::None,
+        }
+    }
+
+    fn to_display(&self) -> Option<(String, Color)> {
+        match self {
+            AssistantMode::None => None,
+            AssistantMode::Yolo => Some(("YOLO mode".to_string(), Color::Red)),
+            AssistantMode::Plan => Some(("plan mode".to_string(), Color::Blue)),
+            AssistantMode::AutoAccept => Some(("auto-accept edits".to_string(), Color::Green)),
+        }
+    }
 }
 /// Tips to display during startup
 const TIPS: &[&str] = &[
@@ -89,6 +120,12 @@ struct App {
     nav_needs_init: bool,
     // Flash highlight for yank operations
     flash_highlight: Option<(edtui::state::selection::Selection, std::time::Instant)>,
+    // Ctrl+C confirmation state
+    ctrl_c_pressed: Option<std::time::Instant>,
+    // Survey manager
+    survey: Survey,
+    // Assistant mode (cycled with Shift+Tab)
+    assistant_mode: AssistantMode,
 }
 impl App {
     fn new() -> Result<Self> {
@@ -115,6 +152,9 @@ impl App {
             nav_scroll_offset: 0,
             nav_needs_init: false,
             flash_highlight: None,
+            ctrl_c_pressed: None,
+            survey: Survey::new(10, 0.33), // Show survey after 10 messages with 33% chance
+            assistant_mode: AssistantMode::None,
         })
     }
     fn create_title_lines() -> Vec<Line<'static>> {
@@ -191,7 +231,7 @@ impl App {
     fn update_animation(&mut self) {
         match self.phase {
             Phase::Ascii => {
-                if self.last_update.elapsed() >= Duration::from_nanos(900) {
+                if self.last_update.elapsed() >= Duration::from_nanos(800) {
                     let mut animation_complete = false;
                     let mut current_line = 0;
                     let mut found_incomplete = false;
@@ -254,7 +294,7 @@ impl App {
                 if let Ok(head_content) = std::fs::read_to_string(&head_path) {
                     if head_content.starts_with("ref: refs/heads/") {
                         let branch = head_content.trim_start_matches("ref: refs/heads/").trim();
-                        git_info = format!(" ({})", branch);
+                        git_info = format!(" ({}", branch);
                         let git_status = Command::new("git")
                             .arg("status")
                             .arg("--porcelain")
@@ -446,15 +486,50 @@ impl App {
     }
     fn submit_message(&mut self) {
         if !self.input.is_empty() {
-            self.messages.push(self.input.clone());
-            self.input.clear();
-            self.reset_cursor();
-            self.input_modified = false;
+            // Check if survey is active and input is a valid number choice
+            let is_survey_choice = if self.survey.is_active() {
+                self.survey.check_number_input(&self.input)
+            } else {
+                None
+            };
+
+            if let Some(is_dismiss) = is_survey_choice {
+                // Clear input without adding to messages
+                self.input.clear();
+                self.reset_cursor();
+                self.input_modified = false;
+
+                // Dismiss the survey and show thank you message if not dismiss option
+                self.survey.dismiss();
+                if !is_dismiss {
+                    self.survey.show_thank_you();
+                }
+            } else {
+                // Normal message submission
+                self.messages.push(self.input.clone());
+                self.input.clear();
+                self.reset_cursor();
+                self.input_modified = false;
+
+                // Trigger survey check after message is sent
+                let question = SurveyQuestion::new(
+                    "How is Nite doing this session?".to_string(),
+                    true,
+                    vec![
+                        "Dismiss".to_string(),
+                        "Bad".to_string(),
+                        "Fine".to_string(),
+                        "Good".to_string(),
+                    ],
+                );
+                self.survey.on_message_sent(Some(question));
+            }
         }
     }
     fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         while !self.exit {
             self.update_animation();
+            self.survey.update(); // Update survey state (auto-dismiss thank you message)
             terminal.draw(|frame| self.draw(frame))?;
             let poll_duration = match self.phase {
                 Phase::Ascii | Phase::Tips => Duration::from_millis(30),
@@ -465,6 +540,33 @@ impl App {
                     && key.kind == KeyEventKind::Press {
                         match self.mode {
                             Mode::Normal => {
+                                // Handle Shift+Tab to cycle assistant mode
+                                if key.modifiers.contains(KeyModifiers::SHIFT) && key.code == KeyCode::BackTab {
+                                    self.assistant_mode = self.assistant_mode.next();
+                                    continue;
+                                }
+
+                                // Handle survey auto-submit on valid number input
+                                if self.survey.is_active() {
+                                    if let KeyCode::Char(c) = key.code {
+                                        // Check if typing this character would make a valid survey choice
+                                        let potential_input = format!("{}{}", self.input, c);
+                                        if let Some(is_dismiss) = self.survey.check_number_input(&potential_input) {
+                                            // Valid choice - auto-submit
+                                            self.input.clear();
+                                            self.reset_cursor();
+                                            self.input_modified = false;
+
+                                            // Dismiss the survey and show thank you message if not dismiss option
+                                            self.survey.dismiss();
+                                            if !is_dismiss {
+                                                self.survey.show_thank_you();
+                                            }
+                                            continue;
+                                        }
+                                    }
+                                }
+
                                 if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('n') {
                                     self.mode = Mode::Navigation;
                                     // Flag that we need to init cursor position on first draw
@@ -476,7 +578,19 @@ impl App {
                                             if key.modifiers.contains(KeyModifiers::CONTROL) =>
                                         {
                                             if self.input.is_empty() {
-                                                self.exit = true;
+                                                // Check if Ctrl+C was recently pressed
+                                                if let Some(last_press) = self.ctrl_c_pressed {
+                                                    if last_press.elapsed().as_millis() < 1000 {
+                                                        // Second Ctrl+C within 1 second - exit
+                                                        self.exit = true;
+                                                    } else {
+                                                        // Pressed too late, reset timer
+                                                        self.ctrl_c_pressed = Some(Instant::now());
+                                                    }
+                                                } else {
+                                                    // First Ctrl+C press
+                                                    self.ctrl_c_pressed = Some(Instant::now());
+                                                }
                                             } else {
                                                 self.input.clear();
                                                 self.character_index = 0;
@@ -860,6 +974,13 @@ impl App {
             }
         }
 
+        // Clear expired Ctrl+C warning
+        if let Some(press_time) = self.ctrl_c_pressed {
+            if press_time.elapsed().as_millis() >= 500 {
+                self.ctrl_c_pressed = None;
+            }
+        }
+
         let constraints = match self.phase {
             Phase::Ascii => vec![
                 Constraint::Length(self.title_lines.len() as u16),
@@ -868,6 +989,7 @@ impl App {
             ],
             Phase::Tips => vec![
                 Constraint::Length(self.title_lines.len() as u16),
+                Constraint::Length(1), // One character gap
                 Constraint::Length(TIPS.len() as u16),
                 Constraint::Min(1),
                 Constraint::Length(1),
@@ -898,12 +1020,44 @@ impl App {
                     }
                     _ => 3u16, // Fixed height for special modes
                 };
-                vec![
-                    Constraint::Length(self.title_lines.len() as u16),
-                    Constraint::Min(1),
-                    Constraint::Length(input_height),
-                    Constraint::Length(1),
-                ]
+                // Add space for survey and Ctrl+C confirmation infobar if active
+                let survey_height = self.survey.get_height();
+                let has_ctrl_c = self.ctrl_c_pressed.is_some();
+
+                match (survey_height > 0, has_ctrl_c) {
+                    (true, true) => vec![
+                        Constraint::Length(self.title_lines.len() as u16),
+                        Constraint::Length(1), // One character gap
+                        Constraint::Min(1), // Messages area (includes tips)
+                        Constraint::Length(survey_height), // Survey
+                        Constraint::Length(1), // Ctrl+C confirmation infobar
+                        Constraint::Length(input_height),
+                        Constraint::Length(1), // Status bar
+                    ],
+                    (true, false) => vec![
+                        Constraint::Length(self.title_lines.len() as u16),
+                        Constraint::Length(1), // One character gap
+                        Constraint::Min(1), // Messages area (includes tips)
+                        Constraint::Length(survey_height), // Survey
+                        Constraint::Length(input_height),
+                        Constraint::Length(1), // Status bar
+                    ],
+                    (false, true) => vec![
+                        Constraint::Length(self.title_lines.len() as u16),
+                        Constraint::Length(1), // One character gap
+                        Constraint::Min(1), // Messages area (includes tips)
+                        Constraint::Length(1), // Ctrl+C confirmation infobar
+                        Constraint::Length(input_height),
+                        Constraint::Length(1), // Status bar
+                    ],
+                    (false, false) => vec![
+                        Constraint::Length(self.title_lines.len() as u16),
+                        Constraint::Length(1), // One character gap
+                        Constraint::Min(1), // Messages area (includes tips)
+                        Constraint::Length(input_height),
+                        Constraint::Length(1), // Status bar
+                    ],
+                }
             }
         };
         let areas = Layout::vertical(constraints).split(frame.area());
@@ -927,15 +1081,39 @@ impl App {
                 .style(Style::default().fg(Color::White));
             frame.render_widget(title, areas[0]);
         }
-        if self.phase == Phase::Tips && areas.len() > 1 {
+        if self.phase == Phase::Tips && areas.len() > 2 {
+            // Render gap (areas[1] is the gap area with 1 line height)
+            let gap = Paragraph::new(Line::from(" "));
+            frame.render_widget(gap, areas[1]);
+
+            // Render tips in areas[2]
             let tips = self.render_tips();
             let tips_paragraph = Paragraph::new(tips)
                 .style(Style::default().fg(Color::Gray));
-            frame.render_widget(tips_paragraph, areas[1]);
+            frame.render_widget(tips_paragraph, areas[2]);
         }
+        // Render gap between ASCII art and messages for Input phase
+        if self.phase == Phase::Input && areas.len() > 2 {
+            let gap = Paragraph::new(Line::from(" "));
+            frame.render_widget(gap, areas[1]);
+        }
+
         let status_area = areas[areas.len() - 1];
+        // Determine area indices based on whether survey/thank_you and infobar are active
+        let has_survey_or_thanks = self.survey.is_active() || self.survey.has_thank_you();
+        let has_infobar = self.ctrl_c_pressed.is_some();
+        let messages_area_idx = 2;
+
+        // Calculate indices based on what's active
+        let (survey_area_idx, infobar_area_idx, input_area_idx, min_areas) = match (has_survey_or_thanks, has_infobar) {
+            (true, true) => (Some(3), Some(4), 5, 7),   // survey/thanks at 3, infobar at 4, input at 5
+            (true, false) => (Some(3), None, 4, 6),      // survey/thanks at 3, input at 4
+            (false, true) => (None, Some(3), 4, 6),      // infobar at 3, input at 4
+            (false, false) => (None, None, 3, 5),        // input at 3
+        };
+
         // Collect status info for status bar
-        let (mode, cursor_row, cursor_col, scroll_offset) = if self.phase == Phase::Input && areas.len() >= 4 {
+        let (mode, cursor_row, cursor_col, scroll_offset) = if self.phase == Phase::Input && areas.len() >= min_areas {
             if self.mode == Mode::Normal {
                 (Mode::Normal, 0, 0, 0)
             } else {
@@ -943,14 +1121,14 @@ impl App {
                 let cursor_row = self.editor.state.cursor.row;
                 let cursor_col = self.editor.state.cursor.col;
                 // Calculate scroll offset based on mode
-                let messages_area = areas[1];
+                let messages_area = areas[messages_area_idx];
                 let visible_lines = messages_area.height as usize;
                 // Need to calculate message_lines to get total_lines and scroll_offset
                 let mut message_lines = Vec::new();
                 let tips = self.render_tips();
                 message_lines.extend(tips.clone());
                 if !tips.is_empty() {
-                    message_lines.push(Line::from(""));
+                    message_lines.push(Line::from(" "));
                 }
                 let max_width = messages_area.width as usize - 4;
                 for message in &self.messages {
@@ -972,15 +1150,15 @@ impl App {
             (Mode::Normal, 0, 0, 0)
         };
         self.render_status_bar(frame, status_area, mode, cursor_row, cursor_col, scroll_offset);
-        if self.phase == Phase::Input && areas.len() >= 4 {
-            let messages_area = areas[1];
-            let input_area = areas[2];
+        if self.phase == Phase::Input && areas.len() >= min_areas {
+            let messages_area = areas[messages_area_idx];
+            let input_area = areas[input_area_idx];
             if self.mode == Mode::Normal {
                 let mut message_lines = Vec::new();
                 let tips = self.render_tips();
                 message_lines.extend(tips.clone());
                 if !tips.is_empty() {
-                    message_lines.push(Line::from("")); // Empty line after tips
+                    message_lines.push(Line::from(" ")); // One character gap after tips
                 }
                 let max_width = messages_area.width as usize - 4;
                 for message in &self.messages {
@@ -1147,7 +1325,7 @@ impl App {
                     let tips = self.render_tips();
                     message_lines.extend(tips.clone());
                     if !tips.is_empty() && !self.messages.is_empty() {
-                        message_lines.push(Line::from("")); // Empty line after tips (only if there are messages)
+                        message_lines.push(Line::from(" ")); // One character gap after tips (only if there are messages)
                     }
                 }
                 // Render messages with wrap_width + 4 to account for borders in render_message_with_max_width
@@ -1403,6 +1581,76 @@ impl App {
                             .border_style(Style::default().fg(self.get_mode_border_color())),
                     );
                 frame.render_widget(mode_widget, input_area);
+            }
+
+            // Render assistant mode indicator above input bar (top-right)
+            if let Some((mode_text, mode_color)) = self.assistant_mode.to_display() {
+                // Position it just above the input area on the right side
+                let indicator_y = input_area.y.saturating_sub(1);
+                let full_text = format!("{} (shift + tab to cycle)", mode_text);
+
+                let separator = " ";
+                let cycle_text_with_parens = "(shift + tab to cycle)";
+
+                let total_width = full_text.len() as u16;
+                let start_x = input_area.x + input_area.width.saturating_sub(total_width + 1);
+
+                let mut current_x = start_x;
+
+                // Render mode text with its color
+                for ch in mode_text.chars() {
+                    if current_x < frame.area().width && indicator_y < frame.area().height {
+                        let cell = frame.buffer_mut().cell_mut((current_x, indicator_y));
+                        if let Some(cell) = cell {
+                            cell.set_char(ch);
+                            cell.set_style(Style::default().fg(mode_color));
+                        }
+                        current_x += 1;
+                    }
+                }
+
+                // Render separator space
+                for ch in separator.chars() {
+                    if current_x < frame.area().width && indicator_y < frame.area().height {
+                        let cell = frame.buffer_mut().cell_mut((current_x, indicator_y));
+                        if let Some(cell) = cell {
+                            cell.set_char(ch);
+                            cell.set_style(Style::default().fg(Color::DarkGray));
+                        }
+                        current_x += 1;
+                    }
+                }
+
+                // Render cycle text with parentheses in dark gray
+                for ch in cycle_text_with_parens.chars() {
+                    if current_x < frame.area().width && indicator_y < frame.area().height {
+                        let cell = frame.buffer_mut().cell_mut((current_x, indicator_y));
+                        if let Some(cell) = cell {
+                            cell.set_char(ch);
+                            cell.set_style(Style::default().fg(Color::DarkGray));
+                        }
+                        current_x += 1;
+                    }
+                }
+            }
+
+            // Render survey if active
+            if let Some(idx) = survey_area_idx {
+                let survey_area = areas[idx];
+                let survey_lines = self.survey.render();
+                let survey_widget = Paragraph::new(survey_lines);
+                frame.render_widget(survey_widget, survey_area);
+            }
+
+            // Render Ctrl+C confirmation infobar if active
+            if let Some(idx) = infobar_area_idx {
+                let infobar_area = areas[idx];
+                let infobar_text = "Press Ctrl+C again to quit";
+                let infobar_widget = Paragraph::new(Line::from(Span::styled(
+                    infobar_text,
+                    Style::default().fg(Color::Rgb(172, 172, 212))
+                )));
+                frame.render_widget(infobar_widget, infobar_area);
             }
         }
     }
