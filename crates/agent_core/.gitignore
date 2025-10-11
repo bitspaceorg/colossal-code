@@ -1,0 +1,10 @@
+# Ignore all debug and release build dirs (recursively)
+**/debug/
+**/release/
+
+# Ignore all lock files (Cargo.lock, package-lock.json, etc.)
+**/*.lock
+
+# Optional: ignore common build artifacts
+**/target/
+**/build/
