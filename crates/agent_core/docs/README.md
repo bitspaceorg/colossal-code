@@ -139,12 +139,18 @@ See `SECURITY.md` for detailed security documentation.
 
 ### Tool Execution
 
-All tools execute through the persistent shell session:
-- `exec_command`: Run shell commands
-- `delete_path`: Delete files/directories
-- `get_files`: List directory contents
-- `read_file`: Read file contents
-- `semantic_search`: Search codebase with embeddings
+All tools execute through the sandboxed system:
+- `exec_command`: Run shell commands in persistent session
+- `delete_path`: Delete a single file or directory
+- `delete_many`: Delete multiple files/directories at once
+- `get_files`: List directory contents (non-recursive)
+- `get_files_recursive`: Recursively list all files with glob patterns
+- `search_files_with_regex`: Search file contents with regex patterns
+- `read_file`: Read complete file or byte range
+- `edit_file`: Find and replace text in files
+- `semantic_search`: Search codebase with vector embeddings
+- `web_search`: Search the web using DuckDuckGo
+- `html_to_text`: Extract plain text from web URLs
 
 Error handling: Tool failures are sent back to the model as JSON error messages, allowing retry/recovery.
 

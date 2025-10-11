@@ -1,0 +1,118 @@
+--- src/manager.rs
++++ src/manager.rs
+@@ -591,105 +591,102 @@
+     }
+ 
+     /// Execute a command in a persistent shell session and return aggregated output (non-streaming)
+     pub async fn exec_command_in_shell_session(
+         &self,
+         session_id: SessionId,
+         command: String,
+         timeout_ms: Option<u64>,
+         max_output_tokens: u32,
+     ) -> Result<ExecCommandOutput, ColossalErr> {
+         // Add command to history
+         {
+             let sessions = self.persistent_shell_sessions.lock().unwrap();
+             if let Some((_, session)) = sessions.iter().find(|(id, _)| *id == session_id) {
+                 session.add_to_history(command.clone());
+             }
+         }
+ 
+         let (writer_tx, mut output_rx) = {
+             let sessions = self.persistent_shell_sessions.lock().unwrap();
+             let session = sessions.iter().find(|(id, _)| *id == session_id)
+                 .map(|(_, session)| session)
+                 .ok_or_else(|| ColossalErr::Sandbox(SandboxErr::Denied(-1, format!("unknown session id {}", session_id.0), ())))?;
+             (session.writer_sender(), session.output_receiver())
+         };
+         
+         // Update session activity
+         self.update_session_activity(session_id);
+         
+         // Send the command with newline
+         let command_with_newline = format!("{}{}", command, "\n");
+         writer_tx.send(command_with_newline.into_bytes())
+             .await
+             .map_err(|_| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, "failed to send command to shell")))?;
+         
+         // Collect output with timeout
+         let cap_bytes = max_output_tokens.saturating_mul(4) as usize;
+         let mut stdout_buf = Vec::with_capacity(8192.min(cap_bytes));
+         let mut stderr_buf = Vec::with_capacity(8192.min(cap_bytes));
+         let mut aggregated_buf = Vec::with_capacity(8192.min(cap_bytes));
+         let start_time = Instant::now();
+         let timeout_duration = timeout_ms.map(Duration::from_millis).unwrap_or(Duration::from_secs(30));
+         let deadline = start_time + timeout_duration;
+         
+         // Collect output until timeout or command completion
+         let mut buffer = String::new();
+         let mut command_output_started = false;
+         let mut last_activity = Instant::now();
+         
+         loop {
+             let now = Instant::now();
+             if now >= deadline {
+                 break;
+             }
+             let remaining = deadline.saturating_duration_since(now);
+             
+             match tokio::time::timeout(remaining, output_rx.recv()).await {
+                 Ok(Ok(chunk)) => {
+                     let raw_output = String::from_utf8_lossy(&chunk);
+                     buffer.push_str(&raw_output);
+                     last_activity = Instant::now();
+                     
+                     // Filter out PTY debug messages
+                     if raw_output.contains("read") && raw_output.contains("bytes from pty") {
+                         continue;
+                     }
+                     if raw_output.contains("read ") && raw_output.contains(" bytes from pty") {
+                         continue;
+                     }
+                     if raw_output.trim().chars().all(|c| c.is_digit(10) || c.is_whitespace()) && !raw_output.trim().is_empty() {
+                         continue;
+                     }
+                     if raw_output.trim().is_empty() {
+                         continue;
+                     }
+                     
+                     // Check if we've started getting command output (after the command echo)
+                     if !command_output_started && raw_output.contains(&command) {
+                         command_output_started = true;
+                         continue; // Skip the command echo
+                     }
+                     
+                     // In PTY, we can't distinguish stdout from stderr, so treat all as stdout
+                     stdout_buf.extend_from_slice(&chunk);
+                     aggregated_buf.extend_from_slice(&chunk);
+                 }
+                 Ok(Err(_)) => break, // Channel closed
+                 Err(_) => {
+                     // If we haven't had activity for a while, assume command is done
+                     if last_activity.elapsed() > Duration::from_millis(500) {
+                         break;
+                     }
+                     continue;
+                 }
+             }
+         }
+         
+         let mut stdout = String::from_utf8_lossy(&truncate_output(stdout_buf, cap_bytes).text).to_string();
+         let stderr = String::from_utf8_lossy(&truncate_output(stderr_buf, cap_bytes).text).to_string();
+         let mut aggregated_output = String::from_utf8_lossy(&truncate_output(aggregated_buf, cap_bytes).text).to_string();
+         
+         // Clean up the output by removing shell prompts and command echoes
+         stdout = clean_shell_output(&stdout, &command);
+         aggregated_output = clean_shell_output(&aggregated_output, &command);
+         
+         // For persistent shell sessions, we don't get an exit code for individual commands
+         // The shell session continues running, so we return Ongoing status
+         Ok(ExecCommandOutput {
+             duration: Instant::now().duration_since(start_time),
+             exit_status: ExitStatus::Ongoing(session_id),
+             stdout,
+             stderr,
+             aggregated_output,
+         })
+     }

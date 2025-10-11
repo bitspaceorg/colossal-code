@@ -1,0 +1,41 @@
+semantic search:
+	[ ] - treesitter logic: 4 langs per day:
+					[ ] - python
+					[ ] - rust
+					[ ] - typescript
+					[ ] - javascript
+					[ ] - golang
+					[ ] - c
+					[ ] - c++
+					[ ] - java
+
+	[x] - embedding is over
+	[x] - ingestion is over
+
+1 day:
+	[x] - ls
+	[x] - rm
+	[x] - read file - optional args[line start, line end]
+	[x] - regex for text - leader fw
+	[x] - command execution: command, requires_acceptance
+
+	[ ] - web search
+	[ ] - outdated changes are to be tracked, when was the model last read and modified the code
+	[ ] - when was the last edit made by the user
+	[ ] - if the last edit is overdue then we have to make the model read code again
+
+unknown:
+	history buffer - SVM lite git for in commit changes
+
+1 day:
+	nite init
+	.nite/ - prompt-history, .niterules[system-prompt], heuristics.toml, version history of all accepted file changes made by model
+	.niteignore - files, folders, file extensions, globs
+
+4 days:
+	[x] - Mistralrs - extend GGUF loader for agentic stuff
+	[ ] - edit file
+	[ ] - apply edit
+
+1 day:
+	openai API compatability

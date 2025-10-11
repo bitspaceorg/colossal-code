@@ -13,8 +13,7 @@ use reqwest::blocking::Client;
 struct FileEntry {
     name: String,
     e_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    length: Option<u64>,
+    length: u64,
     modified: String,
 }
 
@@ -62,6 +61,20 @@ enum DeleteStatus {
 struct DeleteResult {
     path: String,
     status: DeleteStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+enum EditStatus {
+    Success,
+    Failure,
+}
+
+#[derive(Debug, Serialize)]
+struct EditResult {
+    path: String,
+    status: EditStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
 }
@@ -154,9 +167,9 @@ fn get_files(path: &PathBuf, limit: Option<usize>) -> Vec<FileEntry> {
             let meta = entry.metadata();
 
             let (e_type, length, modified) = match meta {
-                Ok(m) if m.is_dir() => (EntryType::Directory, None, get_mod_string(m.modified())),
-                Ok(m) => (EntryType::File, Some(m.len()), get_mod_string(m.modified())),
-                Err(_) => (EntryType::File, None, "".to_string()),
+                Ok(m) if m.is_dir() => (EntryType::Directory, 0, get_mod_string(m.modified())),
+                Ok(m) => (EntryType::File, m.len(), get_mod_string(m.modified())),
+                Err(_) => (EntryType::File, 0, "".to_string()),
             };
 
             let e_type_str = match e_type {
@@ -256,15 +269,15 @@ fn get_files_recursive(
             let (e_type, length, modified) = match meta {
                 Ok(m) if m.is_dir() => (
                     EntryType::Directory,
-                    None,
+                    0,
                     get_mod_string(m.modified()),
                 ),
                 Ok(m) => (
                     EntryType::File,
-                    Some(m.len()),
+                    m.len(),
                     get_mod_string(m.modified()),
                 ),
-                Err(_) => (EntryType::File, None, "".to_string()),
+                Err(_) => (EntryType::File, 0, "".to_string()),
             };
 
             let e_type_str = match e_type {
@@ -352,83 +365,6 @@ fn get_mod_string(mres: std::io::Result<std::time::SystemTime>) -> String {
     }
 }
 
-fn edit_file(
-    target_file: &Path,
-    old_string: &str,
-    new_string: &str,
-) -> ReadResult {
-    if !target_file.exists() {
-        return ReadResult {
-            path: target_file.display().to_string(),
-            status: ReadStatus::Failure,
-            message: Some("File does not exist".to_string()),
-            content: None,
-        };
-    }
-
-    if !target_file.is_file() {
-        return ReadResult {
-            path: target_file.display().to_string(),
-            status: ReadStatus::Failure,
-            message: Some("Target path is not a file".to_string()),
-            content: None,
-        };
-    }
-
-    // Read the file
-    let file_content = match fs::read_to_string(target_file) {
-        Ok(content) => content,
-        Err(e) => {
-            return ReadResult {
-                path: target_file.display().to_string(),
-                status: ReadStatus::Failure,
-                message: Some(format!("Failed to read file: {}", e)),
-                content: None,
-            };
-        }
-    };
-
-    // Count occurrences of old_string
-    let occurrences = file_content.matches(old_string).count();
-
-    if occurrences == 0 {
-        return ReadResult {
-            path: target_file.display().to_string(),
-            status: ReadStatus::Failure,
-            message: Some("old_string not found in file".to_string()),
-            content: None,
-        };
-    }
-
-    if occurrences > 1 {
-        return ReadResult {
-            path: target_file.display().to_string(),
-            status: ReadStatus::Failure,
-            message: Some(format!("old_string appears {} times in file (must appear exactly once)", occurrences)),
-            content: None,
-        };
-    }
-
-    // Replace the string
-    let new_content = file_content.replacen(old_string, new_string, 1);
-
-    // Write the new content back to the file
-    match fs::write(target_file, &new_content) {
-        Ok(_) => ReadResult {
-            path: target_file.display().to_string(),
-            status: ReadStatus::Success,
-            message: Some("File edited successfully".to_string()),
-            content: Some(new_content),
-        },
-        Err(e) => ReadResult {
-            path: target_file.display().to_string(),
-            status: ReadStatus::Failure,
-            message: Some(format!("Failed to write file: {}", e)),
-            content: None,
-        },
-    }
-}
-
 fn read_file(
     target_file: &Path,
     should_read_entire_file: bool,
@@ -488,6 +424,97 @@ fn read_file(
             message: Some(e.to_string()),
             content: None,
         },
+    }
+}
+
+fn edit_file(target_file: &Path, old_string: &str, new_string: &str) -> EditResult {
+    // If file doesn't exist and old_string is empty, create new file
+    if !target_file.exists() {
+        if old_string.is_empty() {
+            // Create new file with new_string as content
+            // Create parent directories if needed
+            if let Some(parent) = target_file.parent() {
+                if !parent.exists() {
+                    if let Err(e) = fs::create_dir_all(parent) {
+                        return EditResult {
+                            path: target_file.display().to_string(),
+                            status: EditStatus::Failure,
+                            message: Some(format!("Failed to create parent directories: {}", e)),
+                        };
+                    }
+                }
+            }
+
+            match fs::write(target_file, new_string) {
+                Ok(_) => EditResult {
+                    path: target_file.display().to_string(),
+                    status: EditStatus::Success,
+                    message: Some("File created".to_string()),
+                },
+                Err(e) => EditResult {
+                    path: target_file.display().to_string(),
+                    status: EditStatus::Failure,
+                    message: Some(format!("Failed to create file: {}", e)),
+                },
+            }
+        } else {
+            return EditResult {
+                path: target_file.display().to_string(),
+                status: EditStatus::Failure,
+                message: Some("File does not exist (use empty old_string to create new file)".to_string()),
+            };
+        }
+    } else {
+        // File exists - edit mode
+        if target_file.is_dir() {
+            return EditResult {
+                path: target_file.display().to_string(),
+                status: EditStatus::Failure,
+                message: Some("Target path is a directory, not a file".to_string()),
+            };
+        }
+
+        let content = match fs::read_to_string(target_file) {
+            Ok(c) => c,
+            Err(e) => {
+                return EditResult {
+                    path: target_file.display().to_string(),
+                    status: EditStatus::Failure,
+                    message: Some(format!("Failed to read file: {}", e)),
+                }
+            }
+        };
+
+        // If old_string is empty, append new_string to the file
+        let new_content = if old_string.is_empty() {
+            format!("{}{}", content, new_string)
+        } else {
+            // Check if old_string exists in the file
+            if !content.contains(old_string) {
+                return EditResult {
+                    path: target_file.display().to_string(),
+                    status: EditStatus::Failure,
+                    message: Some("old_string not found in file".to_string()),
+                };
+            }
+
+            // Replace old_string with new_string (only first occurrence)
+            content.replacen(old_string, new_string, 1)
+        };
+
+        // Write back to file
+        match fs::write(target_file, new_content) {
+            Ok(_) => EditResult {
+                path: target_file.display().to_string(),
+                status: EditStatus::Success,
+                message: None,
+            },
+            Err(e) => EditResult {
+                path: target_file.display().to_string(),
+                status: EditStatus::Failure,
+                message: Some(format!("Failed to write file: {}", e)),
+            },
+        }
     }
 }
 
@@ -561,19 +588,6 @@ fn main() {
             println!("{}", serde_json::to_string(&result).unwrap());
         }
 
-        "edit_file" => {
-            if args.len() < 5 {
-                eprintln!("Usage: tools edit_file <path> <old_string> <new_string>");
-                std::process::exit(1);
-            }
-            let path = PathBuf::from(&args[2]);
-            let old_string = &args[3];
-            let new_string = &args[4];
-
-            let result = edit_file(&path, old_string, new_string);
-            println!("{}", serde_json::to_string(&result).unwrap());
-        }
-
         "delete_path" => {
             if args.len() < 3 {
                 eprintln!("Usage: tools delete_path <path>");
@@ -611,6 +625,19 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+        }
+
+        "edit_file" => {
+            if args.len() < 5 {
+                eprintln!("Usage: tools edit_file <path> <old_string> <new_string>");
+                std::process::exit(1);
+            }
+            let path = PathBuf::from(&args[2]);
+            let old_string = &args[3];
+            let new_string = &args[4];
+
+            let result = edit_file(&path, old_string, new_string);
+            println!("{}", serde_json::to_string(&result).unwrap());
         }
 
         "semantic_search" => {

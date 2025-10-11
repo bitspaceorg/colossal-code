@@ -180,14 +180,6 @@ async fn execute_tool_call(tool_call: &ToolCallResponse) -> Result<String> {
                     let path = arguments["path"].as_str().unwrap_or("");
                     args.push(path.to_string());
                 },
-                "edit_file" => {
-                    let path = arguments["path"].as_str().unwrap_or("");
-                    let old_string = arguments["old_string"].as_str().unwrap_or("");
-                    let new_string = arguments["new_string"].as_str().unwrap_or("");
-                    args.push(path.to_string());
-                    args.push(old_string.to_string());
-                    args.push(new_string.to_string());
-                },
                 "get_files" => {
                     let path = arguments["path"].as_str().unwrap_or(".");
                     let limit = arguments["limit"].as_u64().map(|l| l.to_string()).unwrap_or_else(|| "100".to_string());
@@ -224,6 +216,14 @@ async fn execute_tool_call(tool_call: &ToolCallResponse) -> Result<String> {
                         }
                     }
                 },
+                "edit_file" => {
+                    let path = arguments["path"].as_str().unwrap_or("");
+                    let old_string = arguments["old_string"].as_str().unwrap_or("");
+                    let new_string = arguments["new_string"].as_str().unwrap_or("");
+                    args.push(path.to_string());
+                    args.push(old_string.to_string());
+                    args.push(new_string.to_string());
+                },
                 "semantic_search" => {
                     let query = arguments["query"].as_str().unwrap_or("");
                     args.push(query.to_string());
@@ -257,6 +257,25 @@ async fn execute_tool_call(tool_call: &ToolCallResponse) -> Result<String> {
                     Ok(json!({"status": "Success", "query": query, "results": results_json}).to_string())
                 },
                 Err(e) => Ok(json!({"status": "Failure", "query": query, "error": format!("Web search failed: {}", e)}).to_string()),
+            }
+        },
+        "html_to_text" => {
+            let url = arguments["url"].as_str().unwrap_or("");
+            let max_content_length = arguments.get("max_content_length")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+
+            let params = web_search::ExtractUrlParameters {
+                url: url.to_string(),
+                max_content_length,
+            };
+
+            match web_search::html_to_text(&params) {
+                Ok(result) => {
+                    let result_json = serde_json::to_value(&result)?;
+                    Ok(json!({"status": "Success", "url": url, "result": result_json}).to_string())
+                },
+                Err(e) => Ok(json!({"status": "Failure", "url": url, "error": format!("HTML extraction failed: {}", e)}).to_string()),
             }
         },
         _ => Ok(format!("Tool '{}' executed (not fully implemented)", name))
@@ -524,11 +543,18 @@ impl Agent {
                                         } else {
                                             // Still in thinking - stream the chunk immediately
                                             // But keep last 8 chars in buffer in case "</think>" spans chunks
-                                            if thinking_buffer.len() > 8 {
-                                                let send_up_to = thinking_buffer.len() - 8;
-                                                let to_send = &thinking_buffer[..send_up_to];
-                                                let _ = tx.send(AgentMessage::ThinkingContent(to_send.to_string()));
-                                                thinking_buffer = thinking_buffer[send_up_to..].to_string();
+                                            // Use character count instead of byte count to avoid UTF-8 boundary panics
+                                            let char_count = thinking_buffer.chars().count();
+                                            if char_count > 8 {
+                                                // Find byte position at the character boundary
+                                                // We want to keep last 8 chars, so send (char_count - 8) chars
+                                                let send_char_count = char_count - 8;
+
+                                                if let Some((byte_idx, _)) = thinking_buffer.char_indices().nth(send_char_count) {
+                                                    let to_send = &thinking_buffer[..byte_idx];
+                                                    let _ = tx.send(AgentMessage::ThinkingContent(to_send.to_string()));
+                                                    thinking_buffer = thinking_buffer[byte_idx..].to_string();
+                                                }
                                             }
                                         }
                                     } else {

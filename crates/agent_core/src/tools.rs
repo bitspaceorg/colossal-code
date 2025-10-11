@@ -250,7 +250,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
             tp: ToolType::Function,
             function: Function {
                 name: "edit_file".to_string(),
-                description: Some("Edit a file by finding and replacing text. The old_string must exist exactly once in the file.".to_string()),
+                description: Some("Edit or create a file. If the file exists, finds old_string and replaces it with new_string. If the file doesn't exist and old_string is empty, creates a new file with new_string as content. If old_string is empty for an existing file, appends new_string to the file.".to_string()),
                 parameters: Some({
                     let mut params = HashMap::new();
                     params.insert("type".to_string(), json!("object"));
@@ -259,15 +259,15 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                         json!({
                             "path": {
                                 "type": "string",
-                                "description": "The file path to edit"
+                                "description": "The file path to edit or create"
                             },
                             "old_string": {
                                 "type": "string",
-                                "description": "The exact text to find and replace (must appear exactly once)"
+                                "description": "The text to find in the file. Use empty string to create a new file or append to existing file."
                             },
                             "new_string": {
                                 "type": "string",
-                                "description": "The text to replace it with"
+                                "description": "The text to replace it with, or the content for a new file"
                             }
                         }),
                     );

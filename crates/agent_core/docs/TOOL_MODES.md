@@ -9,7 +9,7 @@
 let tools = tools::get_all_tools();
 ```
 
-**Tools included (8 total):**
+**Tools included (11 total):**
 - ✅ `exec_command` - Execute shell commands
 - ✅ `delete_path` - Delete a file or directory
 - ✅ `delete_many` - Delete multiple paths
@@ -17,7 +17,10 @@ let tools = tools::get_all_tools();
 - ✅ `get_files_recursive` - Recursively list files
 - ✅ `search_files_with_regex` - Search with regex
 - ✅ `read_file` - Read file contents
+- ✅ `edit_file` - Find and replace text in files
 - ✅ `semantic_search` - Semantic code search
+- ✅ `web_search` - Search the web with DuckDuckGo
+- ✅ `html_to_text` - Extract text from web URLs
 
 **Use when:**
 - You want full AI capabilities
@@ -58,12 +61,13 @@ let tools = tools::get_readonly_tools();
 | Feature | Full Mode | Read-Only Mode |
 |---------|-----------|----------------|
 | **Function** | `get_all_tools()` | `get_readonly_tools()` |
-| **Tool Count** | 8 | 5 |
+| **Tool Count** | 11 | 5 |
 | **Can Read Files** | ✅ Yes | ✅ Yes |
 | **Can Search Code** | ✅ Yes | ✅ Yes |
 | **Can Execute Commands** | ✅ Yes | ❌ No |
 | **Can Delete Files** | ✅ Yes | ❌ No |
-| **Can Modify Files** | ✅ Yes (via exec) | ❌ No |
+| **Can Modify Files** | ✅ Yes (edit_file/exec) | ❌ No |
+| **Can Search Web** | ✅ Yes | ❌ No |
 | **Safe for Review** | ⚠️ Caution | ✅ Yes |
 
 ---
@@ -179,15 +183,16 @@ If neither mode fits your needs, build a custom set:
 ```rust
 use crate::tools::{self, ToolName};
 
-// Example: Allow exec but not delete
+// Example: Allow exec and edit but not delete or web access
 let tools = tools::build_tools(&[
-    ToolName::ExecCommand,      // Can execute
+    ToolName::ExecCommand,           // Can execute commands
+    ToolName::EditFile,              // Can edit files
     ToolName::GetFiles,
     ToolName::GetFilesRecursive,
     ToolName::SearchFilesWithRegex,
     ToolName::ReadFile,
     ToolName::SemanticSearch,
-    // Deliberately excluded: DeletePath, DeleteMany
+    // Deliberately excluded: DeletePath, DeleteMany, WebSearch, HtmlToText
 ]);
 ```
 
@@ -199,7 +204,7 @@ let tools = tools::build_tools(&[
 
 #### Writing/Modifying Tools (excluded in read-only)
 1. **exec_command**
-   - Execute shell commands
+   - Execute shell commands in persistent session
    - Can modify files via shell commands (sed, echo, etc.)
    - Examples: `sed -i`, `echo >> file.txt`, `rm`
 
@@ -211,26 +216,44 @@ let tools = tools::build_tools(&[
    - Delete multiple files or directories
    - Batch deletion
 
+4. **edit_file**
+   - Find and replace text in files
+   - Create new files (use empty old_string)
+   - Append to existing files (use empty old_string)
+   - Replaces first occurrence when old_string is provided
+   - Automatically creates parent directories for new files
+
 #### Reading/Analysis Tools (included in both modes)
-4. **get_files**
+5. **get_files**
    - List files in a directory
    - Non-recursive
 
-5. **get_files_recursive**
+6. **get_files_recursive**
    - List all files in directory tree
-   - Supports glob patterns
+   - Supports glob patterns for include/exclude
 
-6. **search_files_with_regex**
+7. **search_files_with_regex**
    - Search file contents with regex
-   - Returns matching lines
+   - Returns matching lines with byte offsets
 
-7. **read_file**
+8. **read_file**
    - Read complete file or byte range
-   - Can handle large files
+   - Can handle large files efficiently
 
-8. **semantic_search**
+9. **semantic_search**
    - AI-powered code search
-   - Finds semantically relevant code
+   - Finds semantically relevant code using embeddings
+
+#### Web Tools (excluded in read-only)
+10. **web_search**
+    - Search the web using DuckDuckGo
+    - Returns titles, descriptions, URLs, and content previews
+    - Supports site-specific searches
+
+11. **html_to_text**
+    - Extract readable text from web URLs
+    - Converts HTML to plain text
+    - Configurable content length limit
 
 ---
 

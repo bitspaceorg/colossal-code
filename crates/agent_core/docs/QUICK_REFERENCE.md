@@ -64,7 +64,7 @@ let tools = tools::build_tools(&[
 
 | Mode | Function | Tools Included |
 |------|----------|----------------|
-| **Full Mode** | `get_all_tools()` | All 8 tools (exec, delete, read, search) |
+| **Full Mode** | `get_all_tools()` | All 11 tools (exec, delete, edit, read, search, web) |
 | **Read-Only Mode** | `get_readonly_tools()` | 5 tools (get_files, get_files_recursive, search_files_with_regex, read_file, semantic_search) |
 | **Custom** | `build_tools(&[...])` | Your selection |
 
@@ -77,7 +77,10 @@ let tools = tools::build_tools(&[
 - `ToolName::GetFilesRecursive` - Recursively list files
 - `ToolName::SearchFilesWithRegex` - Regex search
 - `ToolName::ReadFile` - Read file contents
+- `ToolName::EditFile` - Find and replace text in files
 - `ToolName::SemanticSearch` - Semantic code search
+- `ToolName::WebSearch` - Search the web with DuckDuckGo
+- `ToolName::HtmlToText` - Extract text from web URLs
 
 ## Common Use Cases
 
