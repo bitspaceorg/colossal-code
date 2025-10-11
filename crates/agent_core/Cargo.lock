@@ -230,6 +230,7 @@ dependencies = [
  "scraper 0.20.0",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sessionizer",
  "shlex",
  "strum",

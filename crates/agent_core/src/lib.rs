@@ -6,6 +6,7 @@ use mistralrs::{
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use serde_json::{json, Value};
+use serde::Serialize;
 use colossal_linux_sandbox::protocol::SandboxPolicy;
 use colossal_linux_sandbox::types::ExitStatus;
 use colossal_linux_sandbox::tools::execute_tools_with_sandbox;
@@ -24,6 +25,35 @@ struct GlobalState {
 }
 
 static GLOBAL_STATE: OnceCell<GlobalState> = OnceCell::new();
+
+#[derive(Serialize)]
+struct ExecCommandResult {
+    command: String,
+    status: String,
+    cmd_out: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WebSearchResult {
+    status: String,
+    query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    results: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct HtmlToTextResult {
+    status: String,
+    url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
 
 async fn execute_tool_binary(args: Vec<String>, sandbox_policy: &SandboxPolicy) -> Result<String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -155,12 +185,13 @@ async fn execute_tool_call(tool_call: &ToolCallResponse) -> Result<String> {
             ).await?;
 
             let is_success = matches!(result.exit_status, ExitStatus::Completed { code } if code == 0);
-            Ok(json!({
-                "command": command,
-                "status": if is_success { "Success" } else { "Failure" },
-                "cmd_out": result.aggregated_output,
-                "message": if is_success { None } else { Some(format!("{:?}", result.exit_status)) }
-            }).to_string())
+            let exec_result = ExecCommandResult {
+                command: command.to_string(),
+                status: if is_success { "Success".to_string() } else { "Failure".to_string() },
+                cmd_out: result.aggregated_output,
+                message: if is_success { None } else { Some(format!("{:?}", result.exit_status)) },
+            };
+            Ok(serde_yaml::to_string(&exec_result)?)
         },
         "read_file" | "delete_path" | "delete_many" | "get_files" | "get_files_recursive" | "search_files_with_regex" | "edit_file" | "semantic_search" => {
             let state = GLOBAL_STATE.get().unwrap();
@@ -232,7 +263,14 @@ async fn execute_tool_call(tool_call: &ToolCallResponse) -> Result<String> {
             }
 
             let output = execute_tool_binary(args, &state.sandbox_policy).await?;
-            Ok(output)
+            
+            // Parse the JSON output and convert to YAML format for consistency
+            let json_value: Value = serde_json::from_str(&output).unwrap_or_else(|_| {
+                // If parsing fails, create a default error response
+                json!({"error": format!("Failed to parse tool output: {}", output)})
+            });
+            
+            Ok(serde_yaml::to_string(&json_value)?)
         },
         "web_search" => {
             let query = arguments["query"].as_str().unwrap_or("");
@@ -254,9 +292,23 @@ async fn execute_tool_call(tool_call: &ToolCallResponse) -> Result<String> {
             match web_search::web_search(&params) {
                 Ok(results) => {
                     let results_json = serde_json::to_value(&results)?;
-                    Ok(json!({"status": "Success", "query": query, "results": results_json}).to_string())
+                    let search_result = WebSearchResult {
+                        status: "Success".to_string(),
+                        query: query.to_string(),
+                        results: Some(results_json),
+                        error: None,
+                    };
+                    Ok(serde_yaml::to_string(&search_result)?)
                 },
-                Err(e) => Ok(json!({"status": "Failure", "query": query, "error": format!("Web search failed: {}", e)}).to_string()),
+                Err(e) => {
+                    let search_result = WebSearchResult {
+                        status: "Failure".to_string(),
+                        query: query.to_string(),
+                        results: None,
+                        error: Some(format!("Web search failed: {}", e)),
+                    };
+                    Ok(serde_yaml::to_string(&search_result)?)
+                },
             }
         },
         "html_to_text" => {
@@ -273,9 +325,23 @@ async fn execute_tool_call(tool_call: &ToolCallResponse) -> Result<String> {
             match web_search::html_to_text(&params) {
                 Ok(result) => {
                     let result_json = serde_json::to_value(&result)?;
-                    Ok(json!({"status": "Success", "url": url, "result": result_json}).to_string())
+                    let html_result = HtmlToTextResult {
+                        status: "Success".to_string(),
+                        url: url.to_string(),
+                        result: Some(result_json),
+                        error: None,
+                    };
+                    Ok(serde_yaml::to_string(&html_result)?)
                 },
-                Err(e) => Ok(json!({"status": "Failure", "url": url, "error": format!("HTML extraction failed: {}", e)}).to_string()),
+                Err(e) => {
+                    let html_result = HtmlToTextResult {
+                        status: "Failure".to_string(),
+                        url: url.to_string(),
+                        result: None,
+                        error: Some(format!("HTML extraction failed: {}", e)),
+                    };
+                    Ok(serde_yaml::to_string(&html_result)?)
+                },
             }
         },
         _ => Ok(format!("Tool '{}' executed (not fully implemented)", name))
@@ -609,11 +675,18 @@ impl Agent {
                             result
                         },
                         Err(e) => {
-                            let error_msg = json!({
-                                "error": e.to_string(),
-                                "tool": tool_call.function.name,
-                                "status": "failed"
-                            }).to_string();
+                            #[derive(Serialize)]
+                            struct ToolError {
+                                error: String,
+                                tool: String,
+                                status: String,
+                            }
+                            let error_obj = ToolError {
+                                error: e.to_string(),
+                                tool: tool_call.function.name.clone(),
+                                status: "failed".to_string(),
+                            };
+                            let error_msg = serde_yaml::to_string(&error_obj).unwrap_or_else(|_| "error: Failed to serialize error".to_string());
                             let _ = tx.send(AgentMessage::Error(format!("Tool call failed: {}", e)));
                             error_msg
                         }

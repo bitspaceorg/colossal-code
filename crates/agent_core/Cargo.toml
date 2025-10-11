@@ -21,6 +21,7 @@ mistralrs-core = { path = "./crates/mistral.rs/mistralrs-core", features = ["cud
 cudarc = { git = "https://github.com/coreylowman/cudarc", rev = "d2c412731524531b7507777fa45496ff667fe718", features = ["cuda-13000"] }
 serde_json = "1.0.143"
 serde = { version = "1.0.219", features = ["derive"] }
+serde_yaml = "0.9"
 walkdir = "2.5.0"
 globset = "0.4.16"
 chrono = "0.4.41"

@@ -558,7 +558,7 @@ fn main() {
             let limit = args.get(3).and_then(|s| s.parse::<usize>().ok());
 
             let files = get_files(&path, limit);
-            println!("{}", serde_json::to_string(&files).unwrap());
+            println!("{}", serde_yaml::to_string(&files).unwrap());
         }
 
         "get_files_recursive" => {
@@ -571,7 +571,7 @@ fn main() {
 
             // Parse include/exclude patterns (simplified for now)
             let files = get_files_recursive(&path, None, None, limit);
-            println!("{}", serde_json::to_string(&files).unwrap());
+            println!("{}", serde_yaml::to_string(&files).unwrap());
         }
 
         "read_file" => {
@@ -585,7 +585,7 @@ fn main() {
             let end = args.get(5).and_then(|s| s.parse::<usize>().ok());
 
             let result = read_file(&path, should_read_entire, start, end);
-            println!("{}", serde_json::to_string(&result).unwrap());
+            println!("{}", serde_yaml::to_string(&result).unwrap());
         }
 
         "delete_path" => {
@@ -595,7 +595,7 @@ fn main() {
             }
             let path = PathBuf::from(&args[2]);
             let result = delete_path(&path);
-            println!("{}", serde_json::to_string(&result).unwrap());
+            println!("{}", serde_yaml::to_string(&result).unwrap());
         }
 
         "delete_many" => {
@@ -605,7 +605,7 @@ fn main() {
             }
             let paths: Vec<PathBuf> = args[2..].iter().map(PathBuf::from).collect();
             let results = delete_many(&paths);
-            println!("{}", serde_json::to_string(&results).unwrap());
+            println!("{}", serde_yaml::to_string(&results).unwrap());
         }
 
         "search_files_with_regex" => {
@@ -619,9 +619,11 @@ fn main() {
             let case_sensitive = args.get(5).map(|s| s == "true").unwrap_or(false);
 
             match search_files_with_regex(&path, pattern, None, None, limit, case_sensitive) {
-                Ok(results) => println!("{}", serde_json::to_string(&results).unwrap()),
+                Ok(results) => println!("{}", serde_yaml::to_string(&results).unwrap()),
                 Err(e) => {
-                    eprintln!("{}", serde_json::json!({"error": e}).to_string());
+                    #[derive(Serialize)]
+                    struct ErrorResponse { error: String }
+                    eprintln!("{}", serde_yaml::to_string(&ErrorResponse { error: e }).unwrap());
                     std::process::exit(1);
                 }
             }
@@ -637,7 +639,7 @@ fn main() {
             let new_string = &args[4];
 
             let result = edit_file(&path, old_string, new_string);
-            println!("{}", serde_json::to_string(&result).unwrap());
+            println!("{}", serde_yaml::to_string(&result).unwrap());
         }
 
         "semantic_search" => {
@@ -647,9 +649,11 @@ fn main() {
             }
             let query = &args[2];
             match semantic_search(query) {
-                Ok(hits) => println!("{}", serde_json::to_string(&hits).unwrap()),
+                Ok(hits) => println!("{}", serde_yaml::to_string(&hits).unwrap()),
                 Err(e) => {
-                    eprintln!("{}", serde_json::json!({"error": e.to_string()}).to_string());
+                    #[derive(Serialize)]
+                    struct ErrorResponse { error: String }
+                    eprintln!("{}", serde_yaml::to_string(&ErrorResponse { error: e.to_string() }).unwrap());
                     std::process::exit(1);
                 }
             }
