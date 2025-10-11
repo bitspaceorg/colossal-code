@@ -11,6 +11,8 @@ edtui = {path= "./crates/edtui"}
 cli-clipboard = "0.4.0"
 rand = "0.8"
 clipboard = "0.5.0"
+agent_core = {path = "./crates/agent_core"}
+tokio = { version = "1.0", features = ["full"] }
 
 [features]
 syntax-highlighting = ["edtui/syntax-highlighting"]

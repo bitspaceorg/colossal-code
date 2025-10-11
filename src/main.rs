@@ -13,6 +13,10 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use edtui::clipboard::ClipboardTrait;
+use tokio::sync::mpsc;
+use std::sync::Arc;
+use agent_core::{Agent, AgentMessage};
+
 mod rich_editor;
 use rich_editor::{RichEditor, create_rich_content_from_messages};
 mod survey;
@@ -82,10 +86,39 @@ const TIPS: &[&str] = &[
     "3. /help for more information.",
     "4. Press Alt+n to enter navigation mode (vim-style hjkl, gg, G).",
 ];
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     color_eyre::install()?;
+
+    // Show loading spinner while initializing
     let terminal = ratatui::init();
-    let app_result = App::new()?.run(terminal);
+
+    let app_result = {
+        // Create a simple loading task that shows spinner
+        let loading_handle = tokio::spawn(async {
+            let spinner_frames = vec!["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let mut frame_idx = 0;
+
+            loop {
+                print!("\r{} Loading model...", spinner_frames[frame_idx]);
+                use std::io::Write;
+                std::io::stdout().flush().unwrap();
+                frame_idx = (frame_idx + 1) % spinner_frames.len();
+                tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
+            }
+        });
+
+        // Initialize app (this loads the model)
+        let app = App::new().await?;
+
+        // Cancel the spinner
+        loading_handle.abort();
+        print!("\r✓ Model loaded successfully!\n");
+
+        // Run the app
+        app.run(terminal).await
+    };
+
     ratatui::restore();
     app_result
 }
@@ -126,11 +159,46 @@ struct App {
     survey: Survey,
     // Assistant mode (cycled with Shift+Tab)
     assistant_mode: AssistantMode,
+    // Agent integration
+    agent: Option<Arc<Agent>>,
+    agent_tx: Option<mpsc::UnboundedSender<AgentMessage>>,
+    agent_rx: Option<mpsc::UnboundedReceiver<AgentMessage>>,
+    agent_processing: bool,
 }
 impl App {
-    fn new() -> Result<Self> {
+    async fn new() -> Result<Self> {
         let title_lines = Self::create_title_lines();
         let visible_chars = vec![0; title_lines.len()];
+
+        // Initialize channels
+        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<AgentMessage>();
+        let (output_tx, output_rx) = mpsc::unbounded_channel::<AgentMessage>();
+
+        // Initialize agent and load model synchronously
+        let agent = Agent::new_with_defaults().await
+            .map_err(|e| color_eyre::eyre::eyre!("Failed to initialize agent: {}", e))?;
+
+        // Load model synchronously
+        let _ = agent.get_model().await
+            .map_err(|e| color_eyre::eyre::eyre!("Failed to load model: {}", e))?;
+
+        let agent_arc = Arc::new(agent);
+
+        // Start background task to process agent messages
+        let agent_clone = Arc::clone(&agent_arc);
+        let output_tx_clone = output_tx.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                // Process user messages as they come in
+                while let Some(msg) = input_rx.recv().await {
+                    if let AgentMessage::UserInput(user_message) = msg {
+                        let _ = agent_clone.process_message(user_message, output_tx_clone.clone()).await;
+                    }
+                }
+            });
+        });
+
         Ok(Self {
             input: String::new(),
             messages: Vec::new(),
@@ -155,6 +223,10 @@ impl App {
             ctrl_c_pressed: None,
             survey: Survey::new(10, 0.33), // Show survey after 10 messages with 33% chance
             assistant_mode: AssistantMode::None,
+            agent: Some(agent_arc),
+            agent_tx: Some(input_tx),
+            agent_rx: Some(output_rx),
+            agent_processing: false,
         })
     }
     fn create_title_lines() -> Vec<Line<'static>> {
@@ -506,10 +578,17 @@ impl App {
                 }
             } else {
                 // Normal message submission
-                self.messages.push(self.input.clone());
+                let user_message = self.input.clone();
+                self.messages.push(user_message.clone());
                 self.input.clear();
                 self.reset_cursor();
                 self.input_modified = false;
+
+                // Send message to agent if available - processing happens in background task
+                if let Some(tx) = &self.agent_tx {
+                    self.agent_processing = true;
+                    let _ = tx.send(AgentMessage::UserInput(user_message.clone()));
+                }
 
                 // Trigger survey check after message is sent
                 let question = SurveyQuestion::new(
@@ -526,14 +605,83 @@ impl App {
             }
         }
     }
-    fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
+    async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         while !self.exit {
             self.update_animation();
             self.survey.update(); // Update survey state (auto-dismiss thank you message)
+
+            // Process agent messages if available
+            if let Some(rx) = &mut self.agent_rx {
+                while let Ok(msg) = rx.try_recv() {
+                    match msg {
+                        AgentMessage::ThinkingContent(thinking) => {
+                            // Stream thinking content - append to existing thinking message or create new
+                            let should_create_new = if let Some(last_msg) = self.messages.last() {
+                                // Only append if last message is a thinking message
+                                !last_msg.starts_with("[💭 Thinking]")
+                            } else {
+                                true
+                            };
+
+                            if should_create_new {
+                                self.messages.push(format!("[💭 Thinking]\n{}", thinking));
+                            } else {
+                                // Append to existing thinking message
+                                if let Some(last_msg) = self.messages.last_mut() {
+                                    last_msg.push_str(&thinking);
+                                }
+                            }
+                        }
+                        AgentMessage::AgentResponse(text) => {
+                            // Check if we should append to existing message or create new one
+                            let should_create_new = if let Some(last_msg) = self.messages.last() {
+                                // Create new message if last message starts with '[' (tool call/error/thinking)
+                                // or if messages list only has 1 item (the user's question)
+                                last_msg.starts_with('[') || self.messages.len() == 1
+                            } else {
+                                true
+                            };
+
+                            if should_create_new {
+                                self.messages.push(text);
+                            } else {
+                                // Append to existing agent response
+                                if let Some(last_msg) = self.messages.last_mut() {
+                                    last_msg.push_str(&text);
+                                }
+                            }
+                        }
+                        AgentMessage::ToolCallStarted(tool_name) => {
+                            self.messages.push(format!("[Calling tool: {}]", tool_name));
+                        }
+                        AgentMessage::ToolCallCompleted(tool_name, result) => {
+                            self.messages.push(format!("[Tool {} completed: {}]", tool_name, result));
+                        }
+                        AgentMessage::Error(err) => {
+                            self.messages.push(format!("[Error: {}]", err));
+                            self.agent_processing = false;
+                        }
+                        AgentMessage::Done => {
+                            self.agent_processing = false;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
             terminal.draw(|frame| self.draw(frame))?;
+
+            // Use shorter poll duration for responsive UI
+            // Even shorter when agent is processing to show streaming responses smoothly
             let poll_duration = match self.phase {
                 Phase::Ascii | Phase::Tips => Duration::from_millis(30),
-                Phase::Input => Duration::from_millis(150),
+                Phase::Input => {
+                    if self.agent_processing {
+                        Duration::from_millis(16)  // ~60fps when agent is responding
+                    } else {
+                        Duration::from_millis(50)  // Responsive but not too aggressive
+                    }
+                }
             };
             if event::poll(poll_duration)?
                 && let Event::Key(key) = event::read()?
@@ -1583,10 +1731,35 @@ impl App {
                 frame.render_widget(mode_widget, input_area);
             }
 
-            // Render assistant mode indicator above input bar (top-right)
-            if let Some((mode_text, mode_color)) = self.assistant_mode.to_display() {
-                // Position it just above the input area on the right side
-                let indicator_y = input_area.y.saturating_sub(1);
+            // Render search results info or assistant mode indicator above input bar (top-right)
+            let indicator_y = input_area.y.saturating_sub(1);
+
+            // Check if we have active search results (in either Navigation or Search mode)
+            if (self.mode == Mode::Navigation || self.mode == Mode::Search)
+                && !self.editor.state.search_matches().is_empty() {
+                let num_results = self.editor.state.search_matches().len();
+                let current_match_idx = self.editor.state.search_selected_index();
+                let cursor_pos = self.editor.state.cursor;
+                let current_line = cursor_pos.row + 1; // Convert to 1-indexed
+                let total_lines = self.editor.state.lines.len();
+
+                let search_info = format!("{} results [{}/{}]", num_results, current_line, total_lines);
+                let total_width = search_info.len() as u16;
+                let start_x = input_area.x + input_area.width.saturating_sub(total_width + 1);
+
+                let mut current_x = start_x;
+                for ch in search_info.chars() {
+                    if current_x < frame.area().width && indicator_y < frame.area().height {
+                        let cell = frame.buffer_mut().cell_mut((current_x, indicator_y));
+                        if let Some(cell) = cell {
+                            cell.set_char(ch);
+                            cell.set_style(Style::default().fg(Color::Cyan));
+                        }
+                        current_x += 1;
+                    }
+                }
+            } else if let Some((mode_text, mode_color)) = self.assistant_mode.to_display() {
+                // Render assistant mode indicator
                 let full_text = format!("{} (shift + tab to cycle)", mode_text);
 
                 let separator = " ";
