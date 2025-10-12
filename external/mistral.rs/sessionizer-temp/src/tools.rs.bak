@@ -1,0 +1,32 @@
+use crate::error::ColossalErr;
+use crate::manager::SessionManager;
+use crate::protocol::SandboxPolicy;
+use crate::shell::Shell;
+use crate::types::ExecCommandParams;
+use std::collections::HashSet;
+
+pub async fn exec_command(
+    command: Vec<String>,
+    _is_session: bool,
+    _is_streaming: bool,
+    manager: &SessionManager,
+    shell: &Shell,
+    sandbox_policy: &SandboxPolicy,
+    _approved_commands: &HashSet<Vec<String>>,
+) -> Result<serde_json::Value, ColossalErr> {
+    let cwd = std::env::current_dir().map_err(|e| ColossalErr::Io(e))?;
+    
+    let params = ExecCommandParams {
+        command,
+        shell: shell.clone(),
+        cwd,
+        env: Default::default(),
+        timeout_ms: Some(10000),
+        max_output_tokens: 1000,
+        sandbox_policy: sandbox_policy.clone(),
+    };
+
+    let result = manager.handle_exec_command_request(params).await?;
+
+    Ok(result.to_json_value())
+}

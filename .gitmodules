@@ -1,6 +1,6 @@
-[submodule "crates/agent_core/crates/cudarc"]
-	path = crates/agent_core/crates/cudarc
+[submodule "external/cudarc"]
+	path = external/cudarc
 	url = https://github.com/coreylowman/cudarc.git
-[submodule "crates/agent_core/crates/mistral.rs"]
-	path = crates/agent_core/crates/mistral.rs
+[submodule "external/mistral.rs"]
+	path = external/mistral.rs
 	url = https://github.com/EricLBuehler/mistral.rs

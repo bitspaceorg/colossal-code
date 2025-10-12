@@ -1,0 +1,29 @@
+[package]
+name = "mistralrs-paged-attn"
+readme = "README.md"
+authors = ["Eric Buehler"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+candle-core.workspace = true
+half.workspace = true
+float8.workspace = true
+metal = { workspace = true, optional = true }
+thiserror.workspace = true
+once_cell.workspace = true
+
+[build-dependencies]
+bindgen_cuda = { workspace = true, optional = true }
+anyhow.workspace = true
+
+[features]
+cuda = ["dep:bindgen_cuda"]
+metal = ["dep:metal"]

@@ -1,0 +1,31 @@
+[package]
+name = "semantic-search"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "semantic_search_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "semantic-search"
+path = "src/main.rs"
+
+[dependencies]
+actix-web = "4.11.0"
+anyhow = "1.0.98"
+chunker = { path = "../chunker" }
+env_logger = "0.11.8"
+futures = "0.3.31"
+glob = "0.3.3"
+indicatif = "0.18.0"
+log = "0.4.27"
+qdrant-client = "1.14.0"
+rayon = "1.11.0"
+reqwest = { version = "0.12.22", features=["json"] }
+serde = "1.0.219"
+serde_json = "1.0.140"
+tokio = { version = "1.46.1", features = ["full", "rt-multi-thread"] }
+tonic = "0.13.1"
+uuid = { version = "1.18.0", features = ["v4"] }
+walkdir = "2.5.0"
