@@ -188,19 +188,27 @@ fn get_tools_path() -> Result<PathBuf, ColossalErr> {
 
             // Check if this is the target directory (has debug/release subdirs)
             if parent.file_name().and_then(|n| n.to_str()) == Some("target") {
-                // Found target directory, now look for sessionizer tools binary
+                // Found target directory, now look for tools binary in various locations
                 let workspace_root = parent.parent().unwrap_or(parent);
 
-                // Try crates/sessionizer/target/debug/tools
-                let sessionizer_debug = workspace_root
-                    .join("crates")
-                    .join("sessionizer")
+                // Try workspace-level target/release/tools first (most common for cargo build --release)
+                let workspace_release = workspace_root
+                    .join("target")
+                    .join("release")
+                    .join("tools");
+
+                if workspace_release.exists() {
+                    return Ok(workspace_release);
+                }
+
+                // Try workspace-level target/debug/tools
+                let workspace_debug = workspace_root
                     .join("target")
                     .join("debug")
                     .join("tools");
 
-                if sessionizer_debug.exists() {
-                    return Ok(sessionizer_debug);
+                if workspace_debug.exists() {
+                    return Ok(workspace_debug);
                 }
 
                 // Try crates/sessionizer/target/release/tools
@@ -215,6 +223,42 @@ fn get_tools_path() -> Result<PathBuf, ColossalErr> {
                     return Ok(sessionizer_release);
                 }
 
+                // Try crates/sessionizer/target/debug/tools
+                let sessionizer_debug = workspace_root
+                    .join("crates")
+                    .join("sessionizer")
+                    .join("target")
+                    .join("debug")
+                    .join("tools");
+
+                if sessionizer_debug.exists() {
+                    return Ok(sessionizer_debug);
+                }
+
+                // Try crates/agent_core/target/release/tools
+                let agent_core_release = workspace_root
+                    .join("crates")
+                    .join("agent_core")
+                    .join("target")
+                    .join("release")
+                    .join("tools");
+
+                if agent_core_release.exists() {
+                    return Ok(agent_core_release);
+                }
+
+                // Try crates/agent_core/target/debug/tools
+                let agent_core_debug = workspace_root
+                    .join("crates")
+                    .join("agent_core")
+                    .join("target")
+                    .join("debug")
+                    .join("tools");
+
+                if agent_core_debug.exists() {
+                    return Ok(agent_core_debug);
+                }
+
                 break;
             }
 
@@ -224,7 +268,7 @@ fn get_tools_path() -> Result<PathBuf, ColossalErr> {
         // Fallback: return the default path and let it fail with a clear error
         Err(ColossalErr::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("Tools binary not found. Searched in {} and workspace crates/sessionizer/target/{{debug,release}}/tools", tools_path.display())
+            format!("Tools binary not found. Searched in {} and workspace target/{{debug,release}}/tools, crates/sessionizer/target/{{debug,release}}/tools, crates/agent_core/target/{{debug,release}}/tools", tools_path.display())
         )))
     } else {
         Ok(tools_path)

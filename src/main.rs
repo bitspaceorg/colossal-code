@@ -164,6 +164,16 @@ struct App {
     agent_tx: Option<mpsc::UnboundedSender<AgentMessage>>,
     agent_rx: Option<mpsc::UnboundedReceiver<AgentMessage>>,
     agent_processing: bool,
+    // Thinking animation state
+    is_thinking: bool,
+    thinking_loader_frame: usize,
+    thinking_last_update: Instant,
+    thinking_snowflake_frames: Vec<&'static str>,
+    thinking_words: Vec<&'static str>,
+    thinking_current_word: String,
+    thinking_position: usize,
+    thinking_last_word_change: Instant,
+    thinking_last_tick: Instant,
 }
 impl App {
     async fn new() -> Result<Self> {
@@ -227,6 +237,34 @@ impl App {
             agent_tx: Some(input_tx),
             agent_rx: Some(output_rx),
             agent_processing: false,
+            is_thinking: false,
+            thinking_loader_frame: 0,
+            thinking_last_update: Instant::now(),
+            thinking_snowflake_frames: vec!["✽", "✻", "✹", "❆", "❅"],
+            thinking_words: vec!["Discombobulating", "Fabricating", "Procrastinating", "Dilly-dallying", "Waffling",
+                "Rambling", "Babbling", "Daydreaming", "Woolgathering", "Muddling", "Overthinking", "Pondering",
+                "Wondering", "Speculating", "Ruminating", "Meditating", "Contemplating", "Justifying",
+                "Rationalizing", "Concocting", "Scheming", "Contriving", "Improvising", "Inventing", "Juggling",
+                "Balancing", "Spinning", "Flipping", "Twisting", "Tangling", "Untangling", "Wrangling",
+                "Wrestling", "Struggling", "Scrambling", "Hustling", "Bustling", "Fidgeting", "Squirming",
+                "Floundering", "Stumbling", "Trudging", "Meandering", "Wandering", "Roaming", "Drifting",
+                "Sailing", "Surfing", "Skimming", "Scanning", "Browsing", "Foraging", "Hunting", "Tracking",
+                "Digging", "Excavating", "Burrowing", "Mining", "Fishing", "Netting", "Harvesting", "Sifting",
+                "Filtering", "Shuffling", "Juggling", "Mixing", "Blending", "Stirring", "Brewing", "Stewing",
+                "Marinating", "Cooking", "Baking", "Toasting", "Roasting", "Grilling", "Seasoning", "Garnishing",
+                "Polishing", "Refining", "Sharpening", "Sanding", "Hammering", "Chiseling", "Painting",
+                "Sketching", "Drafting", "Editing", "Proofing", "Revising", "Rewriting", "Compiling",
+                "Assembling", "Skedaddling", "Bamboozling", "Hoodwinking", "Ramshackling", "Fiddling",
+                "Hocus-pocusing", "Abracadabra-ing", "Wiggling", "Quibbling", "Flipping", "Flopping", "Fizzling",
+                "Gobsmacking", "Zig-zagging", "Zapping", "Snickering", "Shazam-ing", "Floofing", "Snazzling",
+                "Glorpifying", "Yapping", "Crinkling", "Boopity-booping", "Bumbling", "Mumbling", "Razzle-dazzling",
+                "Piffle-poofing", "Squashing", "Flabbering", "Mingling", "Mangling", "Bippity-boppitying",
+                "Jumble-wumbling", "Ding-a-linging", "Skronking", "Zoodling", "Zaddling", "Dippy-dappitying",
+                "Swozzling", "Frazzling", "Snarf-blasting"],
+            thinking_current_word: "Thinking".to_string(),
+            thinking_position: 0,
+            thinking_last_word_change: Instant::now(),
+            thinking_last_tick: Instant::now(),
         })
     }
     fn create_title_lines() -> Vec<Line<'static>> {
@@ -300,7 +338,79 @@ impl App {
             Mode::Search => Color::Cyan,
         }
     }
+    fn create_thinking_highlight_spans(text: &str, position: usize) -> Vec<(String, Color)> {
+        let base_color = Color::Rgb(224, 135, 57);    // #e08739
+        let bright_color = Color::Rgb(255, 215, 153); // #ffd799
+        let medium_color = Color::Rgb(255, 179, 102); // #ffb366
+
+        let chars: Vec<char> = text.chars().collect();
+        let mut spans = Vec::new();
+        let mut current_color = base_color;
+        let mut current_text = String::new();
+
+        for (i, &ch) in chars.iter().enumerate() {
+            // Determine the color for this character based on its position relative to the highlight window
+            let color = if position > i && position <= i + 7 {
+                // This character is within the 7-character highlight window
+                let window_pos = position - i - 1;
+
+                match window_pos {
+                    0 | 1 => medium_color,      // First two characters
+                    2 | 3 => bright_color,       // Middle two characters (brightest)
+                    4 | 5 => medium_color,       // Next two characters
+                    6 => base_color,             // 7th character (back to base)
+                    _ => base_color,
+                }
+            } else {
+                base_color
+            };
+
+            // If color changed, push the accumulated span and start a new one
+            if color != current_color {
+                if !current_text.is_empty() {
+                    spans.push((current_text.clone(), current_color));
+                    current_text.clear();
+                }
+                current_color = color;
+            }
+
+            current_text.push(ch);
+        }
+
+        // Push the last accumulated span
+        if !current_text.is_empty() {
+            spans.push((current_text, current_color));
+        }
+
+        spans
+    }
+
     fn update_animation(&mut self) {
+        // Update thinking loader animation
+        if self.is_thinking && self.thinking_last_update.elapsed() >= Duration::from_millis(100) {
+            self.thinking_loader_frame = (self.thinking_loader_frame + 1) % self.thinking_snowflake_frames.len();
+            self.thinking_last_update = Instant::now();
+        }
+
+        // Update thinking word and position animation
+        if self.is_thinking {
+            // Change word every 4 seconds
+            if self.thinking_last_word_change.elapsed() >= Duration::from_secs(4) {
+                use rand::seq::SliceRandom;
+                let mut rng = rand::thread_rng();
+                self.thinking_current_word = self.thinking_words.choose(&mut rng).unwrap().to_string();
+                self.thinking_position = 0;
+                self.thinking_last_word_change = Instant::now();
+            }
+
+            // Update position every 40ms for smooth wave effect
+            if self.thinking_last_tick.elapsed() >= Duration::from_millis(40) {
+                let text_with_dots = format!("{}...", self.thinking_current_word);
+                self.thinking_position = (self.thinking_position + 1) % (text_with_dots.len() + 7);
+                self.thinking_last_tick = Instant::now();
+            }
+        }
+
         match self.phase {
             Phase::Ascii => {
                 if self.last_update.elapsed() >= Duration::from_nanos(800) {
@@ -614,28 +724,32 @@ impl App {
             if let Some(rx) = &mut self.agent_rx {
                 while let Ok(msg) = rx.try_recv() {
                     match msg {
-                        AgentMessage::ThinkingContent(thinking) => {
-                            // Stream thinking content - append to existing thinking message or create new
-                            let should_create_new = if let Some(last_msg) = self.messages.last() {
-                                // Only append if last message is a thinking message
-                                !last_msg.starts_with("[💭 Thinking]")
+                        AgentMessage::ThinkingContent(_thinking) => {
+                            // Add or maintain thinking animation placeholder
+                            let should_add_thinking = if let Some(last_msg) = self.messages.last() {
+                                // Only add if last message is not already a thinking animation
+                                last_msg != "[THINKING_ANIMATION]"
                             } else {
                                 true
                             };
 
-                            if should_create_new {
-                                self.messages.push(format!("[💭 Thinking]\n{}", thinking));
-                            } else {
-                                // Append to existing thinking message
-                                if let Some(last_msg) = self.messages.last_mut() {
-                                    last_msg.push_str(&thinking);
-                                }
+                            if should_add_thinking {
+                                self.messages.push("[THINKING_ANIMATION]".to_string());
                             }
+                            self.is_thinking = true;
                         }
                         AgentMessage::AgentResponse(text) => {
+                            // Remove thinking animation if present
+                            if let Some(last_msg) = self.messages.last() {
+                                if last_msg == "[THINKING_ANIMATION]" {
+                                    self.messages.pop();
+                                }
+                            }
+                            self.is_thinking = false;
+
                             // Check if we should append to existing message or create new one
                             let should_create_new = if let Some(last_msg) = self.messages.last() {
-                                // Create new message if last message starts with '[' (tool call/error/thinking)
+                                // Create new message if last message starts with '[' (tool call/error)
                                 // or if messages list only has 1 item (the user's question)
                                 last_msg.starts_with('[') || self.messages.len() == 1
                             } else {
@@ -660,9 +774,11 @@ impl App {
                         AgentMessage::Error(err) => {
                             self.messages.push(format!("[Error: {}]", err));
                             self.agent_processing = false;
+                            self.is_thinking = false;
                         }
                         AgentMessage::Done => {
                             self.agent_processing = false;
+                            self.is_thinking = false;
                         }
                         _ => {}
                     }
@@ -672,12 +788,12 @@ impl App {
             terminal.draw(|frame| self.draw(frame))?;
 
             // Use shorter poll duration for responsive UI
-            // Even shorter when agent is processing to show streaming responses smoothly
+            // Even shorter when agent is processing or thinking to show animations smoothly
             let poll_duration = match self.phase {
                 Phase::Ascii | Phase::Tips => Duration::from_millis(30),
                 Phase::Input => {
-                    if self.agent_processing {
-                        Duration::from_millis(16)  // ~60fps when agent is responding
+                    if self.agent_processing || self.is_thinking {
+                        Duration::from_millis(16)  // ~60fps when agent is responding or thinking
                     } else {
                         Duration::from_millis(50)  // Responsive but not too aggressive
                     }
@@ -906,6 +1022,34 @@ impl App {
         lines
     }
     fn render_message_with_max_width(&self, message: &str, max_width: usize, highlight_pos: Option<usize>) -> Text<'_> {
+        // Check if this is a thinking animation placeholder
+        if message == "[THINKING_ANIMATION]" {
+            let mut lines = Vec::new();
+
+            // Get current animation frame
+            let current_frame = self.thinking_snowflake_frames[self.thinking_loader_frame];
+
+            // Create the full text with dots
+            let text_with_dots = format!("{}...", self.thinking_current_word);
+
+            // Get color-coded spans for the wave effect
+            let color_spans = Self::create_thinking_highlight_spans(&text_with_dots, self.thinking_position);
+
+            // Build the line with one space padding on the left, then snowflake, then text
+            let mut spans = Vec::new();
+            spans.push(Span::raw(" ")); // One character to the left
+            spans.push(Span::styled(current_frame, Style::default().fg(Color::Rgb(255, 165, 0)))); // Orange snowflake
+            spans.push(Span::raw("  ")); // Two spaces between snowflake and text
+
+            // Add the color-coded text spans
+            for (text, color) in color_spans {
+                spans.push(Span::styled(text, Style::default().fg(color)));
+            }
+
+            lines.push(Line::from(spans));
+            return Text::from(lines);
+        }
+
         // Limit message width to 80 characters
         let content_width = (max_width - 4).min(80);
         let wrapped_lines = Self::wrap_text(message, content_width);
