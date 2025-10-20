@@ -362,7 +362,7 @@ pub enum AgentMessage {
     /// Agent's thinking process (internal reasoning)
     ThinkingContent(String),
     /// Agent is processing a tool call
-    ToolCallStarted(String),
+    ToolCallStarted(String, String), // (tool_name, arguments_json)
     /// Tool call completed with result
     ToolCallCompleted(String, String), // (tool_name, result)
     /// Agent encountered an error
@@ -635,7 +635,8 @@ impl Agent {
                                     accumulated_tool_calls.extend(tool_calls.clone());
                                     for tool_call in tool_calls {
                                         let _ = tx.send(AgentMessage::ToolCallStarted(
-                                            tool_call.function.name.clone()
+                                            tool_call.function.name.clone(),
+                                            tool_call.function.arguments.clone()
                                         ));
                                     }
                                 }

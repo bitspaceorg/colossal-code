@@ -1,0 +1,16 @@
+[package]
+name = "markdown-renderer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pulldown-cmark = "0.12"
+ratatui = "0.29"
+regex-lite = "0.1"
+lazy_static = "1.4"
+path-clean = "1.0"
+textwrap = "0.16"
+tracing = "0.1"
+
+[dev-dependencies]
+pretty_assertions = "1.4"

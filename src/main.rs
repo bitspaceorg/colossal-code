@@ -1,5 +1,6 @@
 use color_eyre::Result;
 use std::{env, process::Command, time::{Duration, Instant}};
+use sha2::{Sha256, Digest};
 use ratatui::{
     crossterm::{
         event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -16,6 +17,7 @@ use edtui::clipboard::ClipboardTrait;
 use tokio::sync::mpsc;
 use std::sync::Arc;
 use agent_core::{Agent, AgentMessage};
+use markdown_renderer;
 
 mod rich_editor;
 use rich_editor::{RichEditor, create_rich_content_from_messages};
@@ -122,11 +124,19 @@ async fn main() -> Result<()> {
     ratatui::restore();
     app_result
 }
+/// Message type to distinguish between user and agent messages
+#[derive(Clone, Debug)]
+enum MessageType {
+    User,
+    Agent,
+}
+
 /// Application state for the TUI
 struct App {
     input: String,
     character_index: usize,
     messages: Vec<String>,
+    message_types: Vec<MessageType>, // Track which messages are from user vs agent
     input_modified: bool,
     mode: Mode,
     status_left: Line<'static>,
@@ -166,6 +176,7 @@ struct App {
     agent_processing: bool,
     // Thinking animation state
     is_thinking: bool,
+    agent_response_started: bool, // Track if we're streaming an agent response
     thinking_loader_frame: usize,
     thinking_last_update: Instant,
     thinking_snowflake_frames: Vec<&'static str>,
@@ -174,8 +185,195 @@ struct App {
     thinking_position: usize,
     thinking_last_word_change: Instant,
     thinking_last_tick: Instant,
+    // Command history
+    command_history: Vec<String>,
+    history_index: Option<usize>,
+    temp_input: Option<String>,
+    history_file_path: std::path::PathBuf,
 }
 impl App {
+    fn get_history_file_path() -> Result<std::path::PathBuf> {
+        // Get current working directory
+        let cwd = std::env::current_dir()?;
+        let cwd_str = cwd.to_string_lossy();
+
+        // Hash the path with SHA256
+        let mut hasher = Sha256::new();
+        hasher.update(cwd_str.as_bytes());
+        let hash = hasher.finalize();
+        let hash_str = format!("{:x}", hash);
+
+        // Get config dir (~/.config/.nite/history/)
+        let mut history_dir = dirs::config_dir()
+            .ok_or_else(|| color_eyre::eyre::eyre!("Could not find config directory"))?;
+        history_dir.push(".nite");
+        history_dir.push("history");
+
+        // Create directory if it doesn't exist
+        std::fs::create_dir_all(&history_dir)?;
+
+        // Return path to history file
+        history_dir.push(hash_str);
+        Ok(history_dir)
+    }
+
+    fn load_history(history_file: &std::path::Path) -> Vec<String> {
+        if let Ok(contents) = std::fs::read_to_string(history_file) {
+            contents.lines().map(|s| s.to_string()).collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn save_to_history(&mut self, command: &str) {
+        if command.trim().is_empty() {
+            return;
+        }
+
+        // Add to in-memory history
+        self.command_history.push(command.to_string());
+
+        // Keep only last 1000 commands
+        if self.command_history.len() > 1000 {
+            self.command_history.drain(0..self.command_history.len() - 1000);
+        }
+
+        // Write to file
+        let contents = self.command_history.join("\n");
+        let _ = std::fs::write(&self.history_file_path, contents);
+    }
+
+    fn get_cursor_row(&self) -> usize {
+        let lines: Vec<&str> = self.input.lines().collect();
+        let mut char_count = 0;
+        for (row, line) in lines.iter().enumerate() {
+            let line_len = line.chars().count() + 1; // +1 for newline
+            if char_count + line_len > self.character_index {
+                return row;
+            }
+            char_count += line_len;
+        }
+        lines.len().saturating_sub(1)
+    }
+
+    fn get_cursor_col(&self) -> usize {
+        let lines: Vec<&str> = self.input.lines().collect();
+        let mut char_count = 0;
+        for (row, line) in lines.iter().enumerate() {
+            let line_len = line.chars().count() + 1; // +1 for newline
+            if char_count + line_len > self.character_index {
+                // Found the line, calculate column
+                return self.character_index - char_count;
+            }
+            char_count += line_len;
+        }
+        0
+    }
+
+    fn is_at_start_of_first_line(&self) -> bool {
+        self.get_cursor_row() == 0 && self.get_cursor_col() == 0
+    }
+
+    fn is_at_end_of_last_line(&self) -> bool {
+        let lines: Vec<&str> = self.input.lines().collect();
+        let last_line_idx = lines.len().saturating_sub(1);
+        let cursor_row = self.get_cursor_row();
+
+        if cursor_row != last_line_idx {
+            return false;
+        }
+
+        // Check if cursor is at end of last line
+        if let Some(last_line) = lines.last() {
+            let cursor_col = self.get_cursor_col();
+            cursor_col >= last_line.chars().count()
+        } else {
+            true
+        }
+    }
+
+    fn move_to_start_of_line(&mut self) {
+        let lines: Vec<&str> = self.input.lines().collect();
+        let cursor_row = self.get_cursor_row();
+
+        // Calculate character index at start of current line
+        let mut char_count = 0;
+        for (row, line) in lines.iter().enumerate() {
+            if row == cursor_row {
+                self.character_index = char_count;
+                return;
+            }
+            char_count += line.chars().count() + 1; // +1 for newline
+        }
+    }
+
+    fn move_to_end_of_line(&mut self) {
+        let lines: Vec<&str> = self.input.lines().collect();
+        let cursor_row = self.get_cursor_row();
+
+        // Calculate character index at end of current line
+        let mut char_count = 0;
+        for (row, line) in lines.iter().enumerate() {
+            if row == cursor_row {
+                self.character_index = char_count + line.chars().count();
+                return;
+            }
+            char_count += line.chars().count() + 1; // +1 for newline
+        }
+    }
+
+    fn navigate_history_backwards(&mut self) {
+        if self.command_history.is_empty() {
+            return;
+        }
+
+        // If not in history mode, save current input
+        if self.history_index.is_none() {
+            self.temp_input = Some(self.input.clone());
+            // Start from the end (most recent)
+            self.history_index = Some(self.command_history.len() - 1);
+        } else {
+            // Go backwards
+            if let Some(idx) = self.history_index {
+                if idx > 0 {
+                    self.history_index = Some(idx - 1);
+                } else {
+                    // Already at oldest, don't do anything
+                    return;
+                }
+            }
+        }
+
+        // Load command from history and move cursor to start
+        if let Some(idx) = self.history_index {
+            if let Some(cmd) = self.command_history.get(idx) {
+                self.input = cmd.clone();
+                // In history mode, cursor stays at first line, first character
+                self.character_index = 0;
+            }
+        }
+    }
+
+    fn navigate_history_forwards(&mut self) {
+        if let Some(idx) = self.history_index {
+            if idx < self.command_history.len() - 1 {
+                // Go forwards in history, cursor stays at first line, first character
+                self.history_index = Some(idx + 1);
+                if let Some(cmd) = self.command_history.get(idx + 1) {
+                    self.input = cmd.clone();
+                    self.character_index = 0;
+                }
+            } else {
+                // At newest command, restore original input and exit history mode
+                self.history_index = None;
+                if let Some(temp) = self.temp_input.take() {
+                    self.input = temp;
+                    self.character_index = self.input.chars().count();
+                }
+            }
+        }
+    }
+
     async fn new() -> Result<Self> {
         let title_lines = Self::create_title_lines();
         let visible_chars = vec![0; title_lines.len()];
@@ -183,6 +381,10 @@ impl App {
         // Initialize channels
         let (input_tx, mut input_rx) = mpsc::unbounded_channel::<AgentMessage>();
         let (output_tx, output_rx) = mpsc::unbounded_channel::<AgentMessage>();
+
+        // Load command history
+        let history_file_path = Self::get_history_file_path()?;
+        let command_history = Self::load_history(&history_file_path);
 
         // Initialize agent and load model synchronously
         let agent = Agent::new_with_defaults().await
@@ -212,6 +414,7 @@ impl App {
         Ok(Self {
             input: String::new(),
             messages: Vec::new(),
+            message_types: Vec::new(),
             character_index: 0,
             input_modified: false,
             mode: Mode::Normal,
@@ -238,6 +441,7 @@ impl App {
             agent_rx: Some(output_rx),
             agent_processing: false,
             is_thinking: false,
+            agent_response_started: false,
             thinking_loader_frame: 0,
             thinking_last_update: Instant::now(),
             thinking_snowflake_frames: vec!["✽", "✻", "✹", "❆", "❅"],
@@ -265,6 +469,10 @@ impl App {
             thinking_position: 0,
             thinking_last_word_change: Instant::now(),
             thinking_last_tick: Instant::now(),
+            command_history,
+            history_index: None,
+            temp_input: None,
+            history_file_path,
         })
     }
     fn create_title_lines() -> Vec<Line<'static>> {
@@ -338,6 +546,149 @@ impl App {
             Mode::Search => Color::Cyan,
         }
     }
+    fn format_tool_arguments(_tool_name: &str, arguments_json: &str) -> String {
+        // Parse JSON and format concisely
+        if let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments_json) {
+            if let Some(obj) = args.as_object() {
+                // Get most important argument first
+                let mut parts = Vec::new();
+
+                // Common important keys first
+                for key in &["path", "pattern", "query", "command", "regex", "needle", "file_path"] {
+                    if let Some(val) = obj.get(*key) {
+                        let val_str = match val {
+                            serde_json::Value::String(s) => {
+                                // Truncate long strings
+                                if s.len() > 50 {
+                                    format!("\"{}...\"", &s[..47])
+                                } else {
+                                    format!("\"{}\"", s)
+                                }
+                            },
+                            serde_json::Value::Number(n) => n.to_string(),
+                            serde_json::Value::Bool(b) => b.to_string(),
+                            _ => continue,
+                        };
+                        parts.push(format!("{}: {}", key, val_str));
+                    }
+                }
+
+                // Add other args if not too many
+                for (k, v) in obj.iter() {
+                    if parts.len() >= 3 { break; } // Limit to 3 args
+                    if ["path", "pattern", "query", "command", "regex", "needle", "file_path"].contains(&k.as_str()) {
+                        continue; // Already added
+                    }
+                    if let serde_json::Value::String(_) | serde_json::Value::Number(_) | serde_json::Value::Bool(_) = v {
+                        parts.push(format!("{}: {:?}", k, v));
+                    }
+                }
+
+                if parts.is_empty() {
+                    return "...".to_string();
+                }
+                return parts.join(", ");
+            }
+        }
+        "...".to_string()
+    }
+
+    fn format_tool_result(tool_name: &str, result_yaml: &str) -> String {
+        // Try parsing as YAML first
+        if let Ok(result) = serde_yaml::from_str::<serde_yaml::Value>(result_yaml) {
+            if let Some(obj) = result.as_mapping() {
+                // Check status
+                let status = obj.get(&serde_yaml::Value::String("status".to_string()))
+                    .and_then(|v| v.as_str());
+
+                if status == Some("Success") {
+                    // Extract specific info based on tool
+                    match tool_name {
+                        "read_file" => {
+                            if let Some(content) = obj.get(&serde_yaml::Value::String("content".to_string()))
+                                .and_then(|v| v.as_str()) {
+                                let lines = content.lines().count();
+                                let chars = content.chars().count();
+                                return format!("Read {} lines ({} chars)", lines, chars);
+                            }
+                        }
+                        "get_files" | "get_files_recursive" => {
+                            if let Some(files) = obj.get(&serde_yaml::Value::String("files".to_string()))
+                                .and_then(|v| v.as_sequence()) {
+                                if files.is_empty() {
+                                    return "No files found".to_string();
+                                }
+                                // Show first few files
+                                let file_names: Vec<String> = files.iter()
+                                    .take(3)
+                                    .filter_map(|f| f.as_str())
+                                    .map(|s| s.to_string())
+                                    .collect();
+                                if files.len() > 3 {
+                                    return format!("Found {} files ({}... +{})", files.len(), file_names.join(", "), files.len() - 3);
+                                } else {
+                                    return format!("Found {} files ({})", files.len(), file_names.join(", "));
+                                }
+                            }
+                        }
+                        "search_files_with_regex" | "grep" => {
+                            if let Some(results) = obj.get(&serde_yaml::Value::String("results".to_string()))
+                                .and_then(|v| v.as_sequence()) {
+                                if results.is_empty() {
+                                    return "No matches found".to_string();
+                                }
+                                return format!("Found {} matches in {} files",
+                                    results.len(),
+                                    results.iter().filter_map(|r| r.get("file")).count().max(1)
+                                );
+                            }
+                        }
+                        "exec_command" => {
+                            if let Some(cmd_out) = obj.get(&serde_yaml::Value::String("cmd_out".to_string()))
+                                .and_then(|v| v.as_str()) {
+                                let lines = cmd_out.lines().count();
+                                // Show first line of output if available
+                                if let Some(first_line) = cmd_out.lines().next() {
+                                    let preview = if first_line.len() > 50 {
+                                        format!("{}...", &first_line[..47])
+                                    } else {
+                                        first_line.to_string()
+                                    };
+                                    return format!("{} lines: {}", lines, preview);
+                                }
+                                return format!("{} lines of output", lines);
+                            }
+                        }
+                        "write_file" => {
+                            return "File written successfully".to_string();
+                        }
+                        _ => return "Success".to_string(),
+                    }
+                } else if let Some(_err_status) = status {
+                    // Get error message
+                    if let Some(msg) = obj.get(&serde_yaml::Value::String("message".to_string()))
+                        .and_then(|v| v.as_str()) {
+                        return format!("Error: {}", msg);
+                    }
+                    return "Failed".to_string();
+                }
+            }
+        }
+
+        // Fallback: try to extract first meaningful line
+        for line in result_yaml.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with("status:") && !trimmed.starts_with("---") {
+                if trimmed.len() > 60 {
+                    return format!("{}...", &trimmed[..57]);
+                }
+                return trimmed.to_string();
+            }
+        }
+
+        "Completed".to_string()
+    }
+
     fn create_thinking_highlight_spans(text: &str, position: usize) -> Vec<(String, Color)> {
         let base_color = Color::Rgb(224, 135, 57);    // #e08739
         let bright_color = Color::Rgb(255, 215, 153); // #ffd799
@@ -690,9 +1041,16 @@ impl App {
                 // Normal message submission
                 let user_message = self.input.clone();
                 self.messages.push(user_message.clone());
+                self.message_types.push(MessageType::User);
                 self.input.clear();
                 self.reset_cursor();
                 self.input_modified = false;
+
+                // Reset agent response tracking for new conversation turn
+                self.agent_response_started = false;
+
+                // Save to history
+                self.save_to_history(&user_message);
 
                 // Send message to agent if available - processing happens in background task
                 if let Some(tx) = &self.agent_tx {
@@ -735,6 +1093,7 @@ impl App {
 
                             if should_add_thinking {
                                 self.messages.push("[THINKING_ANIMATION]".to_string());
+                                self.message_types.push(MessageType::Agent);
                             }
                             self.is_thinking = true;
                         }
@@ -743,21 +1102,27 @@ impl App {
                             if let Some(last_msg) = self.messages.last() {
                                 if last_msg == "[THINKING_ANIMATION]" {
                                     self.messages.pop();
+                                    self.message_types.pop();
                                 }
                             }
                             self.is_thinking = false;
 
                             // Check if we should append to existing message or create new one
-                            let should_create_new = if let Some(last_msg) = self.messages.last() {
-                                // Create new message if last message starts with '[' (tool call/error)
-                                // or if messages list only has 1 item (the user's question)
-                                last_msg.starts_with('[') || self.messages.len() == 1
+                            let should_create_new = if !self.agent_response_started {
+                                // First chunk of agent response - always create new message
+                                true
+                            } else if let Some(last_msg) = self.messages.last() {
+                                // Already started - check if last message is a special marker
+                                // If last message starts with '[', it's a tool call or error, so create new
+                                last_msg.starts_with('[')
                             } else {
                                 true
                             };
 
                             if should_create_new {
                                 self.messages.push(text);
+                                self.message_types.push(MessageType::Agent);
+                                self.agent_response_started = true;
                             } else {
                                 // Append to existing agent response
                                 if let Some(last_msg) = self.messages.last_mut() {
@@ -765,20 +1130,96 @@ impl App {
                                 }
                             }
                         }
-                        AgentMessage::ToolCallStarted(tool_name) => {
-                            self.messages.push(format!("[Calling tool: {}]", tool_name));
+                        AgentMessage::ToolCallStarted(tool_name, arguments) => {
+                            // If thinking is active, remove thinking animation temporarily
+                            let was_thinking = if self.is_thinking {
+                                if let Some(last_msg) = self.messages.last() {
+                                    if last_msg == "[THINKING_ANIMATION]" {
+                                        self.messages.pop();
+                                        self.message_types.pop();
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+
+                            // Format arguments for display
+                            let formatted_args = Self::format_tool_arguments(&tool_name, &arguments);
+                            self.messages.push(format!("[TOOL_CALL_STARTED:{}:{}]", tool_name, formatted_args));
+                            self.message_types.push(MessageType::Agent);
+
+                            // Re-add thinking animation at the bottom if it was there
+                            if was_thinking {
+                                self.messages.push("[THINKING_ANIMATION]".to_string());
+                                self.message_types.push(MessageType::Agent);
+                            }
                         }
                         AgentMessage::ToolCallCompleted(tool_name, result) => {
-                            self.messages.push(format!("[Tool {} completed: {}]", tool_name, result));
+                            // If thinking is active, remove thinking animation temporarily
+                            let was_thinking = if self.is_thinking {
+                                if let Some(last_msg) = self.messages.last() {
+                                    if last_msg == "[THINKING_ANIMATION]" {
+                                        self.messages.pop();
+                                        self.message_types.pop();
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+
+                            // Find and replace the started message with completed
+                            for msg in self.messages.iter_mut().rev() {
+                                if msg.starts_with(&format!("[TOOL_CALL_STARTED:{}:", tool_name)) {
+                                    let formatted_result = Self::format_tool_result(&tool_name, &result);
+                                    *msg = format!("[TOOL_CALL_COMPLETED:{}:{}:{}]",
+                                        tool_name,
+                                        msg.split(':').nth(2).unwrap_or(""),
+                                        formatted_result);
+                                    break;
+                                }
+                            }
+
+                            // Re-add thinking animation at the bottom if it was there
+                            if was_thinking {
+                                self.messages.push("[THINKING_ANIMATION]".to_string());
+                                self.message_types.push(MessageType::Agent);
+                            }
                         }
                         AgentMessage::Error(err) => {
+                            // Remove thinking animation if present
+                            if let Some(last_msg) = self.messages.last() {
+                                if last_msg == "[THINKING_ANIMATION]" {
+                                    self.messages.pop();
+                                    self.message_types.pop();
+                                }
+                            }
                             self.messages.push(format!("[Error: {}]", err));
+                            self.message_types.push(MessageType::Agent);
                             self.agent_processing = false;
                             self.is_thinking = false;
+                            self.agent_response_started = false;
                         }
                         AgentMessage::Done => {
+                            // Remove thinking animation if present
+                            if let Some(last_msg) = self.messages.last() {
+                                if last_msg == "[THINKING_ANIMATION]" {
+                                    self.messages.pop();
+                                    self.message_types.pop();
+                                }
+                            }
                             self.agent_processing = false;
                             self.is_thinking = false;
+                            self.agent_response_started = false;
                         }
                         _ => {}
                     }
@@ -867,16 +1308,53 @@ impl App {
                                         KeyCode::Left if self.phase == Phase::Input => self.move_cursor_left(),
                                         KeyCode::Right if self.phase == Phase::Input => self.move_cursor_right(),
                                         KeyCode::Up if self.phase == Phase::Input => {
-                                            let max_width = terminal.current_buffer_mut().area().width.saturating_sub(4);
-                                            let prompt_width = 4u16;
-                                            let indent_width = 4u16;
-                                            self.move_cursor_up(max_width, prompt_width, indent_width);
+                                            let cursor_row = self.get_cursor_row();
+                                            if cursor_row == 0 {
+                                                // On first line
+                                                if self.is_at_start_of_first_line() {
+                                                    // At start of first line - navigate history backwards
+                                                    self.navigate_history_backwards();
+                                                } else {
+                                                    // Not at start - move to start of line
+                                                    self.move_to_start_of_line();
+                                                }
+                                            } else {
+                                                // Not on first line - normal cursor movement up
+                                                let max_width = terminal.current_buffer_mut().area().width.saturating_sub(4);
+                                                let prompt_width = 4u16;
+                                                let indent_width = 4u16;
+                                                self.move_cursor_up(max_width, prompt_width, indent_width);
+                                            }
                                         }
                                         KeyCode::Down if self.phase == Phase::Input => {
-                                            let max_width = terminal.current_buffer_mut().area().width.saturating_sub(4);
-                                            let prompt_width = 4u16;
-                                            let indent_width = 4u16;
-                                            self.move_cursor_down(max_width, prompt_width, indent_width);
+                                            if self.history_index.is_some() {
+                                                // In history mode
+                                                let lines: Vec<&str> = self.input.lines().collect();
+                                                let last_line_idx = lines.len().saturating_sub(1);
+                                                let cursor_row = self.get_cursor_row();
+
+                                                if cursor_row < last_line_idx {
+                                                    // Not on last line - move down (staying in first column)
+                                                    let max_width = terminal.current_buffer_mut().area().width.saturating_sub(4);
+                                                    let prompt_width = 4u16;
+                                                    let indent_width = 4u16;
+                                                    self.move_cursor_down(max_width, prompt_width, indent_width);
+                                                    // Force cursor back to first column
+                                                    self.move_to_start_of_line();
+                                                } else if self.is_at_end_of_last_line() {
+                                                    // At end of last line - navigate to next history entry
+                                                    self.navigate_history_forwards();
+                                                } else {
+                                                    // On last line but not at end - move to end
+                                                    self.move_to_end_of_line();
+                                                }
+                                            } else {
+                                                // Not in history mode - normal cursor movement
+                                                let max_width = terminal.current_buffer_mut().area().width.saturating_sub(4);
+                                                let prompt_width = 4u16;
+                                                let indent_width = 4u16;
+                                                self.move_cursor_down(max_width, prompt_width, indent_width);
+                                            }
                                         }
                                         _ => {}
                                     }
@@ -1021,7 +1499,55 @@ impl App {
         }
         lines
     }
-    fn render_message_with_max_width(&self, message: &str, max_width: usize, highlight_pos: Option<usize>) -> Text<'_> {
+
+    fn render_agent_message_with_bullet(&self, message: &str, max_width: usize) -> Text<'static> {
+        // Render markdown with proper width wrapping
+        let content_width = max_width.saturating_sub(10);
+
+        // Render markdown into lines
+        let mut markdown_lines = Vec::new();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        markdown_renderer::append_markdown_with_settings(
+            message,
+            Some(content_width),
+            &mut markdown_lines,
+            None,
+            &cwd,
+        );
+
+        let mut lines = Vec::new();
+
+        // Content lines with white bullet on first line, NO BORDERS
+        for (idx, line) in markdown_lines.iter().enumerate() {
+            if idx == 0 {
+                // First line: 1 space left margin + white bullet (matching thinking animation)
+                let mut spans = vec![
+                    Span::raw(" "), // 1 space left margin (same as thinking animation)
+                    Span::styled("● ", Style::default().fg(Color::White)),
+                ];
+                // Add the spans from the markdown line
+                spans.extend(line.spans.iter().cloned());
+                lines.push(Line::from(spans));
+            } else {
+                // Subsequent lines: same left margin + spacing to align with content after bullet
+                let mut spans = vec![
+                    Span::raw(" "), // 1 space left margin
+                    Span::raw("  "), // 2 spaces to align with text after "● "
+                ];
+                // Add the spans from the markdown line
+                spans.extend(line.spans.iter().cloned());
+                lines.push(Line::from(spans));
+            }
+        }
+
+        Text::from(lines)
+    }
+
+    fn render_message_with_max_width(&self, message: &str, max_width: usize, highlight_pos: Option<usize>, is_agent: bool) -> Text<'static> {
+        // If this is a plain agent response (not a special marker), render with white bullet
+        if is_agent && !message.starts_with('[') {
+            return self.render_agent_message_with_bullet(message, max_width);
+        }
         // Check if this is a thinking animation placeholder
         if message == "[THINKING_ANIMATION]" {
             let mut lines = Vec::new();
@@ -1050,18 +1576,118 @@ impl App {
             return Text::from(lines);
         }
 
+        // Check if this is a tool call message
+        if message.starts_with("[TOOL_CALL_COMPLETED:") {
+            // Format: [TOOL_CALL_COMPLETED:tool_name:args:result]
+            let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_COMPLETED:")
+                .trim_end_matches("]")
+                .splitn(3, ':')
+                .collect();
+
+            if parts.len() >= 3 {
+                let tool_name = parts[0].to_string();
+                let args = parts[1].to_string();
+                let result = parts[2].to_string();
+
+                let mut lines = Vec::new();
+
+                // First line: 1 space margin + ● ToolName(args)
+                let mut line1_spans = Vec::new();
+                line1_spans.push(Span::raw(" ".to_string())); // 1 space left margin
+                line1_spans.push(Span::styled("● ".to_string(), Style::default().fg(Color::Blue)));
+                line1_spans.push(Span::styled(tool_name, Style::default().fg(Color::Cyan)));
+                line1_spans.push(Span::raw("(".to_string()));
+                line1_spans.push(Span::styled(args, Style::default().fg(Color::Yellow)));
+                line1_spans.push(Span::raw(")".to_string()));
+                lines.push(Line::from(line1_spans));
+
+                // Second line: 1 space margin + 2 spaces + ⎿ Result
+                let mut line2_spans = Vec::new();
+                line2_spans.push(Span::raw("   ".to_string())); // 1 margin + 2 alignment
+                line2_spans.push(Span::styled("⎿ ".to_string(), Style::default().fg(Color::DarkGray)));
+                // Color errors red, everything else green
+                let result_color = if result.starts_with("Error:") || result == "Failed" {
+                    Color::Red
+                } else {
+                    Color::Green
+                };
+                line2_spans.push(Span::styled(result, Style::default().fg(result_color)));
+                lines.push(Line::from(line2_spans));
+
+                return Text::from(lines);
+            }
+        } else if message.starts_with("[TOOL_CALL_STARTED:") {
+            // Format: [TOOL_CALL_STARTED:tool_name:args]
+            let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_STARTED:")
+                .trim_end_matches("]")
+                .splitn(2, ':')
+                .collect();
+
+            if parts.len() >= 2 {
+                let tool_name = parts[0].to_string();
+                let args = parts[1].to_string();
+
+                let mut lines = Vec::new();
+
+                // Single line: 1 space margin + ● ToolName(args)
+                let mut line_spans = Vec::new();
+                line_spans.push(Span::raw(" ".to_string())); // 1 space left margin
+                line_spans.push(Span::styled("● ".to_string(), Style::default().fg(Color::Blue)));
+                line_spans.push(Span::styled(tool_name, Style::default().fg(Color::Cyan)));
+                line_spans.push(Span::raw("(".to_string()));
+                line_spans.push(Span::styled(args, Style::default().fg(Color::Yellow)));
+                line_spans.push(Span::raw(")".to_string()));
+                lines.push(Line::from(line_spans));
+
+                return Text::from(lines);
+            }
+        }
+
         // Limit message width to 80 characters
         let content_width = (max_width - 4).min(80);
-        let wrapped_lines = Self::wrap_text(message, content_width);
+
+        // Check if this is a user message (not agent, not special marker)
+        let is_user_message = !is_agent && !message.starts_with('[');
+
+        // For user messages, render markdown; for others use plain text
+        let content_lines: Vec<Line<'static>> = if is_user_message {
+            // Render markdown for user messages
+            let mut markdown_lines = Vec::new();
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            markdown_renderer::append_markdown_with_settings(
+                message,
+                Some(content_width),
+                &mut markdown_lines,
+                None,
+                &cwd,
+            );
+            markdown_lines
+        } else {
+            // Plain text wrapping for error messages and other special cases
+            let wrapped_lines = Self::wrap_text(message, content_width);
+            wrapped_lines.iter().map(|s| Line::from(s.to_string())).collect()
+        };
+
         let mut lines = Vec::new();
-        let border_style = Style::default().fg(Color::DarkGray);
-        let max_line_width = wrapped_lines
+        // Check if this is an error message and style it red
+        let is_error = message.starts_with("[Error:");
+        let border_style = if is_error {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let content_style = if is_error {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default()
+        };
+        let max_line_width = content_lines
             .iter()
             .map(|line| line.width())
             .max()
             .unwrap_or(0)
             .min(content_width);
-        let horizontal = MESSAGE_BORDER_SET.horizontal_top.repeat(max_line_width + 2);
+        let horizontal = MESSAGE_BORDER_SET.horizontal_top.repeat(max_line_width + 4);
         lines.push(Line::from(vec![
             Span::styled(MESSAGE_BORDER_SET.top_left, border_style),
             Span::styled(horizontal, border_style),
@@ -1071,8 +1697,9 @@ impl App {
         let (highlight_line, highlight_col) = if let Some(pos) = highlight_pos {
             let mut char_count = 0;
             let mut result = (None, None);
-            for (line_idx, line) in wrapped_lines.iter().enumerate() {
-                let line_chars = line.chars().count();
+            for (line_idx, line) in content_lines.iter().enumerate() {
+                // Calculate character count from spans
+                let line_chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
                 if pos >= char_count && pos < char_count + line_chars {
                     result = (Some(line_idx), Some(pos - char_count));
                     break;
@@ -1083,8 +1710,10 @@ impl App {
         } else {
             (None, None)
         };
-        for (line_idx, line) in wrapped_lines.iter().enumerate() {
+        for (line_idx, line) in content_lines.iter().enumerate() {
             let line_width = line.width();
+            // Add " > " prefix on first line only
+            let prefix = if line_idx == 0 { " > " } else { "   " };
             let padding = " ".repeat(max_line_width + 1 - line_width);
            
             if let (Some(h_line), Some(h_col)) = (highlight_line, highlight_col) {
@@ -1092,56 +1721,79 @@ impl App {
                     // This line contains the highlight
                     let mut spans = Vec::new();
                     spans.push(Span::styled(MESSAGE_BORDER_SET.vertical_left, border_style));
-                    spans.push(Span::raw(" "));
-                   
+                    spans.push(Span::raw(prefix));
+
+                    // For highlighting, convert to plain text (highlight only works with plain text)
                     let line_string = line.to_string();
                     let line_chars: Vec<char> = line_string.chars().collect();
                     if h_col < line_chars.len() {
                         // Add text before highlight
                         if h_col > 0 {
                             let before_text: String = line_chars[..h_col].iter().collect();
-                            spans.push(Span::raw(before_text));
+                            // Use plain style for user messages with highlight, content_style for errors
+                            let style = if is_user_message { Style::default() } else { content_style };
+                            spans.push(Span::styled(before_text, style));
                         }
-                       
+
                         // Add highlighted character
                         let highlight_char = line_chars[h_col];
                         spans.push(Span::styled(highlight_char.to_string(), Style::default().fg(Color::Blue)));
-                       
+
                         // Add text after highlight
                         if h_col + 1 < line_chars.len() {
                             let after_text: String = line_chars[h_col + 1..].iter().collect();
-                            spans.push(Span::raw(after_text));
+                            let style = if is_user_message { Style::default() } else { content_style };
+                            spans.push(Span::styled(after_text, style));
                         }
                     } else {
                         // Highlight is at end of line or beyond
-                        spans.push(Span::raw(line_string));
+                        let style = if is_user_message { Style::default() } else { content_style };
+                        spans.push(Span::styled(line_string, style));
                     }
-                   
+
                     spans.push(Span::raw(padding));
                     spans.push(Span::styled(MESSAGE_BORDER_SET.vertical_right, border_style));
                     lines.push(Line::from(spans));
                 } else {
-                    // Normal line without highlight
-                    lines.push(Line::from(vec![
+                    // Normal line without highlight (within highlight branch but different line)
+                    let mut spans = vec![
                         Span::styled(MESSAGE_BORDER_SET.vertical_left, border_style),
-                        Span::raw(" "),
-                        Span::raw(line.to_string()),
-                        Span::raw(padding),
-                        Span::styled(MESSAGE_BORDER_SET.vertical_right, border_style),
-                    ]));
+                        Span::raw(prefix),
+                    ];
+
+                    // For user messages, preserve markdown styling; for errors, apply error style
+                    if is_user_message {
+                        spans.extend(line.spans.iter().cloned());
+                    } else {
+                        spans.push(Span::styled(line.to_string(), content_style));
+                    }
+
+                    spans.push(Span::raw(padding));
+                    spans.push(Span::styled(MESSAGE_BORDER_SET.vertical_right, border_style));
+                    lines.push(Line::from(spans));
                 }
             } else {
                 // No highlight, render normally
-                lines.push(Line::from(vec![
+                let mut spans = vec![
                     Span::styled(MESSAGE_BORDER_SET.vertical_left, border_style),
-                    Span::raw(" "),
-                    Span::raw(line.to_string()),
-                    Span::raw(padding),
-                    Span::styled(MESSAGE_BORDER_SET.vertical_right, border_style),
-                ]));
+                    Span::raw(prefix),
+                ];
+
+                // For user messages, preserve markdown styling; for errors, apply error style
+                if is_user_message {
+                    // Extend with existing markdown spans
+                    spans.extend(line.spans.iter().cloned());
+                } else {
+                    // Apply content_style to the plain text
+                    spans.push(Span::styled(line.to_string(), content_style));
+                }
+
+                spans.push(Span::raw(padding));
+                spans.push(Span::styled(MESSAGE_BORDER_SET.vertical_right, border_style));
+                lines.push(Line::from(spans));
             }
         }
-        let horizontal = MESSAGE_BORDER_SET.horizontal_bottom.repeat(max_line_width + 2);
+        let horizontal = MESSAGE_BORDER_SET.horizontal_bottom.repeat(max_line_width + 4);
         lines.push(Line::from(vec![
             Span::styled(MESSAGE_BORDER_SET.bottom_left, border_style),
             Span::styled(horizontal, border_style),
@@ -1422,9 +2074,10 @@ impl App {
                 if !tips.is_empty() {
                     message_lines.push(Line::from(" "));
                 }
-                let max_width = messages_area.width as usize - 4;
-                for message in &self.messages {
-                    message_lines.extend(self.render_message_with_max_width(message, max_width, None).lines);
+                let max_width = messages_area.width.saturating_sub(10) as usize;
+                for (idx, message) in self.messages.iter().enumerate() {
+                    let is_agent = matches!(self.message_types.get(idx), Some(MessageType::Agent));
+                    message_lines.extend(self.render_message_with_max_width(message, max_width, None, is_agent).lines);
                 }
                 let total_lines = message_lines.len();
                 let scroll = if total_lines <= visible_lines {
@@ -1452,9 +2105,10 @@ impl App {
                 if !tips.is_empty() {
                     message_lines.push(Line::from(" ")); // One character gap after tips
                 }
-                let max_width = messages_area.width as usize - 4;
-                for message in &self.messages {
-                    message_lines.extend(self.render_message_with_max_width(message, max_width, None).lines);
+                let max_width = messages_area.width.saturating_sub(10) as usize;
+                for (idx, message) in self.messages.iter().enumerate() {
+                    let is_agent = matches!(self.message_types.get(idx), Some(MessageType::Agent));
+                    message_lines.extend(self.render_message_with_max_width(message, max_width, None, is_agent).lines);
                 }
                 let total_lines = message_lines.len();
                 let visible_lines = messages_area.height as usize;
@@ -1563,9 +2217,9 @@ impl App {
                 // Use at least 10 rows to ensure half-page scrolling works
                 self.editor.state.set_viewport_rows((messages_area.height as usize).max(10));
 
-                // Use fixed 80 character wrap width for readability and consistent line counting
+                // Use terminal width minus 10 for wrapping to match visual display
                 // This ensures the navigation buffer line count matches the visual display
-                let wrap_width = 80;
+                let wrap_width = messages_area.width.saturating_sub(10) as usize;
 
                 // Regenerate editor content with correct width to match rendered output
                 // Both rich and plain content must use the same wrap width for line counts to match
@@ -1620,10 +2274,10 @@ impl App {
                         message_lines.push(Line::from(" ")); // One character gap after tips (only if there are messages)
                     }
                 }
-                // Render messages with wrap_width + 4 to account for borders in render_message_with_max_width
-                // (render_message_with_max_width subtracts 4 from max_width to get content_width)
-                for message in &self.messages {
-                    message_lines.extend(self.render_message_with_max_width(message, wrap_width + 4, None).lines);
+                // Render messages with appropriate width
+                for (idx, message) in self.messages.iter().enumerate() {
+                    let is_agent = matches!(self.message_types.get(idx), Some(MessageType::Agent));
+                    message_lines.extend(self.render_message_with_max_width(message, wrap_width, None, is_agent).lines);
                 }
                 // Calculate scroll offset based on edtui's cursor position
                 let cursor_row = self.editor.state.cursor.row;
