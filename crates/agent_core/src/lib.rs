@@ -15,6 +15,7 @@ use once_cell::sync::OnceCell;
 pub mod config;
 pub mod tools;
 pub mod web_search;
+pub mod thinking_summarizer;
 
 // Global state for persistent shell session
 struct GlobalState {
@@ -361,6 +362,10 @@ pub enum AgentMessage {
     AgentResponse(String),
     /// Agent's thinking process (internal reasoning)
     ThinkingContent(String),
+    /// Thinking summary line (from summarizer model)
+    ThinkingSummary(String),
+    /// Thinking has completed with residual token count
+    ThinkingComplete(usize), // residual_token_count
     /// Agent is processing a tool call
     ToolCallStarted(String, String), // (tool_name, arguments_json)
     /// Tool call completed with result
@@ -380,6 +385,7 @@ pub struct Agent {
     model_files: Vec<String>,
     system_prompt: String,
     tools: Vec<Tool>,
+    thinking_summarizer: Arc<Mutex<thinking_summarizer::ThinkingSummarizer>>,
 }
 
 impl Agent {
@@ -396,6 +402,7 @@ impl Agent {
             model_files,
             system_prompt,
             tools,
+            thinking_summarizer: Arc::new(Mutex::new(thinking_summarizer::ThinkingSummarizer::new())),
         }
     }
 
@@ -598,6 +605,20 @@ impl Agent {
                                             let final_thinking = &thinking_buffer[..end_idx];
                                             if !final_thinking.is_empty() {
                                                 let _ = tx.send(AgentMessage::ThinkingContent(final_thinking.to_string()));
+
+                                                // Add to summarizer and flush
+                                                let mut summarizer_guard = self.thinking_summarizer.lock().await;
+                                                summarizer_guard.add_thinking_chunk(final_thinking).await;
+                                                summarizer_guard.flush().await;  // Force flush to summarize remaining tokens
+                                                // Send only new summaries with token count embedded
+                                                for (summary, token_count) in summarizer_guard.get_new_summaries() {
+                                                    let _ = tx.send(AgentMessage::ThinkingSummary(format!("{}|{}", summary, token_count)));
+                                                }
+                                                // Send completion signal with residual token count
+                                                let residual_tokens = summarizer_guard.get_residual_token_count();
+                                                if residual_tokens > 0 {
+                                                    let _ = tx.send(AgentMessage::ThinkingComplete(residual_tokens));
+                                                }
                                             }
 
                                             // Send any content after </think> tag as normal response
@@ -619,6 +640,10 @@ impl Agent {
                                                 if let Some((byte_idx, _)) = thinking_buffer.char_indices().nth(send_char_count) {
                                                     let to_send = &thinking_buffer[..byte_idx];
                                                     let _ = tx.send(AgentMessage::ThinkingContent(to_send.to_string()));
+
+                                                    // Note: Don't send to summarizer here - we'll summarize when thinking ends or tool calls
+                                                    // This prevents fragmenting the thinking buffer across multiple summarizer calls
+
                                                     thinking_buffer = thinking_buffer[byte_idx..].to_string();
                                                 }
                                             }
@@ -632,6 +657,31 @@ impl Agent {
                                     tool_calls: Some(tool_calls),
                                     ..
                                 } => {
+                                    // Before processing tool calls, flush any remaining thinking content
+                                    if in_thinking && !thinking_buffer.is_empty() {
+                                        // Send remaining thinking content
+                                        let _ = tx.send(AgentMessage::ThinkingContent(thinking_buffer.clone()));
+
+                                        // Summarize thinking content when tool call arrives
+                                        {
+                                            let mut summarizer_guard = self.thinking_summarizer.lock().await;
+                                            summarizer_guard.add_thinking_chunk(&thinking_buffer).await;
+                                            summarizer_guard.flush().await;  // Force flush to summarize remaining tokens
+                                            // Send only new summaries with token count embedded
+                                            for (summary, token_count) in summarizer_guard.get_new_summaries() {
+                                                let _ = tx.send(AgentMessage::ThinkingSummary(format!("{}|{}", summary, token_count)));
+                                            }
+                                            // Send completion signal with residual token count
+                                            let residual_tokens = summarizer_guard.get_residual_token_count();
+                                            if residual_tokens > 0 {
+                                                let _ = tx.send(AgentMessage::ThinkingComplete(residual_tokens));
+                                            }
+                                        }
+
+                                        thinking_buffer.clear();
+                                        in_thinking = false;
+                                    }
+
                                     accumulated_tool_calls.extend(tool_calls.clone());
                                     for tool_call in tool_calls {
                                         let _ = tx.send(AgentMessage::ToolCallStarted(

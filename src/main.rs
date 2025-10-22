@@ -182,6 +182,7 @@ struct App {
     thinking_snowflake_frames: Vec<&'static str>,
     thinking_words: Vec<&'static str>,
     thinking_current_word: String,
+    thinking_current_summary: Option<(String, usize)>, // Current summary being shown with snowflake (text, token_count)
     thinking_position: usize,
     thinking_last_word_change: Instant,
     thinking_last_tick: Instant,
@@ -444,7 +445,8 @@ impl App {
             agent_response_started: false,
             thinking_loader_frame: 0,
             thinking_last_update: Instant::now(),
-            thinking_snowflake_frames: vec!["✽", "✻", "✹", "❆", "❅"],
+            // thinking_snowflake_frames: vec!["✽", "✻", "✹", "❆", "❅"],
+            thinking_snowflake_frames: vec!["✽ ", "✻ ", "✹ ", "❆ ", "❅ "],
             thinking_words: vec!["Discombobulating", "Fabricating", "Procrastinating", "Dilly-dallying", "Waffling",
                 "Rambling", "Babbling", "Daydreaming", "Woolgathering", "Muddling", "Overthinking", "Pondering",
                 "Wondering", "Speculating", "Ruminating", "Meditating", "Contemplating", "Justifying",
@@ -466,6 +468,7 @@ impl App {
                 "Jumble-wumbling", "Ding-a-linging", "Skronking", "Zoodling", "Zaddling", "Dippy-dappitying",
                 "Swozzling", "Frazzling", "Snarf-blasting"],
             thinking_current_word: "Thinking".to_string(),
+            thinking_current_summary: None,
             thinking_position: 0,
             thinking_last_word_change: Instant::now(),
             thinking_last_tick: Instant::now(),
@@ -756,8 +759,15 @@ impl App {
 
             // Update position every 40ms for smooth wave effect
             if self.thinking_last_tick.elapsed() >= Duration::from_millis(40) {
-                let text_with_dots = format!("{}...", self.thinking_current_word);
-                self.thinking_position = (self.thinking_position + 1) % (text_with_dots.len() + 7);
+                // Calculate text length based on what's actually being displayed
+                // Always add 3 for the "..." at the end
+                let text_len = if let Some((ref summary, _)) = self.thinking_current_summary {
+                    summary.len() + 3  // summary + "..."
+                } else {
+                    let text_with_dots = format!("{}...", self.thinking_current_word);
+                    text_with_dots.len()
+                };
+                self.thinking_position = (self.thinking_position + 1) % (text_len + 7);
                 self.thinking_last_tick = Instant::now();
             }
         }
@@ -1097,12 +1107,58 @@ impl App {
                             }
                             self.is_thinking = true;
                         }
+                        AgentMessage::ThinkingSummary(summary) => {
+                            // Parse summary format: "text|token_count"
+                            let (summary_text, token_count) = if let Some(pipe_idx) = summary.rfind('|') {
+                                let text = summary[..pipe_idx].to_string();
+                                let count_str = &summary[pipe_idx + 1..];
+                                let count = count_str.parse::<usize>().unwrap_or(0);
+                                (text, count)
+                            } else {
+                                (summary.clone(), 0)
+                            };
+
+                            // If we have a current summary, move it to a static tree line
+                            if let Some((old_summary, old_count)) = self.thinking_current_summary.take() {
+                                // Remove the thinking animation temporarily
+                                if let Some(last_msg) = self.messages.last() {
+                                    if last_msg == "[THINKING_ANIMATION]" {
+                                        self.messages.pop();
+                                        self.message_types.pop();
+                                    }
+                                }
+                                // Add old summary as static tree line with token count
+                                self.messages.push(format!("├── {} ({}t)", old_summary, old_count));
+                                self.message_types.push(MessageType::Agent);
+                                // Re-add thinking animation at bottom
+                                self.messages.push("[THINKING_ANIMATION]".to_string());
+                                self.message_types.push(MessageType::Agent);
+                            }
+                            // Store new summary as current (will show with snowflake)
+                            self.thinking_current_summary = Some((summary_text, token_count));
+                            // Reset animation position to start wave from beginning
+                            self.thinking_position = 0;
+                        }
                         AgentMessage::AgentResponse(text) => {
-                            // Remove thinking animation if present
-                            if let Some(last_msg) = self.messages.last() {
-                                if last_msg == "[THINKING_ANIMATION]" {
-                                    self.messages.pop();
-                                    self.message_types.pop();
+                            // If we have a current summary, move it to a static tree line before response
+                            if let Some((final_summary, token_count)) = self.thinking_current_summary.take() {
+                                // Remove thinking animation
+                                if let Some(last_msg) = self.messages.last() {
+                                    if last_msg == "[THINKING_ANIMATION]" {
+                                        self.messages.pop();
+                                        self.message_types.pop();
+                                    }
+                                }
+                                // Add final summary as static tree line with token count
+                                self.messages.push(format!("├── {} ({}t)", final_summary, token_count));
+                                self.message_types.push(MessageType::Agent);
+                            } else {
+                                // No summary, just remove thinking animation if present
+                                if let Some(last_msg) = self.messages.last() {
+                                    if last_msg == "[THINKING_ANIMATION]" {
+                                        self.messages.pop();
+                                        self.message_types.pop();
+                                    }
                                 }
                             }
                             self.is_thinking = false;
@@ -1131,33 +1187,37 @@ impl App {
                             }
                         }
                         AgentMessage::ToolCallStarted(tool_name, arguments) => {
-                            // If thinking is active, remove thinking animation temporarily
-                            let was_thinking = if self.is_thinking {
+                            // If we have a current summary, move it to static tree line before tool call
+                            if let Some((current_summary, token_count)) = self.thinking_current_summary.take() {
+                                // Remove thinking animation if present
                                 if let Some(last_msg) = self.messages.last() {
                                     if last_msg == "[THINKING_ANIMATION]" {
                                         self.messages.pop();
                                         self.message_types.pop();
-                                        true
-                                    } else {
-                                        false
                                     }
-                                } else {
-                                    false
                                 }
+                                // Add summary as static tree line with token count
+                                self.messages.push(format!("├── {} ({}t)", current_summary, token_count));
+                                self.message_types.push(MessageType::Agent);
                             } else {
-                                false
-                            };
+                                // If thinking is active, remove thinking animation temporarily
+                                if self.is_thinking {
+                                    if let Some(last_msg) = self.messages.last() {
+                                        if last_msg == "[THINKING_ANIMATION]" {
+                                            self.messages.pop();
+                                            self.message_types.pop();
+                                        }
+                                    }
+                                }
+                            }
 
                             // Format arguments for display
                             let formatted_args = Self::format_tool_arguments(&tool_name, &arguments);
                             self.messages.push(format!("[TOOL_CALL_STARTED:{}:{}]", tool_name, formatted_args));
                             self.message_types.push(MessageType::Agent);
 
-                            // Re-add thinking animation at the bottom if it was there
-                            if was_thinking {
-                                self.messages.push("[THINKING_ANIMATION]".to_string());
-                                self.message_types.push(MessageType::Agent);
-                            }
+                            // Don't re-add thinking animation - tool is executing now
+                            self.is_thinking = false;
                         }
                         AgentMessage::ToolCallCompleted(tool_name, result) => {
                             // If thinking is active, remove thinking animation temporarily
@@ -1195,12 +1255,33 @@ impl App {
                                 self.message_types.push(MessageType::Agent);
                             }
                         }
+                        AgentMessage::ThinkingComplete(_residual_tokens) => {
+                            // Thinking has ended - handle residual tokens if any
+                            // If residual tokens < 50 and we don't have a current summary,
+                            // they should have already been summarized and sent as ThinkingSummary
+                            // This marker just indicates thinking is complete
+                            self.is_thinking = false;
+                        }
                         AgentMessage::Error(err) => {
-                            // Remove thinking animation if present
-                            if let Some(last_msg) = self.messages.last() {
-                                if last_msg == "[THINKING_ANIMATION]" {
-                                    self.messages.pop();
-                                    self.message_types.pop();
+                            // If we have a current summary, move it to a static tree line before error
+                            if let Some((final_summary, token_count)) = self.thinking_current_summary.take() {
+                                // Remove thinking animation
+                                if let Some(last_msg) = self.messages.last() {
+                                    if last_msg == "[THINKING_ANIMATION]" {
+                                        self.messages.pop();
+                                        self.message_types.pop();
+                                    }
+                                }
+                                // Add final summary as static tree line with token count
+                                self.messages.push(format!("├── {} ({}t)", final_summary, token_count));
+                                self.message_types.push(MessageType::Agent);
+                            } else {
+                                // No summary, just remove thinking animation if present
+                                if let Some(last_msg) = self.messages.last() {
+                                    if last_msg == "[THINKING_ANIMATION]" {
+                                        self.messages.pop();
+                                        self.message_types.pop();
+                                    }
                                 }
                             }
                             self.messages.push(format!("[Error: {}]", err));
@@ -1210,11 +1291,25 @@ impl App {
                             self.agent_response_started = false;
                         }
                         AgentMessage::Done => {
-                            // Remove thinking animation if present
-                            if let Some(last_msg) = self.messages.last() {
-                                if last_msg == "[THINKING_ANIMATION]" {
-                                    self.messages.pop();
-                                    self.message_types.pop();
+                            // If we have a current summary, move it to a static tree line when done
+                            if let Some((final_summary, token_count)) = self.thinking_current_summary.take() {
+                                // Remove thinking animation
+                                if let Some(last_msg) = self.messages.last() {
+                                    if last_msg == "[THINKING_ANIMATION]" {
+                                        self.messages.pop();
+                                        self.message_types.pop();
+                                    }
+                                }
+                                // Add final summary as static tree line with token count
+                                self.messages.push(format!("├── {} ({}t)", final_summary, token_count));
+                                self.message_types.push(MessageType::Agent);
+                            } else {
+                                // No summary, just remove thinking animation if present
+                                if let Some(last_msg) = self.messages.last() {
+                                    if last_msg == "[THINKING_ANIMATION]" {
+                                        self.messages.pop();
+                                        self.message_types.pop();
+                                    }
                                 }
                             }
                             self.agent_processing = false;
@@ -1501,15 +1596,31 @@ impl App {
     }
 
     fn render_agent_message_with_bullet(&self, message: &str, max_width: usize) -> Text<'static> {
+        // Check if this is a thinking summary (tree line starting with ├──)
+        if message.starts_with("├── ") {
+            return Text::from(vec![Line::from(vec![
+                Span::raw(" "),  // 1 space left margin
+                Span::styled(message.to_string(), Style::default().fg(Color::DarkGray)),
+            ])]);
+        }
+
         // Render markdown with proper width wrapping
         let content_width = max_width.saturating_sub(10);
+
+        // Use full terminal width for tables (no wrapping if less than 10 chars would be left)
+        // This allows tables to render at full width while still wrapping regular text reasonably
+        let markdown_width = if content_width < 10 {
+            None  // Disable wrapping entirely
+        } else {
+            Some(max_width.saturating_sub(4))  // Give more room, just account for bullet
+        };
 
         // Render markdown into lines
         let mut markdown_lines = Vec::new();
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         markdown_renderer::append_markdown_with_settings(
             message,
-            Some(content_width),
+            markdown_width,
             &mut markdown_lines,
             None,
             &cwd,
@@ -1520,19 +1631,19 @@ impl App {
         // Content lines with white bullet on first line, NO BORDERS
         for (idx, line) in markdown_lines.iter().enumerate() {
             if idx == 0 {
-                // First line: 1 space left margin + white bullet (matching thinking animation)
+                // First line: 1 space left margin + white bullet
                 let mut spans = vec![
-                    Span::raw(" "), // 1 space left margin (same as thinking animation)
+                    Span::raw(" "),  // 1 space left margin (matching thinking animation)
                     Span::styled("● ", Style::default().fg(Color::White)),
                 ];
                 // Add the spans from the markdown line
                 spans.extend(line.spans.iter().cloned());
                 lines.push(Line::from(spans));
             } else {
-                // Subsequent lines: same left margin + spacing to align with content after bullet
+                // Subsequent lines: 1 space left margin + 2 spaces to align with text after bullet
                 let mut spans = vec![
-                    Span::raw(" "), // 1 space left margin
-                    Span::raw("  "), // 2 spaces to align with text after "● "
+                    Span::raw(" "),   // 1 space left margin
+                    Span::raw("  "),  // 2 spaces to align with text after "● "
                 ];
                 // Add the spans from the markdown line
                 spans.extend(line.spans.iter().cloned());
@@ -1555,8 +1666,13 @@ impl App {
             // Get current animation frame
             let current_frame = self.thinking_snowflake_frames[self.thinking_loader_frame];
 
-            // Create the full text with dots
-            let text_with_dots = format!("{}...", self.thinking_current_word);
+            // Use current summary if available, otherwise use random word
+            // Always add "..." to the end
+            let text_with_dots = if let Some((ref summary, token_count)) = self.thinking_current_summary {
+                format!("{} ({}t)...", summary, token_count)
+            } else {
+                format!("{}...", self.thinking_current_word)
+            };
 
             // Get color-coded spans for the wave effect
             let color_spans = Self::create_thinking_highlight_spans(&text_with_dots, self.thinking_position);
@@ -1591,20 +1707,20 @@ impl App {
 
                 let mut lines = Vec::new();
 
-                // First line: 1 space margin + ● ToolName(args)
+                // First line: 1 space left margin + ● ToolName(args)
                 let mut line1_spans = Vec::new();
-                line1_spans.push(Span::raw(" ".to_string())); // 1 space left margin
-                line1_spans.push(Span::styled("● ".to_string(), Style::default().fg(Color::Blue)));
+                line1_spans.push(Span::raw(" "));  // 1 space left margin (matching thinking animation)
+                line1_spans.push(Span::styled("● ", Style::default().fg(Color::Blue)));
                 line1_spans.push(Span::styled(tool_name, Style::default().fg(Color::Cyan)));
-                line1_spans.push(Span::raw("(".to_string()));
+                line1_spans.push(Span::raw("("));
                 line1_spans.push(Span::styled(args, Style::default().fg(Color::Yellow)));
-                line1_spans.push(Span::raw(")".to_string()));
+                line1_spans.push(Span::raw(")"));
                 lines.push(Line::from(line1_spans));
 
-                // Second line: 1 space margin + 2 spaces + ⎿ Result
+                // Second line: 1 space left margin + │ ⎿ Result
                 let mut line2_spans = Vec::new();
-                line2_spans.push(Span::raw("   ".to_string())); // 1 margin + 2 alignment
-                line2_spans.push(Span::styled("⎿ ".to_string(), Style::default().fg(Color::DarkGray)));
+                line2_spans.push(Span::raw(" "));  // 1 space left margin
+                line2_spans.push(Span::styled("│ ⎿  ", Style::default().fg(Color::DarkGray)));
                 // Color errors red, everything else green
                 let result_color = if result.starts_with("Error:") || result == "Failed" {
                     Color::Red
@@ -1651,12 +1767,21 @@ impl App {
 
         // For user messages, render markdown; for others use plain text
         let content_lines: Vec<Line<'static>> = if is_user_message {
+            // Use wider width for tables - if content_width is too narrow, disable wrapping
+            let markdown_width = if content_width < 10 {
+                None  // Disable wrapping entirely
+            } else {
+                // Use max_width minus just the borders (4 chars) for tables
+                // Don't limit to 80 for tables
+                Some(max_width.saturating_sub(8))  // Account for borders and " > " prefix
+            };
+
             // Render markdown for user messages
             let mut markdown_lines = Vec::new();
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             markdown_renderer::append_markdown_with_settings(
                 message,
-                Some(content_width),
+                markdown_width,
                 &mut markdown_lines,
                 None,
                 &cwd,
@@ -1714,7 +1839,7 @@ impl App {
             let line_width = line.width();
             // Add " > " prefix on first line only
             let prefix = if line_idx == 0 { " > " } else { "   " };
-            let padding = " ".repeat(max_line_width + 1 - line_width);
+            let padding = " ".repeat(max_line_width.saturating_add(1).saturating_sub(line_width));
            
             if let (Some(h_line), Some(h_col)) = (highlight_line, highlight_col) {
                 if line_idx == h_line {
@@ -2207,6 +2332,8 @@ impl App {
                             .border_style(Style::default().fg(self.get_mode_border_color())),
                     );
                 frame.render_widget(input, input_area);
+
+                // Always show cursor in input area (Normal mode)
                 let visible_cursor_row = cursor_row.saturating_sub(scroll_y);
                 let cursor_x = input_area.x + 1 + cursor_col;
                 let max_cursor_x = input_area.x + input_area.width.saturating_sub(3);
@@ -2475,8 +2602,8 @@ impl App {
                         }
                     }
                 }
-                // Render cursor if it's visible in the viewport
-                if cursor_row >= scroll_offset && cursor_row < scroll_offset + visible_lines {
+                // Render cursor if it's visible in the viewport (but NOT during thinking/processing in messages area)
+                if !self.agent_processing && !self.is_thinking && cursor_row >= scroll_offset && cursor_row < scroll_offset + visible_lines {
                     let visible_row = cursor_row - scroll_offset;
                     let cursor_y = messages_area.y + visible_row as u16;
                     // Calculate cursor x position based on the line content

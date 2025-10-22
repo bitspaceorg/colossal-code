@@ -38,6 +38,7 @@ impl IndentContext {
 pub fn render_markdown_text(input: &str) -> Text<'static> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
     let parser = Parser::new_ext(input, options);
     let mut w = Writer::new(parser, None, None, None);
     w.run();
@@ -52,6 +53,7 @@ pub(crate) fn render_markdown_text_with_citations(
 ) -> Text<'static> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
     let parser = Parser::new_ext(input, options);
     let mut w = Writer::new(
         parser,
@@ -85,6 +87,12 @@ where
     current_subsequent_indent: Vec<Span<'static>>,
     current_line_style: Style,
     current_line_in_code_block: bool,
+    // Table state
+    in_table: bool,
+    table_rows: Vec<Vec<String>>,
+    current_table_row: Vec<String>,
+    current_cell_content: String,
+    is_table_header: bool,
 }
 
 impl<'a, I> Writer<'a, I>
@@ -116,6 +124,12 @@ where
             current_subsequent_indent: Vec::new(),
             current_line_style: Style::default(),
             current_line_in_code_block: false,
+            // Initialize table state
+            in_table: false,
+            table_rows: Vec::new(),
+            current_table_row: Vec::new(),
+            current_cell_content: String::new(),
+            is_table_header: false,
         }
     }
 
@@ -173,12 +187,12 @@ where
             Tag::Strong => self.push_inline_style(Style::new().bold()),
             Tag::Strikethrough => self.push_inline_style(Style::new().crossed_out()),
             Tag::Link { dest_url, .. } => self.push_link(dest_url.to_string()),
+            Tag::Table(_) => self.start_table(),
+            Tag::TableHead => self.start_table_head(),
+            Tag::TableRow => self.start_table_row(),
+            Tag::TableCell => self.start_table_cell(),
             Tag::HtmlBlock
             | Tag::FootnoteDefinition(_)
-            | Tag::Table(_)
-            | Tag::TableHead
-            | Tag::TableRow
-            | Tag::TableCell
             | Tag::Image { .. }
             | Tag::MetadataBlock(_)
             | Tag::DefinitionList
@@ -200,12 +214,12 @@ where
             }
             TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => self.pop_inline_style(),
             TagEnd::Link => self.pop_link(),
+            TagEnd::Table => self.end_table(),
+            TagEnd::TableHead => self.end_table_head(),
+            TagEnd::TableRow => self.end_table_row(),
+            TagEnd::TableCell => self.end_table_cell(),
             TagEnd::HtmlBlock
             | TagEnd::FootnoteDefinition
-            | TagEnd::Table
-            | TagEnd::TableHead
-            | TagEnd::TableRow
-            | TagEnd::TableCell
             | TagEnd::Image
             | TagEnd::MetadataBlock(_)
             | TagEnd::DefinitionList
@@ -268,6 +282,12 @@ where
     }
 
     fn text(&mut self, text: CowStr<'a>) {
+        // If we're in a table, accumulate cell content
+        if self.in_table {
+            self.current_cell_content.push_str(&text);
+            return;
+        }
+
         if self.pending_marker_line {
             self.push_line(Line::default());
         }
@@ -315,6 +335,12 @@ where
     }
 
     fn code(&mut self, code: CowStr<'a>) {
+        // If we're in a table, accumulate cell content
+        if self.in_table {
+            self.current_cell_content.push_str(&code);
+            return;
+        }
+
         if self.pending_marker_line {
             self.push_line(Line::default());
             self.pending_marker_line = false;
@@ -534,5 +560,153 @@ where
         }
 
         prefix
+    }
+
+    // Table handling methods
+    fn start_table(&mut self) {
+        self.flush_current_line();
+        self.in_table = true;
+        self.table_rows.clear();
+        if self.needs_newline {
+            self.push_blank_line();
+        }
+    }
+
+    fn start_table_head(&mut self) {
+        self.is_table_header = true;
+    }
+
+    fn start_table_row(&mut self) {
+        self.current_table_row.clear();
+    }
+
+    fn start_table_cell(&mut self) {
+        self.current_cell_content.clear();
+    }
+
+    fn end_table_cell(&mut self) {
+        self.current_table_row.push(self.current_cell_content.clone());
+        self.current_cell_content.clear();
+    }
+
+    fn end_table_row(&mut self) {
+        if !self.current_table_row.is_empty() {
+            self.table_rows.push(self.current_table_row.clone());
+        }
+        self.current_table_row.clear();
+    }
+
+    fn end_table_head(&mut self) {
+        self.is_table_header = false;
+    }
+
+    fn end_table(&mut self) {
+        self.flush_current_line();
+        self.render_table();
+        self.in_table = false;
+        self.table_rows.clear();
+        self.needs_newline = true;
+    }
+
+    fn render_table(&mut self) {
+        if self.table_rows.is_empty() {
+            return;
+        }
+
+        // Clone the rows to avoid borrow checker issues
+        let rows = self.table_rows.clone();
+
+        // Calculate column widths
+        let num_cols = rows.iter().map(|row| row.len()).max().unwrap_or(0);
+        let mut col_widths = vec![0; num_cols];
+
+        for row in &rows {
+            for (i, cell) in row.iter().enumerate() {
+                col_widths[i] = col_widths[i].max(cell.chars().count());
+            }
+        }
+
+        // Check if table exceeds available width and adjust if needed
+        if let Some(max_width) = self.wrap_width {
+            // Calculate total table width: borders + separators + cell content
+            // Format: "│ cell1 │ cell2 │ cell3 │"
+            let separators_width = (num_cols - 1) * 3; // " │ " between columns
+            let borders_width = 4; // "│ " at start and " │" at end
+            let total_width: usize = col_widths.iter().sum::<usize>() + separators_width + borders_width;
+
+            if total_width > max_width {
+                // Table is too wide, need to constrain column widths
+                let available_for_cells = max_width.saturating_sub(separators_width + borders_width);
+
+                // Distribute available width proportionally, but ensure minimum width of 3 chars
+                let total_desired: usize = col_widths.iter().sum();
+                if total_desired > 0 {
+                    for width in &mut col_widths {
+                        let proportion = (*width as f64) / (total_desired as f64);
+                        let new_width = ((available_for_cells as f64) * proportion).floor() as usize;
+                        *width = new_width.max(3); // Minimum 3 chars per column
+                    }
+                }
+            }
+        }
+
+        // Render table rows
+        for (row_idx, row) in rows.iter().enumerate() {
+            let mut line_spans = Vec::new();
+            line_spans.push(Span::raw("│ "));
+
+            for (col_idx, cell) in row.iter().enumerate() {
+                let width = col_widths[col_idx];
+
+                // Truncate cell content if it's longer than allocated width
+                // Use char-based truncation to avoid UTF-8 boundary issues
+                let cell_content = if cell.chars().count() > width {
+                    if width > 3 {
+                        // Truncate and add ellipsis
+                        let truncate_at = width.saturating_sub(3);
+                        let truncated: String = cell.chars().take(truncate_at).collect();
+                        format!("{}...", truncated)
+                    } else {
+                        // Too narrow for ellipsis, just truncate
+                        cell.chars().take(width).collect()
+                    }
+                } else {
+                    cell.clone()
+                };
+
+                let padding = " ".repeat(width.saturating_sub(cell_content.chars().count()));
+
+                // Style header row differently
+                if row_idx == 0 {
+                    line_spans.push(Span::styled(cell_content, Style::new().bold()));
+                } else {
+                    line_spans.push(Span::raw(cell_content));
+                }
+                line_spans.push(Span::raw(padding));
+
+                if col_idx < row.len() - 1 {
+                    line_spans.push(Span::raw(" │ "));
+                }
+            }
+
+            line_spans.push(Span::raw(" │"));
+            self.push_line(Line::from(line_spans));
+
+            // Add separator after header row
+            if row_idx == 0 {
+                let mut separator_spans = Vec::new();
+                separator_spans.push(Span::raw("├─"));
+
+                for (col_idx, &width) in col_widths.iter().enumerate() {
+                    separator_spans.push(Span::raw("─".repeat(width)));
+                    if col_idx < col_widths.len() - 1 {
+                        separator_spans.push(Span::raw("─┼─"));
+                    }
+                }
+
+                separator_spans.push(Span::raw("─┤"));
+                self.push_line(Line::from(separator_spans));
+            }
+        }
     }
 }
