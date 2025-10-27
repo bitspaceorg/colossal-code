@@ -1,5 +1,6 @@
-use regex::Regex;
 use serde::{Deserialize, Serialize};
+use tokenizers::Tokenizer;
+use once_cell::sync::Lazy;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Message {
@@ -27,10 +28,20 @@ struct ChatResponse {
     choices: Vec<ChatChoice>,
 }
 
+// Load SmolLM2-135M tokenizer from HuggingFace
+static SMOLLM_TOKENIZER: Lazy<Option<Tokenizer>> = Lazy::new(|| {
+    // Try to load from HuggingFace hub
+    if let Ok(tokenizer) = Tokenizer::from_pretrained("HuggingFaceTB/SmolLM2-135M", None) {
+        return Some(tokenizer);
+    }
+    None
+});
+
 pub struct ThinkingSummarizer {
     buffer: String,
     token_count: usize,
-    summaries: Vec<(String, usize)>,  // (summary, token_count)
+    chunk_count: usize,  // Track actual chunk count separately
+    summaries: Vec<(String, usize, usize)>,  // (summary, real_token_count, chunk_count)
     last_sent_count: usize,  // Track how many summaries we've already sent
     client: reqwest::Client,
 }
@@ -42,6 +53,7 @@ impl ThinkingSummarizer {
         Self {
             buffer: String::new(),
             token_count: 0,
+            chunk_count: 0,
             summaries: Vec::new(),
             last_sent_count: 0,
             client: reqwest::Client::new(),
@@ -50,30 +62,38 @@ impl ThinkingSummarizer {
 
     pub async fn add_thinking_chunk(&mut self, chunk: &str) {
         self.buffer.push_str(chunk);
-        let chunk_tokens = Self::estimate_tokens(chunk);
-        self.token_count += chunk_tokens;
+        self.chunk_count += 1;  // Each stream chunk = 1 chunk
+
+        // Count real tokens using SmolLM2 tokenizer
+        if let Some(tokenizer) = SMOLLM_TOKENIZER.as_ref() {
+            if let Ok(encoding) = tokenizer.encode(self.buffer.clone(), false) {
+                self.token_count = encoding.len();
+            }
+        }
 
         if self.token_count >= Self::TOKEN_THRESHOLD {
             if let Ok(summary) = self.summarize_buffer().await {
-                self.summaries.push((summary, self.token_count));
+                self.summaries.push((summary, self.token_count, self.chunk_count));
             }
             self.buffer.clear();
             self.token_count = 0;
+            self.chunk_count = 0;
         }
     }
 
     pub async fn flush(&mut self) {
         if !self.buffer.is_empty() && self.token_count > 0 {
             if let Ok(summary) = self.summarize_buffer().await {
-                self.summaries.push((summary, self.token_count));
+                self.summaries.push((summary, self.token_count, self.chunk_count));
             }
             self.buffer.clear();
             self.token_count = 0;
+            self.chunk_count = 0;
         }
     }
 
     async fn summarize_buffer(&self) -> Result<String, Box<dyn std::error::Error>> {
-        let system_prompt = "You are SmolLM, a compact and helpful model. You convert a reasoning trace into a concise summary.";
+        let system_prompt = "You are SmolLM, a compact and helpful model. Convert this reasoning trace into a single-line concise summary. Start with a verb ending in '-ing'. Keep it under 50 characters. Do not use quotes, hashes, asterisks, slashes, backslashes, pipes, or backticks.";
 
         let request_body = ChatRequestBody {
             model: "reasoning-summarizer-V0:135M".to_string(),
@@ -110,31 +130,32 @@ impl ThinkingSummarizer {
 
         let chat_response: ChatResponse = serde_json::from_str(&response_text)?;
 
-        if let Some(choice) = chat_response.choices.first() {
+        let summary = if let Some(choice) = chat_response.choices.first() {
             if let Some(first_line) = choice.message.content.lines().next() {
-                // TEMP: Commenting out validation to see summaries - will re-enable later
-                // if Self::is_valid_summary(first_line) {
-                    return Ok(first_line.to_string());
-                // }
+                first_line.trim().to_string()
+            } else {
+                String::new()
             }
-        }
+        } else {
+            String::new()
+        };
 
-        Err("Invalid summary generated".into())
+        Ok(summary)
     }
 
     pub fn get_tree_lines(&self) -> Vec<String> {
         self.summaries
             .iter()
-            .map(|(s, tokens)| format!("├── {} ({}t)", s, tokens))
+            .map(|(s, real_tokens, chunk_count)| format!("├── {} ({}rt {}ct)", s, real_tokens, chunk_count))
             .collect()
     }
 
     // Get only new summaries that haven't been sent yet
-    pub fn get_new_summaries(&mut self) -> Vec<(String, usize)> {
-        let new_summaries: Vec<(String, usize)> = self.summaries
+    pub fn get_new_summaries(&mut self) -> Vec<(String, usize, usize)> {
+        let new_summaries: Vec<(String, usize, usize)> = self.summaries
             .iter()
             .skip(self.last_sent_count)
-            .cloned()
+            .map(|(s, tokens, chunks)| (s.clone(), *tokens, *chunks))
             .collect();
         self.last_sent_count = self.summaries.len();
         new_summaries
@@ -143,6 +164,7 @@ impl ThinkingSummarizer {
     pub fn clear(&mut self) {
         self.buffer.clear();
         self.token_count = 0;
+        self.chunk_count = 0;
         self.summaries.clear();
         self.last_sent_count = 0;
     }
@@ -151,48 +173,6 @@ impl ThinkingSummarizer {
         self.token_count
     }
 
-    fn estimate_tokens(text: &str) -> usize {
-        // Rough heuristic: ~1.3 tokens per word
-        (text.split_whitespace().count() as f32 * 1.3) as usize
-    }
-
-    // TEMP: Commenting out validation function - will re-enable after testing
-    // fn is_valid_summary(summary: &str) -> bool {
-    //     let trimmed = summary.trim();
-    //
-    //     // Non-empty
-    //     if trimmed.is_empty() {
-    //         return false;
-    //     }
-    //
-    //     // Single-line only
-    //     if trimmed.contains('\n') {
-    //         return false;
-    //     }
-    //
-    //     // No disallowed special characters
-    //     let disallowed = Regex::new(r#"["\#\*/\\|`]"#).unwrap();
-    //     if disallowed.is_match(trimmed) {
-    //         return false;
-    //     }
-    //
-    //     // Word count <= 6
-    //     let words: Vec<&str> = trimmed.split_whitespace().collect();
-    //     if words.len() > 6 {
-    //         return false;
-    //     }
-    //
-    //     // First word must end with "ing"
-    //     if let Some(first) = words.first() {
-    //         if !first.to_lowercase().ends_with("ing") {
-    //             return false;
-    //         }
-    //     } else {
-    //         return false;
-    //     }
-    //
-    //     true
-    // }
 }
 
 impl Default for ThinkingSummarizer {

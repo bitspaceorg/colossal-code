@@ -36,6 +36,7 @@ urlencoding = "2.1"
 scraper = "0.20"
 html2text = "0.12"
 rayon = "1.10"
+tokenizers = { version = "0.21", features = ["http"] }
 
 [patch.crates-io]
 cudarc = { git = "https://github.com/coreylowman/cudarc", rev = "d2c412731524531b7507777fa45496ff667fe718" }

@@ -131,12 +131,20 @@ enum MessageType {
     Agent,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum MessageState {
+    Sent,        // Normal sent message
+    Queued,      // Message queued, waiting to be sent
+    Interrupted, // Message generation was interrupted (partial)
+}
+
 /// Application state for the TUI
 struct App {
     input: String,
     character_index: usize,
     messages: Vec<String>,
     message_types: Vec<MessageType>, // Track which messages are from user vs agent
+    message_states: Vec<MessageState>, // Track state of each message
     input_modified: bool,
     mode: Mode,
     status_left: Line<'static>,
@@ -182,7 +190,7 @@ struct App {
     thinking_snowflake_frames: Vec<&'static str>,
     thinking_words: Vec<&'static str>,
     thinking_current_word: String,
-    thinking_current_summary: Option<(String, usize)>, // Current summary being shown with snowflake (text, token_count)
+    thinking_current_summary: Option<(String, usize, usize)>, // Current summary being shown with snowflake (text, token_count, chunk_count)
     thinking_position: usize,
     thinking_last_word_change: Instant,
     thinking_last_tick: Instant,
@@ -191,6 +199,12 @@ struct App {
     history_index: Option<usize>,
     temp_input: Option<String>,
     history_file_path: std::path::PathBuf,
+    // Message queue system
+    queued_messages: Vec<String>,  // Queue of messages waiting to be sent
+    editing_queue_index: Option<usize>,  // Index of queue message being edited (if any)
+    show_queue_choice: bool,  // Show the queue choice popup
+    queue_choice_input: String,  // Collect user choice for queue
+    interrupt_pending: Option<String>,  // Message waiting to send after cancel completes
 }
 impl App {
     fn get_history_file_path() -> Result<std::path::PathBuf> {
@@ -324,15 +338,18 @@ impl App {
     }
 
     fn navigate_history_backwards(&mut self) {
-        if self.command_history.is_empty() {
+        // Combined history: command_history + queued_messages
+        // Most recent queued message is at the end
+        let total_items = self.command_history.len() + self.queued_messages.len();
+
+        if total_items == 0 {
             return;
         }
 
-        // If not in history mode, save current input
+        // If not in history mode, save current input and start from most recent
         if self.history_index.is_none() {
             self.temp_input = Some(self.input.clone());
-            // Start from the end (most recent)
-            self.history_index = Some(self.command_history.len() - 1);
+            self.history_index = Some(total_items - 1);
         } else {
             // Go backwards
             if let Some(idx) = self.history_index {
@@ -345,28 +362,59 @@ impl App {
             }
         }
 
-        // Load command from history and move cursor to start
+        // Load the message at the current index
         if let Some(idx) = self.history_index {
-            if let Some(cmd) = self.command_history.get(idx) {
-                self.input = cmd.clone();
-                // In history mode, cursor stays at first line, first character
-                self.character_index = 0;
+            let history_len = self.command_history.len();
+
+            if idx < history_len {
+                // In regular history
+                if let Some(cmd) = self.command_history.get(idx) {
+                    self.input = cmd.clone();
+                    self.character_index = 0;
+                    self.editing_queue_index = None;
+                }
+            } else {
+                // In queued messages (idx >= history_len)
+                let queue_idx = idx - history_len;
+                if let Some(queued_msg) = self.queued_messages.get(queue_idx) {
+                    self.input = queued_msg.clone();
+                    self.character_index = 0;
+                    self.editing_queue_index = Some(queue_idx);
+                }
             }
         }
     }
 
     fn navigate_history_forwards(&mut self) {
         if let Some(idx) = self.history_index {
-            if idx < self.command_history.len() - 1 {
-                // Go forwards in history, cursor stays at first line, first character
-                self.history_index = Some(idx + 1);
-                if let Some(cmd) = self.command_history.get(idx + 1) {
-                    self.input = cmd.clone();
-                    self.character_index = 0;
+            let total_items = self.command_history.len() + self.queued_messages.len();
+
+            if idx < total_items - 1 {
+                // Go forwards in combined history
+                let new_idx = idx + 1;
+                self.history_index = Some(new_idx);
+
+                let history_len = self.command_history.len();
+                if new_idx < history_len {
+                    // In regular history
+                    if let Some(cmd) = self.command_history.get(new_idx) {
+                        self.input = cmd.clone();
+                        self.character_index = 0;
+                        self.editing_queue_index = None;
+                    }
+                } else {
+                    // In queued messages
+                    let queue_idx = new_idx - history_len;
+                    if let Some(queued_msg) = self.queued_messages.get(queue_idx) {
+                        self.input = queued_msg.clone();
+                        self.character_index = 0;
+                        self.editing_queue_index = Some(queue_idx);
+                    }
                 }
             } else {
-                // At newest command, restore original input and exit history mode
+                // At newest item, restore original input and exit history mode
                 self.history_index = None;
+                self.editing_queue_index = None;
                 if let Some(temp) = self.temp_input.take() {
                     self.input = temp;
                     self.character_index = self.input.chars().count();
@@ -402,20 +450,36 @@ impl App {
         let output_tx_clone = output_tx.clone();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
+            let local = tokio::task::LocalSet::new();
+            rt.block_on(local.run_until(async {
                 // Process user messages as they come in
                 while let Some(msg) = input_rx.recv().await {
-                    if let AgentMessage::UserInput(user_message) = msg {
-                        let _ = agent_clone.process_message(user_message, output_tx_clone.clone()).await;
+                    match msg {
+                        AgentMessage::UserInput(user_message) => {
+                            // Spawn as concurrent task so Cancel messages can be processed during generation
+                            let agent = agent_clone.clone();
+                            let tx = output_tx_clone.clone();
+                            tokio::task::spawn_local(async move {
+                                let _ = agent.process_message(user_message, tx).await;
+                            });
+                        }
+                        AgentMessage::Cancel => {
+                            // Request cancellation of current generation
+                            agent_clone.request_cancel();
+                        }
+                        _ => {
+                            // Ignore other message types in the background thread
+                        }
                     }
                 }
-            });
+            }));
         });
 
         Ok(Self {
             input: String::new(),
             messages: Vec::new(),
             message_types: Vec::new(),
+            message_states: Vec::new(),
             character_index: 0,
             input_modified: false,
             mode: Mode::Normal,
@@ -476,6 +540,12 @@ impl App {
             history_index: None,
             temp_input: None,
             history_file_path,
+            // Message queue initialization
+            queued_messages: Vec::new(),
+            editing_queue_index: None,
+            show_queue_choice: false,
+            queue_choice_input: String::new(),
+            interrupt_pending: None,
         })
     }
     fn create_title_lines() -> Vec<Line<'static>> {
@@ -761,7 +831,7 @@ impl App {
             if self.thinking_last_tick.elapsed() >= Duration::from_millis(40) {
                 // Calculate text length based on what's actually being displayed
                 // Always add 3 for the "..." at the end
-                let text_len = if let Some((ref summary, _)) = self.thinking_current_summary {
+                let text_len = if let Some((ref summary, _, _)) = self.thinking_current_summary {
                     summary.len() + 3  // summary + "..."
                 } else {
                     let text_with_dots = format!("{}...", self.thinking_current_word);
@@ -1029,7 +1099,71 @@ impl App {
     }
     fn submit_message(&mut self) {
         if !self.input.is_empty() {
-            // Check if survey is active and input is a valid number choice
+            // Check if we're editing a queued message
+            if let Some(idx) = self.editing_queue_index.take() {
+                // Update the queued message with edited content
+                if idx < self.queued_messages.len() {
+                    self.queued_messages[idx] = self.input.clone();
+                }
+                self.input.clear();
+                self.reset_cursor();
+                self.input_modified = false;
+                return;
+            }
+
+            // Check if we're in queue choice mode
+            if self.show_queue_choice {
+                let choice = self.input.trim();
+                match choice {
+                    "1" => {
+                        // Queue message - add to queue
+                        let user_message = self.queue_choice_input.clone();
+                        self.save_to_history(&user_message); // Save to file history
+                        self.queued_messages.push(user_message);
+                    }
+                    "2" => {
+                        // Interrupt & send new message
+                        // Send cancel message to agent first
+                        if let Some(tx) = &self.agent_tx {
+                            let _ = tx.send(AgentMessage::Cancel);
+                        }
+
+                        // Store message to send after cancel completes
+                        self.interrupt_pending = Some(self.queue_choice_input.clone());
+
+                        // Clear UI state immediately
+                        if let Some(last_msg) = self.messages.last() {
+                            if last_msg == "[THINKING_ANIMATION]" {
+                                self.messages.pop();
+                                self.message_types.pop();
+                                self.message_states.pop();
+                            }
+                        }
+
+                        self.is_thinking = false;
+                        self.thinking_current_summary = None;
+                        self.thinking_position = 0;
+                    }
+                    "3" => {
+                        // Cancel - discard message
+                    }
+                    _ => {
+                        // Invalid choice, keep the popup
+                        self.input.clear();
+                        self.reset_cursor();
+                        self.input_modified = false;
+                        return;
+                    }
+                }
+                self.input.clear();
+                self.reset_cursor();
+                self.input_modified = false;
+                self.show_queue_choice = false;
+                self.queue_choice_input.clear();
+                return;
+            }
+
+            // Check if main survey is active and input is a valid number choice
             let is_survey_choice = if self.survey.is_active() {
                 self.survey.check_number_input(&self.input)
             } else {
@@ -1047,8 +1181,19 @@ impl App {
                 if !is_dismiss {
                     self.survey.show_thank_you();
                 }
+            } else if self.agent_processing || self.is_thinking {
+                // Agent is currently processing - show queue options popup
+                let user_message = self.input.clone();
+
+                // Store message and show queue choice - don't add to messages yet
+                self.queue_choice_input = user_message;
+                self.show_queue_choice = true;
+
+                self.input.clear();
+                self.reset_cursor();
+                self.input_modified = false;
             } else {
-                // Normal message submission
+                // Normal message submission - agent is not processing
                 let user_message = self.input.clone();
                 self.messages.push(user_message.clone());
                 self.message_types.push(MessageType::User);
@@ -1089,6 +1234,8 @@ impl App {
             self.survey.update(); // Update survey state (auto-dismiss thank you message)
 
             // Process agent messages if available
+            let mut process_queued = false;
+            let mut process_interrupt: Option<String> = None;
             if let Some(rx) = &mut self.agent_rx {
                 while let Ok(msg) = rx.try_recv() {
                     match msg {
@@ -1108,18 +1255,26 @@ impl App {
                             self.is_thinking = true;
                         }
                         AgentMessage::ThinkingSummary(summary) => {
-                            // Parse summary format: "text|token_count"
-                            let (summary_text, token_count) = if let Some(pipe_idx) = summary.rfind('|') {
-                                let text = summary[..pipe_idx].to_string();
-                                let count_str = &summary[pipe_idx + 1..];
-                                let count = count_str.parse::<usize>().unwrap_or(0);
-                                (text, count)
+                            // Parse summary format: "text|token_count|chunk_count"
+                            let (summary_text, token_count, chunk_count) = if let Some(last_pipe) = summary.rfind('|') {
+                                let chunk_str = &summary[last_pipe + 1..];
+                                let chunk_count = chunk_str.parse::<usize>().unwrap_or(0);
+
+                                let summary_without_chunk = &summary[..last_pipe];
+                                if let Some(first_pipe) = summary_without_chunk.rfind('|') {
+                                    let text = summary_without_chunk[..first_pipe].to_string();
+                                    let token_str = &summary_without_chunk[first_pipe + 1..];
+                                    let token_count = token_str.parse::<usize>().unwrap_or(0);
+                                    (text, token_count, chunk_count)
+                                } else {
+                                    (summary.clone(), 0, 0)
+                                }
                             } else {
-                                (summary.clone(), 0)
+                                (summary.clone(), 0, 0)
                             };
 
                             // If we have a current summary, move it to a static tree line
-                            if let Some((old_summary, old_count)) = self.thinking_current_summary.take() {
+                            if let Some((old_summary, old_tokens, old_chunks)) = self.thinking_current_summary.take() {
                                 // Remove the thinking animation temporarily
                                 if let Some(last_msg) = self.messages.last() {
                                     if last_msg == "[THINKING_ANIMATION]" {
@@ -1127,21 +1282,22 @@ impl App {
                                         self.message_types.pop();
                                     }
                                 }
-                                // Add old summary as static tree line with token count
-                                self.messages.push(format!("├── {} ({}t)", old_summary, old_count));
+                                // Add old summary as static tree line with token count and chunk count
+                                // self.messages.push(format!("├── {} ({}rt {}ct)", old_summary, old_tokens, old_chunks));
+                                self.messages.push(format!("├── {}", old_summary));
                                 self.message_types.push(MessageType::Agent);
                                 // Re-add thinking animation at bottom
                                 self.messages.push("[THINKING_ANIMATION]".to_string());
                                 self.message_types.push(MessageType::Agent);
                             }
                             // Store new summary as current (will show with snowflake)
-                            self.thinking_current_summary = Some((summary_text, token_count));
+                            self.thinking_current_summary = Some((summary_text, token_count, chunk_count));
                             // Reset animation position to start wave from beginning
                             self.thinking_position = 0;
                         }
                         AgentMessage::AgentResponse(text) => {
                             // If we have a current summary, move it to a static tree line before response
-                            if let Some((final_summary, token_count)) = self.thinking_current_summary.take() {
+                            if let Some((final_summary, token_count, chunk_count)) = self.thinking_current_summary.take() {
                                 // Remove thinking animation
                                 if let Some(last_msg) = self.messages.last() {
                                     if last_msg == "[THINKING_ANIMATION]" {
@@ -1149,8 +1305,9 @@ impl App {
                                         self.message_types.pop();
                                     }
                                 }
-                                // Add final summary as static tree line with token count
-                                self.messages.push(format!("├── {} ({}t)", final_summary, token_count));
+                                // Add final summary as static tree line with token count and chunk count
+                                // self.messages.push(format!("├── {} ({}rt {}ct)", final_summary, token_count, chunk_count));
+                                self.messages.push(format!("├── {}", final_summary));
                                 self.message_types.push(MessageType::Agent);
                             } else {
                                 // No summary, just remove thinking animation if present
@@ -1188,7 +1345,7 @@ impl App {
                         }
                         AgentMessage::ToolCallStarted(tool_name, arguments) => {
                             // If we have a current summary, move it to static tree line before tool call
-                            if let Some((current_summary, token_count)) = self.thinking_current_summary.take() {
+                            if let Some((current_summary, token_count, chunk_count)) = self.thinking_current_summary.take() {
                                 // Remove thinking animation if present
                                 if let Some(last_msg) = self.messages.last() {
                                     if last_msg == "[THINKING_ANIMATION]" {
@@ -1196,8 +1353,9 @@ impl App {
                                         self.message_types.pop();
                                     }
                                 }
-                                // Add summary as static tree line with token count
-                                self.messages.push(format!("├── {} ({}t)", current_summary, token_count));
+                                // Add summary as static tree line with token count and chunk count
+                                // self.messages.push(format!("├── {} ({}rt {}ct)", current_summary, token_count, chunk_count));
+                                self.messages.push(format!("├── {}", current_summary));
                                 self.message_types.push(MessageType::Agent);
                             } else {
                                 // If thinking is active, remove thinking animation temporarily
@@ -1264,7 +1422,7 @@ impl App {
                         }
                         AgentMessage::Error(err) => {
                             // If we have a current summary, move it to a static tree line before error
-                            if let Some((final_summary, token_count)) = self.thinking_current_summary.take() {
+                            if let Some((final_summary, token_count, chunk_count)) = self.thinking_current_summary.take() {
                                 // Remove thinking animation
                                 if let Some(last_msg) = self.messages.last() {
                                     if last_msg == "[THINKING_ANIMATION]" {
@@ -1272,8 +1430,9 @@ impl App {
                                         self.message_types.pop();
                                     }
                                 }
-                                // Add final summary as static tree line with token count
-                                self.messages.push(format!("├── {} ({}t)", final_summary, token_count));
+                                // Add final summary as static tree line with token count and chunk count
+                                // self.messages.push(format!("├── {} ({}rt {}ct)", final_summary, token_count, chunk_count));
+                                self.messages.push(format!("├── {}", final_summary));
                                 self.message_types.push(MessageType::Agent);
                             } else {
                                 // No summary, just remove thinking animation if present
@@ -1292,7 +1451,7 @@ impl App {
                         }
                         AgentMessage::Done => {
                             // If we have a current summary, move it to a static tree line when done
-                            if let Some((final_summary, token_count)) = self.thinking_current_summary.take() {
+                            if let Some((final_summary, token_count, chunk_count)) = self.thinking_current_summary.take() {
                                 // Remove thinking animation
                                 if let Some(last_msg) = self.messages.last() {
                                     if last_msg == "[THINKING_ANIMATION]" {
@@ -1300,8 +1459,9 @@ impl App {
                                         self.message_types.pop();
                                     }
                                 }
-                                // Add final summary as static tree line with token count
-                                self.messages.push(format!("├── {} ({}t)", final_summary, token_count));
+                                // Add final summary as static tree line with token count and chunk count
+                                // self.messages.push(format!("├── {} ({}rt {}ct)", final_summary, token_count, chunk_count));
+                                self.messages.push(format!("├── {}", final_summary));
                                 self.message_types.push(MessageType::Agent);
                             } else {
                                 // No summary, just remove thinking animation if present
@@ -1315,10 +1475,78 @@ impl App {
                             self.agent_processing = false;
                             self.is_thinking = false;
                             self.agent_response_started = false;
+
+                            // Check for interrupt pending FIRST
+                            if let Some(interrupt_msg) = self.interrupt_pending.take() {
+                                // Mark last message (interrupted one) as Interrupted
+                                if let Some(last_state) = self.message_states.last_mut() {
+                                    if matches!(last_state, MessageState::Sent) {
+                                        *last_state = MessageState::Interrupted;
+                                    }
+                                }
+
+                                // Add interrupt marker message
+                                self.messages.push("● Interrupted".to_string());
+                                self.message_types.push(MessageType::Agent);
+                                self.message_states.push(MessageState::Sent);
+
+                                // Add the prompt message
+                                self.messages.push("  ⎿ What should Nite do instead?".to_string());
+                                self.message_types.push(MessageType::Agent);
+                                self.message_states.push(MessageState::Sent);
+
+                                // Set flag to process interrupt after rx is dropped
+                                process_interrupt = Some(interrupt_msg);
+                            } else {
+                                // Update last message state from Queued to Sent if needed
+                                if let Some(last_state) = self.message_states.last_mut() {
+                                    if matches!(last_state, MessageState::Queued) {
+                                        *last_state = MessageState::Sent;
+                                    }
+                                }
+
+                                process_queued = true;  // Set flag to process queued message after rx is dropped
+                            }
                         }
                         _ => {}
                     }
                 }
+            }
+
+            // Process interrupt message after rx borrow is dropped
+            if let Some(interrupt_msg) = process_interrupt {
+                // Add interrupt message
+                self.messages.push(interrupt_msg.clone());
+                self.message_types.push(MessageType::User);
+                self.message_states.push(MessageState::Sent);
+                self.save_to_history(&interrupt_msg);
+
+                // Send to agent
+                if let Some(tx) = &self.agent_tx {
+                    self.agent_processing = true;
+                    let _ = tx.send(AgentMessage::UserInput(interrupt_msg));
+                }
+            }
+
+            // Process queued message after rx borrow is dropped
+            if process_queued {
+                // Check if user is editing the next message to send (index 0)
+                let is_editing_next_message = self.editing_queue_index == Some(0);
+
+                // Only process if NOT editing the next message
+                if !is_editing_next_message && !self.queued_messages.is_empty() {
+                    let queued_msg = self.queued_messages.remove(0);
+                    self.messages.push(queued_msg.clone());
+                    self.message_types.push(MessageType::User);
+                    self.message_states.push(MessageState::Queued);
+                    // Don't save_to_history here - already saved when queued
+
+                    if let Some(tx) = &self.agent_tx {
+                        self.agent_processing = true;
+                        let _ = tx.send(AgentMessage::UserInput(queued_msg));
+                    }
+                }
+                // If editing next message, agent will wait until user submits or cancels
             }
 
             terminal.draw(|frame| self.draw(frame))?;
@@ -1377,7 +1605,19 @@ impl App {
                                         KeyCode::Char('c')
                                             if key.modifiers.contains(KeyModifiers::CONTROL) =>
                                         {
-                                            if self.input.is_empty() {
+                                            // Check if we're editing a queued message
+                                            if let Some(idx) = self.editing_queue_index.take() {
+                                                // Remove the specific message being edited from queue
+                                                if idx < self.queued_messages.len() {
+                                                    self.queued_messages.remove(idx);
+                                                }
+                                                self.input.clear();
+                                                self.character_index = 0;
+                                                self.input_modified = false;
+                                            } else if !self.queued_messages.is_empty() && self.input.is_empty() {
+                                                // Remove the most recent (last) queued message
+                                                self.queued_messages.pop();
+                                            } else if self.input.is_empty() {
                                                 // Check if Ctrl+C was recently pressed
                                                 if let Some(last_press) = self.ctrl_c_pressed {
                                                     if last_press.elapsed().as_millis() < 1000 {
@@ -1605,15 +1845,8 @@ impl App {
         }
 
         // Render markdown with proper width wrapping
-        let content_width = max_width.saturating_sub(10);
-
-        // Use full terminal width for tables (no wrapping if less than 10 chars would be left)
-        // This allows tables to render at full width while still wrapping regular text reasonably
-        let markdown_width = if content_width < 10 {
-            None  // Disable wrapping entirely
-        } else {
-            Some(max_width.saturating_sub(4))  // Give more room, just account for bullet
-        };
+        // Account for: 1 space margin + 2 char bullet + 1 space = 4 chars total
+        let markdown_width = Some(max_width.saturating_sub(4));
 
         // Render markdown into lines
         let mut markdown_lines = Vec::new();
@@ -1655,6 +1888,24 @@ impl App {
     }
 
     fn render_message_with_max_width(&self, message: &str, max_width: usize, highlight_pos: Option<usize>, is_agent: bool) -> Text<'static> {
+        // Check for interrupt marker - render with RED circle and RED text
+        if message == "● Interrupted" {
+            let mut lines = Vec::new();
+            let mut spans = Vec::new();
+            spans.push(Span::raw(" ")); // Left margin
+            spans.push(Span::styled("● ", Style::default().fg(Color::Red))); // RED circle
+            spans.push(Span::styled("Interrupted", Style::default().fg(Color::Red))); // RED text
+            lines.push(Line::from(spans));
+            return Text::from(lines);
+        }
+
+        // Check for "What should Nite do instead?" prompt
+        if message.starts_with("  ⎿ ") {
+            let mut lines = Vec::new();
+            lines.push(Line::from(Span::raw(message.to_string())));
+            return Text::from(lines);
+        }
+
         // If this is a plain agent response (not a special marker), render with white bullet
         if is_agent && !message.starts_with('[') {
             return self.render_agent_message_with_bullet(message, max_width);
@@ -1668,8 +1919,9 @@ impl App {
 
             // Use current summary if available, otherwise use random word
             // Always add "..." to the end
-            let text_with_dots = if let Some((ref summary, token_count)) = self.thinking_current_summary {
-                format!("{} ({}t)...", summary, token_count)
+            let text_with_dots = if let Some((ref summary, _token_count, _chunk_count)) = self.thinking_current_summary {
+                // format!("{} ({}rt {}ct)...", summary, token_count, chunk_count)
+                format!("{}...", summary)
             } else {
                 format!("{}...", self.thinking_current_word)
             };
@@ -1759,22 +2011,16 @@ impl App {
             }
         }
 
-        // Limit message width to 80 characters
-        let content_width = (max_width - 4).min(80);
-
         // Check if this is a user message (not agent, not special marker)
         let is_user_message = !is_agent && !message.starts_with('[');
 
+        // Determine content width based on message type
+        let content_width = if is_user_message { 80 } else { max_width.saturating_sub(4) };
+
         // For user messages, render markdown; for others use plain text
         let content_lines: Vec<Line<'static>> = if is_user_message {
-            // Use wider width for tables - if content_width is too narrow, disable wrapping
-            let markdown_width = if content_width < 10 {
-                None  // Disable wrapping entirely
-            } else {
-                // Use max_width minus just the borders (4 chars) for tables
-                // Don't limit to 80 for tables
-                Some(max_width.saturating_sub(8))  // Account for borders and " > " prefix
-            };
+            // User messages wrap at 80 characters
+            let markdown_width = Some(80);
 
             // Render markdown for user messages
             let mut markdown_lines = Vec::new();
@@ -1926,6 +2172,31 @@ impl App {
         ]));
         Text::from(lines)
     }
+
+    fn render_queue_choice_popup(&self) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+
+        // First line: question
+        lines.push(Line::from(vec![
+            Span::styled("● ", Style::default().fg(Color::Cyan)),
+            Span::raw("Message queued. What should Nite do?"),
+        ]));
+
+        // Second line: options
+        let option_spans = vec![
+            Span::raw("  "),
+            Span::styled("1: ", Style::default().fg(Color::Yellow)),
+            Span::raw("Queue message   "),
+            Span::styled("2: ", Style::default().fg(Color::Yellow)),
+            Span::raw("Interrupt & send   "),
+            Span::styled("3: ", Style::default().fg(Color::Yellow)),
+            Span::raw("Cancel"),
+        ];
+        lines.push(Line::from(option_spans));
+
+        lines
+    }
+
     fn render_tips(&self) -> Vec<Line<'_>> {
         TIPS
             .iter()
@@ -2089,21 +2360,64 @@ impl App {
                     }
                     _ => 3u16, // Fixed height for special modes
                 };
-                // Add space for survey and Ctrl+C confirmation infobar if active
+                // Add space for queue choice popup, survey and infobar if active
+                let queue_choice_height = if self.show_queue_choice { 2 } else { 0 };
                 let survey_height = self.survey.get_height();
-                let has_ctrl_c = self.ctrl_c_pressed.is_some();
+                let has_infobar = self.ctrl_c_pressed.is_some() || !self.queued_messages.is_empty();
 
-                match (survey_height > 0, has_ctrl_c) {
-                    (true, true) => vec![
+                match (queue_choice_height > 0, survey_height > 0, has_infobar) {
+                    // Queue choice popup, Survey, and infobar
+                    (true, true, true) => vec![
+                        Constraint::Length(self.title_lines.len() as u16),
+                        Constraint::Length(1), // One character gap
+                        Constraint::Min(1), // Messages area (includes tips)
+                        Constraint::Length(queue_choice_height), // Queue choice popup
+                        Constraint::Length(survey_height), // Survey
+                        Constraint::Length(1), // Infobar
+                        Constraint::Length(input_height),
+                        Constraint::Length(1), // Status bar
+                    ],
+                    // Queue choice popup and Survey
+                    (true, true, false) => vec![
+                        Constraint::Length(self.title_lines.len() as u16),
+                        Constraint::Length(1), // One character gap
+                        Constraint::Min(1), // Messages area (includes tips)
+                        Constraint::Length(queue_choice_height), // Queue choice popup
+                        Constraint::Length(survey_height), // Survey
+                        Constraint::Length(input_height),
+                        Constraint::Length(1), // Status bar
+                    ],
+                    // Queue choice popup and infobar
+                    (true, false, true) => vec![
+                        Constraint::Length(self.title_lines.len() as u16),
+                        Constraint::Length(1), // One character gap
+                        Constraint::Min(1), // Messages area (includes tips)
+                        Constraint::Length(queue_choice_height), // Queue choice popup
+                        Constraint::Length(1), // Infobar
+                        Constraint::Length(input_height),
+                        Constraint::Length(1), // Status bar
+                    ],
+                    // Queue choice popup only
+                    (true, false, false) => vec![
+                        Constraint::Length(self.title_lines.len() as u16),
+                        Constraint::Length(1), // One character gap
+                        Constraint::Min(1), // Messages area (includes tips)
+                        Constraint::Length(queue_choice_height), // Queue choice popup
+                        Constraint::Length(input_height),
+                        Constraint::Length(1), // Status bar
+                    ],
+                    // Survey and infobar
+                    (false, true, true) => vec![
                         Constraint::Length(self.title_lines.len() as u16),
                         Constraint::Length(1), // One character gap
                         Constraint::Min(1), // Messages area (includes tips)
                         Constraint::Length(survey_height), // Survey
-                        Constraint::Length(1), // Ctrl+C confirmation infobar
+                        Constraint::Length(1), // Infobar
                         Constraint::Length(input_height),
                         Constraint::Length(1), // Status bar
                     ],
-                    (true, false) => vec![
+                    // Survey only
+                    (false, true, false) => vec![
                         Constraint::Length(self.title_lines.len() as u16),
                         Constraint::Length(1), // One character gap
                         Constraint::Min(1), // Messages area (includes tips)
@@ -2111,15 +2425,17 @@ impl App {
                         Constraint::Length(input_height),
                         Constraint::Length(1), // Status bar
                     ],
-                    (false, true) => vec![
+                    // Infobar only
+                    (false, false, true) => vec![
                         Constraint::Length(self.title_lines.len() as u16),
                         Constraint::Length(1), // One character gap
                         Constraint::Min(1), // Messages area (includes tips)
-                        Constraint::Length(1), // Ctrl+C confirmation infobar
+                        Constraint::Length(1), // Infobar
                         Constraint::Length(input_height),
                         Constraint::Length(1), // Status bar
                     ],
-                    (false, false) => vec![
+                    // Nothing extra
+                    (false, false, false) => vec![
                         Constraint::Length(self.title_lines.len() as u16),
                         Constraint::Length(1), // One character gap
                         Constraint::Min(1), // Messages area (includes tips)
@@ -2168,17 +2484,30 @@ impl App {
         }
 
         let status_area = areas[areas.len() - 1];
-        // Determine area indices based on whether survey/thank_you and infobar are active
+        // Determine area indices based on whether queue choice popup, survey/thank_you and infobar are active
+        let has_queue_choice = self.show_queue_choice;
         let has_survey_or_thanks = self.survey.is_active() || self.survey.has_thank_you();
-        let has_infobar = self.ctrl_c_pressed.is_some();
+        let has_infobar = self.ctrl_c_pressed.is_some() || !self.queued_messages.is_empty();
         let messages_area_idx = 2;
 
         // Calculate indices based on what's active
-        let (survey_area_idx, infobar_area_idx, input_area_idx, min_areas) = match (has_survey_or_thanks, has_infobar) {
-            (true, true) => (Some(3), Some(4), 5, 7),   // survey/thanks at 3, infobar at 4, input at 5
-            (true, false) => (Some(3), None, 4, 6),      // survey/thanks at 3, input at 4
-            (false, true) => (None, Some(3), 4, 6),      // infobar at 3, input at 4
-            (false, false) => (None, None, 3, 5),        // input at 3
+        let (queue_choice_area_idx, survey_area_idx, infobar_area_idx, input_area_idx, min_areas) = match (has_queue_choice, has_survey_or_thanks, has_infobar) {
+            // Queue choice, Survey, and Ctrl+C
+            (true, true, true) => (Some(3), Some(4), Some(5), 6, 8),
+            // Queue choice and Survey
+            (true, true, false) => (Some(3), Some(4), None, 5, 7),
+            // Queue choice and Ctrl+C
+            (true, false, true) => (Some(3), None, Some(4), 5, 7),
+            // Queue choice only
+            (true, false, false) => (Some(3), None, None, 4, 6),
+            // Survey and Ctrl+C
+            (false, true, true) => (None, Some(3), Some(4), 5, 7),
+            // Survey only
+            (false, true, false) => (None, Some(3), None, 4, 6),
+            // Ctrl+C only
+            (false, false, true) => (None, None, Some(3), 4, 6),
+            // Nothing extra
+            (false, false, false) => (None, None, None, 3, 5),
         };
 
         // Collect status info for status bar
@@ -2199,7 +2528,7 @@ impl App {
                 if !tips.is_empty() {
                     message_lines.push(Line::from(" "));
                 }
-                let max_width = messages_area.width.saturating_sub(10) as usize;
+                let max_width = messages_area.width.saturating_sub(4) as usize; // Account for: 1 space margin + bullet + space
                 for (idx, message) in self.messages.iter().enumerate() {
                     let is_agent = matches!(self.message_types.get(idx), Some(MessageType::Agent));
                     message_lines.extend(self.render_message_with_max_width(message, max_width, None, is_agent).lines);
@@ -2230,7 +2559,7 @@ impl App {
                 if !tips.is_empty() {
                     message_lines.push(Line::from(" ")); // One character gap after tips
                 }
-                let max_width = messages_area.width.saturating_sub(10) as usize;
+                let max_width = messages_area.width.saturating_sub(4) as usize; // Account for: 1 space margin + bullet + space
                 for (idx, message) in self.messages.iter().enumerate() {
                     let is_agent = matches!(self.message_types.get(idx), Some(MessageType::Agent));
                     message_lines.extend(self.render_message_with_max_width(message, max_width, None, is_agent).lines);
@@ -2344,9 +2673,10 @@ impl App {
                 // Use at least 10 rows to ensure half-page scrolling works
                 self.editor.state.set_viewport_rows((messages_area.height as usize).max(10));
 
-                // Use terminal width minus 10 for wrapping to match visual display
+                // Use terminal width minus 4 for wrapping to match visual display
+                // Account for: 1 space margin + bullet + space
                 // This ensures the navigation buffer line count matches the visual display
-                let wrap_width = messages_area.width.saturating_sub(10) as usize;
+                let wrap_width = messages_area.width.saturating_sub(4) as usize;
 
                 // Regenerate editor content with correct width to match rendered output
                 // Both rich and plain content must use the same wrap width for line counts to match
@@ -2732,6 +3062,14 @@ impl App {
                 }
             }
 
+            // Render queue choice popup if active
+            if let Some(idx) = queue_choice_area_idx {
+                let queue_area = areas[idx];
+                let queue_lines = self.render_queue_choice_popup();
+                let queue_widget = Paragraph::new(queue_lines);
+                frame.render_widget(queue_widget, queue_area);
+            }
+
             // Render survey if active
             if let Some(idx) = survey_area_idx {
                 let survey_area = areas[idx];
@@ -2740,10 +3078,18 @@ impl App {
                 frame.render_widget(survey_widget, survey_area);
             }
 
-            // Render Ctrl+C confirmation infobar if active
+            // Render Ctrl+C confirmation or queued message infobar if active
             if let Some(idx) = infobar_area_idx {
                 let infobar_area = areas[idx];
-                let infobar_text = "Press Ctrl+C again to quit";
+                let infobar_text = if !self.queued_messages.is_empty() {
+                    let count = self.queued_messages.len();
+                    let plural = if count == 1 { "message" } else { "messages" };
+                    format!("{} {} in queue • ↑ to edit • Ctrl+C to cancel", count, plural)
+                } else if self.ctrl_c_pressed.is_some() {
+                    "Press Ctrl+C again to quit".to_string()
+                } else {
+                    String::new()
+                };
                 let infobar_widget = Paragraph::new(Line::from(Span::styled(
                     infobar_text,
                     Style::default().fg(Color::Rgb(172, 172, 212))

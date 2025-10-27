@@ -4,6 +4,7 @@ use mistralrs::{
     TextMessageRole, Tool, ToolCallResponse, ToolChoice, Model,
 };
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, Mutex};
 use serde_json::{json, Value};
 use serde::Serialize;
@@ -372,6 +373,8 @@ pub enum AgentMessage {
     ToolCallCompleted(String, String), // (tool_name, result)
     /// Agent encountered an error
     Error(String),
+    /// Cancel the current generation and finalize the response
+    Cancel,
     /// Agent has finished processing
     Done,
     /// Model has finished loading
@@ -379,6 +382,7 @@ pub enum AgentMessage {
 }
 
 /// Agent instance that can be used from the TUI
+#[derive(Clone)]
 pub struct Agent {
     model: Arc<Mutex<Option<Arc<Model>>>>,
     model_path: String,
@@ -386,6 +390,8 @@ pub struct Agent {
     system_prompt: String,
     tools: Vec<Tool>,
     thinking_summarizer: Arc<Mutex<thinking_summarizer::ThinkingSummarizer>>,
+    /// Flag to cancel current generation
+    cancel_requested: Arc<AtomicBool>,
 }
 
 impl Agent {
@@ -403,6 +409,7 @@ impl Agent {
             system_prompt,
             tools,
             thinking_summarizer: Arc::new(Mutex::new(thinking_summarizer::ThinkingSummarizer::new())),
+            cancel_requested: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -534,12 +541,30 @@ impl Agent {
         Ok(model_guard.as_ref().unwrap().clone())
     }
 
+    /// Request cancellation of the current generation
+    pub fn request_cancel(&self) {
+        self.cancel_requested.store(true, Ordering::SeqCst);
+    }
+
+    /// Reset the cancellation flag (called at the start of a new message)
+    pub fn reset_cancel(&self) {
+        self.cancel_requested.store(false, Ordering::SeqCst);
+    }
+
+    /// Check if cancellation was requested
+    pub fn is_cancel_requested(&self) -> bool {
+        self.cancel_requested.load(Ordering::SeqCst)
+    }
+
     /// Process a user message and stream responses back through the channel
     pub async fn process_message(
         &self,
         user_message: String,
         tx: mpsc::UnboundedSender<AgentMessage>,
     ) -> Result<()> {
+        // Reset cancel flag for new message
+        self.reset_cancel();
+
         // Create request
         let request_builder = RequestBuilder::new()
             .enable_thinking(true)
@@ -557,7 +582,6 @@ impl Agent {
         self.run_generation(request_builder, tx).await
     }
 
-    /// Internal method to handle the generation loop
     async fn run_generation(
         &self,
         request_builder: RequestBuilder,
@@ -579,7 +603,51 @@ impl Agent {
             let mut in_thinking = true;  // Start in thinking mode since <think> is auto-included
             let mut thinking_buffer = String::new();
 
-            while let Some(response) = stream.next().await {
+            loop {
+                // Helper macro to check cancellation frequently
+                macro_rules! check_cancel {
+                    () => {
+                        if self.is_cancel_requested() {
+                            // Finalize thinking buffer if needed
+                            if !thinking_buffer.is_empty() && in_thinking {
+                                let mut summarizer_guard = self.thinking_summarizer.lock().await;
+                                summarizer_guard.add_thinking_chunk(&thinking_buffer).await;
+                                summarizer_guard.flush().await;
+                                for (summary, token_count, chunk_count) in summarizer_guard.get_new_summaries() {
+                                    let _ = tx.send(AgentMessage::ThinkingSummary(format!("{}|{}|{}", summary, token_count, chunk_count)));
+                                }
+                            }
+
+                            // Send any accumulated content as partial response
+                            if !accumulated_content.is_empty() && !in_thinking {
+                                let _ = tx.send(AgentMessage::AgentResponse(accumulated_content.clone()));
+                            }
+
+                            // Send Done to finalize
+                            let _ = tx.send(AgentMessage::Done);
+                            return Ok(());
+                        }
+                    };
+                }
+
+                // Check at start of loop iteration
+                check_cancel!();
+
+                // Poll for next response with timeout to allow cancellation checks
+                let response = tokio::select! {
+                    res = stream.next() => {
+                        match res {
+                            Some(r) => r,
+                            None => break, // Stream ended
+                        }
+                    }
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(10)) => {
+                        // Timeout - check cancellation and continue (10ms for responsive interruption)
+                        check_cancel!();
+                        continue;
+                    }
+                };
+
                 match response {
                     Response::Chunk(ChatCompletionChunkResponse { choices, .. }) => {
                         if let Some(choice) = choices.first() {
@@ -591,8 +659,6 @@ impl Agent {
                                 } => {
                                     accumulated_content.push_str(content);
 
-                                    // Parse thinking tags for Qwen3-Thinking models
-                                    // Note: <think> is auto-included by chat template, so we only see </think>
                                     if in_thinking {
                                         thinking_buffer.push_str(content);
 
@@ -605,20 +671,30 @@ impl Agent {
                                             let final_thinking = &thinking_buffer[..end_idx];
                                             if !final_thinking.is_empty() {
                                                 let _ = tx.send(AgentMessage::ThinkingContent(final_thinking.to_string()));
+                                                check_cancel!();
 
-                                                // Add to summarizer and flush
+                                                // Add to summarizer and check for new summaries
                                                 let mut summarizer_guard = self.thinking_summarizer.lock().await;
                                                 summarizer_guard.add_thinking_chunk(final_thinking).await;
-                                                summarizer_guard.flush().await;  // Force flush to summarize remaining tokens
-                                                // Send only new summaries with token count embedded
-                                                for (summary, token_count) in summarizer_guard.get_new_summaries() {
-                                                    let _ = tx.send(AgentMessage::ThinkingSummary(format!("{}|{}", summary, token_count)));
+                                                // Send only new summaries with token count and chunk count embedded
+                                                for (summary, token_count, chunk_count) in summarizer_guard.get_new_summaries() {
+                                                    let _ = tx.send(AgentMessage::ThinkingSummary(format!("{}|{}|{}", summary, token_count, chunk_count)));
+                                                    check_cancel!();
                                                 }
-                                                // Send completion signal with residual token count
-                                                let residual_tokens = summarizer_guard.get_residual_token_count();
-                                                if residual_tokens > 0 {
-                                                    let _ = tx.send(AgentMessage::ThinkingComplete(residual_tokens));
-                                                }
+                                            }
+
+                                            // At end, force flush to handle any residual <50 tokens
+                                            let mut summarizer_guard = self.thinking_summarizer.lock().await;
+                                            summarizer_guard.flush().await;
+                                            // Send new summaries from flush
+                                            for (summary, token_count, chunk_count) in summarizer_guard.get_new_summaries() {
+                                                let _ = tx.send(AgentMessage::ThinkingSummary(format!("{}|{}|{}", summary, token_count, chunk_count)));
+                                                check_cancel!();
+                                            }
+                                            // Send completion signal with residual token count (should be 0 after flush)
+                                            let residual_tokens = summarizer_guard.get_residual_token_count();
+                                            if residual_tokens > 0 {
+                                                let _ = tx.send(AgentMessage::ThinkingComplete(residual_tokens));
                                             }
 
                                             // Send any content after </think> tag as normal response
@@ -630,19 +706,44 @@ impl Agent {
                                         } else {
                                             // Still in thinking - stream the chunk immediately
                                             // But keep last 8 chars in buffer in case "</think>" spans chunks
-                                            // Use character count instead of byte count to avoid UTF-8 boundary panics
                                             let char_count = thinking_buffer.chars().count();
                                             if char_count > 8 {
-                                                // Find byte position at the character boundary
-                                                // We want to keep last 8 chars, so send (char_count - 8) chars
+                                                // Send (char_count - 8) chars, but check cancellation every 100 chars
                                                 let send_char_count = char_count - 8;
-
                                                 if let Some((byte_idx, _)) = thinking_buffer.char_indices().nth(send_char_count) {
                                                     let to_send = &thinking_buffer[..byte_idx];
-                                                    let _ = tx.send(AgentMessage::ThinkingContent(to_send.to_string()));
 
-                                                    // Note: Don't send to summarizer here - we'll summarize when thinking ends or tool calls
-                                                    // This prevents fragmenting the thinking buffer across multiple summarizer calls
+                                                    // Break into 100-char chunks for frequent cancellation checks
+                                                    let mut remaining = to_send;
+                                                    while !remaining.is_empty() {
+                                                        // Check cancellation before processing each chunk
+                                                        check_cancel!();
+
+                                                        // Take up to 100 chars
+                                                        let chunk_chars = remaining.chars().take(100).count();
+                                                        if let Some((chunk_byte_end, _)) = remaining.char_indices().nth(chunk_chars) {
+                                                            let chunk = &remaining[..chunk_byte_end];
+                                                            let _ = tx.send(AgentMessage::ThinkingContent(chunk.to_string()));
+                                                            remaining = &remaining[chunk_byte_end..];
+                                                        } else {
+                                                            // Last chunk
+                                                            let _ = tx.send(AgentMessage::ThinkingContent(remaining.to_string()));
+                                                            break;
+                                                        }
+
+                                                        // Check cancellation after sending each chunk
+                                                        check_cancel!();
+                                                    }
+
+                                                    // Add to summarizer as we stream
+                                                    let mut summarizer_guard = self.thinking_summarizer.lock().await;
+                                                    summarizer_guard.add_thinking_chunk(to_send).await;
+                                                    // Send only new summaries with token count and chunk count embedded
+                                                    for (summary, token_count, chunk_count) in summarizer_guard.get_new_summaries() {
+                                                        let _ = tx.send(AgentMessage::ThinkingSummary(format!("{}|{}|{}", summary, token_count, chunk_count)));
+                                                        // Check cancellation after each summary
+                                                        check_cancel!();
+                                                    }
 
                                                     thinking_buffer = thinking_buffer[byte_idx..].to_string();
                                                 }
@@ -651,6 +752,8 @@ impl Agent {
                                     } else {
                                         // Not in thinking section - send content directly to UI
                                         let _ = tx.send(AgentMessage::AgentResponse(content.clone()));
+                                        // Check cancellation after sending response content
+                                        check_cancel!();
                                     }
                                 }
                                 Delta {
@@ -662,20 +765,22 @@ impl Agent {
                                         // Send remaining thinking content
                                         let _ = tx.send(AgentMessage::ThinkingContent(thinking_buffer.clone()));
 
-                                        // Summarize thinking content when tool call arrives
-                                        {
-                                            let mut summarizer_guard = self.thinking_summarizer.lock().await;
-                                            summarizer_guard.add_thinking_chunk(&thinking_buffer).await;
-                                            summarizer_guard.flush().await;  // Force flush to summarize remaining tokens
-                                            // Send only new summaries with token count embedded
-                                            for (summary, token_count) in summarizer_guard.get_new_summaries() {
-                                                let _ = tx.send(AgentMessage::ThinkingSummary(format!("{}|{}", summary, token_count)));
-                                            }
-                                            // Send completion signal with residual token count
-                                            let residual_tokens = summarizer_guard.get_residual_token_count();
-                                            if residual_tokens > 0 {
-                                                let _ = tx.send(AgentMessage::ThinkingComplete(residual_tokens));
-                                            }
+                                        // Add to summarizer
+                                        let mut summarizer_guard = self.thinking_summarizer.lock().await;
+                                        summarizer_guard.add_thinking_chunk(&thinking_buffer).await;
+
+                                        // Force flush for residual
+                                        summarizer_guard.flush().await;
+
+                                        // Send new summaries
+                                        for (summary, token_count, chunk_count) in summarizer_guard.get_new_summaries() {
+                                            let _ = tx.send(AgentMessage::ThinkingSummary(format!("{}|{}|{}", summary, token_count, chunk_count)));
+                                        }
+
+                                        // Send completion if residual >0 (though flush should handle)
+                                        let residual_tokens = summarizer_guard.get_residual_token_count();
+                                        if residual_tokens > 0 {
+                                            let _ = tx.send(AgentMessage::ThinkingComplete(residual_tokens));
                                         }
 
                                         thinking_buffer.clear();
@@ -710,6 +815,22 @@ impl Agent {
                         break;
                     }
                     _ => {}
+                }
+            }
+
+            // After stream ends, if still in thinking (no </think> found), flush residual
+            if in_thinking && !thinking_buffer.is_empty() {
+                let _ = tx.send(AgentMessage::ThinkingContent(thinking_buffer.clone()));
+
+                let mut summarizer_guard = self.thinking_summarizer.lock().await;
+                summarizer_guard.add_thinking_chunk(&thinking_buffer).await;
+                summarizer_guard.flush().await;
+                for (summary, token_count, chunk_count) in summarizer_guard.get_new_summaries() {
+                    let _ = tx.send(AgentMessage::ThinkingSummary(format!("{}|{}|{}", summary, token_count, chunk_count)));
+                }
+                let residual_tokens = summarizer_guard.get_residual_token_count();
+                if residual_tokens > 0 {
+                    let _ = tx.send(AgentMessage::ThinkingComplete(residual_tokens));
                 }
             }
 
