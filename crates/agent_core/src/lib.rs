@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, Mutex};
 use serde_json::{json, Value};
 use serde::Serialize;
+use tokenizers::Tokenizer;
 use colossal_linux_sandbox::protocol::SandboxPolicy;
 use colossal_linux_sandbox::types::ExitStatus;
 use colossal_linux_sandbox::tools::execute_tools_with_sandbox;
@@ -361,8 +362,8 @@ pub enum AgentMessage {
     UserInput(String),
     /// Agent's text response
     AgentResponse(String),
-    /// Agent's thinking process (internal reasoning)
-    ThinkingContent(String),
+    /// Agent's thinking process (internal reasoning) with token count
+    ThinkingContent(String, usize), // (content, token_count)
     /// Thinking summary line (from summarizer model)
     ThinkingSummary(String),
     /// Thinking has completed with residual token count
@@ -392,6 +393,8 @@ pub struct Agent {
     thinking_summarizer: Arc<Mutex<thinking_summarizer::ThinkingSummarizer>>,
     /// Flag to cancel current generation
     cancel_requested: Arc<AtomicBool>,
+    /// Tokenizer for accurate token counting
+    tokenizer: Arc<Tokenizer>,
 }
 
 impl Agent {
@@ -401,6 +404,7 @@ impl Agent {
         model_files: Vec<String>,
         system_prompt: String,
         tools: Vec<Tool>,
+        tokenizer: Tokenizer,
     ) -> Self {
         Self {
             model: Arc::new(Mutex::new(None)),
@@ -410,6 +414,7 @@ impl Agent {
             tools,
             thinking_summarizer: Arc::new(Mutex::new(thinking_summarizer::ThinkingSummarizer::new())),
             cancel_requested: Arc::new(AtomicBool::new(false)),
+            tokenizer: Arc::new(tokenizer),
         }
     }
 
@@ -459,7 +464,59 @@ impl Agent {
         let model_path = "/home/wise/.config/.nite/models".to_string();
         let model_files = vec!["Qwen_Qwen3-4B-Thinking-2507-Q8_0.gguf".to_string()];
 
-        Ok(Self::new(model_path, model_files, system_prompt, tools))
+        // Load tokenizer from HuggingFace (Qwen2.5 tokenizer)
+        // Suppress output during loading
+        #[cfg(unix)]
+        let tokenizer = {
+            use std::os::unix::io::AsRawFd;
+            use std::fs::OpenOptions;
+
+            // Save original stdout and stderr
+            let stdout_fd = std::io::stdout().as_raw_fd();
+            let stderr_fd = std::io::stderr().as_raw_fd();
+            let saved_stdout = unsafe { libc::dup(stdout_fd) };
+            let saved_stderr = unsafe { libc::dup(stderr_fd) };
+
+            // Open /dev/null
+            let devnull = OpenOptions::new()
+                .write(true)
+                .open("/dev/null")
+                .ok();
+
+            let result = if let Some(devnull) = devnull {
+                let devnull_fd = devnull.as_raw_fd();
+
+                // Redirect stdout and stderr to /dev/null
+                unsafe {
+                    libc::dup2(devnull_fd, stdout_fd);
+                    libc::dup2(devnull_fd, stderr_fd);
+                }
+
+                // Load tokenizer
+                let tokenizer = Tokenizer::from_pretrained("Qwen/Qwen2.5-0.5B", None);
+
+                // Restore stdout and stderr
+                unsafe {
+                    libc::dup2(saved_stdout, stdout_fd);
+                    libc::dup2(saved_stderr, stderr_fd);
+                    libc::close(saved_stdout);
+                    libc::close(saved_stderr);
+                }
+
+                tokenizer
+            } else {
+                // Fallback if /dev/null can't be opened
+                Tokenizer::from_pretrained("Qwen/Qwen2.5-0.5B", None)
+            };
+
+            result.map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?
+        };
+
+        #[cfg(not(unix))]
+        let tokenizer = Tokenizer::from_pretrained("Qwen/Qwen2.5-0.5B", None)
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+
+        Ok(Self::new(model_path, model_files, system_prompt, tools, tokenizer))
     }
 
     /// Get or initialize the model (lazy loading)
@@ -554,6 +611,14 @@ impl Agent {
     /// Check if cancellation was requested
     pub fn is_cancel_requested(&self) -> bool {
         self.cancel_requested.load(Ordering::SeqCst)
+    }
+
+    /// Count tokens in text using the tokenizer
+    fn count_tokens(&self, text: &str) -> usize {
+        match self.tokenizer.encode(text, false) {
+            Ok(encoding) => encoding.len(),
+            Err(_) => 0, // Fallback to 0 if encoding fails
+        }
     }
 
     /// Process a user message and stream responses back through the channel
@@ -670,7 +735,8 @@ impl Agent {
                                             // Send the remaining thinking content before the tag (streaming)
                                             let final_thinking = &thinking_buffer[..end_idx];
                                             if !final_thinking.is_empty() {
-                                                let _ = tx.send(AgentMessage::ThinkingContent(final_thinking.to_string()));
+                                                let token_count = self.count_tokens(final_thinking);
+                                                let _ = tx.send(AgentMessage::ThinkingContent(final_thinking.to_string(), token_count));
                                                 check_cancel!();
 
                                                 // Add to summarizer and check for new summaries
@@ -723,11 +789,13 @@ impl Agent {
                                                         let chunk_chars = remaining.chars().take(100).count();
                                                         if let Some((chunk_byte_end, _)) = remaining.char_indices().nth(chunk_chars) {
                                                             let chunk = &remaining[..chunk_byte_end];
-                                                            let _ = tx.send(AgentMessage::ThinkingContent(chunk.to_string()));
+                                                            let token_count = self.count_tokens(chunk);
+                                                            let _ = tx.send(AgentMessage::ThinkingContent(chunk.to_string(), token_count));
                                                             remaining = &remaining[chunk_byte_end..];
                                                         } else {
                                                             // Last chunk
-                                                            let _ = tx.send(AgentMessage::ThinkingContent(remaining.to_string()));
+                                                            let token_count = self.count_tokens(remaining);
+                                                            let _ = tx.send(AgentMessage::ThinkingContent(remaining.to_string(), token_count));
                                                             break;
                                                         }
 
@@ -763,7 +831,8 @@ impl Agent {
                                     // Before processing tool calls, flush any remaining thinking content
                                     if in_thinking && !thinking_buffer.is_empty() {
                                         // Send remaining thinking content
-                                        let _ = tx.send(AgentMessage::ThinkingContent(thinking_buffer.clone()));
+                                        let token_count = self.count_tokens(&thinking_buffer);
+                                        let _ = tx.send(AgentMessage::ThinkingContent(thinking_buffer.clone(), token_count));
 
                                         // Add to summarizer
                                         let mut summarizer_guard = self.thinking_summarizer.lock().await;
@@ -820,7 +889,8 @@ impl Agent {
 
             // After stream ends, if still in thinking (no </think> found), flush residual
             if in_thinking && !thinking_buffer.is_empty() {
-                let _ = tx.send(AgentMessage::ThinkingContent(thinking_buffer.clone()));
+                let token_count = self.count_tokens(&thinking_buffer);
+                let _ = tx.send(AgentMessage::ThinkingContent(thinking_buffer.clone(), token_count));
 
                 let mut summarizer_guard = self.thinking_summarizer.lock().await;
                 summarizer_guard.add_thinking_chunk(&thinking_buffer).await;

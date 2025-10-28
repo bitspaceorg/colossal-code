@@ -194,6 +194,8 @@ struct App {
     thinking_position: usize,
     thinking_last_word_change: Instant,
     thinking_last_tick: Instant,
+    thinking_start_time: Option<Instant>, // Track when thinking started for elapsed time display
+    thinking_token_count: usize, // Real-time count of thinking tokens generated
     // Command history
     command_history: Vec<String>,
     history_index: Option<usize>,
@@ -536,6 +538,8 @@ impl App {
             thinking_position: 0,
             thinking_last_word_change: Instant::now(),
             thinking_last_tick: Instant::now(),
+            thinking_start_time: None,
+            thinking_token_count: 0,
             command_history,
             history_index: None,
             temp_input: None,
@@ -774,15 +778,16 @@ impl App {
 
         for (i, &ch) in chars.iter().enumerate() {
             // Determine the color for this character based on its position relative to the highlight window
-            let color = if position > i && position <= i + 7 {
-                // This character is within the 7-character highlight window
+            // The wave sweeps from left to right, with position being where the peak is
+            let color = if i + 7 >= position && i < position {
+                // This character is within the 7-character highlight window before position
                 let window_pos = position - i - 1;
 
                 match window_pos {
-                    0 | 1 => medium_color,      // First two characters
-                    2 | 3 => bright_color,       // Middle two characters (brightest)
-                    4 | 5 => medium_color,       // Next two characters
-                    6 => base_color,             // 7th character (back to base)
+                    0 => bright_color,           // Character right before position (brightest)
+                    1 => bright_color,           // Second brightest
+                    2 | 3 => medium_color,       // Medium brightness
+                    4 | 5 | 6 => base_color,     // Fading back to base
                     _ => base_color,
                 }
             } else {
@@ -837,6 +842,7 @@ impl App {
                     let text_with_dots = format!("{}...", self.thinking_current_word);
                     text_with_dots.len()
                 };
+                // Add 7 to complete the wave sweep all the way to the end
                 self.thinking_position = (self.thinking_position + 1) % (text_len + 7);
                 self.thinking_last_tick = Instant::now();
             }
@@ -1141,6 +1147,8 @@ impl App {
                         }
 
                         self.is_thinking = false;
+                        self.thinking_start_time = None;
+                        self.thinking_token_count = 0;
                         self.thinking_current_summary = None;
                         self.thinking_position = 0;
                     }
@@ -1207,6 +1215,13 @@ impl App {
                 // Save to history
                 self.save_to_history(&user_message);
 
+                // Show thinking animation immediately
+                self.messages.push("[THINKING_ANIMATION]".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.is_thinking = true;
+                self.thinking_start_time = Some(Instant::now());
+                self.thinking_token_count = 0;
+
                 // Send message to agent if available - processing happens in background task
                 if let Some(tx) = &self.agent_tx {
                     self.agent_processing = true;
@@ -1239,7 +1254,7 @@ impl App {
             if let Some(rx) = &mut self.agent_rx {
                 while let Ok(msg) = rx.try_recv() {
                     match msg {
-                        AgentMessage::ThinkingContent(_thinking) => {
+                        AgentMessage::ThinkingContent(_thinking, token_count) => {
                             // Add or maintain thinking animation placeholder
                             let should_add_thinking = if let Some(last_msg) = self.messages.last() {
                                 // Only add if last message is not already a thinking animation
@@ -1253,6 +1268,13 @@ impl App {
                                 self.message_types.push(MessageType::Agent);
                             }
                             self.is_thinking = true;
+                            // Don't reset thinking_start_time here - it was already set on submit
+                            if self.thinking_start_time.is_none() {
+                                self.thinking_start_time = Some(Instant::now());
+                            }
+
+                            // Use actual token count from tokenizer
+                            self.thinking_token_count += token_count;
                         }
                         AgentMessage::ThinkingSummary(summary) => {
                             // Parse summary format: "text|token_count|chunk_count"
@@ -1319,6 +1341,8 @@ impl App {
                                 }
                             }
                             self.is_thinking = false;
+                            self.thinking_start_time = None;
+                            self.thinking_token_count = 0;
 
                             // Check if we should append to existing message or create new one
                             let should_create_new = if !self.agent_response_started {
@@ -1376,6 +1400,8 @@ impl App {
 
                             // Don't re-add thinking animation - tool is executing now
                             self.is_thinking = false;
+                            self.thinking_start_time = None;
+                            self.thinking_token_count = 0;
                         }
                         AgentMessage::ToolCallCompleted(tool_name, result) => {
                             // If thinking is active, remove thinking animation temporarily
@@ -1419,6 +1445,8 @@ impl App {
                             // they should have already been summarized and sent as ThinkingSummary
                             // This marker just indicates thinking is complete
                             self.is_thinking = false;
+                            self.thinking_start_time = None;
+                            self.thinking_token_count = 0;
                         }
                         AgentMessage::Error(err) => {
                             // If we have a current summary, move it to a static tree line before error
@@ -1447,6 +1475,8 @@ impl App {
                             self.message_types.push(MessageType::Agent);
                             self.agent_processing = false;
                             self.is_thinking = false;
+                            self.thinking_start_time = None;
+                            self.thinking_token_count = 0;
                             self.agent_response_started = false;
                         }
                         AgentMessage::Done => {
@@ -1474,6 +1504,8 @@ impl App {
                             }
                             self.agent_processing = false;
                             self.is_thinking = false;
+                            self.thinking_start_time = None;
+                            self.thinking_token_count = 0;
                             self.agent_response_started = false;
 
                             // Check for interrupt pending FIRST
@@ -1933,11 +1965,26 @@ impl App {
             let mut spans = Vec::new();
             spans.push(Span::raw(" ")); // One character to the left
             spans.push(Span::styled(current_frame, Style::default().fg(Color::Rgb(255, 165, 0)))); // Orange snowflake
-            spans.push(Span::raw("  ")); // Two spaces between snowflake and text
+            spans.push(Span::raw(" ")); // One space between snowflake and text
 
             // Add the color-coded text spans
             for (text, color) in color_spans {
                 spans.push(Span::styled(text, Style::default().fg(color)));
+            }
+
+            // Add status info: [Esc to interrupt | Xs | ↓ N tokens]
+            if let Some(start_time) = self.thinking_start_time {
+                let elapsed = start_time.elapsed().as_secs();
+
+                // Show real-time token count
+                let token_info = if self.thinking_token_count > 0 {
+                    format!(" | ↓ {} tokens", self.thinking_token_count)
+                } else {
+                    String::new()
+                };
+
+                let status = format!(" [Esc to interrupt | {}s{}]", elapsed, token_info);
+                spans.push(Span::styled(status, Style::default().fg(Color::DarkGray)));
             }
 
             lines.push(Line::from(spans));
