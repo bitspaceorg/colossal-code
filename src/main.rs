@@ -182,6 +182,7 @@ struct App {
     agent_tx: Option<mpsc::UnboundedSender<AgentMessage>>,
     agent_rx: Option<mpsc::UnboundedReceiver<AgentMessage>>,
     agent_processing: bool,
+    agent_interrupted: bool, // Flag to block processing agent messages after interrupt
     // Thinking animation state
     is_thinking: bool,
     agent_response_started: bool, // Track if we're streaming an agent response
@@ -507,6 +508,7 @@ impl App {
             agent_tx: Some(input_tx),
             agent_rx: Some(output_rx),
             agent_processing: false,
+            agent_interrupted: false,
             is_thinking: false,
             agent_response_started: false,
             thinking_loader_frame: 0,
@@ -624,50 +626,46 @@ impl App {
         }
     }
     fn format_tool_arguments(_tool_name: &str, arguments_json: &str) -> String {
-        // Parse JSON and format concisely
+        // Parse JSON and format all parameters
         if let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments_json) {
             if let Some(obj) = args.as_object() {
-                // Get most important argument first
                 let mut parts = Vec::new();
 
-                // Common important keys first
-                for key in &["path", "pattern", "query", "command", "regex", "needle", "file_path"] {
-                    if let Some(val) = obj.get(*key) {
-                        let val_str = match val {
-                            serde_json::Value::String(s) => {
-                                // Truncate long strings
-                                if s.len() > 50 {
-                                    format!("\"{}...\"", &s[..47])
-                                } else {
-                                    format!("\"{}\"", s)
-                                }
-                            },
-                            serde_json::Value::Number(n) => n.to_string(),
-                            serde_json::Value::Bool(b) => b.to_string(),
-                            _ => continue,
-                        };
-                        parts.push(format!("{}: {}", key, val_str));
-                    }
-                }
-
-                // Add other args if not too many
+                // Add all arguments in order
                 for (k, v) in obj.iter() {
-                    if parts.len() >= 3 { break; } // Limit to 3 args
-                    if ["path", "pattern", "query", "command", "regex", "needle", "file_path"].contains(&k.as_str()) {
-                        continue; // Already added
-                    }
-                    if let serde_json::Value::String(_) | serde_json::Value::Number(_) | serde_json::Value::Bool(_) = v {
-                        parts.push(format!("{}: {:?}", k, v));
-                    }
+                    let val_str = match v {
+                        serde_json::Value::String(s) => {
+                            // Truncate very long strings
+                            if s.len() > 100 {
+                                format!("\"{}...\"", &s[..97])
+                            } else {
+                                format!("\"{}\"", s)
+                            }
+                        },
+                        serde_json::Value::Number(n) => n.to_string(),
+                        serde_json::Value::Bool(b) => b.to_string(),
+                        serde_json::Value::Array(arr) => {
+                            let items: Vec<String> = arr.iter().take(3).map(|item| {
+                                match item {
+                                    serde_json::Value::String(s) => format!("\"{}\"", s),
+                                    _ => format!("{}", item),
+                                }
+                            }).collect();
+                            format!("[{}]", items.join(", "))
+                        },
+                        serde_json::Value::Null => "null".to_string(),
+                        serde_json::Value::Object(_) => "{...}".to_string(),
+                    };
+                    parts.push(format!("{}: {}", k, val_str));
                 }
 
                 if parts.is_empty() {
-                    return "...".to_string();
+                    return "".to_string();
                 }
                 return parts.join(", ");
             }
         }
-        "...".to_string()
+        "".to_string()
     }
 
     fn format_tool_result(tool_name: &str, result_yaml: &str) -> String {
@@ -1225,6 +1223,7 @@ impl App {
                 // Send message to agent if available - processing happens in background task
                 if let Some(tx) = &self.agent_tx {
                     self.agent_processing = true;
+                    self.agent_interrupted = false; // Reset interrupted flag for new message
                     let _ = tx.send(AgentMessage::UserInput(user_message.clone()));
                 }
 
@@ -1253,6 +1252,15 @@ impl App {
             let mut process_interrupt: Option<String> = None;
             if let Some(rx) = &mut self.agent_rx {
                 while let Ok(msg) = rx.try_recv() {
+                    // Skip processing agent messages if we've interrupted
+                    if self.agent_interrupted {
+                        // Only process Done message to reset interrupted flag
+                        if matches!(msg, AgentMessage::Done) {
+                            self.agent_interrupted = false;
+                        }
+                        continue;
+                    }
+
                     match msg {
                         AgentMessage::ThinkingContent(_thinking, token_count) => {
                             // Add or maintain thinking animation placeholder
@@ -1318,27 +1326,18 @@ impl App {
                             self.thinking_position = 0;
                         }
                         AgentMessage::AgentResponse(text) => {
-                            // If we have a current summary, move it to a static tree line before response
-                            if let Some((final_summary, token_count, chunk_count)) = self.thinking_current_summary.take() {
-                                // Remove thinking animation
-                                if let Some(last_msg) = self.messages.last() {
-                                    if last_msg == "[THINKING_ANIMATION]" {
-                                        self.messages.pop();
-                                        self.message_types.pop();
-                                    }
+                            // IMPORTANT: Remove thinking animation FIRST, unconditionally
+                            if let Some(last_msg) = self.messages.last() {
+                                if last_msg == "[THINKING_ANIMATION]" {
+                                    self.messages.pop();
+                                    self.message_types.pop();
                                 }
-                                // Add final summary as static tree line with token count and chunk count
-                                // self.messages.push(format!("├── {} ({}rt {}ct)", final_summary, token_count, chunk_count));
+                            }
+
+                            // THEN convert summary to static tree line if it exists
+                            if let Some((final_summary, _token_count, _chunk_count)) = self.thinking_current_summary.take() {
                                 self.messages.push(format!("├── {}", final_summary));
                                 self.message_types.push(MessageType::Agent);
-                            } else {
-                                // No summary, just remove thinking animation if present
-                                if let Some(last_msg) = self.messages.last() {
-                                    if last_msg == "[THINKING_ANIMATION]" {
-                                        self.messages.pop();
-                                        self.message_types.pop();
-                                    }
-                                }
                             }
                             self.is_thinking = false;
                             self.thinking_start_time = None;
@@ -1368,34 +1367,23 @@ impl App {
                             }
                         }
                         AgentMessage::ToolCallStarted(tool_name, arguments) => {
-                            // If we have a current summary, move it to static tree line before tool call
-                            if let Some((current_summary, token_count, chunk_count)) = self.thinking_current_summary.take() {
-                                // Remove thinking animation if present
-                                if let Some(last_msg) = self.messages.last() {
-                                    if last_msg == "[THINKING_ANIMATION]" {
-                                        self.messages.pop();
-                                        self.message_types.pop();
-                                    }
+                            // IMPORTANT: Remove thinking animation FIRST, unconditionally
+                            if let Some(last_msg) = self.messages.last() {
+                                if last_msg == "[THINKING_ANIMATION]" {
+                                    self.messages.pop();
+                                    self.message_types.pop();
                                 }
-                                // Add summary as static tree line with token count and chunk count
-                                // self.messages.push(format!("├── {} ({}rt {}ct)", current_summary, token_count, chunk_count));
+                            }
+
+                            // THEN convert summary to static tree line if it exists
+                            if let Some((current_summary, _token_count, _chunk_count)) = self.thinking_current_summary.take() {
                                 self.messages.push(format!("├── {}", current_summary));
                                 self.message_types.push(MessageType::Agent);
-                            } else {
-                                // If thinking is active, remove thinking animation temporarily
-                                if self.is_thinking {
-                                    if let Some(last_msg) = self.messages.last() {
-                                        if last_msg == "[THINKING_ANIMATION]" {
-                                            self.messages.pop();
-                                            self.message_types.pop();
-                                        }
-                                    }
-                                }
                             }
 
                             // Format arguments for display
                             let formatted_args = Self::format_tool_arguments(&tool_name, &arguments);
-                            self.messages.push(format!("[TOOL_CALL_STARTED:{}:{}]", tool_name, formatted_args));
+                            self.messages.push(format!("[TOOL_CALL_STARTED:{}|{}]", tool_name, formatted_args));
                             self.message_types.push(MessageType::Agent);
 
                             // Don't re-add thinking animation - tool is executing now
@@ -1423,11 +1411,14 @@ impl App {
 
                             // Find and replace the started message with completed
                             for msg in self.messages.iter_mut().rev() {
-                                if msg.starts_with(&format!("[TOOL_CALL_STARTED:{}:", tool_name)) {
+                                if msg.starts_with(&format!("[TOOL_CALL_STARTED:{}|", tool_name)) {
+                                    // Extract args: everything between first | and final ]
+                                    let args = msg.trim_start_matches(&format!("[TOOL_CALL_STARTED:{}|", tool_name))
+                                        .trim_end_matches("]");
                                     let formatted_result = Self::format_tool_result(&tool_name, &result);
-                                    *msg = format!("[TOOL_CALL_COMPLETED:{}:{}:{}]",
+                                    *msg = format!("[TOOL_CALL_COMPLETED:{}|{}|{}]",
                                         tool_name,
-                                        msg.split(':').nth(2).unwrap_or(""),
+                                        args,
                                         formatted_result);
                                     break;
                                 }
@@ -1449,28 +1440,21 @@ impl App {
                             self.thinking_token_count = 0;
                         }
                         AgentMessage::Error(err) => {
-                            // If we have a current summary, move it to a static tree line before error
-                            if let Some((final_summary, token_count, chunk_count)) = self.thinking_current_summary.take() {
-                                // Remove thinking animation
-                                if let Some(last_msg) = self.messages.last() {
-                                    if last_msg == "[THINKING_ANIMATION]" {
-                                        self.messages.pop();
-                                        self.message_types.pop();
-                                    }
-                                }
-                                // Add final summary as static tree line with token count and chunk count
-                                // self.messages.push(format!("├── {} ({}rt {}ct)", final_summary, token_count, chunk_count));
-                                self.messages.push(format!("├── {}", final_summary));
-                                self.message_types.push(MessageType::Agent);
-                            } else {
-                                // No summary, just remove thinking animation if present
-                                if let Some(last_msg) = self.messages.last() {
-                                    if last_msg == "[THINKING_ANIMATION]" {
-                                        self.messages.pop();
-                                        self.message_types.pop();
-                                    }
+                            // IMPORTANT: Remove thinking animation FIRST, unconditionally
+                            if let Some(last_msg) = self.messages.last() {
+                                if last_msg == "[THINKING_ANIMATION]" {
+                                    self.messages.pop();
+                                    self.message_types.pop();
                                 }
                             }
+
+                            // THEN convert summary to static tree line if it exists
+                            if let Some((final_summary, _token_count, _chunk_count)) = self.thinking_current_summary.take() {
+                                self.messages.push(format!("├── {}", final_summary));
+                                self.message_types.push(MessageType::Agent);
+                            }
+
+                            // FINALLY add the error message
                             self.messages.push(format!("[Error: {}]", err));
                             self.message_types.push(MessageType::Agent);
                             self.agent_processing = false;
@@ -1480,27 +1464,18 @@ impl App {
                             self.agent_response_started = false;
                         }
                         AgentMessage::Done => {
-                            // If we have a current summary, move it to a static tree line when done
-                            if let Some((final_summary, token_count, chunk_count)) = self.thinking_current_summary.take() {
-                                // Remove thinking animation
-                                if let Some(last_msg) = self.messages.last() {
-                                    if last_msg == "[THINKING_ANIMATION]" {
-                                        self.messages.pop();
-                                        self.message_types.pop();
-                                    }
+                            // IMPORTANT: Remove thinking animation FIRST, unconditionally
+                            if let Some(last_msg) = self.messages.last() {
+                                if last_msg == "[THINKING_ANIMATION]" {
+                                    self.messages.pop();
+                                    self.message_types.pop();
                                 }
-                                // Add final summary as static tree line with token count and chunk count
-                                // self.messages.push(format!("├── {} ({}rt {}ct)", final_summary, token_count, chunk_count));
+                            }
+
+                            // THEN convert summary to static tree line if it exists
+                            if let Some((final_summary, _token_count, _chunk_count)) = self.thinking_current_summary.take() {
                                 self.messages.push(format!("├── {}", final_summary));
                                 self.message_types.push(MessageType::Agent);
-                            } else {
-                                // No summary, just remove thinking animation if present
-                                if let Some(last_msg) = self.messages.last() {
-                                    if last_msg == "[THINKING_ANIMATION]" {
-                                        self.messages.pop();
-                                        self.message_types.pop();
-                                    }
-                                }
                             }
                             self.agent_processing = false;
                             self.is_thinking = false;
@@ -1603,6 +1578,71 @@ impl App {
                                 // Handle Shift+Tab to cycle assistant mode
                                 if key.modifiers.contains(KeyModifiers::SHIFT) && key.code == KeyCode::BackTab {
                                     self.assistant_mode = self.assistant_mode.next();
+                                    continue;
+                                }
+
+                                // Handle Esc to interrupt agent processing
+                                if key.code == KeyCode::Esc && (self.agent_processing || self.is_thinking) {
+                                    // If we have a current thinking summary, convert it to static tree line FIRST
+                                    if let Some((current_summary, _token_count, _chunk_count)) = self.thinking_current_summary.take() {
+                                        // Remove thinking animation
+                                        if let Some(last_msg) = self.messages.last() {
+                                            if last_msg == "[THINKING_ANIMATION]" {
+                                                self.messages.pop();
+                                                self.message_types.pop();
+                                                if !self.message_states.is_empty() {
+                                                    self.message_states.pop();
+                                                }
+                                            }
+                                        }
+                                        // Add current summary as static tree line
+                                        self.messages.push(format!("├── {}", current_summary));
+                                        self.message_types.push(MessageType::Agent);
+                                        self.message_states.push(MessageState::Sent);
+                                    } else {
+                                        // No summary, just remove thinking animation if present
+                                        if let Some(last_msg) = self.messages.last() {
+                                            if last_msg == "[THINKING_ANIMATION]" {
+                                                self.messages.pop();
+                                                self.message_types.pop();
+                                                if !self.message_states.is_empty() {
+                                                    self.message_states.pop();
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Set interrupted flag to block any further agent message processing
+                                    self.agent_interrupted = true;
+
+                                    // Send cancel message to agent
+                                    if let Some(tx) = &self.agent_tx {
+                                        let _ = tx.send(AgentMessage::Cancel);
+                                    }
+
+                                    // Update last message state to Interrupted if it exists
+                                    if let Some(last_state) = self.message_states.last_mut() {
+                                        if matches!(last_state, MessageState::Queued) {
+                                            *last_state = MessageState::Interrupted;
+                                        }
+                                    }
+
+                                    // Add interrupted marker
+                                    self.messages.push("● Interrupted".to_string());
+                                    self.message_types.push(MessageType::Agent);
+                                    self.message_states.push(MessageState::Sent);
+
+                                    // Add the prompt message
+                                    self.messages.push("  ⎿ What should Nite do instead?".to_string());
+                                    self.message_types.push(MessageType::Agent);
+                                    self.message_states.push(MessageState::Sent);
+
+                                    // Reset all thinking state
+                                    self.is_thinking = false;
+                                    self.thinking_start_time = None;
+                                    self.thinking_token_count = 0;
+                                    self.thinking_position = 0;
+                                    self.agent_processing = false;
                                     continue;
                                 }
 
@@ -1993,10 +2033,10 @@ impl App {
 
         // Check if this is a tool call message
         if message.starts_with("[TOOL_CALL_COMPLETED:") {
-            // Format: [TOOL_CALL_COMPLETED:tool_name:args:result]
+            // Format: [TOOL_CALL_COMPLETED:tool_name|args|result]
             let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_COMPLETED:")
                 .trim_end_matches("]")
-                .splitn(3, ':')
+                .splitn(3, '|')
                 .collect();
 
             if parts.len() >= 3 {
@@ -2032,10 +2072,10 @@ impl App {
                 return Text::from(lines);
             }
         } else if message.starts_with("[TOOL_CALL_STARTED:") {
-            // Format: [TOOL_CALL_STARTED:tool_name:args]
+            // Format: [TOOL_CALL_STARTED:tool_name|args]
             let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_STARTED:")
                 .trim_end_matches("]")
-                .splitn(2, ':')
+                .splitn(2, '|')
                 .collect();
 
             if parts.len() >= 2 {

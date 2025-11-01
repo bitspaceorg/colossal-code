@@ -238,6 +238,14 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                             "end_byte_one_indexed": {
                                 "type": "integer",
                                 "description": "The ending byte position (1-indexed)"
+                            },
+                            "offset": {
+                                "type": "integer",
+                                "description": "Byte offset to start reading from (alternative to start_byte_one_indexed)"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of bytes to read from the offset"
                             }
                         }),
                     );
