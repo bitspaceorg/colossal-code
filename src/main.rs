@@ -138,6 +138,21 @@ enum MessageState {
     Interrupted, // Message generation was interrupted (partial)
 }
 
+/// Snapshot of UI state for frozen display in Navigation mode
+#[derive(Clone)]
+struct AppSnapshot {
+    messages: Vec<String>,
+    message_types: Vec<MessageType>,
+    message_states: Vec<MessageState>,
+    is_thinking: bool,
+    thinking_elapsed_secs: u64, // Frozen elapsed time in seconds
+    thinking_token_count: usize,
+    thinking_current_summary: Option<(String, usize, usize)>,
+    thinking_position: usize,
+    thinking_loader_frame: usize,
+    thinking_current_word: String,
+}
+
 /// Application state for the TUI
 struct App {
     input: String,
@@ -208,6 +223,8 @@ struct App {
     show_queue_choice: bool,  // Show the queue choice popup
     queue_choice_input: String,  // Collect user choice for queue
     interrupt_pending: Option<String>,  // Message waiting to send after cancel completes
+    // Navigation mode snapshot - frozen UI state while nav mode is active
+    nav_snapshot: Option<AppSnapshot>,
 }
 impl App {
     fn get_history_file_path() -> Result<std::path::PathBuf> {
@@ -552,6 +569,7 @@ impl App {
             show_queue_choice: false,
             queue_choice_input: String::new(),
             interrupt_pending: None,
+            nav_snapshot: None,
         })
     }
     fn create_title_lines() -> Vec<Line<'static>> {
@@ -1668,6 +1686,27 @@ impl App {
                                 }
 
                                 if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('n') {
+                                    // Capture snapshot of current UI state before entering nav mode
+                                    // Calculate elapsed time NOW and freeze it
+                                    let elapsed_secs = if let Some(start_time) = self.thinking_start_time {
+                                        start_time.elapsed().as_secs()
+                                    } else {
+                                        0
+                                    };
+
+                                    self.nav_snapshot = Some(AppSnapshot {
+                                        messages: self.messages.clone(),
+                                        message_types: self.message_types.clone(),
+                                        message_states: self.message_states.clone(),
+                                        is_thinking: self.is_thinking,
+                                        thinking_elapsed_secs: elapsed_secs,
+                                        thinking_token_count: self.thinking_token_count,
+                                        thinking_current_summary: self.thinking_current_summary.clone(),
+                                        thinking_position: self.thinking_position,
+                                        thinking_loader_frame: self.thinking_loader_frame,
+                                        thinking_current_word: self.thinking_current_word.clone(),
+                                    });
+
                                     self.mode = Mode::Navigation;
                                     // Flag that we need to init cursor position on first draw
                                     self.nav_needs_init = true;
@@ -1771,6 +1810,7 @@ impl App {
                                 // Exit navigation on q (only in Navigation mode)
                                 if self.mode == Mode::Navigation && key.code == KeyCode::Char('q') {
                                     self.mode = Mode::Normal;
+                                    self.nav_snapshot = None; // Clear snapshot, return to live state
                                     continue;
                                 }
                                 // Exit navigation on Ctrl+C (only in Navigation mode)
@@ -1778,11 +1818,13 @@ impl App {
                                    key.modifiers.contains(KeyModifiers::CONTROL) &&
                                    key.code == KeyCode::Char('c') {
                                     self.mode = Mode::Normal;
+                                    self.nav_snapshot = None; // Clear snapshot, return to live state
                                     continue;
                                 }
                                 // Enter command mode on : (only in Navigation mode)
                                 if self.mode == Mode::Navigation && key.code == KeyCode::Char(':') {
                                     self.mode = Mode::Command;
+                                    self.nav_snapshot = None; // Clear snapshot when leaving nav mode
                                     self.command_input.clear();
                                     self.cached_mode_content = None;
                                     continue;
@@ -1959,6 +2001,42 @@ impl App {
         Text::from(lines)
     }
 
+    // Helper to get snapshot or live data
+    fn get_messages(&self) -> &Vec<String> {
+        self.nav_snapshot.as_ref().map(|s| &s.messages).unwrap_or(&self.messages)
+    }
+    fn get_message_types(&self) -> &Vec<MessageType> {
+        self.nav_snapshot.as_ref().map(|s| &s.message_types).unwrap_or(&self.message_types)
+    }
+    fn get_thinking_loader_frame(&self) -> usize {
+        self.nav_snapshot.as_ref().map(|s| s.thinking_loader_frame).unwrap_or(self.thinking_loader_frame)
+    }
+    fn get_thinking_current_summary(&self) -> &Option<(String, usize, usize)> {
+        self.nav_snapshot.as_ref().map(|s| &s.thinking_current_summary).unwrap_or(&self.thinking_current_summary)
+    }
+    fn get_thinking_position(&self) -> usize {
+        self.nav_snapshot.as_ref().map(|s| s.thinking_position).unwrap_or(self.thinking_position)
+    }
+    fn get_thinking_current_word(&self) -> &str {
+        self.nav_snapshot.as_ref().map(|s| s.thinking_current_word.as_str()).unwrap_or(&self.thinking_current_word)
+    }
+    fn get_thinking_elapsed_secs(&self) -> Option<u64> {
+        if let Some(snapshot) = &self.nav_snapshot {
+            // Return frozen elapsed time from snapshot
+            if snapshot.is_thinking {
+                Some(snapshot.thinking_elapsed_secs)
+            } else {
+                None
+            }
+        } else {
+            // Return live elapsed time
+            self.thinking_start_time.map(|start| start.elapsed().as_secs())
+        }
+    }
+    fn get_thinking_token_count(&self) -> usize {
+        self.nav_snapshot.as_ref().map(|s| s.thinking_token_count).unwrap_or(self.thinking_token_count)
+    }
+
     fn render_message_with_max_width(&self, message: &str, max_width: usize, highlight_pos: Option<usize>, is_agent: bool) -> Text<'static> {
         // Check for interrupt marker - render with RED circle and RED text
         if message == "● Interrupted" {
@@ -1986,20 +2064,20 @@ impl App {
         if message == "[THINKING_ANIMATION]" {
             let mut lines = Vec::new();
 
-            // Get current animation frame
-            let current_frame = self.thinking_snowflake_frames[self.thinking_loader_frame];
+            // Get current animation frame (from snapshot if in nav mode)
+            let current_frame = self.thinking_snowflake_frames[self.get_thinking_loader_frame()];
 
-            // Use current summary if available, otherwise use random word
+            // Use current summary if available, otherwise use random word (from snapshot if in nav mode)
             // Always add "..." to the end
-            let text_with_dots = if let Some((ref summary, _token_count, _chunk_count)) = self.thinking_current_summary {
+            let text_with_dots = if let Some((summary, _token_count, _chunk_count)) = self.get_thinking_current_summary() {
                 // format!("{} ({}rt {}ct)...", summary, token_count, chunk_count)
                 format!("{}...", summary)
             } else {
-                format!("{}...", self.thinking_current_word)
+                format!("{}...", self.get_thinking_current_word())
             };
 
-            // Get color-coded spans for the wave effect
-            let color_spans = Self::create_thinking_highlight_spans(&text_with_dots, self.thinking_position);
+            // Get color-coded spans for the wave effect (using snapshot position if in nav mode)
+            let color_spans = Self::create_thinking_highlight_spans(&text_with_dots, self.get_thinking_position());
 
             // Build the line with one space padding on the left, then snowflake, then text
             let mut spans = Vec::new();
@@ -2012,13 +2090,12 @@ impl App {
                 spans.push(Span::styled(text, Style::default().fg(color)));
             }
 
-            // Add status info: [Esc to interrupt | Xs | ↓ N tokens]
-            if let Some(start_time) = self.thinking_start_time {
-                let elapsed = start_time.elapsed().as_secs();
-
-                // Show real-time token count
-                let token_info = if self.thinking_token_count > 0 {
-                    format!(" | ↓ {} tokens", self.thinking_token_count)
+            // Add status info: [Esc to interrupt | Xs | ↓ N tokens] (using snapshot data if in nav mode)
+            if let Some(elapsed) = self.get_thinking_elapsed_secs() {
+                // Show token count (from snapshot if in nav mode)
+                let token_count = self.get_thinking_token_count();
+                let token_info = if token_count > 0 {
+                    format!(" | ↓ {} tokens", token_count)
                 } else {
                     String::new()
                 };
@@ -2616,8 +2693,11 @@ impl App {
                     message_lines.push(Line::from(" "));
                 }
                 let max_width = messages_area.width.saturating_sub(4) as usize; // Account for: 1 space margin + bullet + space
-                for (idx, message) in self.messages.iter().enumerate() {
-                    let is_agent = matches!(self.message_types.get(idx), Some(MessageType::Agent));
+                // Use snapshot messages if in nav mode, otherwise use live messages
+                let messages = self.get_messages();
+                let message_types = self.get_message_types();
+                for (idx, message) in messages.iter().enumerate() {
+                    let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
                     message_lines.extend(self.render_message_with_max_width(message, max_width, None, is_agent).lines);
                 }
                 let total_lines = message_lines.len();
@@ -2647,8 +2727,11 @@ impl App {
                     message_lines.push(Line::from(" ")); // One character gap after tips
                 }
                 let max_width = messages_area.width.saturating_sub(4) as usize; // Account for: 1 space margin + bullet + space
-                for (idx, message) in self.messages.iter().enumerate() {
-                    let is_agent = matches!(self.message_types.get(idx), Some(MessageType::Agent));
+                // Use snapshot messages if in nav mode, otherwise use live messages
+                let messages = self.get_messages();
+                let message_types = self.get_message_types();
+                for (idx, message) in messages.iter().enumerate() {
+                    let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
                     message_lines.extend(self.render_message_with_max_width(message, max_width, None, is_agent).lines);
                 }
                 let total_lines = message_lines.len();
@@ -2767,8 +2850,10 @@ impl App {
 
                 // Regenerate editor content with correct width to match rendered output
                 // Both rich and plain content must use the same wrap width for line counts to match
-                let rich_content = create_rich_content_from_messages(&self.messages, TIPS, self.visible_tips, MESSAGE_BORDER_SET, wrap_width);
-                let plain_content = rich_editor::create_plain_content_for_editor(&self.messages, TIPS, self.visible_tips, wrap_width);
+                // Use snapshot messages if in nav mode, otherwise use live messages
+                let messages = self.get_messages();
+                let rich_content = create_rich_content_from_messages(messages, TIPS, self.visible_tips, MESSAGE_BORDER_SET, wrap_width);
+                let plain_content = rich_editor::create_plain_content_for_editor(messages, TIPS, self.visible_tips, wrap_width);
 
                 // Preserve ALL state before regenerating content (this fixes search, clipboard, text objects, etc.)
                 let old_cursor_row = self.editor.state.cursor.row;
@@ -2814,13 +2899,18 @@ impl App {
                 {
                     let tips = self.render_tips();
                     message_lines.extend(tips.clone());
-                    if !tips.is_empty() && !self.messages.is_empty() {
+                    // Use snapshot messages if in nav mode for checking if empty
+                    let messages = self.get_messages();
+                    if !tips.is_empty() && !messages.is_empty() {
                         message_lines.push(Line::from(" ")); // One character gap after tips (only if there are messages)
                     }
                 }
                 // Render messages with appropriate width
-                for (idx, message) in self.messages.iter().enumerate() {
-                    let is_agent = matches!(self.message_types.get(idx), Some(MessageType::Agent));
+                // Use snapshot messages if in nav mode, otherwise use live messages
+                let messages = self.get_messages();
+                let message_types = self.get_message_types();
+                for (idx, message) in messages.iter().enumerate() {
+                    let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
                     message_lines.extend(self.render_message_with_max_width(message, wrap_width, None, is_agent).lines);
                 }
                 // Calculate scroll offset based on edtui's cursor position
