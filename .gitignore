@@ -16,3 +16,6 @@
 
 # Ignore every target/ directory everywhere
 **/target/
+
+# TODO directory for tracking issues
+/todo/

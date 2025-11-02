@@ -212,6 +212,8 @@ struct App {
     thinking_last_tick: Instant,
     thinking_start_time: Option<Instant>, // Track when thinking started for elapsed time display
     thinking_token_count: usize, // Real-time count of thinking tokens generated
+    // Generation statistics (only for latest response)
+    generation_stats: Option<(f32, usize, f32, String)>, // (tok_per_sec, token_count, time_to_first_token, stop_reason)
     // Command history
     command_history: Vec<String>,
     history_index: Option<usize>,
@@ -559,6 +561,7 @@ impl App {
             thinking_last_tick: Instant::now(),
             thinking_start_time: None,
             thinking_token_count: 0,
+            generation_stats: None,
             command_history,
             history_index: None,
             temp_input: None,
@@ -1238,6 +1241,9 @@ impl App {
                 self.thinking_start_time = Some(Instant::now());
                 self.thinking_token_count = 0;
 
+                // Clear previous generation stats when starting new message
+                self.generation_stats = None;
+
                 // Send message to agent if available - processing happens in background task
                 if let Some(tx) = &self.agent_tx {
                     self.agent_processing = true;
@@ -1480,6 +1486,10 @@ impl App {
                             self.thinking_start_time = None;
                             self.thinking_token_count = 0;
                             self.agent_response_started = false;
+                        }
+                        AgentMessage::GenerationStats(tok_per_sec, token_count, time_to_first_token, stop_reason) => {
+                            // Store the generation stats
+                            self.generation_stats = Some((tok_per_sec, token_count, time_to_first_token, stop_reason));
                         }
                         AgentMessage::Done => {
                             // IMPORTANT: Remove thinking animation FIRST, unconditionally
@@ -2700,6 +2710,16 @@ impl App {
                     let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
                     message_lines.extend(self.render_message_with_max_width(message, max_width, None, is_agent).lines);
                 }
+
+                // Render generation stats after the last message (if available)
+                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) = &self.generation_stats {
+                    let stats_text = format!(
+                        " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
+                        tok_per_sec, token_count, time_to_first_token, stop_reason
+                    );
+                    message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::BOLD))));
+                }
+
                 let total_lines = message_lines.len();
                 let scroll = if total_lines <= visible_lines {
                     0
@@ -2734,6 +2754,16 @@ impl App {
                     let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
                     message_lines.extend(self.render_message_with_max_width(message, max_width, None, is_agent).lines);
                 }
+
+                // Render generation stats after the last message (if available)
+                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) = &self.generation_stats {
+                    let stats_text = format!(
+                        " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
+                        tok_per_sec, token_count, time_to_first_token, stop_reason
+                    );
+                    message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::BOLD))));
+                }
+
                 let total_lines = message_lines.len();
                 let visible_lines = messages_area.height as usize;
                 let scroll_offset = total_lines.saturating_sub(visible_lines);
@@ -2913,6 +2943,16 @@ impl App {
                     let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
                     message_lines.extend(self.render_message_with_max_width(message, wrap_width, None, is_agent).lines);
                 }
+
+                // Render generation stats after the last message (if available)
+                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) = &self.generation_stats {
+                    let stats_text = format!(
+                        " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
+                        tok_per_sec, token_count, time_to_first_token, stop_reason
+                    );
+                    message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::BOLD))));
+                }
+
                 // Calculate scroll offset based on edtui's cursor position
                 let cursor_row = self.editor.state.cursor.row;
                 let cursor_col = self.editor.state.cursor.col;

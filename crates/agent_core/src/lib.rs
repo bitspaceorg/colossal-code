@@ -380,6 +380,8 @@ pub enum AgentMessage {
     Done,
     /// Model has finished loading
     ModelLoaded,
+    /// Generation statistics (tokens/sec, token_count, time_to_first_token, stop_reason)
+    GenerationStats(f32, usize, f32, String), // (tok_per_sec, token_count, time_to_first_token_sec, stop_reason)
 }
 
 /// Agent instance that can be used from the TUI
@@ -714,7 +716,26 @@ impl Agent {
                 };
 
                 match response {
-                    Response::Chunk(ChatCompletionChunkResponse { choices, .. }) => {
+                    Response::Chunk(ChatCompletionChunkResponse { choices, usage, .. }) => {
+                        // Check if this is the final chunk with usage stats
+                        if let Some(usage_stats) = usage {
+                            let tok_per_sec = usage_stats.avg_compl_tok_per_sec;
+                            let token_count = usage_stats.completion_tokens;
+                            let time_to_first_token = usage_stats.total_prompt_time_sec;
+                            // Try to get finish_reason from the choice
+                            let stop_reason = choices.first()
+                                .and_then(|c| c.finish_reason.as_ref())
+                                .map(|s| s.clone())
+                                .unwrap_or_else(|| "unknown".to_string());
+
+                            let _ = tx.send(AgentMessage::GenerationStats(
+                                tok_per_sec,
+                                token_count,
+                                time_to_first_token,
+                                stop_reason
+                            ));
+                        }
+
                         if let Some(choice) = choices.first() {
                             match &choice.delta {
                                 Delta {
@@ -868,7 +889,22 @@ impl Agent {
                             }
                         }
                     }
-                    Response::Done(_) => {
+                    Response::Done(response) => {
+                        // Extract generation statistics
+                        let tok_per_sec = response.usage.avg_compl_tok_per_sec;
+                        let token_count = response.usage.completion_tokens;
+                        let time_to_first_token = response.usage.total_prompt_time_sec;
+                        let stop_reason = response.choices.first()
+                            .map(|c| c.finish_reason.clone())
+                            .unwrap_or_else(|| "unknown".to_string());
+
+                        // Send stats before Done
+                        let _ = tx.send(AgentMessage::GenerationStats(
+                            tok_per_sec,
+                            token_count,
+                            time_to_first_token,
+                            stop_reason
+                        ));
                         break;
                     }
                     Response::InternalError(e) => {
