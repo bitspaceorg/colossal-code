@@ -23,6 +23,8 @@ mod rich_editor;
 use rich_editor::{RichEditor, create_rich_content_from_messages};
 mod survey;
 use survey::{Survey, SurveyQuestion};
+mod session_manager;
+use session_manager::SessionManager;
 
 /// Custom border set for messages
 const MESSAGE_BORDER_SET: symbols::border::Set = symbols::border::Set {
@@ -50,6 +52,7 @@ pub enum Mode {
     Command,
     Visual,
     Search,
+    SessionWindow,
 }
 
 /// AI Assistant modes (cycled with Shift+Tab)
@@ -227,6 +230,8 @@ struct App {
     interrupt_pending: Option<String>,  // Message waiting to send after cancel completes
     // Navigation mode snapshot - frozen UI state while nav mode is active
     nav_snapshot: Option<AppSnapshot>,
+    // Session manager window
+    session_manager: SessionManager,
 }
 impl App {
     fn get_history_file_path() -> Result<std::path::PathBuf> {
@@ -573,6 +578,7 @@ impl App {
             queue_choice_input: String::new(),
             interrupt_pending: None,
             nav_snapshot: None,
+            session_manager: SessionManager::new(),
         })
     }
     fn create_title_lines() -> Vec<Line<'static>> {
@@ -632,6 +638,10 @@ impl App {
                 Span::styled(" > SEARCH MODE / ", Style::default().fg(Color::Cyan)),
                 Span::styled(self.editor.search_query.clone(), Style::default().fg(Color::Cyan)),
             ]),
+            Mode::SessionWindow => Line::from(vec![
+                Span::styled(" > ", Style::default().fg(Color::Blue)),
+                Span::styled("SESSION WINDOW - ↑↓: navigate, Esc/Alt+w: close", Style::default().fg(Color::Blue)),
+            ]),
         };
         // Cache the content
         self.cached_mode_content = Some((self.mode, content.clone()));
@@ -644,6 +654,7 @@ impl App {
             Mode::Command => Color::Green,
             Mode::Visual => Color::Magenta,
             Mode::Search => Color::Cyan,
+            Mode::SessionWindow => Color::Blue,
         }
     }
     fn format_tool_arguments(_tool_name: &str, arguments_json: &str) -> String {
@@ -1526,7 +1537,7 @@ impl App {
                                 self.message_states.push(MessageState::Sent);
 
                                 // Add the prompt message
-                                self.messages.push("  ⎿ What should Nite do instead?".to_string());
+                                self.messages.push(" ⎿ What should Nite do instead?".to_string());
                                 self.message_types.push(MessageType::Agent);
                                 self.message_states.push(MessageState::Sent);
 
@@ -1695,7 +1706,14 @@ impl App {
                                     }
                                 }
 
-                                if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('n') {
+                                if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('w') {
+                                    // Toggle session window
+                                    if self.mode == Mode::SessionWindow {
+                                        self.mode = Mode::Normal;
+                                    } else {
+                                        self.mode = Mode::SessionWindow;
+                                    }
+                                } else if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('n') {
                                     // Capture snapshot of current UI state before entering nav mode
                                     // Calculate elapsed time NOW and freeze it
                                     let elapsed_secs = if let Some(start_time) = self.thinking_start_time {
@@ -1911,6 +1929,21 @@ impl App {
                                     _ => {}
                                 }
                             }
+                            Mode::SessionWindow => {
+                                // Handle session window navigation (read-only mode for Agent UI below)
+                                match key.code {
+                                    KeyCode::Up => {
+                                        self.session_manager.previous_session();
+                                    }
+                                    KeyCode::Down => {
+                                        self.session_manager.next_session();
+                                    }
+                                    KeyCode::Char('q') | KeyCode::Esc => {
+                                        self.mode = Mode::Normal;
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
                     }
         }
@@ -2059,8 +2092,8 @@ impl App {
             return Text::from(lines);
         }
 
-        // Check for "What should Nite do instead?" prompt
-        if message.starts_with("  ⎿ ") {
+        // Check for "What should Nite do instead?" prompt (only for agent messages)
+        if is_agent && message.starts_with(" ⎿ ") {
             let mut lines = Vec::new();
             lines.push(Line::from(Span::raw(message.to_string())));
             return Text::from(lines);
@@ -2420,11 +2453,12 @@ impl App {
         let directory_width = self.status_left.width() as u16;
         // Create center text based on mode
         let center_text = match mode {
-            Mode::Navigation | Mode::Visual | Mode::Search => {
+            Mode::Navigation | Mode::Visual | Mode::Search | Mode::SessionWindow => {
                 let (mode_name, mode_color) = match mode {
                     Mode::Navigation => ("NAV MODE", Color::Yellow),
                     Mode::Visual => ("VISUAL MODE", Color::Magenta),
                     Mode::Search => ("SEARCH MODE", Color::Cyan),
+                    Mode::SessionWindow => ("SESSION WINDOW", Color::Blue),
                     _ => ("", Color::White),
                 };
                 vec![
@@ -2480,7 +2514,50 @@ impl App {
         let version = Paragraph::new(Line::from(version_text)).right_aligned();
         frame.render_widget(version, right_area);
     }
+    fn render_session_window_with_agent_ui(&mut self, frame: &mut Frame) {
+        // Split screen: top 49% for session list, bottom 51% for bordered box containing Agent UI
+        let layout = Layout::vertical([
+            Constraint::Percentage(49),
+            Constraint::Percentage(51),
+        ]);
+        let [sessions_area, input_box_area] = layout.areas(frame.area());
+
+        // Render sessions list in top area
+        let session_items = session_manager::SessionManager::create_session_list_items_with_selection(
+            &self.session_manager.sessions,
+            self.session_manager.selected_index
+        );
+        let sessions_list = ratatui::widgets::List::new(session_items)
+            .block(Block::default().borders(ratatui::widgets::Borders::NONE));
+        frame.render_widget(sessions_list, sessions_area);
+
+        // Render the bordered box with title
+        let title = format!(" {} (sort: index) ", self.session_manager.selected_index);
+        let input_box = Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .title(title);
+        let agent_ui_area = input_box.inner(input_box_area);
+        frame.render_widget(input_box, input_box_area);
+
+        // Now render the FULL Agent UI inside agent_ui_area using existing draw logic
+        self.draw_internal(frame, Some(agent_ui_area));
+    }
+
     fn draw(&mut self, frame: &mut Frame) {
+        self.draw_internal(frame, None);
+    }
+
+    fn draw_internal(&mut self, frame: &mut Frame, constrained_area: Option<ratatui::layout::Rect>) {
+        // If in SessionWindow mode (and not called recursively), render session window
+        if self.mode == Mode::SessionWindow && constrained_area.is_none() {
+            // SessionManager will render itself and call back to render Agent UI in its bottom box
+            self.render_session_window_with_agent_ui(frame);
+            return;
+        }
+
+        // Use constrained area if provided, otherwise use full frame area
+        let render_area = constrained_area.unwrap_or_else(|| frame.area());
+
         // Clear expired flash highlights
         if let Some((_, flash_time)) = &self.flash_highlight {
             if flash_time.elapsed().as_millis() >= 50 {
@@ -2513,7 +2590,7 @@ impl App {
                     Mode::Normal => {
                         let prompt_width = 4u16;
                         let indent_width = 4u16;
-                        let max_width = frame.area().width.saturating_sub(4);
+                        let max_width = render_area.width.saturating_sub(4);
                         let content_str = if !self.input_modified && self.input.is_empty() {
                             "Type your message or @/ to give suggestions for what tools to use."
                         } else {
@@ -2619,7 +2696,7 @@ impl App {
                 }
             }
         };
-        let areas = Layout::vertical(constraints).split(frame.area());
+        let areas = Layout::vertical(constraints).split(render_area);
         if self.phase >= Phase::Ascii {
             let title_text: Vec<Line> = self
                 .title_lines
@@ -2686,7 +2763,7 @@ impl App {
 
         // Collect status info for status bar
         let (mode, cursor_row, cursor_col, scroll_offset) = if self.phase == Phase::Input && areas.len() >= min_areas {
-            if self.mode == Mode::Normal {
+            if self.mode == Mode::Normal || self.mode == Mode::SessionWindow {
                 (Mode::Normal, 0, 0, 0)
             } else {
                 // Navigation/Visual/Search/Command modes - get info from editor
@@ -2717,7 +2794,7 @@ impl App {
                         " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
                         tok_per_sec, token_count, time_to_first_token, stop_reason
                     );
-                    message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::BOLD))));
+                    message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::ITALIC))));
                 }
 
                 let total_lines = message_lines.len();
@@ -2739,7 +2816,7 @@ impl App {
         if self.phase == Phase::Input && areas.len() >= min_areas {
             let messages_area = areas[messages_area_idx];
             let input_area = areas[input_area_idx];
-            if self.mode == Mode::Normal {
+            if self.mode == Mode::Normal || self.mode == Mode::SessionWindow {
                 let mut message_lines = Vec::new();
                 let tips = self.render_tips();
                 message_lines.extend(tips.clone());
@@ -2761,7 +2838,7 @@ impl App {
                         " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
                         tok_per_sec, token_count, time_to_first_token, stop_reason
                     );
-                    message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::BOLD))));
+                    message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::ITALIC))));
                 }
 
                 let total_lines = message_lines.len();
@@ -2950,7 +3027,7 @@ impl App {
                         " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
                         tok_per_sec, token_count, time_to_first_token, stop_reason
                     );
-                    message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::BOLD))));
+                    message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::ITALIC))));
                 }
 
                 // Calculate scroll offset based on edtui's cursor position

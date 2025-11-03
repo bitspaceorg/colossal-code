@@ -718,22 +718,25 @@ impl Agent {
                 match response {
                     Response::Chunk(ChatCompletionChunkResponse { choices, usage, .. }) => {
                         // Check if this is the final chunk with usage stats
+                        // Only send stats if there are NO tool calls (final text response only)
                         if let Some(usage_stats) = usage {
-                            let tok_per_sec = usage_stats.avg_compl_tok_per_sec;
-                            let token_count = usage_stats.completion_tokens;
-                            let time_to_first_token = usage_stats.total_prompt_time_sec;
-                            // Try to get finish_reason from the choice
-                            let stop_reason = choices.first()
-                                .and_then(|c| c.finish_reason.as_ref())
-                                .map(|s| s.clone())
-                                .unwrap_or_else(|| "unknown".to_string());
+                            if accumulated_tool_calls.is_empty() {
+                                let tok_per_sec = usage_stats.avg_compl_tok_per_sec;
+                                let token_count = usage_stats.completion_tokens;
+                                let time_to_first_token = usage_stats.total_prompt_time_sec;
+                                // Try to get finish_reason from the choice
+                                let stop_reason = choices.first()
+                                    .and_then(|c| c.finish_reason.as_ref())
+                                    .map(|s| s.clone())
+                                    .unwrap_or_else(|| "unknown".to_string());
 
-                            let _ = tx.send(AgentMessage::GenerationStats(
-                                tok_per_sec,
-                                token_count,
-                                time_to_first_token,
-                                stop_reason
-                            ));
+                                let _ = tx.send(AgentMessage::GenerationStats(
+                                    tok_per_sec,
+                                    token_count,
+                                    time_to_first_token,
+                                    stop_reason
+                                ));
+                            }
                         }
 
                         if let Some(choice) = choices.first() {
@@ -890,21 +893,23 @@ impl Agent {
                         }
                     }
                     Response::Done(response) => {
-                        // Extract generation statistics
-                        let tok_per_sec = response.usage.avg_compl_tok_per_sec;
-                        let token_count = response.usage.completion_tokens;
-                        let time_to_first_token = response.usage.total_prompt_time_sec;
-                        let stop_reason = response.choices.first()
-                            .map(|c| c.finish_reason.clone())
-                            .unwrap_or_else(|| "unknown".to_string());
+                        // Extract generation statistics only if there are no tool calls
+                        if accumulated_tool_calls.is_empty() {
+                            let tok_per_sec = response.usage.avg_compl_tok_per_sec;
+                            let token_count = response.usage.completion_tokens;
+                            let time_to_first_token = response.usage.total_prompt_time_sec;
+                            let stop_reason = response.choices.first()
+                                .map(|c| c.finish_reason.clone())
+                                .unwrap_or_else(|| "unknown".to_string());
 
-                        // Send stats before Done
-                        let _ = tx.send(AgentMessage::GenerationStats(
-                            tok_per_sec,
-                            token_count,
-                            time_to_first_token,
-                            stop_reason
-                        ));
+                            // Send stats before Done
+                            let _ = tx.send(AgentMessage::GenerationStats(
+                                tok_per_sec,
+                                token_count,
+                                time_to_first_token,
+                                stop_reason
+                            ));
+                        }
                         break;
                     }
                     Response::InternalError(e) => {
