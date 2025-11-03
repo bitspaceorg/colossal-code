@@ -9,6 +9,15 @@ use ratatui::{
 };
 use markdown_renderer::{RendererConfig, render_markdown_text};
 use std::path::PathBuf;
+
+/// Context for expanding thinking animation placeholders
+pub struct ThinkingContext {
+    pub snowflake_frame: &'static str,
+    pub current_summary: Option<(String, usize, usize)>,
+    pub current_word: String,
+    pub elapsed_secs: Option<u64>,
+    pub token_count: usize,
+}
 /// A struct that combines edtui functionality with rich formatting
 pub struct RichEditor {
     /// The edtui editor state for navigation and editing
@@ -88,8 +97,8 @@ impl RichEditor {
     }
 }
 // Helper function to create rich content from messages with proper styling
-// This creates the visual content with borders
-pub fn create_rich_content_from_messages(messages: &[String], tips: &[&str], visible_tips: usize, border_set: ratatui::symbols::border::Set, wrap_width: usize) -> Vec<Line<'static>> {
+// This creates the visual content matching the actual render logic
+pub fn create_rich_content_from_messages(messages: &[String], message_types: &[crate::MessageType], tips: &[&str], visible_tips: usize, border_set: ratatui::symbols::border::Set, wrap_width: usize, thinking_context: &ThinkingContext) -> Vec<Line<'static>> {
     let mut content = Vec::new();
 
     // Add tips with proper formatting and styling (replicating render_tips functionality)
@@ -127,72 +136,185 @@ pub fn create_rich_content_from_messages(messages: &[String], tips: &[&str], vis
         content.push(Line::from(spans));
     }
 
-    // Add messages with markdown rendering
+    // Add messages - matching the actual render logic from render_message_with_max_width
     for (i, message) in messages.iter().enumerate() {
         // Add a gap between tips and first message only, no gap between messages
         if i == 0 && visible_tips > 0 {
             content.push(Line::from(vec![Span::raw("")]));
         }
 
-        // Render the message as markdown
-        let markdown_lines = render_markdown_text(message);
+        let is_agent = matches!(message_types.get(i), Some(crate::MessageType::Agent));
 
-        // Get the maximum width of all rendered lines for border sizing
-        let max_line_width = markdown_lines.lines.iter()
-            .map(|line| {
-                line.spans.iter().map(|s| s.content.len()).sum::<usize>()
-            })
-            .max()
-            .unwrap_or(0);
+        // Handle thinking animation
+        if message == "[THINKING_ANIMATION]" {
+            let text_with_dots = if let Some((summary, _token_count, _chunk_count)) = &thinking_context.current_summary {
+                format!("{}...", summary)
+            } else {
+                format!("{}...", thinking_context.current_word)
+            };
 
-        // Use the actual content width for borders
-        let border_width = max_line_width.max(1);
+            let mut text = format!("{} {}", thinking_context.snowflake_frame, text_with_dots);
+            if let Some(elapsed) = thinking_context.elapsed_secs {
+                let token_info = if thinking_context.token_count > 0 {
+                    format!(" | ↓ {} tokens", thinking_context.token_count)
+                } else {
+                    String::new()
+                };
+                text = format!("{} [Esc to interrupt | {}s{}]", text, elapsed, token_info);
+            }
 
-        // Top border with dark gray styling
-        let horizontal_top = border_set.horizontal_top.repeat(border_width + 2); // +2 for padding
-        let border_top = format!("{}{}{}",
-            border_set.top_left,
-            horizontal_top,
-            border_set.top_right
-        );
-        content.push(Line::from(vec![
-            Span::styled(border_top, ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray))
-        ]));
-
-        // Add each markdown-rendered line with borders, padding to max width
-        for md_line in markdown_lines.lines {
-            // Calculate the actual width of this line
-            let line_width: usize = md_line.spans.iter().map(|s| s.content.len()).sum();
-            let padding_needed = border_width - line_width;
-
-            let mut line_spans = vec![
-                Span::styled(border_set.vertical_left.to_string(), ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)),
-                Span::raw(" ".to_string()), // Left padding
-            ];
-            line_spans.extend(md_line.spans);
-            // Add padding to align right borders
-            line_spans.push(Span::raw(" ".repeat(padding_needed + 1))); // +1 for right padding
-            line_spans.push(Span::styled(border_set.vertical_right.to_string(), ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)));
-            content.push(Line::from(line_spans));
+            content.push(Line::from(vec![Span::raw(format!(" {}", text))]));
+            continue;
         }
 
-        // Bottom border
-        let horizontal_bottom = border_set.horizontal_bottom.repeat(border_width + 2);
-        let border_bottom = format!("{}{}{}",
-            border_set.bottom_left,
-            horizontal_bottom,
-            border_set.bottom_right
-        );
-        content.push(Line::from(vec![
-            Span::styled(border_bottom, ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray))
-        ]));
+        // Handle tool calls
+        if message.starts_with("[TOOL_CALL_COMPLETED:") {
+            let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_COMPLETED:")
+                .trim_end_matches("]")
+                .splitn(3, '|')
+                .collect();
+            if parts.len() >= 3 {
+                let tool_name = parts[0];
+                let args = parts[1];
+                let result = parts[2];
+                content.push(Line::from(vec![Span::raw(format!(" ● {}({})", tool_name, args))]));
+                content.push(Line::from(vec![Span::raw(format!(" │ ⎿  {}", result))]));
+                continue;
+            }
+        } else if message.starts_with("[TOOL_CALL_STARTED:") {
+            let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_STARTED:")
+                .trim_end_matches("]")
+                .splitn(2, '|')
+                .collect();
+            if parts.len() >= 2 {
+                let tool_name = parts[0];
+                let args = parts[1];
+                content.push(Line::from(vec![Span::raw(format!(" ● {}({})", tool_name, args))]));
+                continue;
+            }
+        }
+
+        // Handle other special cases
+        if message == "● Interrupted"
+            || message.starts_with(" ⎿ ")
+            || message.starts_with("├── ")
+            || message.contains("tok/sec") {  // Generation stats
+            content.push(Line::from(vec![Span::raw(format!(" {}", message))]));
+            continue;
+        }
+
+        // Check if this is an agent message with bullet (no borders)
+        if is_agent && !message.starts_with('[') {
+            // Agent messages with bullet - NO BORDERS
+            let markdown_width = Some(wrap_width.saturating_sub(4));
+            let markdown_lines = render_markdown_text(message);
+
+            for (idx, md_line) in markdown_lines.lines.iter().enumerate() {
+                if idx == 0 {
+                    // First line: 1 space left margin + white bullet
+                    let mut spans = vec![
+                        Span::raw(" "),
+                        Span::styled("● ", ratatui::style::Style::default().fg(ratatui::style::Color::White)),
+                    ];
+                    spans.extend(md_line.spans.iter().cloned());
+                    content.push(Line::from(spans));
+                } else {
+                    // Subsequent lines: 1 space margin + 2 spaces alignment
+                    let mut spans = vec![
+                        Span::raw(" "),
+                        Span::raw("  "),
+                    ];
+                    spans.extend(md_line.spans.iter().cloned());
+                    content.push(Line::from(spans));
+                }
+            }
+            continue;
+        }
+
+        // Check if this is a user message or error message (both get borders)
+        let is_user_message = !is_agent && !message.starts_with('[');
+        let is_error = message.starts_with("[Error:");
+
+        if is_user_message || is_error {
+            // These messages have borders
+            // User messages wrap at 80 characters (matching visual rendering)
+            let markdown_text = if is_user_message {
+                // Use markdown rendering with 80-char width for user messages
+                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let mut lines = Vec::new();
+                markdown_renderer::append_markdown_with_settings(
+                    message,
+                    Some(80),
+                    &mut lines,
+                    None,
+                    &cwd,
+                );
+                ratatui::text::Text::from(lines)
+            } else {
+                render_markdown_text(message)
+            };
+            let max_line_width = markdown_text.lines.iter()
+                .map(|line| {
+                    line.spans.iter().map(|s| s.content.len()).sum::<usize>()
+                })
+                .max()
+                .unwrap_or(0);
+
+            let border_width = max_line_width.max(1);
+            let border_color = if is_error {
+                ratatui::style::Color::Red
+            } else {
+                ratatui::style::Color::DarkGray
+            };
+
+            // Top border
+            let horizontal_top = border_set.horizontal_top.repeat(border_width + 4);
+            let border_top = format!("{}{}{}",
+                border_set.top_left,
+                horizontal_top,
+                border_set.top_right
+            );
+            content.push(Line::from(vec![
+                Span::styled(border_top, ratatui::style::Style::default().fg(border_color))
+            ]));
+
+            // Content lines with borders
+            for (line_idx, md_line) in markdown_text.lines.iter().enumerate() {
+                let line_width: usize = md_line.spans.iter().map(|s| s.content.len()).sum();
+                let padding_needed = border_width - line_width;
+                let prefix = if line_idx == 0 { " > " } else { "   " };
+
+                let mut line_spans = vec![
+                    Span::styled(border_set.vertical_left.to_string(), ratatui::style::Style::default().fg(border_color)),
+                    Span::raw(prefix.to_string()),
+                ];
+                line_spans.extend(md_line.spans.iter().cloned());
+                line_spans.push(Span::raw(" ".repeat(padding_needed + 1)));
+                line_spans.push(Span::styled(border_set.vertical_right.to_string(), ratatui::style::Style::default().fg(border_color)));
+                content.push(Line::from(line_spans));
+            }
+
+            // Bottom border
+            let horizontal_bottom = border_set.horizontal_bottom.repeat(border_width + 4);
+            let border_bottom = format!("{}{}{}",
+                border_set.bottom_left,
+                horizontal_bottom,
+                border_set.bottom_right
+            );
+            content.push(Line::from(vec![
+                Span::styled(border_bottom, ratatui::style::Style::default().fg(border_color))
+            ]));
+        } else {
+            // Other messages without borders (plain text)
+            content.push(Line::from(vec![Span::raw(format!(" {}", message))]));
+        }
     }
-   
+
     content
 }
 // Helper function to create plain content for edtui navigation
 // MUST match rendered output EXACTLY character-by-character
-pub fn create_plain_content_for_editor(messages: &[String], tips: &[&str], visible_tips: usize, wrap_width: usize) -> String {
+pub fn create_plain_content_for_editor(messages: &[String], message_types: &[crate::MessageType], tips: &[&str], visible_tips: usize, wrap_width: usize, thinking_context: &ThinkingContext) -> String {
     let mut content = Vec::new();
 
     // Add tips - matching render_tips() exactly
@@ -205,39 +327,139 @@ pub fn create_plain_content_for_editor(messages: &[String], tips: &[&str], visib
         content.push(String::new());
     }
 
-    // Add messages with borders - using markdown rendering to match rich content EXACTLY
-    for message in messages.iter() {
-        // Render markdown to get the actual content
-        let markdown_lines = render_markdown_text(message);
+    // Add messages - matching the actual render logic
+    for (i, message) in messages.iter().enumerate() {
+        let is_agent = matches!(message_types.get(i), Some(crate::MessageType::Agent));
 
-        // Get the maximum width of all rendered lines
-        let max_line_width = markdown_lines.lines.iter()
-            .map(|line| {
-                // Calculate width from spans
-                line.spans.iter().map(|s| s.content.len()).sum::<usize>()
-            })
-            .max()
-            .unwrap_or(0);
+        // Handle thinking animation
+        if message == "[THINKING_ANIMATION]" {
+            let text_with_dots = if let Some((summary, _token_count, _chunk_count)) = &thinking_context.current_summary {
+                format!("{}...", summary)
+            } else {
+                format!("{}...", thinking_context.current_word)
+            };
 
-        let border_width = max_line_width.max(1);
+            let mut text = format!("{} {}", thinking_context.snowflake_frame, text_with_dots);
+            if let Some(elapsed) = thinking_context.elapsed_secs {
+                let token_info = if thinking_context.token_count > 0 {
+                    format!(" | ↓ {} tokens", thinking_context.token_count)
+                } else {
+                    String::new()
+                };
+                text = format!("{} [Esc to interrupt | {}s{}]", text, elapsed, token_info);
+            }
 
-        // Top border
-        let horizontal_top = "─".repeat(border_width + 2);
-        content.push(format!("╭{}╮", horizontal_top));
-
-        // Add each line with borders, padding to max width
-        for md_line in &markdown_lines.lines {
-            let line_text: String = md_line.spans.iter().map(|s| s.content.as_ref()).collect();
-            let line_width = line_text.len();
-            let padding_needed = border_width - line_width;
-
-            // Format: │ <line_text><padding> │
-            content.push(format!("│ {}{} │", line_text, " ".repeat(padding_needed)));
+            content.push(format!(" {}", text));
+            continue;
         }
 
-        // Bottom border
-        let horizontal_bottom = "─".repeat(border_width + 2);
-        content.push(format!("╰{}╯", horizontal_bottom));
+        // Handle tool calls
+        if message.starts_with("[TOOL_CALL_COMPLETED:") {
+            let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_COMPLETED:")
+                .trim_end_matches("]")
+                .splitn(3, '|')
+                .collect();
+            if parts.len() >= 3 {
+                let tool_name = parts[0];
+                let args = parts[1];
+                let result = parts[2];
+                content.push(format!(" ● {}({})", tool_name, args));
+                content.push(format!(" │ ⎿  {}", result));
+                continue;
+            }
+        } else if message.starts_with("[TOOL_CALL_STARTED:") {
+            let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_STARTED:")
+                .trim_end_matches("]")
+                .splitn(2, '|')
+                .collect();
+            if parts.len() >= 2 {
+                let tool_name = parts[0];
+                let args = parts[1];
+                content.push(format!(" ● {}({})", tool_name, args));
+                continue;
+            }
+        }
+
+        // Handle other special cases
+        if message == "● Interrupted"
+            || message.starts_with(" ⎿ ")
+            || message.starts_with("├── ")
+            || message.contains("tok/sec") {  // Generation stats
+            content.push(format!(" {}", message));
+            continue;
+        }
+
+        // Check if this is an agent message with bullet (no borders)
+        if is_agent && !message.starts_with('[') {
+            // Agent messages with bullet - NO BORDERS
+            let markdown_lines = render_markdown_text(message);
+
+            for (idx, md_line) in markdown_lines.lines.iter().enumerate() {
+                let line_text: String = md_line.spans.iter().map(|s| s.content.as_ref()).collect();
+                if idx == 0 {
+                    // First line: 1 space + bullet + space + text
+                    content.push(format!(" ● {}", line_text));
+                } else {
+                    // Subsequent lines: 1 space + 2 spaces alignment + text
+                    content.push(format!("   {}", line_text));
+                }
+            }
+            continue;
+        }
+
+        // Check if this is a user message or error message (both get borders)
+        let is_user_message = !is_agent && !message.starts_with('[');
+        let is_error = message.starts_with("[Error:");
+
+        if is_user_message || is_error {
+            // These messages have borders
+            // User messages wrap at 80 characters (matching visual rendering)
+            let markdown_text = if is_user_message {
+                // Use markdown rendering with 80-char width for user messages
+                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let mut lines = Vec::new();
+                markdown_renderer::append_markdown_with_settings(
+                    message,
+                    Some(80),
+                    &mut lines,
+                    None,
+                    &cwd,
+                );
+                ratatui::text::Text::from(lines)
+            } else {
+                render_markdown_text(message)
+            };
+            let max_line_width = markdown_text.lines.iter()
+                .map(|line| {
+                    line.spans.iter().map(|s| s.content.len()).sum::<usize>()
+                })
+                .max()
+                .unwrap_or(0);
+
+            let border_width = max_line_width.max(1);
+
+            // Top border
+            let horizontal_top = "─".repeat(border_width + 4);
+            content.push(format!("╭{}╮", horizontal_top));
+
+            // Content lines with borders
+            for (line_idx, md_line) in markdown_text.lines.iter().enumerate() {
+                let line_text: String = md_line.spans.iter().map(|s| s.content.as_ref()).collect();
+                let line_width = line_text.len();
+                let padding_needed = border_width - line_width;
+                let prefix = if line_idx == 0 { " > " } else { "   " };
+
+                // Format: │<prefix><line_text><padding> │
+                content.push(format!("│{}{}{} │", prefix, line_text, " ".repeat(padding_needed)));
+            }
+
+            // Bottom border
+            let horizontal_bottom = "─".repeat(border_width + 4);
+            content.push(format!("╰{}╯", horizontal_bottom));
+        } else {
+            // Other messages without borders (plain text)
+            content.push(format!(" {}", message));
+        }
     }
 
     content.join("\n")

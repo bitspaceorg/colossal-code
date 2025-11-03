@@ -42,12 +42,37 @@ impl SearchState {
     }
 
     /// Triggers a search based on the current pattern in the provided text.
+    /// Search is case-sensitive by default.
     pub(crate) fn trigger_search(&mut self, lines: &Lines) {
         let pattern: Vec<char> = self.pattern.chars().collect();
-        self.matches = lines
-            .match_indices(&pattern)
-            .map(|(_, index)| index)
-            .collect();
+
+        // Perform case-sensitive search manually
+        self.matches = Vec::new();
+        if pattern.is_empty() {
+            self.cached_pattern_len = 0;
+            return;
+        }
+
+        for (row_idx, row_chars) in lines.iter_row().enumerate() {
+            // Convert row to Vec for easier indexing
+            let row_vec: Vec<char> = row_chars.iter().copied().collect();
+            // Search for all occurrences in this row
+            for col_idx in 0..=row_vec.len().saturating_sub(pattern.len()) {
+                // Check if pattern matches at this position (case-sensitive)
+                let mut matches = true;
+                for (i, pattern_char) in pattern.iter().enumerate() {
+                    if row_vec.get(col_idx + i) != Some(pattern_char) {
+                        matches = false;
+                        break;
+                    }
+                }
+
+                if matches {
+                    self.matches.push(Index2::new(row_idx, col_idx));
+                }
+            }
+        }
+
         // Cache the pattern length for highlighting
         self.cached_pattern_len = pattern.len();
     }

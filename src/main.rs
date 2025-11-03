@@ -20,7 +20,7 @@ use agent_core::{Agent, AgentMessage};
 use markdown_renderer;
 
 mod rich_editor;
-use rich_editor::{RichEditor, create_rich_content_from_messages};
+use rich_editor::{RichEditor, create_rich_content_from_messages, ThinkingContext};
 mod survey;
 use survey::{Survey, SurveyQuestion};
 mod session_manager;
@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
 }
 /// Message type to distinguish between user and agent messages
 #[derive(Clone, Debug)]
-enum MessageType {
+pub enum MessageType {
     User,
     Agent,
 }
@@ -154,6 +154,7 @@ struct AppSnapshot {
     thinking_position: usize,
     thinking_loader_frame: usize,
     thinking_current_word: String,
+    generation_stats: Option<(f32, usize, f32, String)>, // Frozen generation stats
 }
 
 /// Application state for the TUI
@@ -1483,13 +1484,10 @@ impl App {
                                 }
                             }
 
-                            // THEN convert summary to static tree line if it exists
-                            if let Some((final_summary, _token_count, _chunk_count)) = self.thinking_current_summary.take() {
-                                self.messages.push(format!("├── {}", final_summary));
-                                self.message_types.push(MessageType::Agent);
-                            }
+                            // For errors, discard the thinking summary (don't convert to static tree line)
+                            self.thinking_current_summary = None;
 
-                            // FINALLY add the error message
+                            // Add the error message
                             self.messages.push(format!("[Error: {}]", err));
                             self.message_types.push(MessageType::Agent);
                             self.agent_processing = false;
@@ -1587,6 +1585,16 @@ impl App {
                     self.message_states.push(MessageState::Queued);
                     // Don't save_to_history here - already saved when queued
 
+                    // Show thinking animation immediately
+                    self.messages.push("[THINKING_ANIMATION]".to_string());
+                    self.message_types.push(MessageType::Agent);
+                    self.is_thinking = true;
+                    self.thinking_start_time = Some(Instant::now());
+                    self.thinking_token_count = 0;
+
+                    // Clear previous generation stats when starting new message
+                    self.generation_stats = None;
+
                     if let Some(tx) = &self.agent_tx {
                         self.agent_processing = true;
                         let _ = tx.send(AgentMessage::UserInput(queued_msg));
@@ -1672,7 +1680,7 @@ impl App {
                                     self.message_states.push(MessageState::Sent);
 
                                     // Add the prompt message
-                                    self.messages.push("  ⎿ What should Nite do instead?".to_string());
+                                    self.messages.push(" ⎿ What should Nite do instead?".to_string());
                                     self.message_types.push(MessageType::Agent);
                                     self.message_states.push(MessageState::Sent);
 
@@ -1733,6 +1741,7 @@ impl App {
                                         thinking_position: self.thinking_position,
                                         thinking_loader_frame: self.thinking_loader_frame,
                                         thinking_current_word: self.thinking_current_word.clone(),
+                                        generation_stats: self.generation_stats.clone(),
                                     });
 
                                     self.mode = Mode::Navigation;
@@ -1852,7 +1861,7 @@ impl App {
                                 // Enter command mode on : (only in Navigation mode)
                                 if self.mode == Mode::Navigation && key.code == KeyCode::Char(':') {
                                     self.mode = Mode::Command;
-                                    self.nav_snapshot = None; // Clear snapshot when leaving nav mode
+                                    // Keep snapshot active - Command mode also uses frozen state
                                     self.command_input.clear();
                                     self.cached_mode_content = None;
                                     continue;
@@ -2079,6 +2088,9 @@ impl App {
     fn get_thinking_token_count(&self) -> usize {
         self.nav_snapshot.as_ref().map(|s| s.thinking_token_count).unwrap_or(self.thinking_token_count)
     }
+    fn get_generation_stats(&self) -> &Option<(f32, usize, f32, String)> {
+        self.nav_snapshot.as_ref().map(|s| &s.generation_stats).unwrap_or(&self.generation_stats)
+    }
 
     fn render_message_with_max_width(&self, message: &str, max_width: usize, highlight_pos: Option<usize>, is_agent: bool) -> Text<'static> {
         // Check for interrupt marker - render with RED circle and RED text
@@ -2093,9 +2105,14 @@ impl App {
         }
 
         // Check for "What should Nite do instead?" prompt (only for agent messages)
-        if is_agent && message.starts_with(" ⎿ ") {
+        if is_agent && (message.starts_with(" ⎿ ") || message.trim() == "⎿ What should Nite do instead?") {
             let mut lines = Vec::new();
-            lines.push(Line::from(Span::raw(message.to_string())));
+            // Add left margin + extra space to align with text after bullet
+            lines.push(Line::from(vec![
+                Span::raw(" "),  // Left margin
+                Span::raw("  "),  // Two spaces to align with "Interrupted" (after "● ")
+                Span::raw(message.trim_start().to_string()),
+            ]));
             return Text::from(lines);
         }
 
@@ -2789,12 +2806,15 @@ impl App {
                 }
 
                 // Render generation stats after the last message (if available)
-                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) = &self.generation_stats {
-                    let stats_text = format!(
-                        " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
-                        tok_per_sec, token_count, time_to_first_token, stop_reason
-                    );
-                    message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::ITALIC))));
+                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) = self.get_generation_stats() {
+                    // Only render stats if stop_reason is not "tool_calls" (tool calls render separately)
+                    if stop_reason != "tool_calls" {
+                        let stats_text = format!(
+                            " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
+                            tok_per_sec, token_count, time_to_first_token, stop_reason
+                        );
+                        message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::ITALIC))));
+                    }
                 }
 
                 let total_lines = message_lines.len();
@@ -2833,12 +2853,15 @@ impl App {
                 }
 
                 // Render generation stats after the last message (if available)
-                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) = &self.generation_stats {
-                    let stats_text = format!(
-                        " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
-                        tok_per_sec, token_count, time_to_first_token, stop_reason
-                    );
-                    message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::ITALIC))));
+                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) = self.get_generation_stats() {
+                    // Only render stats if stop_reason is not "tool_calls" (tool calls render separately)
+                    if stop_reason != "tool_calls" {
+                        let stats_text = format!(
+                            " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
+                            tok_per_sec, token_count, time_to_first_token, stop_reason
+                        );
+                        message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::ITALIC))));
+                    }
                 }
 
                 let total_lines = message_lines.len();
@@ -2959,8 +2982,35 @@ impl App {
                 // Both rich and plain content must use the same wrap width for line counts to match
                 // Use snapshot messages if in nav mode, otherwise use live messages
                 let messages = self.get_messages();
-                let rich_content = create_rich_content_from_messages(messages, TIPS, self.visible_tips, MESSAGE_BORDER_SET, wrap_width);
-                let plain_content = rich_editor::create_plain_content_for_editor(messages, TIPS, self.visible_tips, wrap_width);
+                let message_types = self.get_message_types().clone();
+
+                // Pass messages directly to rich_editor along with context needed for expansion
+                // rich_editor will handle expanding placeholders to match visual rendering
+                let mut messages_with_stats = messages.to_vec();
+                let mut message_types_with_stats = message_types.clone();
+                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) = self.get_generation_stats() {
+                    // Only add stats if stop_reason is not "tool_calls" (tool calls render separately)
+                    if stop_reason != "tool_calls" {
+                        let stats_text = format!(
+                            "{:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
+                            tok_per_sec, token_count, time_to_first_token, stop_reason
+                        );
+                        messages_with_stats.push(stats_text);
+                        message_types_with_stats.push(MessageType::Agent);
+                    }
+                }
+
+                // Create editor content with context for expanding thinking animation
+                let thinking_context = ThinkingContext {
+                    snowflake_frame: self.thinking_snowflake_frames[self.get_thinking_loader_frame()],
+                    current_summary: self.get_thinking_current_summary().clone(),
+                    current_word: self.get_thinking_current_word().to_string(),
+                    elapsed_secs: self.get_thinking_elapsed_secs(),
+                    token_count: self.get_thinking_token_count(),
+                };
+
+                let rich_content = create_rich_content_from_messages(&messages_with_stats, &message_types_with_stats, TIPS, self.visible_tips, MESSAGE_BORDER_SET, wrap_width, &thinking_context);
+                let plain_content = rich_editor::create_plain_content_for_editor(&messages_with_stats, &message_types_with_stats, TIPS, self.visible_tips, wrap_width, &thinking_context);
 
                 // Preserve ALL state before regenerating content (this fixes search, clipboard, text objects, etc.)
                 let old_cursor_row = self.editor.state.cursor.row;
@@ -3013,21 +3063,23 @@ impl App {
                     }
                 }
                 // Render messages with appropriate width
-                // Use snapshot messages if in nav mode, otherwise use live messages
+                // Use original messages for proper styling, but ensure line count matches editor
                 let messages = self.get_messages();
-                let message_types = self.get_message_types();
                 for (idx, message) in messages.iter().enumerate() {
                     let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
                     message_lines.extend(self.render_message_with_max_width(message, wrap_width, None, is_agent).lines);
                 }
 
                 // Render generation stats after the last message (if available)
-                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) = &self.generation_stats {
-                    let stats_text = format!(
-                        " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
-                        tok_per_sec, token_count, time_to_first_token, stop_reason
-                    );
-                    message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::ITALIC))));
+                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) = self.get_generation_stats() {
+                    // Only render stats if stop_reason is not "tool_calls" (tool calls render separately)
+                    if stop_reason != "tool_calls" {
+                        let stats_text = format!(
+                            " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
+                            tok_per_sec, token_count, time_to_first_token, stop_reason
+                        );
+                        message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::ITALIC))));
+                    }
                 }
 
                 // Calculate scroll offset based on edtui's cursor position
@@ -3226,8 +3278,10 @@ impl App {
                         }
                     }
                 }
-                // Render cursor if it's visible in the viewport (but NOT during thinking/processing in messages area)
-                if !self.agent_processing && !self.is_thinking && cursor_row >= scroll_offset && cursor_row < scroll_offset + visible_lines {
+                // Render cursor if it's visible in the viewport
+                // In Navigation mode, always show cursor (frozen state), otherwise only show if not thinking
+                let should_show_cursor = self.nav_snapshot.is_some() || (!self.agent_processing && !self.is_thinking);
+                if should_show_cursor && cursor_row >= scroll_offset && cursor_row < scroll_offset + visible_lines {
                     let visible_row = cursor_row - scroll_offset;
                     let cursor_y = messages_area.y + visible_row as u16;
                     // Calculate cursor x position based on the line content
