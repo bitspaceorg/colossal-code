@@ -54,6 +54,13 @@ impl RichEditor {
         self.state = EditorState::new(edtui::Lines::from(content));
         self.use_rich_formatting = false;
     }
+    /// Set plain text content while preserving the current mode
+    pub fn set_text_content_preserving_mode(&mut self, content: &str) {
+        let current_mode = self.state.mode;
+        self.state = EditorState::new(edtui::Lines::from(content));
+        self.state.mode = current_mode;
+        self.use_rich_formatting = false;
+    }
     /// Set rich content with formatting for display, and plain content for edtui navigation
     pub fn set_rich_content(&mut self, content: Vec<Line<'static>>, plain_text: String) {
         self.rich_content = content;
@@ -81,10 +88,16 @@ impl RichEditor {
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
         // Use standard edtui rendering - it handles all cursor positioning, scrolling, etc.
         // Disable the status line since we have our own mode display
+        // Set text color to gray to match user message style
+        // Hide edtui's cursor since we'll use the terminal cursor instead
+        // Enable line wrapping for multiline support
         let theme = EditorTheme::default()
-            .hide_status_line();
+            .hide_status_line()
+            .base(ratatui::style::Style::default().fg(ratatui::style::Color::Gray))
+            .hide_cursor();
         EditorView::new(&mut self.state)
             .theme(theme)
+            .wrap(true)
             .render(area, buf);
     }
     /// Get the current editor mode
@@ -196,6 +209,7 @@ pub fn create_rich_content_from_messages(messages: &[String], message_types: &[c
 
         // Handle other special cases
         if message == "● Interrupted"
+            || message.starts_with("[COMMAND:")
             || message.starts_with(" ⎿ ")
             || message.starts_with("├── ")
             || message.contains("tok/sec") {  // Generation stats
@@ -382,6 +396,7 @@ pub fn create_plain_content_for_editor(messages: &[String], message_types: &[cra
 
         // Handle other special cases
         if message == "● Interrupted"
+            || message.starts_with("[COMMAND:")
             || message.starts_with(" ⎿ ")
             || message.starts_with("├── ")
             || message.contains("tok/sec") {  // Generation stats

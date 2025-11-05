@@ -93,8 +93,9 @@ impl ThinkingSummarizer {
     }
 
     async fn summarize_buffer(&self) -> Result<String, Box<dyn std::error::Error>> {
-        let system_prompt = "You are SmolLM, a compact and helpful model. Convert this reasoning trace into a single-line concise summary. Start with a verb ending in '-ing'. Keep it under 50 characters. Do not use quotes, hashes, asterisks, slashes, backslashes, pipes, or backticks.";
-
+        // Match the Python system prompt more closely
+        let system_prompt = "You are SmolLM, a compact and helpful model. You convert a reasoning trace into a concise summary.";
+  
         let request_body = ChatRequestBody {
             model: "reasoning-summarizer-V0:135M".to_string(),
             messages: vec![
@@ -107,10 +108,10 @@ impl ThinkingSummarizer {
                     content: self.buffer.clone(),
                 },
             ],
-            temperature: Some(0.7),
-            top_p: Some(0.90),
-            max_tokens: Some(16),
-            frequency_penalty: Some(0.2),
+            temperature: Some(0.7),        // ✓ Correct
+            top_p: Some(0.9),              // Changed from 0.90 to 0.9 (same value, just matching)
+            max_tokens: Some(30),          // Changed from 16 to 30 to match max_new_tokens
+            frequency_penalty: None,       // Remove this - Python doesn't use it
         };
 
         let response = self.client

@@ -397,6 +397,8 @@ pub struct Agent {
     cancel_requested: Arc<AtomicBool>,
     /// Tokenizer for accurate token counting
     tokenizer: Arc<Tokenizer>,
+    /// Conversation history (RequestBuilder maintains all messages)
+    conversation: Arc<Mutex<Option<RequestBuilder>>>,
 }
 
 impl Agent {
@@ -417,6 +419,7 @@ impl Agent {
             thinking_summarizer: Arc::new(Mutex::new(thinking_summarizer::ThinkingSummarizer::new())),
             cancel_requested: Arc::new(AtomicBool::new(false)),
             tokenizer: Arc::new(tokenizer),
+            conversation: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -615,6 +618,30 @@ impl Agent {
         self.cancel_requested.load(Ordering::SeqCst)
     }
 
+    /// Clear the conversation history
+    pub async fn clear_conversation(&self) {
+        let mut conversation_guard = self.conversation.lock().await;
+        *conversation_guard = None;
+    }
+
+    /// Export the conversation directly from RequestBuilder
+    /// This gives you the ACTUAL conversation that gets sent to the model
+    /// Returns None if there's no conversation history
+    pub async fn export_conversation(&self) -> Option<String> {
+        let conversation_guard = self.conversation.lock().await;
+        if let Some(request_builder) = conversation_guard.as_ref() {
+            // Get messages from RequestBuilder and serialize to JSON
+            let messages = request_builder.messages();
+            if messages.is_empty() {
+                None
+            } else {
+                serde_json::to_string_pretty(&messages).ok()
+            }
+        } else {
+            None
+        }
+    }
+
     /// Count tokens in text using the tokenizer
     fn count_tokens(&self, text: &str) -> usize {
         match self.tokenizer.encode(text, false) {
@@ -632,19 +659,28 @@ impl Agent {
         // Reset cancel flag for new message
         self.reset_cancel();
 
-        // Create request
-        let request_builder = RequestBuilder::new()
-            .enable_thinking(true)
-            .add_message(
-                TextMessageRole::System,
-                "You are Nite 3, a coding agent deployed in the best TUI colossal code. You live inside the terminal, running lean, fast, and sharp. Your role is to serve as the developer's right hand."
-            )
-            .add_message(
+        // Get or create conversation
+        let mut conversation_guard = self.conversation.lock().await;
+
+        let request_builder = if let Some(existing_conversation) = conversation_guard.take() {
+            // Continue existing conversation
+            existing_conversation.add_message(
                 TextMessageRole::User,
-                &format!("{}\n\n{}", self.system_prompt, user_message),
+                &user_message,
             )
-            .set_tools(self.tools.clone())
-            .set_tool_choice(ToolChoice::Auto);
+        } else {
+            // Start new conversation with system prompt
+            let system_msg = "You are Nite 3, a coding agent deployed in the best TUI colossal code. You live inside the terminal, running lean, fast, and sharp. Your role is to serve as the developer's right hand.";
+            let full_user_msg = format!("{}\n\n{}", self.system_prompt, user_message);
+
+            RequestBuilder::new()
+                .enable_thinking(true)
+                .add_message(TextMessageRole::System, system_msg)
+                .add_message(TextMessageRole::User, &full_user_msg)
+                .set_tools(self.tools.clone())
+                .set_tool_choice(ToolChoice::Auto)
+        };
+        drop(conversation_guard);
 
         self.run_generation(request_builder, tx).await
     }
@@ -659,6 +695,7 @@ impl Agent {
 
         let mut current_request_builder = request_builder;
         let mut has_more_tool_calls = true;
+        let mut final_accumulated_content = String::new();
 
         while has_more_tool_calls {
             let mut stream = model.stream_chat_request(current_request_builder.clone()).await?;
@@ -945,6 +982,11 @@ impl Agent {
                 }
             }
 
+            // Store the accumulated content for final logging
+            if accumulated_tool_calls.is_empty() {
+                final_accumulated_content = accumulated_content.clone();
+            }
+
             if !accumulated_tool_calls.is_empty() {
                 has_more_tool_calls = true;
                 for tool_call in accumulated_tool_calls {
@@ -985,6 +1027,11 @@ impl Agent {
                 }
             }
         }
+
+        // Store the updated conversation for next turn
+        let mut conversation_guard = self.conversation.lock().await;
+        *conversation_guard = Some(current_request_builder);
+        drop(conversation_guard);
 
         let _ = tx.send(AgentMessage::Done);
         Ok(())

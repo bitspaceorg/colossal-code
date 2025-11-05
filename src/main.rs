@@ -37,6 +37,24 @@ const MESSAGE_BORDER_SET: symbols::border::Set = symbols::border::Set {
     horizontal_top: "─",
     horizontal_bottom: "─",
 };
+
+/// Available slash commands with descriptions for autocomplete
+const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/bashes", "list and manage background tasks"),
+    ("/clear", "clear conversation history and free up context"),
+    ("/compact", "clear conversation history but keep a summary in context. optional: /compact [instructions for summarization]"),
+    ("/exit", "exit the repl"),
+    ("/export", "export the current conversation to a file or clipboard"),
+    ("/help", "show help information and available commands"),
+    ("/model", "set the ai model for colossal code"),
+    ("/resume", "resume a conversation"),
+    ("/review", "review uncommited changes"),
+    ("/rewind", "restore the code and/or conversation to a previous point"),
+    ("/status", "show tool statuses"),
+    ("/stats", "show the total token count and duration of the current session"),
+    ("/todos", "list current todo items"),
+    ("/vim", "toggle between vim and normal editing modes"),
+];
 /// Application phases for startup animation
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
 enum Phase {
@@ -211,6 +229,7 @@ struct App {
     thinking_words: Vec<&'static str>,
     thinking_current_word: String,
     thinking_current_summary: Option<(String, usize, usize)>, // Current summary being shown with snowflake (text, token_count, chunk_count)
+    thinking_raw_content: String, // Full raw thinking content with <think> tags for export
     thinking_position: usize,
     thinking_last_word_change: Instant,
     thinking_last_tick: Instant,
@@ -233,8 +252,48 @@ struct App {
     nav_snapshot: Option<AppSnapshot>,
     // Session manager window
     session_manager: SessionManager,
+    // Autocomplete state
+    autocomplete_active: bool,
+    autocomplete_suggestions: Vec<(String, String)>, // (command, description)
+    autocomplete_selected_index: usize,
+    // Sandbox toggle
+    sandbox_enabled: bool,
+    // Vim keybindings toggle
+    vim_mode_enabled: bool,
+    vim_input_editor: RichEditor,
 }
 impl App {
+    fn get_config_file_path() -> Result<std::path::PathBuf> {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map_err(|_| color_eyre::eyre::eyre!("Could not determine home directory"))?;
+        let config_dir = std::path::Path::new(&home).join(".config").join("nite");
+        std::fs::create_dir_all(&config_dir)?;
+        Ok(config_dir.join("nite.conf"))
+    }
+
+    fn load_vim_mode_setting() -> bool {
+        if let Ok(config_path) = Self::get_config_file_path() {
+            if let Ok(content) = std::fs::read_to_string(config_path) {
+                for line in content.lines() {
+                    if line.starts_with("vim-keybind") {
+                        if let Some(value) = line.split('=').nth(1) {
+                            return value.trim() == "true";
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn save_vim_mode_setting(&self) -> Result<()> {
+        let config_path = Self::get_config_file_path()?;
+        let content = format!("vim-keybind = {}\n", self.vim_mode_enabled);
+        std::fs::write(config_path, content)?;
+        Ok(())
+    }
+
     fn get_history_file_path() -> Result<std::path::PathBuf> {
         // Get current working directory
         let cwd = std::env::current_dir()?;
@@ -411,6 +470,11 @@ impl App {
                 }
             }
         }
+
+        // Sync to vim editor if vim mode is enabled
+        if self.vim_mode_enabled {
+            self.sync_input_to_vim();
+        }
     }
 
     fn navigate_history_forwards(&mut self) {
@@ -448,6 +512,11 @@ impl App {
                     self.character_index = self.input.chars().count();
                 }
             }
+        }
+
+        // Sync to vim editor if vim mode is enabled
+        if self.vim_mode_enabled {
+            self.sync_input_to_vim();
         }
     }
 
@@ -511,7 +580,7 @@ impl App {
             character_index: 0,
             input_modified: false,
             mode: Mode::Normal,
-            status_left: Self::compute_status_left()?,
+            status_left: Self::compute_status_left_initial()?,
             phase: Phase::Ascii,
             title_lines,
             visible_chars,
@@ -580,6 +649,13 @@ impl App {
             interrupt_pending: None,
             nav_snapshot: None,
             session_manager: SessionManager::new(),
+            autocomplete_active: false,
+            autocomplete_suggestions: Vec::new(),
+            autocomplete_selected_index: 0,
+            thinking_raw_content: String::new(),
+            sandbox_enabled: false,
+            vim_mode_enabled: Self::load_vim_mode_setting(),
+            vim_input_editor: RichEditor::new(),
         })
     }
     fn create_title_lines() -> Vec<Line<'static>> {
@@ -925,7 +1001,16 @@ impl App {
             Phase::Input => {}
         }
     }
-    fn compute_status_left() -> Result<Line<'static>> {
+    fn compute_status_left_initial() -> Result<Line<'static>> {
+        Self::compute_status_left_impl(false, edtui::EditorMode::Normal)
+    }
+
+    fn compute_status_left(&self) -> Result<Line<'static>> {
+        let mode = self.vim_input_editor.get_mode();
+        Self::compute_status_left_impl(self.vim_mode_enabled, mode)
+    }
+
+    fn compute_status_left_impl(vim_mode_enabled: bool, vim_input_mode: edtui::EditorMode) -> Result<Line<'static>> {
         let current_dir = env::current_dir().map_err(|e| {
             color_eyre::eyre::eyre!("Failed to get current directory: {}", e)
         })?;
@@ -967,17 +1052,31 @@ impl App {
                 break;
             }
         }
-        Ok(if !git_info.is_empty() {
-            Line::from(vec![
-                Span::styled(display_path, Style::default().fg(Color::Blue)),
-                Span::styled(git_info, Style::default().fg(Color::DarkGray)),
-            ])
-        } else {
-            Line::from(vec![Span::styled(
-                display_path,
-                Style::default().fg(Color::Blue),
-            )])
-        })
+        let mut spans = Vec::new();
+
+        // Add vim mode indicator if enabled (skip Search mode)
+        if vim_mode_enabled {
+            let mode_str = match vim_input_mode {
+                edtui::EditorMode::Normal => Some("[NORMAL]"),
+                edtui::EditorMode::Insert => Some("[INSERT]"),
+                edtui::EditorMode::Visual { .. } => Some("[VISUAL]"),
+                edtui::EditorMode::Search => None, // Don't show search mode in input tag
+            };
+            if let Some(mode) = mode_str {
+                spans.push(Span::styled(mode, Style::default().fg(Color::DarkGray)));
+                spans.push(Span::raw(" "));
+            }
+        }
+
+        // Add directory path
+        spans.push(Span::styled(display_path, Style::default().fg(Color::Blue)));
+
+        // Add git info if available
+        if !git_info.is_empty() {
+            spans.push(Span::styled(git_info, Style::default().fg(Color::DarkGray)));
+        }
+
+        Ok(Line::from(spans))
     }
     // Existing cursor movement functions (keeping for normal mode)
     fn move_cursor_left(&mut self) {
@@ -1107,6 +1206,9 @@ impl App {
         self.input.insert(index, new_char);
         self.move_cursor_right();
         self.input_modified = true;
+
+        // Check if autocomplete should be triggered or updated
+        self.update_autocomplete();
     }
     fn byte_index(&self) -> usize {
         self.input
@@ -1127,6 +1229,45 @@ impl App {
         if self.input.is_empty() {
             self.input_modified = false;
         }
+
+        // Update autocomplete after deletion
+        self.update_autocomplete();
+    }
+
+    fn update_autocomplete(&mut self) {
+        let input_trimmed = self.input.trim_start();
+
+        // Only trigger if input starts with "/" or " /" (but not "@/" or other prefixes)
+        let should_show = if input_trimmed.starts_with('/') {
+            // Check that it's not preceded by @ or other non-space characters
+            let prefix = self.input.chars().take_while(|&c| c != '/').collect::<String>();
+            prefix.is_empty() || prefix.chars().all(|c| c.is_whitespace())
+        } else {
+            false
+        };
+
+        if should_show {
+            // Extract the command prefix after the /
+            let after_slash = input_trimmed.trim_start_matches('/');
+
+            // Filter commands that match the prefix
+            self.autocomplete_suggestions = SLASH_COMMANDS
+                .iter()
+                .filter(|(cmd, _)| cmd.trim_start_matches('/').starts_with(after_slash))
+                .map(|(cmd, desc)| (cmd.to_string(), desc.to_string()))
+                .collect();
+
+            self.autocomplete_active = !self.autocomplete_suggestions.is_empty();
+
+            // Reset selection to first item
+            if self.autocomplete_active {
+                self.autocomplete_selected_index = 0;
+            }
+        } else {
+            self.autocomplete_active = false;
+            self.autocomplete_suggestions.clear();
+            self.autocomplete_selected_index = 0;
+        }
     }
     fn clamp_cursor(&self, new_cursor_pos: usize) -> usize {
         new_cursor_pos.clamp(0, self.input.chars().count())
@@ -1134,8 +1275,451 @@ impl App {
     fn reset_cursor(&mut self) {
         self.character_index = 0;
     }
+
+    fn sync_vim_input(&mut self) {
+        // Sync edtui editor content to self.input
+        self.input = self.vim_input_editor.get_text_content();
+
+        // Sync cursor position from vim editor
+        let cursor = self.vim_input_editor.state.cursor;
+        // Calculate linear position from row/col
+        let lines: Vec<&str> = self.input.lines().collect();
+        let mut char_index = 0;
+        for (row_idx, line) in lines.iter().enumerate() {
+            if row_idx < cursor.row {
+                char_index += line.len() + 1; // +1 for newline
+            } else if row_idx == cursor.row {
+                char_index += cursor.col.min(line.len());
+                break;
+            }
+        }
+        self.character_index = char_index.min(self.input.len());
+    }
+
+    fn sync_input_to_vim(&mut self) {
+        // Sync self.input to edtui editor by replacing text, preserving mode
+        self.vim_input_editor.set_text_content_preserving_mode(&self.input);
+
+        // Sync cursor position to vim editor
+        // Convert linear character_index to row/col
+        let char_idx = self.character_index;
+        let lines: Vec<&str> = self.input.lines().collect();
+        let mut remaining = char_idx;
+        let mut row = 0;
+        let mut col = 0;
+
+        for (row_idx, line) in lines.iter().enumerate() {
+            let line_len = line.len();
+            if remaining <= line_len {
+                row = row_idx;
+                col = remaining;
+                break;
+            }
+            remaining = remaining.saturating_sub(line_len + 1); // +1 for newline
+            row = row_idx + 1;
+        }
+
+        self.vim_input_editor.state.cursor.row = row;
+        self.vim_input_editor.state.cursor.col = col;
+    }
+
+    fn export_conversation(&mut self) {
+        use serde_json::json;
+
+        // Build OpenAI-format messages
+        let mut openai_messages = Vec::new();
+        let mut pending_tool_calls = Vec::new();
+        let mut current_assistant_content = String::new();
+        let mut thinking_content_added = false;
+
+        for (idx, message) in self.messages.iter().enumerate() {
+            // Skip only the export command itself
+            if message == "/export" {
+                continue;
+            }
+
+            let msg_type = self.message_types.get(idx);
+
+            // Handle command feedback - include as assistant messages
+            if message.starts_with("[COMMAND:") {
+                let content = message.trim_start_matches("[COMMAND:").trim_end_matches(']').trim();
+                openai_messages.push(json!({
+                    "role": "assistant",
+                    "content": format!("[System: {}]", content)
+                }));
+                continue;
+            }
+
+            // Handle tool calls
+            if message.starts_with("[TOOL_CALL_STARTED:") {
+                let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_STARTED:")
+                    .trim_end_matches("]")
+                    .splitn(2, '|')
+                    .collect();
+                if parts.len() >= 2 {
+                    let tool_name = parts[0];
+                    let arguments = parts[1];
+
+                    pending_tool_calls.push(json!({
+                        "id": format!("call_{}", idx),
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": arguments
+                        }
+                    }));
+                }
+                continue;
+            }
+
+            // Handle tool call completions
+            if message.starts_with("[TOOL_CALL_COMPLETED:") {
+                let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_COMPLETED:")
+                    .trim_end_matches("]")
+                    .splitn(3, '|')
+                    .collect();
+                if parts.len() >= 3 {
+                    let tool_name = parts[0];
+                    let result = parts[2];
+
+                    // Add assistant message with tool calls if we have any pending
+                    if !pending_tool_calls.is_empty() {
+                        // Add any accumulated assistant content before tool calls
+                        let content = if !current_assistant_content.is_empty() {
+                            let c = current_assistant_content.clone();
+                            current_assistant_content.clear();
+                            json!(c)
+                        } else {
+                            json!(null)
+                        };
+
+                        openai_messages.push(json!({
+                            "role": "assistant",
+                            "content": content,
+                            "tool_calls": pending_tool_calls.clone()
+                        }));
+                        pending_tool_calls.clear();
+                    }
+
+                    // Add tool response
+                    openai_messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": format!("call_{}", idx),
+                        "name": tool_name,
+                        "content": result
+                    }));
+                }
+                continue;
+            }
+
+            // Handle interrupt marker
+            if message == "● Interrupted" {
+                openai_messages.push(json!({
+                    "role": "assistant",
+                    "content": "[Interrupted by user]"
+                }));
+                continue;
+            }
+
+            // Handle "What should Nite do instead?" prompt
+            if message.starts_with(" ⎿ ") || message.trim() == "⎿ What should Nite do instead?" {
+                let prompt_text = message.trim_start().trim_start_matches("⎿ ").trim();
+                openai_messages.push(json!({
+                    "role": "assistant",
+                    "content": format!("[System prompt: {}]", prompt_text)
+                }));
+                continue;
+            }
+
+            // Skip thinking animation and other special markers except thinking summaries
+            if message.starts_with('[') && !message.starts_with("├── ") {
+                continue;
+            }
+
+            // Skip thinking summaries - we want full agent responses, not summaries
+            if message.starts_with("├── ") {
+                continue;
+            }
+
+            match msg_type {
+                Some(MessageType::User) => {
+                    // Flush any pending tool calls before user message
+                    if !pending_tool_calls.is_empty() {
+                        let content = if !current_assistant_content.is_empty() {
+                            let c = current_assistant_content.clone();
+                            current_assistant_content.clear();
+                            json!(c)
+                        } else {
+                            json!(null)
+                        };
+
+                        openai_messages.push(json!({
+                            "role": "assistant",
+                            "content": content,
+                            "tool_calls": pending_tool_calls.clone()
+                        }));
+                        pending_tool_calls.clear();
+                    }
+
+                    // Flush any accumulated assistant content
+                    if !current_assistant_content.is_empty() {
+                        openai_messages.push(json!({
+                            "role": "assistant",
+                            "content": current_assistant_content.clone()
+                        }));
+                        current_assistant_content.clear();
+                    }
+
+                    // Check if this message was queued (sent while agent was processing)
+                    let msg_state = self.message_states.get(idx);
+                    let content = if matches!(msg_state, Some(MessageState::Queued)) {
+                        format!("[Queued message] {}", message)
+                    } else {
+                        message.to_string()
+                    };
+
+                    openai_messages.push(json!({
+                        "role": "user",
+                        "content": content
+                    }));
+                }
+                Some(MessageType::Agent) => {
+                    // Add raw thinking content before first agent message (if available)
+                    if !thinking_content_added && !self.thinking_raw_content.is_empty() {
+                        if !current_assistant_content.is_empty() {
+                            current_assistant_content.push('\n');
+                        }
+                        current_assistant_content.push_str(&self.thinking_raw_content);
+                        thinking_content_added = true;
+                    }
+
+                    // Accumulate assistant content
+                    if !current_assistant_content.is_empty() {
+                        current_assistant_content.push('\n');
+                    }
+                    current_assistant_content.push_str(message);
+                }
+                None => continue,
+            }
+        }
+
+        // Flush any remaining assistant content
+        if !current_assistant_content.is_empty() {
+            openai_messages.push(json!({
+                "role": "assistant",
+                "content": current_assistant_content
+            }));
+        }
+
+        // Flush any remaining tool calls
+        if !pending_tool_calls.is_empty() {
+            openai_messages.push(json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": pending_tool_calls
+            }));
+        }
+
+        let export_json = json!(openai_messages);
+        let json_string = serde_json::to_string_pretty(&export_json).unwrap_or_else(|_| "{}".to_string());
+
+        // Try to copy to clipboard
+        use clipboard::{ClipboardProvider, ClipboardContext};
+        let clipboard_result: Result<(), Box<dyn std::error::Error>> = ClipboardContext::new()
+            .and_then(|mut ctx| ctx.set_contents(json_string));
+
+        if clipboard_result.is_ok() {
+            self.messages.push("[COMMAND: Conversation exported to clipboard]".to_string());
+        } else {
+            self.messages.push("[COMMAND: Failed to copy to clipboard]".to_string());
+        }
+        self.message_types.push(MessageType::Agent);
+        self.message_states.push(MessageState::Sent);
+    }
+
+    async fn handle_slash_command_async(&mut self) {
+        let command = self.input.trim().to_string();
+
+        // Add command to messages as user message
+        self.messages.push(command.clone());
+        self.message_types.push(MessageType::User);
+        self.message_states.push(MessageState::Sent);
+
+        // Clear input
+        self.input.clear();
+        self.reset_cursor();
+        self.input_modified = false;
+        // Sync clear to vim editor if vim mode is enabled
+        if self.vim_mode_enabled {
+            self.sync_input_to_vim();
+        }
+
+        // Parse and execute command
+        let cmd_lower = command.to_lowercase();
+        if cmd_lower == "/clear" {
+            // Clear all messages except the command itself
+            let command_msg = self.messages.pop().unwrap();
+            let command_type = self.message_types.pop().unwrap();
+            let command_state = self.message_states.pop();
+
+            self.messages.clear();
+            self.message_types.clear();
+            self.message_states.clear();
+
+            // Add back the command
+            self.messages.push(command_msg);
+            self.message_types.push(command_type);
+            if let Some(state) = command_state {
+                self.message_states.push(state);
+            }
+
+            // Add confirmation message
+            self.messages.push("[COMMAND: Conversation history cleared]".to_string());
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+
+            // Clear agent conversation too
+            if let Some(agent) = &self.agent {
+                agent.clear_conversation().await;
+            }
+
+            // Clear previous generation stats
+            self.generation_stats = None;
+        } else if cmd_lower == "/exit" {
+            self.messages.push("[COMMAND: Exiting...]".to_string());
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+            self.exit = true;
+        } else if cmd_lower == "/export" {
+            // Try to export from agent first
+            if let Some(agent) = &self.agent {
+                if let Some(json_string) = agent.export_conversation().await {
+                    // Try to copy to clipboard
+                    use clipboard::{ClipboardProvider, ClipboardContext};
+                    let clipboard_result: Result<(), Box<dyn std::error::Error>> = ClipboardContext::new()
+                        .and_then(|mut ctx| ctx.set_contents(json_string));
+
+                    if clipboard_result.is_ok() {
+                        self.messages.push("[COMMAND: Conversation exported to clipboard]".to_string());
+                    } else {
+                        self.messages.push("[COMMAND: Failed to copy to clipboard]".to_string());
+                    }
+                    self.message_types.push(MessageType::Agent);
+                    self.message_states.push(MessageState::Sent);
+                    return;
+                }
+            }
+
+            // Fallback to old export if agent export not available
+            self.messages.push("[COMMAND: No conversation history available]".to_string());
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+        } else if cmd_lower == "/vim" {
+            // Toggle vim mode
+            self.vim_mode_enabled = !self.vim_mode_enabled;
+
+            // Sync current input to vim editor when enabling
+            if self.vim_mode_enabled {
+                self.sync_input_to_vim();
+            }
+
+            let _ = self.save_vim_mode_setting();
+
+            let status = if self.vim_mode_enabled { "enabled" } else { "disabled" };
+            self.messages.push(format!("[COMMAND: Vim keybindings {}]", status));
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+        } else {
+            self.messages.push(format!("[COMMAND: Unknown command '{}']", command));
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+        }
+    }
+
+    fn handle_slash_command(&mut self) {
+        let command = self.input.trim().to_string();
+
+        // Add command to messages as user message
+        self.messages.push(command.clone());
+        self.message_types.push(MessageType::User);
+        self.message_states.push(MessageState::Sent);
+
+        // Clear input
+        self.input.clear();
+        self.reset_cursor();
+        self.input_modified = false;
+        // Sync clear to vim editor if vim mode is enabled
+        if self.vim_mode_enabled {
+            self.sync_input_to_vim();
+        }
+
+        // Parse and execute command
+        let cmd_lower = command.to_lowercase();
+        if cmd_lower == "/clear" {
+            // Clear all messages except the command itself
+            let command_msg = self.messages.pop().unwrap();
+            let command_type = self.message_types.pop().unwrap();
+            let command_state = self.message_states.pop();
+
+            self.messages.clear();
+            self.message_types.clear();
+            self.message_states.clear();
+
+            // Add back the command
+            self.messages.push(command_msg);
+            self.message_types.push(command_type);
+            if let Some(state) = command_state {
+                self.message_states.push(state);
+            }
+
+            // Add confirmation message
+            self.messages.push("[COMMAND: Conversation history cleared]".to_string());
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+
+            // Reset generation stats
+            self.generation_stats = None;
+
+            // TODO: Clear agent context when we have that functionality
+        } else if cmd_lower == "/exit" {
+            // Add confirmation message
+            self.messages.push("[COMMAND: Exiting...]".to_string());
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+
+            // Set exit flag
+            self.exit = true;
+        } else if cmd_lower == "/export" {
+            // Export conversation to OpenAI JSON format
+            self.export_conversation();
+        } else if cmd_lower == "/vim" {
+            // Toggle vim mode
+            self.vim_mode_enabled = !self.vim_mode_enabled;
+
+            // Sync current input to vim editor when enabling
+            if self.vim_mode_enabled {
+                self.sync_input_to_vim();
+            }
+
+            let _ = self.save_vim_mode_setting();
+
+            let status = if self.vim_mode_enabled { "enabled" } else { "disabled" };
+            self.messages.push(format!("[COMMAND: Vim keybindings {}]", status));
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+        } else {
+            // Unknown command
+            self.messages.push(format!("[COMMAND: Unknown command '{}']", command));
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+        }
+    }
+
     fn submit_message(&mut self) {
         if !self.input.is_empty() {
+            // Check if input is a slash command
+            let is_slash_command = self.input.trim().starts_with('/');
+
             // Check if we're editing a queued message
             if let Some(idx) = self.editing_queue_index.take() {
                 // Update the queued message with edited content
@@ -1145,6 +1729,10 @@ impl App {
                 self.input.clear();
                 self.reset_cursor();
                 self.input_modified = false;
+                // Sync clear to vim editor if vim mode is enabled
+                if self.vim_mode_enabled {
+                    self.sync_input_to_vim();
+                }
                 return;
             }
 
@@ -1182,6 +1770,7 @@ impl App {
                         self.thinking_token_count = 0;
                         self.thinking_current_summary = None;
                         self.thinking_position = 0;
+                        self.thinking_raw_content.clear();
                     }
                     "3" => {
                         // Cancel - discard message
@@ -1231,6 +1820,13 @@ impl App {
                 self.input.clear();
                 self.reset_cursor();
                 self.input_modified = false;
+                // Sync clear to vim editor if vim mode is enabled
+                if self.vim_mode_enabled {
+                    self.sync_input_to_vim();
+                }
+            } else if is_slash_command {
+                // Execute command immediately if agent is not processing
+                self.handle_slash_command();
             } else {
                 // Normal message submission - agent is not processing
                 let user_message = self.input.clone();
@@ -1239,6 +1835,10 @@ impl App {
                 self.input.clear();
                 self.reset_cursor();
                 self.input_modified = false;
+                // Sync clear to vim editor if vim mode is enabled
+                if self.vim_mode_enabled {
+                    self.sync_input_to_vim();
+                }
 
                 // Reset agent response tracking for new conversation turn
                 self.agent_response_started = false;
@@ -1255,6 +1855,9 @@ impl App {
 
                 // Clear previous generation stats when starting new message
                 self.generation_stats = None;
+
+                // Clear raw thinking content for new conversation turn
+                self.thinking_raw_content.clear();
 
                 // Send message to agent if available - processing happens in background task
                 if let Some(tx) = &self.agent_tx {
@@ -1298,7 +1901,7 @@ impl App {
                     }
 
                     match msg {
-                        AgentMessage::ThinkingContent(_thinking, token_count) => {
+                        AgentMessage::ThinkingContent(thinking, token_count) => {
                             // Add or maintain thinking animation placeholder
                             let should_add_thinking = if let Some(last_msg) = self.messages.last() {
                                 // Only add if last message is not already a thinking animation
@@ -1316,6 +1919,9 @@ impl App {
                             if self.thinking_start_time.is_none() {
                                 self.thinking_start_time = Some(Instant::now());
                             }
+
+                            // Accumulate raw thinking content for export
+                            self.thinking_raw_content.push_str(&thinking);
 
                             // Use actual token count from tokenizer
                             self.thinking_token_count += token_count;
@@ -1378,6 +1984,7 @@ impl App {
                             self.is_thinking = false;
                             self.thinking_start_time = None;
                             self.thinking_token_count = 0;
+                            // Note: Don't clear thinking_raw_content here - it will be used in export
 
                             // Check if we should append to existing message or create new one
                             let should_create_new = if !self.agent_response_started {
@@ -1426,6 +2033,7 @@ impl App {
                             self.is_thinking = false;
                             self.thinking_start_time = None;
                             self.thinking_token_count = 0;
+                            // Note: Don't clear thinking_raw_content here - it will be used in export
                         }
                         AgentMessage::ToolCallCompleted(tool_name, result) => {
                             // If thinking is active, remove thinking animation temporarily
@@ -1559,16 +2167,26 @@ impl App {
 
             // Process interrupt message after rx borrow is dropped
             if let Some(interrupt_msg) = process_interrupt {
-                // Add interrupt message
-                self.messages.push(interrupt_msg.clone());
-                self.message_types.push(MessageType::User);
-                self.message_states.push(MessageState::Sent);
-                self.save_to_history(&interrupt_msg);
+                // Check if interrupt message is a command
+                if interrupt_msg.trim().starts_with('/') {
+                    // Execute command
+                    self.input = interrupt_msg.clone();
+                    self.handle_slash_command();
+                } else {
+                    // Add interrupt message
+                    self.messages.push(interrupt_msg.clone());
+                    self.message_types.push(MessageType::User);
+                    self.message_states.push(MessageState::Sent);
+                    self.save_to_history(&interrupt_msg);
 
-                // Send to agent
-                if let Some(tx) = &self.agent_tx {
-                    self.agent_processing = true;
-                    let _ = tx.send(AgentMessage::UserInput(interrupt_msg));
+                    // Clear raw thinking content for new conversation turn
+                    self.thinking_raw_content.clear();
+
+                    // Send to agent
+                    if let Some(tx) = &self.agent_tx {
+                        self.agent_processing = true;
+                        let _ = tx.send(AgentMessage::UserInput(interrupt_msg));
+                    }
                 }
             }
 
@@ -1580,24 +2198,36 @@ impl App {
                 // Only process if NOT editing the next message
                 if !is_editing_next_message && !self.queued_messages.is_empty() {
                     let queued_msg = self.queued_messages.remove(0);
-                    self.messages.push(queued_msg.clone());
-                    self.message_types.push(MessageType::User);
-                    self.message_states.push(MessageState::Queued);
-                    // Don't save_to_history here - already saved when queued
 
-                    // Show thinking animation immediately
-                    self.messages.push("[THINKING_ANIMATION]".to_string());
-                    self.message_types.push(MessageType::Agent);
-                    self.is_thinking = true;
-                    self.thinking_start_time = Some(Instant::now());
-                    self.thinking_token_count = 0;
+                    // Check if queued message is a command
+                    if queued_msg.trim().starts_with('/') {
+                        // Execute command
+                        self.input = queued_msg.clone();
+                        self.handle_slash_command();
+                    } else {
+                        // Regular message
+                        self.messages.push(queued_msg.clone());
+                        self.message_types.push(MessageType::User);
+                        self.message_states.push(MessageState::Queued);
+                        // Don't save_to_history here - already saved when queued
 
-                    // Clear previous generation stats when starting new message
-                    self.generation_stats = None;
+                        // Show thinking animation immediately
+                        self.messages.push("[THINKING_ANIMATION]".to_string());
+                        self.message_types.push(MessageType::Agent);
+                        self.is_thinking = true;
+                        self.thinking_start_time = Some(Instant::now());
+                        self.thinking_token_count = 0;
 
-                    if let Some(tx) = &self.agent_tx {
-                        self.agent_processing = true;
-                        let _ = tx.send(AgentMessage::UserInput(queued_msg));
+                        // Clear previous generation stats when starting new message
+                        self.generation_stats = None;
+
+                        // Clear raw thinking content for new conversation turn
+                        self.thinking_raw_content.clear();
+
+                        if let Some(tx) = &self.agent_tx {
+                            self.agent_processing = true;
+                            let _ = tx.send(AgentMessage::UserInput(queued_msg));
+                        }
                     }
                 }
                 // If editing next message, agent will wait until user submits or cancels
@@ -1626,6 +2256,27 @@ impl App {
                                 if key.modifiers.contains(KeyModifiers::SHIFT) && key.code == KeyCode::BackTab {
                                     self.assistant_mode = self.assistant_mode.next();
                                     continue;
+                                }
+
+                                // Handle Ctrl+S to toggle sandbox mode
+                                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+                                    self.sandbox_enabled = !self.sandbox_enabled;
+                                    continue;
+                                }
+
+                                // Handle Esc in vim mode BEFORE agent interrupt
+                                // If in Insert/Visual mode, exit to Normal mode instead of interrupting
+                                if self.vim_mode_enabled && key.code == KeyCode::Esc {
+                                    let vim_mode = self.vim_input_editor.get_mode();
+                                    let is_in_normal_mode = matches!(vim_mode, edtui::EditorMode::Normal);
+
+                                    if !is_in_normal_mode {
+                                        // In Insert or Visual mode - send to vim to exit to Normal mode
+                                        self.vim_input_editor.handle_event(Event::Key(key));
+                                        self.sync_vim_input();
+                                        continue;
+                                    }
+                                    // If in Normal mode, fall through to agent interrupt handler below
                                 }
 
                                 // Handle Esc to interrupt agent processing
@@ -1749,6 +2400,35 @@ impl App {
                                     self.nav_needs_init = true;
                                     self.nav_scroll_offset = 0;
                                 } else {
+                                    // Handle vim mode keybindings before other keys if vim mode is enabled
+                                    if self.vim_mode_enabled && self.phase == Phase::Input {
+                                        // Esc is now handled earlier (before agent interrupt check)
+                                        // Let edtui handle the key event first (but not Enter, Ctrl+C, Up/Down for history, or Esc for interrupts)
+                                        let handled = match key.code {
+                                            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) || c != 'c' => {
+                                                self.vim_input_editor.handle_event(Event::Key(key));
+                                                self.sync_vim_input();
+                                                // Update autocomplete after vim input changes
+                                                self.update_autocomplete();
+                                                true
+                                            }
+                                            KeyCode::Backspace | KeyCode::Delete | KeyCode::Home | KeyCode::End |
+                                            KeyCode::Left | KeyCode::Right => {
+                                                self.vim_input_editor.handle_event(Event::Key(key));
+                                                self.sync_vim_input();
+                                                // Update autocomplete after vim input changes
+                                                self.update_autocomplete();
+                                                true
+                                            }
+                                            // Up/Down are NEVER sent to vim - they're always for history/autocomplete
+                                            // This ensures command history works properly
+                                            _ => false
+                                        };
+                                        if handled {
+                                            continue;
+                                        }
+                                    }
+
                                     match key.code {
                                         KeyCode::Char('c')
                                             if key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -1783,34 +2463,111 @@ impl App {
                                                 self.input.clear();
                                                 self.character_index = 0;
                                                 self.input_modified = false;
+                                                // Sync clear to vim editor if vim mode is enabled
+                                                if self.vim_mode_enabled {
+                                                    self.sync_input_to_vim();
+                                                }
                                             }
                                         }
-                                        KeyCode::Enter if self.phase == Phase::Input => self.submit_message(),
-                                        KeyCode::Char(to_insert) if self.phase == Phase::Input => self.enter_char(to_insert),
-                                        KeyCode::Backspace if self.phase == Phase::Input => self.delete_char(),
-                                        KeyCode::Left if self.phase == Phase::Input => self.move_cursor_left(),
-                                        KeyCode::Right if self.phase == Phase::Input => self.move_cursor_right(),
-                                        KeyCode::Up if self.phase == Phase::Input => {
-                                            let cursor_row = self.get_cursor_row();
-                                            if cursor_row == 0 {
-                                                // On first line
-                                                if self.is_at_start_of_first_line() {
-                                                    // At start of first line - navigate history backwards
-                                                    self.navigate_history_backwards();
-                                                } else {
-                                                    // Not at start - move to start of line
-                                                    self.move_to_start_of_line();
+                                        KeyCode::Esc if self.phase == Phase::Input && self.autocomplete_active => {
+                                            // Dismiss autocomplete
+                                            self.autocomplete_active = false;
+                                            self.autocomplete_suggestions.clear();
+                                            self.autocomplete_selected_index = 0;
+                                        }
+                                        KeyCode::Tab if self.phase == Phase::Input && self.autocomplete_active => {
+                                            // Apply autocomplete selection
+                                            if let Some((cmd, _desc)) = self.autocomplete_suggestions.get(self.autocomplete_selected_index) {
+                                                self.input = cmd.clone();
+                                                self.character_index = self.input.chars().count();
+                                                self.autocomplete_active = false;
+                                                self.autocomplete_suggestions.clear();
+                                                self.autocomplete_selected_index = 0;
+                                            }
+                                        }
+                                        KeyCode::Enter if self.phase == Phase::Input => {
+                                            // If autocomplete is active, apply selection instead of submitting
+                                            if self.autocomplete_active {
+                                                if let Some((cmd, _desc)) = self.autocomplete_suggestions.get(self.autocomplete_selected_index) {
+                                                    self.input = cmd.clone();
+                                                    self.character_index = self.input.chars().count();
+                                                    self.autocomplete_active = false;
+                                                    self.autocomplete_suggestions.clear();
+                                                    self.autocomplete_selected_index = 0;
                                                 }
                                             } else {
-                                                // Not on first line - normal cursor movement up
-                                                let max_width = terminal.current_buffer_mut().area().width.saturating_sub(4);
-                                                let prompt_width = 4u16;
-                                                let indent_width = 4u16;
-                                                self.move_cursor_up(max_width, prompt_width, indent_width);
+                                                self.submit_message();
+                                            }
+                                        }
+                                        KeyCode::Char(to_insert) if self.phase == Phase::Input => {
+                                            if self.vim_mode_enabled {
+                                                self.vim_input_editor.handle_event(Event::Key(key));
+                                                self.sync_vim_input();
+                                            } else {
+                                                self.enter_char(to_insert);
+                                            }
+                                        }
+                                        KeyCode::Backspace if self.phase == Phase::Input => {
+                                            if self.vim_mode_enabled {
+                                                self.vim_input_editor.handle_event(Event::Key(key));
+                                                self.sync_vim_input();
+                                            } else {
+                                                self.delete_char();
+                                            }
+                                        }
+                                        KeyCode::Left if self.phase == Phase::Input => {
+                                            if !self.vim_mode_enabled {
+                                                self.move_cursor_left();
+                                            }
+                                        }
+                                        KeyCode::Right if self.phase == Phase::Input => {
+                                            if !self.vim_mode_enabled {
+                                                self.move_cursor_right();
+                                            }
+                                        }
+                                        KeyCode::Up if self.phase == Phase::Input => {
+                                            // Check if autocomplete is active
+                                            if self.autocomplete_active && !self.autocomplete_suggestions.is_empty() {
+                                                // Navigate autocomplete suggestions (cycle)
+                                                if self.autocomplete_selected_index == 0 {
+                                                    self.autocomplete_selected_index = self.autocomplete_suggestions.len() - 1;
+                                                } else {
+                                                    self.autocomplete_selected_index -= 1;
+                                                }
+                                            } else {
+                                                let cursor_row = self.get_cursor_row();
+                                                if cursor_row == 0 {
+                                                    // On first line
+                                                    if self.is_at_start_of_first_line() {
+                                                        // At start of first line - navigate history backwards
+                                                        self.navigate_history_backwards();
+                                                    } else {
+                                                        // Not at start - move to start of line
+                                                        self.move_to_start_of_line();
+                                                    }
+                                                } else {
+                                                    // Not on first line - normal cursor movement up
+                                                    let max_width = terminal.current_buffer_mut().area().width.saturating_sub(4);
+                                                    let prompt_width = 4u16;
+                                                    let indent_width = 4u16;
+                                                    self.move_cursor_up(max_width, prompt_width, indent_width);
+                                                    // Sync to vim editor if vim mode enabled
+                                                    if self.vim_mode_enabled {
+                                                        self.sync_input_to_vim();
+                                                    }
+                                                }
                                             }
                                         }
                                         KeyCode::Down if self.phase == Phase::Input => {
-                                            if self.history_index.is_some() {
+                                            // Check if autocomplete is active
+                                            if self.autocomplete_active && !self.autocomplete_suggestions.is_empty() {
+                                                // Navigate autocomplete suggestions (cycle)
+                                                if self.autocomplete_selected_index >= self.autocomplete_suggestions.len() - 1 {
+                                                    self.autocomplete_selected_index = 0;
+                                                } else {
+                                                    self.autocomplete_selected_index += 1;
+                                                }
+                                            } else if self.history_index.is_some() {
                                                 // In history mode
                                                 let lines: Vec<&str> = self.input.lines().collect();
                                                 let last_line_idx = lines.len().saturating_sub(1);
@@ -1837,6 +2594,10 @@ impl App {
                                                 let prompt_width = 4u16;
                                                 let indent_width = 4u16;
                                                 self.move_cursor_down(max_width, prompt_width, indent_width);
+                                                // Sync to vim editor if vim mode enabled
+                                                if self.vim_mode_enabled {
+                                                    self.sync_input_to_vim();
+                                                }
                                             }
                                         }
                                         _ => {}
@@ -2101,6 +2862,18 @@ impl App {
             spans.push(Span::styled("● ", Style::default().fg(Color::Red))); // RED circle
             spans.push(Span::styled("Interrupted", Style::default().fg(Color::Red))); // RED text
             lines.push(Line::from(spans));
+            return Text::from(lines);
+        }
+
+        // Check for command execution feedback
+        if message.starts_with("[COMMAND:") {
+            let content = message.trim_start_matches("[COMMAND:").trim_end_matches(']').trim().to_string();
+            let mut lines = Vec::new();
+            lines.push(Line::from(vec![
+                Span::raw(" "),  // Left margin
+                Span::styled("● ", Style::default().fg(Color::Green)), // Green circle for command
+                Span::styled(content, Style::default().fg(Color::Green)),
+            ]));
             return Text::from(lines);
         }
 
@@ -2442,7 +3215,7 @@ impl App {
                     if !parts[0].is_empty() {
                         spans.push(Span::raw(parts[0].to_string()));
                     }
-                    spans.push(Span::styled("/help", Style::default().fg(Color::Magenta)));
+                    spans.push(Span::styled("/help", Style::default().fg(Color::Blue)));
                     remaining = parts.get(1).unwrap_or(&"").to_string();
                 }
                 if remaining.contains("Alt+n") {
@@ -2466,6 +3239,56 @@ impl App {
             .areas(area);
         area
     }
+    fn render_autocomplete(&self, frame: &mut Frame, autocomplete_area: ratatui::layout::Rect) {
+        // Calculate scroll offset to keep selected item visible
+        let visible_height = autocomplete_area.height as usize;
+        let total_items = self.autocomplete_suggestions.len();
+        let selected = self.autocomplete_selected_index;
+
+        // Calculate scroll offset to center the selected item
+        let scroll_offset = if total_items <= visible_height {
+            0
+        } else if selected < visible_height / 2 {
+            0
+        } else if selected >= total_items.saturating_sub(visible_height / 2) {
+            total_items.saturating_sub(visible_height)
+        } else {
+            selected.saturating_sub(visible_height / 2)
+        };
+
+        // Create lines with command highlighted and description in gray
+        let lines: Vec<Line> = self.autocomplete_suggestions.iter().enumerate().map(|(idx, (cmd, desc))| {
+            let is_selected = idx == self.autocomplete_selected_index;
+
+            // Format: "  /command                         description"
+            let cmd_style = if is_selected {
+                Style::default().fg(Color::Blue).add_modifier(ratatui::style::Modifier::BOLD) // Same as directory color
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            let desc_style = if is_selected {
+                Style::default().fg(Color::Blue) // Same as directory color
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            // Pad command to align descriptions (find max command length)
+            let max_cmd_len = 35; // Fixed width for alignment
+            let padded_cmd = format!("{:width$}", cmd, width = max_cmd_len);
+
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(padded_cmd, cmd_style),
+                Span::styled(desc.clone(), desc_style),
+            ])
+        }).collect();
+
+        let paragraph = Paragraph::new(lines)
+            .scroll((scroll_offset as u16, 0));
+        frame.render_widget(paragraph, autocomplete_area);
+    }
+
     fn render_status_bar(&self, frame: &mut Frame, status_area: ratatui::layout::Rect, mode: Mode, cursor_row: usize, cursor_col: usize, scroll_offset: usize) {
         let directory_width = self.status_left.width() as u16;
         // Create center text based on mode
@@ -2499,10 +3322,17 @@ impl App {
                 ]
             },
             Mode::Normal => {
-                vec![
-                    Span::styled("no sandbox ", Style::default().fg(Color::Red)),
-                    Span::styled("(see /docs)", Style::default().fg(Color::DarkGray)),
-                ]
+                if self.sandbox_enabled {
+                    vec![
+                        Span::styled("sandbox ", Style::default().fg(Color::Green)),
+                        Span::styled("(ctrl + s to cycle)", Style::default().fg(Color::DarkGray)),
+                    ]
+                } else {
+                    vec![
+                        Span::styled("no sandbox ", Style::default().fg(Color::Red)),
+                        Span::styled("(ctrl + s to cycle)", Style::default().fg(Color::DarkGray)),
+                    ]
+                }
             }
         };
         let center_line = Line::from(center_text);
@@ -2523,7 +3353,11 @@ impl App {
         ])
         .flex(ratatui::layout::Flex::SpaceBetween);
         let [_, left_area, _, center_area, _, right_area, _] = horizontal.areas(status_area);
-        let directory = Paragraph::new(self.status_left.clone()).left_aligned();
+
+        // Compute status_left with current vim mode if enabled
+        let status_left = self.compute_status_left().unwrap_or_else(|_| self.status_left.clone());
+
+        let directory = Paragraph::new(status_left).left_aligned();
         frame.render_widget(directory, left_area);
         let centered_area = Self::center_horizontal(center_area, center_width);
         let sandbox = Paragraph::new(center_line);
@@ -2628,89 +3462,42 @@ impl App {
                     }
                     _ => 3u16, // Fixed height for special modes
                 };
-                // Add space for queue choice popup, survey and infobar if active
+                // Add space for queue choice popup, survey, autocomplete, and infobar if active
                 let queue_choice_height = if self.show_queue_choice { 2 } else { 0 };
                 let survey_height = self.survey.get_height();
+                let autocomplete_height = if self.autocomplete_active && self.mode == Mode::Normal {
+                    self.autocomplete_suggestions.len().min(10) as u16
+                } else {
+                    0
+                };
                 let has_infobar = self.ctrl_c_pressed.is_some() || !self.queued_messages.is_empty();
 
-                match (queue_choice_height > 0, survey_height > 0, has_infobar) {
-                    // Queue choice popup, Survey, and infobar
-                    (true, true, true) => vec![
-                        Constraint::Length(self.title_lines.len() as u16),
-                        Constraint::Length(1), // One character gap
-                        Constraint::Min(1), // Messages area (includes tips)
-                        Constraint::Length(queue_choice_height), // Queue choice popup
-                        Constraint::Length(survey_height), // Survey
-                        Constraint::Length(1), // Infobar
-                        Constraint::Length(input_height),
-                        Constraint::Length(1), // Status bar
-                    ],
-                    // Queue choice popup and Survey
-                    (true, true, false) => vec![
-                        Constraint::Length(self.title_lines.len() as u16),
-                        Constraint::Length(1), // One character gap
-                        Constraint::Min(1), // Messages area (includes tips)
-                        Constraint::Length(queue_choice_height), // Queue choice popup
-                        Constraint::Length(survey_height), // Survey
-                        Constraint::Length(input_height),
-                        Constraint::Length(1), // Status bar
-                    ],
-                    // Queue choice popup and infobar
-                    (true, false, true) => vec![
-                        Constraint::Length(self.title_lines.len() as u16),
-                        Constraint::Length(1), // One character gap
-                        Constraint::Min(1), // Messages area (includes tips)
-                        Constraint::Length(queue_choice_height), // Queue choice popup
-                        Constraint::Length(1), // Infobar
-                        Constraint::Length(input_height),
-                        Constraint::Length(1), // Status bar
-                    ],
-                    // Queue choice popup only
-                    (true, false, false) => vec![
-                        Constraint::Length(self.title_lines.len() as u16),
-                        Constraint::Length(1), // One character gap
-                        Constraint::Min(1), // Messages area (includes tips)
-                        Constraint::Length(queue_choice_height), // Queue choice popup
-                        Constraint::Length(input_height),
-                        Constraint::Length(1), // Status bar
-                    ],
-                    // Survey and infobar
-                    (false, true, true) => vec![
-                        Constraint::Length(self.title_lines.len() as u16),
-                        Constraint::Length(1), // One character gap
-                        Constraint::Min(1), // Messages area (includes tips)
-                        Constraint::Length(survey_height), // Survey
-                        Constraint::Length(1), // Infobar
-                        Constraint::Length(input_height),
-                        Constraint::Length(1), // Status bar
-                    ],
-                    // Survey only
-                    (false, true, false) => vec![
-                        Constraint::Length(self.title_lines.len() as u16),
-                        Constraint::Length(1), // One character gap
-                        Constraint::Min(1), // Messages area (includes tips)
-                        Constraint::Length(survey_height), // Survey
-                        Constraint::Length(input_height),
-                        Constraint::Length(1), // Status bar
-                    ],
-                    // Infobar only
-                    (false, false, true) => vec![
-                        Constraint::Length(self.title_lines.len() as u16),
-                        Constraint::Length(1), // One character gap
-                        Constraint::Min(1), // Messages area (includes tips)
-                        Constraint::Length(1), // Infobar
-                        Constraint::Length(input_height),
-                        Constraint::Length(1), // Status bar
-                    ],
-                    // Nothing extra
-                    (false, false, false) => vec![
-                        Constraint::Length(self.title_lines.len() as u16),
-                        Constraint::Length(1), // One character gap
-                        Constraint::Min(1), // Messages area (includes tips)
-                        Constraint::Length(input_height),
-                        Constraint::Length(1), // Status bar
-                    ],
+                // Build constraints dynamically
+                let mut constraints_vec = vec![
+                    Constraint::Length(self.title_lines.len() as u16),
+                    Constraint::Length(1), // One character gap
+                    Constraint::Min(1), // Messages area (includes tips)
+                ];
+
+                if queue_choice_height > 0 {
+                    constraints_vec.push(Constraint::Length(queue_choice_height));
                 }
+                if survey_height > 0 {
+                    constraints_vec.push(Constraint::Length(survey_height));
+                }
+                if has_infobar {
+                    constraints_vec.push(Constraint::Length(1)); // Infobar
+                }
+
+                constraints_vec.push(Constraint::Length(input_height));
+
+                if autocomplete_height > 0 {
+                    constraints_vec.push(Constraint::Length(autocomplete_height)); // Autocomplete
+                }
+
+                constraints_vec.push(Constraint::Length(1)); // Status bar
+
+                constraints_vec
             }
         };
         let areas = Layout::vertical(constraints).split(render_area);
@@ -2756,27 +3543,43 @@ impl App {
         let has_queue_choice = self.show_queue_choice;
         let has_survey_or_thanks = self.survey.is_active() || self.survey.has_thank_you();
         let has_infobar = self.ctrl_c_pressed.is_some() || !self.queued_messages.is_empty();
+        let has_autocomplete = self.autocomplete_active && self.mode == Mode::Normal;
+
         let messages_area_idx = 2;
 
-        // Calculate indices based on what's active
-        let (queue_choice_area_idx, survey_area_idx, infobar_area_idx, input_area_idx, min_areas) = match (has_queue_choice, has_survey_or_thanks, has_infobar) {
-            // Queue choice, Survey, and Ctrl+C
-            (true, true, true) => (Some(3), Some(4), Some(5), 6, 8),
-            // Queue choice and Survey
-            (true, true, false) => (Some(3), Some(4), None, 5, 7),
-            // Queue choice and Ctrl+C
-            (true, false, true) => (Some(3), None, Some(4), 5, 7),
-            // Queue choice only
-            (true, false, false) => (Some(3), None, None, 4, 6),
-            // Survey and Ctrl+C
-            (false, true, true) => (None, Some(3), Some(4), 5, 7),
-            // Survey only
-            (false, true, false) => (None, Some(3), None, 4, 6),
-            // Ctrl+C only
-            (false, false, true) => (None, None, Some(3), 4, 6),
-            // Nothing extra
-            (false, false, false) => (None, None, None, 3, 5),
+        // Calculate indices dynamically
+        let mut idx = 3;
+        let queue_choice_area_idx = if has_queue_choice {
+            let i = idx;
+            idx += 1;
+            Some(i)
+        } else {
+            None
         };
+        let survey_area_idx = if has_survey_or_thanks {
+            let i = idx;
+            idx += 1;
+            Some(i)
+        } else {
+            None
+        };
+        let infobar_area_idx = if has_infobar {
+            let i = idx;
+            idx += 1;
+            Some(i)
+        } else {
+            None
+        };
+        let input_area_idx = idx;
+        idx += 1;
+        let autocomplete_area_idx = if has_autocomplete {
+            let i = idx;
+            idx += 1;
+            Some(i)
+        } else {
+            None
+        };
+        let min_areas = idx + 1; // +1 for status bar
 
         // Collect status info for status bar
         let (mode, cursor_row, cursor_col, scroll_offset) = if self.phase == Phase::Input && areas.len() >= min_areas {
@@ -2870,8 +3673,11 @@ impl App {
                 let messages_widget = Paragraph::new(Text::from(message_lines))
                     .scroll((scroll_offset as u16, 0));
                 frame.render_widget(messages_widget, messages_area);
-                // Render normal input mode
-                let prompt_spans: Vec<Span> = vec![
+
+                // Render input mode (both vim and normal use the same rendering)
+                {
+                    // Render normal input mode
+                    let prompt_spans: Vec<Span> = vec![
                     Span::raw(" "),
                     Span::styled(">", Style::default().fg(Color::Magenta)),
                     Span::raw(" "),
@@ -2962,12 +3768,13 @@ impl App {
                     );
                 frame.render_widget(input, input_area);
 
-                // Always show cursor in input area (Normal mode)
-                let visible_cursor_row = cursor_row.saturating_sub(scroll_y);
-                let cursor_x = input_area.x + 1 + cursor_col;
-                let max_cursor_x = input_area.x + input_area.width.saturating_sub(3);
-                let cursor_y = input_area.y + 1 + visible_cursor_row;
-                frame.set_cursor_position(Position::new(cursor_x.min(max_cursor_x), cursor_y));
+                    // Always show cursor in input area (Normal mode)
+                    let visible_cursor_row = cursor_row.saturating_sub(scroll_y);
+                    let cursor_x = input_area.x + 1 + cursor_col;
+                    let max_cursor_x = input_area.x + input_area.width.saturating_sub(3);
+                    let cursor_y = input_area.y + 1 + visible_cursor_row;
+                    frame.set_cursor_position(Position::new(cursor_x.min(max_cursor_x), cursor_y));
+                }
             } else {
                 // Update the viewport size for Ctrl+d/Ctrl+u to work properly
                 // Use at least 10 rows to ensure half-page scrolling works
@@ -3443,6 +4250,12 @@ impl App {
                     Style::default().fg(Color::Rgb(172, 172, 212))
                 )));
                 frame.render_widget(infobar_widget, infobar_area);
+            }
+
+            // Render autocomplete if active
+            if let Some(idx) = autocomplete_area_idx {
+                let autocomplete_area = areas[idx];
+                self.render_autocomplete(frame, autocomplete_area);
             }
         }
     }

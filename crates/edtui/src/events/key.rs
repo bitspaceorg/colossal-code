@@ -89,6 +89,34 @@ impl Default for KeyEventHandler {
                 KeyEventRegister::n(vec![KeyEvent::Char('v')]),
                 SwitchMode(EditorMode::Visual).into(),
             ),
+            // Go into insert mode
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('i')]),
+                SwitchMode(EditorMode::Insert).into(),
+            ),
+            // Go into insert mode after cursor (append)
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('a')]),
+                Append.into(),
+            ),
+            // Go into insert mode at end of line
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('A')]),
+                Composed(vec![
+                    MoveToEndOfLine().into(),
+                    SwitchMode(EditorMode::Insert).into(),
+                ]).into(),
+            ),
+            // Open new line below and enter insert mode
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('o')]),
+                AppendNewline(1).into(),
+            ),
+            // Open new line above and enter insert mode
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('O')]),
+                InsertNewline(1).into(),
+            ),
             // Goes into search mode and starts of a new search.
             (
                 KeyEventRegister::n(vec![KeyEvent::Char('/')]),
@@ -356,6 +384,11 @@ impl Default for KeyEventHandler {
                 KeyEventRegister::n(vec![KeyEvent::Char('y'), KeyEvent::Char('y')]),
                 CopyLine.into(),
             ),
+            // Delete line with dd
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('d'), KeyEvent::Char('d')]),
+                DeleteLine(1).into(),
+            ),
             // Paste
             (KeyEventRegister::n(vec![KeyEvent::Char('p')]), Paste.into()),
             (
@@ -507,6 +540,7 @@ impl KeyEventHandler {
             // Always insert characters in insert mode
             KeyEvent::Char(c) if mode == EditorMode::Insert => InsertChar(c).execute(state),
             KeyEvent::Tab if mode == EditorMode::Insert => InsertChar('\t').execute(state),
+            KeyEvent::Backspace if mode == EditorMode::Insert => DeleteChar(1).execute(state),
             // Always add characters to search in search mode
             KeyEvent::Char(c) if mode == EditorMode::Search => AppendCharToSearch(c).execute(state),
             // Handle f/F/t/T keys in Normal and Visual modes

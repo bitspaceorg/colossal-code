@@ -598,6 +598,11 @@ impl RequestBuilder {
         self
     }
 
+    /// Get a reference to the messages in this request
+    pub fn messages(&self) -> &[IndexMap<String, MessageContent>] {
+        &self.messages
+    }
+
     pub fn set_sampler_topp(mut self, topp: f64) -> Self {
         self.sampling_params.top_p = Some(topp);
         self
