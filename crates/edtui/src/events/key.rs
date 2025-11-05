@@ -107,15 +107,21 @@ impl Default for KeyEventHandler {
                     SwitchMode(EditorMode::Insert).into(),
                 ]).into(),
             ),
-            // Open new line below and enter insert mode
+            // 'o' creates a newline and enters insert mode (allows input bar to grow up to 4 lines)
             (
                 KeyEventRegister::n(vec![KeyEvent::Char('o')]),
-                AppendNewline(1).into(),
+                Composed(vec![
+                    SwitchMode(EditorMode::Insert).into(),
+                    LineBreak(1).into(),
+                ]).into(),
             ),
-            // Open new line above and enter insert mode
+            // 'O' also creates a newline and enters insert mode
             (
                 KeyEventRegister::n(vec![KeyEvent::Char('O')]),
-                InsertNewline(1).into(),
+                Composed(vec![
+                    SwitchMode(EditorMode::Insert).into(),
+                    LineBreak(1).into(),
+                ]).into(),
             ),
             // Goes into search mode and starts of a new search.
             (
@@ -389,11 +395,126 @@ impl Default for KeyEventHandler {
                 KeyEventRegister::n(vec![KeyEvent::Char('d'), KeyEvent::Char('d')]),
                 DeleteLine(1).into(),
             ),
+            // Delete character under cursor with x
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('x')]),
+                RemoveChar(1).into(),
+            ),
+            // Delete to end of line with D
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('D')]),
+                DeleteToEndOfLine.into(),
+            ),
+            // Delete word with dw
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('d'), KeyEvent::Char('w')]),
+                Composed(vec![
+                    SelectInnerWord.into(),
+                    MoveWordForward(1).into(),
+                    DeleteSelection.into(),
+                ]).into(),
+            ),
+            // Delete inner word with diw
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('d'), KeyEvent::Char('i'), KeyEvent::Char('w')]),
+                Composed(vec![
+                    SelectInnerWord.into(),
+                    DeleteSelection.into(),
+                ]).into(),
+            ),
             // Paste
             (KeyEventRegister::n(vec![KeyEvent::Char('p')]), Paste.into()),
             (
                 KeyEventRegister::v(vec![KeyEvent::Char('p')]),
                 PasteOverSelection.into(),
+            ),
+            // Undo with u
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('u')]),
+                Undo.into(),
+            ),
+            // Redo with Ctrl+R
+            (
+                KeyEventRegister::n(vec![KeyEvent::Ctrl('r')]),
+                Redo.into(),
+            ),
+            // Insert at first non-blank character with I
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('I')]),
+                Composed(vec![
+                    MoveToFirst().into(),
+                    SwitchMode(EditorMode::Insert).into(),
+                ]).into(),
+            ),
+            // Join lines with J
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('J')]),
+                JoinLineWithLineBelow.into(),
+            ),
+            // Change inner word with ciw
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char('w')]),
+                ChangeInnerWord.into(),
+            ),
+            // Change inner double quotes with ci"
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char('"')]),
+                ChangeInnerBetween::new('"', '"').into(),
+            ),
+            // Change inner single quotes with ci'
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char('\'')]),
+                ChangeInnerBetween::new('\'', '\'').into(),
+            ),
+            // Change inner parentheses with ci(
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char('(')]),
+                ChangeInnerBetween::new('(', ')').into(),
+            ),
+            // Change inner parentheses with ci)
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char(')')]),
+                ChangeInnerBetween::new('(', ')').into(),
+            ),
+            // Change inner braces with ci{
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char('{')]),
+                ChangeInnerBetween::new('{', '}').into(),
+            ),
+            // Change inner braces with ci}
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char('}')]),
+                ChangeInnerBetween::new('{', '}').into(),
+            ),
+            // Change inner brackets with ci[
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char('[')]),
+                ChangeInnerBetween::new('[', ']').into(),
+            ),
+            // Change inner brackets with ci]
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char(']')]),
+                ChangeInnerBetween::new('[', ']').into(),
+            ),
+            // Delete selection in visual mode with d
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('d')]),
+                DeleteSelection.into(),
+            ),
+            // Delete selection in visual mode with x
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('x')]),
+                DeleteSelection.into(),
+            ),
+            // Change selection in visual mode with c
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('c')]),
+                ChangeSelection.into(),
+            ),
+            // Join lines in visual mode with J
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('J')]),
+                JoinLineWithLineBelow.into(),
             ),
         ]);
 

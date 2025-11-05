@@ -321,7 +321,13 @@ impl App {
 
     fn load_history(history_file: &std::path::Path) -> Vec<String> {
         if let Ok(contents) = std::fs::read_to_string(history_file) {
-            contents.lines().map(|s| s.to_string()).collect()
+            contents.lines()
+                .map(|s| {
+                    // Unescape newlines: \n becomes actual newline
+                    s.replace("\\n", "\n")
+                        .replace("\\\\", "\\")  // Handle escaped backslashes
+                })
+                .collect()
         } else {
             Vec::new()
         }
@@ -340,8 +346,16 @@ impl App {
             self.command_history.drain(0..self.command_history.len() - 1000);
         }
 
-        // Write to file
-        let contents = self.command_history.join("\n");
+        // Write to file - escape newlines and backslashes
+        let escaped_history: Vec<String> = self.command_history
+            .iter()
+            .map(|cmd| {
+                // Escape backslashes first, then newlines
+                cmd.replace("\\", "\\\\")
+                    .replace("\n", "\\n")
+            })
+            .collect();
+        let contents = escaped_history.join("\n");
         let _ = std::fs::write(&self.history_file_path, contents);
     }
 
@@ -1436,10 +1450,10 @@ impl App {
                 continue;
             }
 
-            // Skip thinking summaries - we want full agent responses, not summaries
-            if message.starts_with("├── ") {
-                continue;
-            }
+            // Don't skip thinking summaries - we want to render them as static tree lines
+            // if message.starts_with("├── ") {
+            //     continue;
+            // }
 
             match msg_type {
                 Some(MessageType::User) => {
@@ -2405,12 +2419,17 @@ impl App {
                                         // Esc is now handled earlier (before agent interrupt check)
                                         // Let edtui handle the key event first (but not Enter, Ctrl+C, Up/Down for history, or Esc for interrupts)
                                         let handled = match key.code {
-                                            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) || c != 'c' => {
-                                                self.vim_input_editor.handle_event(Event::Key(key));
-                                                self.sync_vim_input();
-                                                // Update autocomplete after vim input changes
-                                                self.update_autocomplete();
-                                                true
+                                            KeyCode::Char(c) => {
+                                                // Skip Ctrl+C - let it fall through to quit confirmation
+                                                if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
+                                                    false
+                                                } else {
+                                                    self.vim_input_editor.handle_event(Event::Key(key));
+                                                    self.sync_vim_input();
+                                                    // Update autocomplete after vim input changes
+                                                    self.update_autocomplete();
+                                                    true
+                                                }
                                             }
                                             KeyCode::Backspace | KeyCode::Delete | KeyCode::Home | KeyCode::End |
                                             KeyCode::Left | KeyCode::Right => {
@@ -3450,6 +3469,13 @@ impl App {
                         let mut lines_needed = 1u16;
                         let mut current_width = prompt_width;
                         for c in content_str.chars() {
+                            // Handle newlines explicitly - they create new lines
+                            if c == '\n' {
+                                lines_needed += 1;
+                                current_width = indent_width;
+                                continue;
+                            }
+
                             let cw = UnicodeWidthChar::width(c).unwrap_or(1) as u16;
                             if current_width + cw > max_width {
                                 lines_needed += 1;
@@ -3715,6 +3741,15 @@ impl App {
                         cursor_row = row;
                         cursor_col = col;
                     }
+
+                    // Handle newlines explicitly - advance to next row
+                    if c == '\n' {
+                        row += 1;
+                        col = indent_width;
+                        char_idx += 1;
+                        continue;
+                    }
+
                     let cw = UnicodeWidthChar::width(c).unwrap_or(1) as u16;
                     if col + cw > max_width {
                         row += 1;
@@ -3732,6 +3767,18 @@ impl App {
                 let mut current_width: u16 = prompt_width;
                 let mut current_buf: String = String::new();
                 for c in content_str.chars() {
+                    // Handle newlines explicitly - create actual line break
+                    if c == '\n' {
+                        if !current_buf.is_empty() {
+                            current_line.push(Span::styled(current_buf, content_style));
+                            current_buf = String::new();
+                        }
+                        lines.push(Line::from(current_line));
+                        current_line = vec![Span::raw(indent)];
+                        current_width = indent_width;
+                        continue;
+                    }
+
                     let cw = UnicodeWidthChar::width(c).unwrap_or(1) as u16;
                     let would_overflow = current_width + cw > max_width;
                     if would_overflow {

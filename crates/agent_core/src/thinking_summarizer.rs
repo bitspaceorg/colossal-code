@@ -47,7 +47,7 @@ pub struct ThinkingSummarizer {
 }
 
 impl ThinkingSummarizer {
-    const TOKEN_THRESHOLD: usize = 50;
+    const TOKEN_THRESHOLD: usize = 200;
 
     pub fn new() -> Self {
         Self {
@@ -97,7 +97,7 @@ impl ThinkingSummarizer {
         let system_prompt = "You are SmolLM, a compact and helpful model. You convert a reasoning trace into a concise summary.";
   
         let request_body = ChatRequestBody {
-            model: "reasoning-summarizer-V0:135M".to_string(),
+            model: "reasoning-summarizer:v0".to_string(),
             messages: vec![
                 Message {
                     role: "system".to_string(),
