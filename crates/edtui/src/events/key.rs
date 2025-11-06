@@ -236,7 +236,8 @@ impl Default for KeyEventHandler {
             ),
             (KeyEventRegister::n(vec![KeyEvent::Up]), MoveUp(1).into()),
             (KeyEventRegister::v(vec![KeyEvent::Up]), MoveUp(1).into()),
-            (KeyEventRegister::i(vec![KeyEvent::Up]), MoveUp(1).into()),
+            // Don't bind Up in Insert mode - let it fall through to history navigation
+            // (KeyEventRegister::i(vec![KeyEvent::Up]), MoveUp(1).into()),
             // Move cursor down
             (
                 KeyEventRegister::n(vec![KeyEvent::Char('j')]),
@@ -254,10 +255,11 @@ impl Default for KeyEventHandler {
                 KeyEventRegister::v(vec![KeyEvent::Down]),
                 MoveDown(1).into(),
             ),
-            (
-                KeyEventRegister::i(vec![KeyEvent::Down]),
-                MoveDown(1).into(),
-            ),
+            // Don't bind Down in Insert mode - let it fall through to history navigation
+            // (
+            //     KeyEventRegister::i(vec![KeyEvent::Down]),
+            //     MoveDown(1).into(),
+            // ),
             // Move one word forward/backward
             (
                 KeyEventRegister::n(vec![KeyEvent::Char('w')]),

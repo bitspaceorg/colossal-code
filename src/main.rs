@@ -524,6 +524,11 @@ impl App {
                 if let Some(temp) = self.temp_input.take() {
                     self.input = temp;
                     self.character_index = self.input.chars().count();
+                } else {
+                    // No temp input saved (e.g., entered history without typing first)
+                    // Clear the input
+                    self.input.clear();
+                    self.character_index = 0;
                 }
             }
         }
@@ -2553,27 +2558,18 @@ impl App {
                                                 } else {
                                                     self.autocomplete_selected_index -= 1;
                                                 }
+                                            } else if self.vim_mode_enabled {
+                                                // In vim mode: Up arrow ALWAYS navigates history
+                                                // Use j/k keys for cursor movement within text
+                                                self.navigate_history_backwards();
                                             } else {
-                                                let cursor_row = self.get_cursor_row();
-                                                if cursor_row == 0 {
-                                                    // On first line
-                                                    if self.is_at_start_of_first_line() {
-                                                        // At start of first line - navigate history backwards
-                                                        self.navigate_history_backwards();
-                                                    } else {
-                                                        // Not at start - move to start of line
-                                                        self.move_to_start_of_line();
-                                                    }
+                                                // In normal mode: go to (0,0) first, then history
+                                                if self.is_at_start_of_first_line() {
+                                                    // Already at (0,0) - navigate history backwards
+                                                    self.navigate_history_backwards();
                                                 } else {
-                                                    // Not on first line - normal cursor movement up
-                                                    let max_width = terminal.current_buffer_mut().area().width.saturating_sub(4);
-                                                    let prompt_width = 4u16;
-                                                    let indent_width = 4u16;
-                                                    self.move_cursor_up(max_width, prompt_width, indent_width);
-                                                    // Sync to vim editor if vim mode enabled
-                                                    if self.vim_mode_enabled {
-                                                        self.sync_input_to_vim();
-                                                    }
+                                                    // Not at (0,0) - move to position (0,0)
+                                                    self.character_index = 0;
                                                 }
                                             }
                                         }
@@ -2586,36 +2582,42 @@ impl App {
                                                 } else {
                                                     self.autocomplete_selected_index += 1;
                                                 }
-                                            } else if self.history_index.is_some() {
-                                                // In history mode
+                                            } else {
+                                                // Unified behavior for both vim and normal mode:
+                                                // Work with LOGICAL lines (split by \n), not visual rows
+                                                // 1. Move to END of next logical line
+                                                // 2. When on last line at end, navigate history
+
                                                 let lines: Vec<&str> = self.input.lines().collect();
-                                                let last_line_idx = lines.len().saturating_sub(1);
                                                 let cursor_row = self.get_cursor_row();
+                                                let last_line_idx = lines.len().saturating_sub(1);
 
                                                 if cursor_row < last_line_idx {
-                                                    // Not on last line - move down (staying in first column)
-                                                    let max_width = terminal.current_buffer_mut().area().width.saturating_sub(4);
-                                                    let prompt_width = 4u16;
-                                                    let indent_width = 4u16;
-                                                    self.move_cursor_down(max_width, prompt_width, indent_width);
-                                                    // Force cursor back to first column
-                                                    self.move_to_start_of_line();
+                                                    // Not on last logical line - move to END of next logical line
+                                                    let mut char_count = 0;
+                                                    for (row, line) in lines.iter().enumerate() {
+                                                        if row == cursor_row + 1 {
+                                                            // Found next line - move to its end
+                                                            self.character_index = char_count + line.chars().count();
+                                                            break;
+                                                        }
+                                                        char_count += line.chars().count() + 1; // +1 for newline
+                                                    }
+
+                                                    if self.vim_mode_enabled {
+                                                        self.sync_input_to_vim();
+                                                    }
                                                 } else if self.is_at_end_of_last_line() {
-                                                    // At end of last line - navigate to next history entry
-                                                    self.navigate_history_forwards();
+                                                    // At end of last line - navigate history
+                                                    if self.history_index.is_some() {
+                                                        self.navigate_history_forwards();
+                                                    }
                                                 } else {
                                                     // On last line but not at end - move to end
-                                                    self.move_to_end_of_line();
-                                                }
-                                            } else {
-                                                // Not in history mode - normal cursor movement
-                                                let max_width = terminal.current_buffer_mut().area().width.saturating_sub(4);
-                                                let prompt_width = 4u16;
-                                                let indent_width = 4u16;
-                                                self.move_cursor_down(max_width, prompt_width, indent_width);
-                                                // Sync to vim editor if vim mode enabled
-                                                if self.vim_mode_enabled {
-                                                    self.sync_input_to_vim();
+                                                    self.character_index = self.input.chars().count();
+                                                    if self.vim_mode_enabled {
+                                                        self.sync_input_to_vim();
+                                                    }
                                                 }
                                             }
                                         }
