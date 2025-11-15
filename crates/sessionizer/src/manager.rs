@@ -18,7 +18,6 @@ use std::sync::Arc;
 use qdrant_client::Qdrant;
 use std::path::PathBuf;
 use crate::hash_id::hash_id_exists;
-use regex::Regex;
 
 /// Clean shell output by removing prompts and command echoes
 fn clean_shell_output(output: &str, command: &str) -> String {
@@ -99,16 +98,37 @@ struct SessionMetadata {
     timeout_duration: Duration,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SessionManager {
     next_session_id: AtomicU32,
+    process_id: u32, // Store PID for unique session IDs across processes
     pub sessions: Mutex<Vec<(SessionId, ExecCommandSession)>>,
     pub persistent_shell_sessions: Mutex<Vec<(SessionId, PersistentShellSession)>>,
     pub semantic_search_sessions: Mutex<Vec<(SessionId, SemanticSearchSession)>>,
     session_metadata: Mutex<HashMap<SessionId, SessionMetadata>>,
 }
 
+impl Default for SessionManager {
+    fn default() -> Self {
+        Self {
+            next_session_id: AtomicU32::new(0),
+            process_id: std::process::id(),
+            sessions: Mutex::new(Vec::new()),
+            persistent_shell_sessions: Mutex::new(Vec::new()),
+            semantic_search_sessions: Mutex::new(Vec::new()),
+            session_metadata: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
 impl SessionManager {
+    /// Generate a globally unique session ID across all process instances
+    /// Format: {pid}_{counter} where pid ensures uniqueness across processes
+    fn generate_unique_session_id(&self) -> SessionId {
+        let counter = self.next_session_id.fetch_add(1, Ordering::SeqCst);
+        SessionId(format!("{}_{}", self.process_id, counter))
+    }
+
     /// Create a session metadata entry
     fn create_session_metadata(&self, session_id: SessionId, timeout_duration: Duration) {
         let metadata = SessionMetadata {
@@ -270,7 +290,7 @@ impl SessionManager {
             crate::safety::SafetyCheck::Reject { reason } => return Err(ColossalErr::Sandbox(SandboxErr::Denied(-1, reason, ()))), 
         };
         // eprintln!("Sandbox type: {:?}", sandbox_type);
-        let session_id = SessionId(self.next_session_id.fetch_add(1, Ordering::SeqCst).to_string());
+        let session_id = self.generate_unique_session_id();
         
         // Format the command as a string
         let formatted_command = params.shell.format_default_shell_invocation(params.command.clone(), false)
@@ -294,10 +314,10 @@ impl SessionManager {
         
         self.sessions.lock().unwrap().push((session_id.clone(), session));
         
-        // Create session metadata with a default timeout of 10 minutes
+        // Create session metadata with timeout (None for background processes)
         let timeout_duration = params.timeout_ms
             .map(Duration::from_millis)
-            .unwrap_or(Duration::from_secs(600)); // 10 minutes default
+            .unwrap_or(Duration::from_secs(600)); // 10 minutes default for foreground
         self.create_session_metadata(session_id.clone(), timeout_duration);
         let mut output_rx1 = {
             let sessions = self.sessions.lock().unwrap();
@@ -307,76 +327,144 @@ impl SessionManager {
             session.output_receiver()
         };
         
-        let cap_bytes = params.max_output_tokens.saturating_mul(4) as usize;
-        let mut stdout_buf = Vec::with_capacity(8192.min(cap_bytes));
-        let mut stderr_buf = Vec::with_capacity(8192.min(cap_bytes));
-        let mut aggregated_buf = Vec::with_capacity(8192.min(cap_bytes));
-        let start_time = Instant::now();
-        let deadline = start_time + Duration::from_millis(params.timeout_ms.unwrap_or(10000));
-        let mut exit_code: Option<i32> = None;
-        let mut exit_future = Box::pin(exit_rx);
-        loop {
-            if Instant::now() >= deadline {
-                // eprintln!("Command timed out after {}ms", params.timeout_ms.unwrap_or(10000));
-                break;
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            select! {
-                biased;
-                exit_result = &mut *exit_future => {
-                    match exit_result {
-                        Ok(code) => {
-                            // eprintln!("Process exited with code: {}", code);
-                            exit_code = Some(code);
-                        }
-                        Err(_) => {
-                            // eprintln!("Exit channel closed unexpectedly");
-                            exit_code = Some(-1);
-                        }
-                    }
-                    let grace_deadline = Instant::now() + Duration::from_millis(100);
-                    while Instant::now() < grace_deadline {
-                        match output_rx1.try_recv() {
+        // Handle background vs foreground execution differently
+        if params.is_background {
+            // Background execution: spawn a task to write output to log file
+            let log_file_path = std::path::PathBuf::from(format!("/tmp/shell_{}.log", session_id.as_str()));
+            let log_file_path_clone = log_file_path.clone();
+            let session_id_clone = session_id.clone();
+
+            tokio::spawn(async move {
+                let file = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&log_file_path_clone)
+                    .await;
+
+                if let Ok(mut file) = file {
+                    use tokio::io::AsyncWriteExt;
+                    let mut output_rx = output_rx1;
+                    loop {
+                        match output_rx.recv().await {
                             Ok(chunk) => {
-                                stdout_buf.extend_from_slice(&chunk);
-                                aggregated_buf.extend_from_slice(&chunk);
+                                if let Err(_) = file.write_all(&chunk).await {
+                                    break;
+                                }
+                                let _ = file.flush().await;
                             }
-                            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
-                            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
-                            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                            Err(_) => break,
                         }
                     }
+                }
+            });
+
+            // Return immediately with Ongoing status
+            Ok(ExecCommandOutput {
+                duration: Duration::from_secs(0),
+                exit_status: ExitStatus::Ongoing(session_id),
+                stdout: String::new(),
+                stderr: String::new(),
+                aggregated_output: format!("Background process started. Session ID: {}. Log file: {}", session_id_clone.as_str(), log_file_path.display()),
+                log_file: Some(log_file_path),
+            })
+        } else {
+            // Foreground execution: original behavior
+            let cap_bytes = params.max_output_tokens.saturating_mul(4) as usize;
+            let mut stdout_buf = Vec::with_capacity(8192.min(cap_bytes));
+            let stderr_buf = Vec::with_capacity(8192.min(cap_bytes));
+            let mut aggregated_buf = Vec::with_capacity(8192.min(cap_bytes));
+            let start_time = Instant::now();
+            let deadline = start_time + Duration::from_millis(params.timeout_ms.unwrap_or(10000));
+            let mut exit_code: Option<i32> = None;
+            let mut exit_future = Box::pin(exit_rx);
+            loop {
+                if Instant::now() >= deadline {
+                    // eprintln!("Command timed out after {}ms", params.timeout_ms.unwrap_or(10000));
                     break;
                 }
-                chunk = tokio::time::timeout(remaining, output_rx1.recv()) => {
-                    if let Ok(Ok(chunk)) = chunk {
-                        stdout_buf.extend_from_slice(&chunk);
-                        aggregated_buf.extend_from_slice(&chunk);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                select! {
+                    biased;
+                    exit_result = &mut *exit_future => {
+                        match exit_result {
+                            Ok(code) => {
+                                // eprintln!("Process exited with code: {}", code);
+                                exit_code = Some(code);
+                            }
+                            Err(_) => {
+                                // eprintln!("Exit channel closed unexpectedly");
+                                exit_code = Some(-1);
+                            }
+                        }
+                        let grace_deadline = Instant::now() + Duration::from_millis(100);
+                        while Instant::now() < grace_deadline {
+                            match output_rx1.try_recv() {
+                                Ok(chunk) => {
+                                    stdout_buf.extend_from_slice(&chunk);
+                                    aggregated_buf.extend_from_slice(&chunk);
+                                }
+                                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                            }
+                        }
+                        break;
+                    }
+                    chunk = tokio::time::timeout(remaining, output_rx1.recv()) => {
+                        if let Ok(Ok(chunk)) = chunk {
+                            stdout_buf.extend_from_slice(&chunk);
+                            aggregated_buf.extend_from_slice(&chunk);
+                        }
                     }
                 }
             }
-        }
-        let stdout = String::from_utf8_lossy(&truncate_output(stdout_buf, cap_bytes).text).to_string();
-        let stderr = String::from_utf8_lossy(&truncate_output(stderr_buf, cap_bytes).text).to_string();
-        let aggregated_output = String::from_utf8_lossy(&truncate_output(aggregated_buf, cap_bytes).text).to_string();
-        let exit_status = match exit_code {
-            Some(code) => ExitStatus::Completed { code },
-            None => {
-                if Instant::now() >= deadline {
-                    ExitStatus::Timeout
-                } else {
-                    ExitStatus::Killed
+            let stdout = String::from_utf8_lossy(&truncate_output(stdout_buf, cap_bytes).text).to_string();
+            let stderr = String::from_utf8_lossy(&truncate_output(stderr_buf, cap_bytes).text).to_string();
+            let aggregated_output = String::from_utf8_lossy(&truncate_output(aggregated_buf, cap_bytes).text).to_string();
+            let exit_status = match exit_code {
+                Some(code) => ExitStatus::Completed { code },
+                None => {
+                    if Instant::now() >= deadline {
+                        ExitStatus::Timeout
+                    } else {
+                        ExitStatus::Killed
+                    }
                 }
-            }
-        };
-        // eprintln!("Command completed with status: {:?}", exit_status);
-        Ok(ExecCommandOutput {
-            duration: Instant::now().duration_since(start_time),
-            exit_status,
-            stdout,
-            stderr,
-            aggregated_output,
-        })
+            };
+            // eprintln!("Command completed with status: {:?}", exit_status);
+            Ok(ExecCommandOutput {
+                duration: Instant::now().duration_since(start_time),
+                exit_status,
+                stdout,
+                stderr,
+                aggregated_output,
+                log_file: None,
+            })
+        }
+    }
+
+    /// Read output from a background process log file
+    pub async fn read_background_output(
+        &self,
+        session_id: SessionId,
+    ) -> Result<String, ColossalErr> {
+        let log_file_path = std::path::PathBuf::from(format!("/tmp/shell_{}.log", session_id.as_str()));
+
+        // Check if log file exists
+        if !log_file_path.exists() {
+            return Err(ColossalErr::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Log file not found for session {}", session_id.as_str()),
+            )));
+        }
+
+        // Read the log file
+        let contents = tokio::fs::read_to_string(&log_file_path)
+            .await
+            .map_err(|e| ColossalErr::Io(e))?;
+
+        Ok(contents)
     }
 
     pub async fn handle_write_stdin_request(
@@ -431,6 +519,7 @@ impl SessionManager {
             stdout,
             stderr,
             aggregated_output,
+            log_file: None,
         })
     }
 
@@ -453,7 +542,7 @@ impl SessionManager {
             crate::safety::SafetyCheck::Reject { reason } => return Err(ColossalErr::Sandbox(SandboxErr::Denied(-1, reason, ()))), 
         };
         // eprintln!("Sandbox type: {:?}", sandbox_type);
-        let session_id = SessionId(self.next_session_id.fetch_add(1, Ordering::SeqCst).to_string());
+        let session_id = self.generate_unique_session_id();
         
         // Format the command as a string
         let formatted_command = params.shell.format_default_shell_invocation(params.command.clone(), true)
@@ -599,7 +688,7 @@ impl SessionManager {
         shared_state: Arc<crate::session::SharedSessionState>,
         timeout_duration: Option<Duration>,
     ) -> Result<SessionId, ColossalErr> {
-        let session_id = SessionId(self.next_session_id.fetch_add(1, Ordering::SeqCst).to_string());
+        let session_id = self.generate_unique_session_id();
         
         let (session, _exit_rx) = crate::session::create_persistent_shell_session(
             shell,
@@ -715,6 +804,7 @@ impl SessionManager {
             stdout: cleaned_output.clone(),
             stderr: String::new(),
             aggregated_output: cleaned_output,
+            log_file: None,
         })
     }
 
@@ -735,8 +825,9 @@ impl SessionManager {
         // Update session activity
         self.update_session_activity(session_id);
         
-        // Send the input
-        writer_tx.send(input.into_bytes())
+        // Send the input with newline to execute it
+        let input_with_newline = format!("{}\n", input);
+        writer_tx.send(input_with_newline.into_bytes())
             .await
             .map_err(|_| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, "failed to send input to shell")))?;
         
@@ -1178,7 +1269,7 @@ impl SessionManager {
             crate::safety::SafetyCheck::Reject { reason } => return Err(ColossalErr::Sandbox(SandboxErr::Denied(-1, reason, ()))), 
         };
         // eprintln!("Sandbox type: {:?}", sandbox_type);
-        let session_id = SessionId(self.next_session_id.fetch_add(1, Ordering::SeqCst).to_string());
+        let session_id = self.generate_unique_session_id();
         
         // Format the command as a string
         let formatted_command = params.shell.format_default_shell_invocation(params.command.clone(), true)

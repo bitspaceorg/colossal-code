@@ -159,7 +159,11 @@ where
             Event::Html(html) => self.html(html, false),
             Event::InlineHtml(html) => self.html(html, true),
             Event::FootnoteReference(_) => {}
-            Event::TaskListMarker(_) => {}
+            Event::TaskListMarker(checked) => {
+                // Render task list checkboxes
+                let checkbox = if checked { "[✓] " } else { "[ ] " };
+                self.push_span(Span::raw(checkbox));
+            }
             Event::InlineMath(_) => {}
             Event::DisplayMath(_) => {}
         }

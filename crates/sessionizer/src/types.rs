@@ -12,6 +12,7 @@ pub struct ExecCommandParams {
     pub timeout_ms: Option<u64>,
     pub max_output_tokens: u32,
     pub sandbox_policy: crate::protocol::SandboxPolicy,
+    pub is_background: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +54,7 @@ pub struct ExecCommandOutput {
     pub stdout: String,
     pub stderr: String,
     pub aggregated_output: String,
+    pub log_file: Option<PathBuf>,
 }
 
 impl ExecCommandOutput {
@@ -61,13 +63,14 @@ impl ExecCommandOutput {
             "duration_ms": self.duration.as_millis(),
             "exit_status": match &self.exit_status {
                 ExitStatus::Completed { code } => serde_json::json!({ "Completed": { "code": code } }),
-                ExitStatus::Ongoing(_) => serde_json::json!("Ongoing"),
+                ExitStatus::Ongoing(session_id) => serde_json::json!({ "Ongoing": { "session_id": session_id.as_str() } }),
                 ExitStatus::Timeout => serde_json::json!("Timeout"),
                 ExitStatus::Killed => serde_json::json!("Killed"),
             },
             "stdout": self.stdout,
             "stderr": self.stderr,
             "aggregated_output": self.aggregated_output,
+            "log_file": self.log_file.as_ref().map(|p| p.to_string_lossy().to_string()),
         })
     }
 
@@ -83,6 +86,7 @@ impl ExecCommandOutput {
             "stdout": self.stdout,
             "stderr": self.stderr,
             "aggregated_output": self.aggregated_output,
+            "log_file": self.log_file.as_ref().map(|p| p.to_string_lossy().to_string()),
         })
     }
 }

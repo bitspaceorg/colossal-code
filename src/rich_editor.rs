@@ -207,10 +207,18 @@ pub fn create_rich_content_from_messages(messages: &[String], message_types: &[c
             }
         }
 
+        // Handle messages starting with " ⎿ " in DarkGray
+        if message.starts_with(" ⎿ ") {
+            content.push(Line::from(vec![Span::styled(
+                format!(" {}", message),
+                ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)
+            )]));
+            continue;
+        }
+
         // Handle other special cases
         if message == "● Interrupted"
             || message.starts_with("[COMMAND:")
-            || message.starts_with(" ⎿ ")
             || message.starts_with("├── ")
             || message.contains("tok/sec") {  // Generation stats
             content.push(Line::from(vec![Span::raw(format!(" {}", message))]));
@@ -394,7 +402,7 @@ pub fn create_plain_content_for_editor(messages: &[String], message_types: &[cra
             }
         }
 
-        // Handle other special cases
+        // Handle other special cases (plain text version doesn't support colors)
         if message == "● Interrupted"
             || message.starts_with("[COMMAND:")
             || message.starts_with(" ⎿ ")

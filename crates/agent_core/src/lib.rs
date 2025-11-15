@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use serde::Serialize;
 use tokenizers::Tokenizer;
 use colossal_linux_sandbox::protocol::SandboxPolicy;
-use colossal_linux_sandbox::types::ExitStatus;
+use colossal_linux_sandbox::types::{ExitStatus, SessionId};
 use colossal_linux_sandbox::tools::execute_tools_with_sandbox;
 use once_cell::sync::OnceCell;
 
@@ -25,6 +25,8 @@ struct GlobalState {
     shell_session_id: tokio::sync::Mutex<Option<colossal_linux_sandbox::types::SessionId>>,
     shell: colossal_linux_sandbox::shell::Shell,
     sandbox_policy: SandboxPolicy,
+    // Track if current session has a background process running
+    session_has_background_process: tokio::sync::Mutex<bool>,
 }
 
 static GLOBAL_STATE: OnceCell<GlobalState> = OnceCell::new();
@@ -130,6 +132,7 @@ async fn ensure_global_state_initialized() {
             shell_session_id: tokio::sync::Mutex::new(None),
             shell,
             sandbox_policy,
+            session_has_background_process: tokio::sync::Mutex::new(false),
         });
     }
 }
@@ -139,8 +142,12 @@ async fn get_or_create_shell_session() -> Result<(Arc<colossal_linux_sandbox::ma
 
     let state = GLOBAL_STATE.get().unwrap();
     let mut session_id_lock = state.shell_session_id.lock().await;
+    let has_background = state.session_has_background_process.lock().await;
 
-    if session_id_lock.is_none() {
+    // Create new session if:
+    // 1. No session exists yet, OR
+    // 2. Current session has a background process running
+    if session_id_lock.is_none() || *has_background {
         let workspace_path = std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
 
@@ -177,24 +184,81 @@ async fn execute_tool_call(tool_call: &ToolCallResponse) -> Result<String> {
 
     match name.as_str() {
         "exec_command" => {
-            let (manager, session_id) = get_or_create_shell_session().await?;
+            let state = GLOBAL_STATE.get().unwrap();
             let command = arguments["command"].as_str().unwrap_or("");
+            let is_background = arguments.get("is_background").and_then(|v| v.as_bool()).unwrap_or(false);
 
-            let result = manager.exec_command_in_shell_session(
-                session_id,
-                command.to_string(),
-                Some(5000),
-                1000,
-            ).await?;
+            // Get or create shell session (will create new one if current has background process)
+            let (manager, session_id) = get_or_create_shell_session().await?;
 
-            let is_success = matches!(result.exit_status, ExitStatus::Completed { code } if code == 0);
-            let exec_result = ExecCommandResult {
-                command: command.to_string(),
-                status: if is_success { "Success".to_string() } else { "Failure".to_string() },
-                cmd_out: result.aggregated_output,
-                message: if is_success { None } else { Some(format!("{:?}", result.exit_status)) },
-            };
-            Ok(serde_yaml::to_string(&exec_result)?)
+            if is_background {
+                // Mark session as busy BEFORE starting the command
+                let mut has_background = state.session_has_background_process.lock().await;
+                *has_background = true;
+                drop(has_background); // Release lock
+
+                // Create log file for background output
+                let log_file_path = format!("/tmp/shell_{}.log", session_id.as_str());
+
+                // Run command in background with output redirected to log file
+                // Strip trailing & if present since we'll add it with redirection
+                let command_clean = command.trim_end().trim_end_matches('&').trim_end();
+                let bg_command = format!("{} > {} 2>&1 &", command_clean, log_file_path);
+                manager.send_input_to_shell_session(
+                    session_id.clone(),
+                    bg_command,
+                ).await?;
+
+                let exec_result = serde_json::json!({
+                    "command": command,
+                    "status": "Background",
+                    "session_id": session_id.as_str(),
+                    "log_file": log_file_path,
+                    "message": format!("Command started in background. Session ID: {}. Log file: {}", session_id.as_str(), log_file_path)
+                });
+                Ok(serde_yaml::to_string(&exec_result)?)
+            } else {
+                // Foreground command - wait for completion
+                let result = manager.exec_command_in_shell_session(
+                    session_id.clone(),
+                    command.to_string(),
+                    Some(5000),
+                    1000,
+                ).await?;
+
+                let is_success = matches!(result.exit_status, ExitStatus::Completed { code } if code == 0);
+                let exec_result = ExecCommandResult {
+                    command: command.to_string(),
+                    status: if is_success { "Success".to_string() } else { "Failure".to_string() },
+                    cmd_out: result.aggregated_output,
+                    message: if is_success { None } else { Some(format!("{:?}", result.exit_status)) },
+                };
+                Ok(serde_yaml::to_string(&exec_result)?)
+            }
+        },
+        "read_output" => {
+            let state = GLOBAL_STATE.get().unwrap();
+            let session_id_str = arguments["session_id"].as_str().unwrap_or("");
+            let session_id = SessionId::new(session_id_str.to_string());
+
+            match state.manager.read_background_output(session_id).await {
+                Ok(output) => {
+                    let result = serde_json::json!({
+                        "status": "Success",
+                        "session_id": session_id_str,
+                        "output": output
+                    });
+                    Ok(serde_yaml::to_string(&result)?)
+                },
+                Err(e) => {
+                    let result = serde_json::json!({
+                        "status": "Failure",
+                        "session_id": session_id_str,
+                        "error": format!("Failed to read output: {}", e)
+                    });
+                    Ok(serde_yaml::to_string(&result)?)
+                }
+            }
         },
         "read_file" | "delete_path" | "delete_many" | "get_files" | "get_files_recursive" | "search_files_with_regex" | "edit_file" | "semantic_search" => {
             let state = GLOBAL_STATE.get().unwrap();
@@ -347,6 +411,15 @@ async fn execute_tool_call(tool_call: &ToolCallResponse) -> Result<String> {
                 },
             }
         },
+        "todo_write" => {
+            // Return the todos array as JSON for the main app to save
+            let todos = &arguments["todos"];
+            let result = serde_json::json!({
+                "status": "Success",
+                "todos": todos
+            });
+            Ok(serde_json::to_string(&result)?)
+        },
         _ => Ok(format!("Tool '{}' executed (not fully implemented)", name))
     }
 }
@@ -376,12 +449,18 @@ pub enum AgentMessage {
     Error(String),
     /// Cancel the current generation and finalize the response
     Cancel,
+    /// Clear the conversation context/history
+    ClearContext,
+    /// Background task started
+    BackgroundTaskStarted(String, String, String), // (session_id, command, log_file)
     /// Agent has finished processing
     Done,
     /// Model has finished loading
     ModelLoaded,
     /// Generation statistics (tokens/sec, token_count, time_to_first_token, stop_reason)
     GenerationStats(f32, usize, f32, String), // (tok_per_sec, token_count, time_to_first_token_sec, stop_reason)
+    /// Reload the model with a new model file
+    ReloadModel(String), // (model_filename)
 }
 
 /// Agent instance that can be used from the TUI
@@ -389,7 +468,7 @@ pub enum AgentMessage {
 pub struct Agent {
     model: Arc<Mutex<Option<Arc<Model>>>>,
     model_path: String,
-    model_files: Vec<String>,
+    model_files: Arc<Mutex<Vec<String>>>,
     system_prompt: String,
     tools: Vec<Tool>,
     thinking_summarizer: Arc<Mutex<thinking_summarizer::ThinkingSummarizer>>,
@@ -413,7 +492,7 @@ impl Agent {
         Self {
             model: Arc::new(Mutex::new(None)),
             model_path,
-            model_files,
+            model_files: Arc::new(Mutex::new(model_files)),
             system_prompt,
             tools,
             thinking_summarizer: Arc::new(Mutex::new(thinking_summarizer::ThinkingSummarizer::new())),
@@ -425,6 +504,11 @@ impl Agent {
 
     /// Create a new agent with default configuration
     pub async fn new_with_defaults() -> Result<Self> {
+        Self::new_with_model(None).await
+    }
+
+    /// Create a new agent with a specific model (or default if None)
+    pub async fn new_with_model(model_filename: Option<String>) -> Result<Self> {
         // Initialize config
         if let Err(e) = initialize_config() {
             eprintln!("Warning: Failed to initialize config: {}", e);
@@ -467,7 +551,7 @@ impl Agent {
             .replace("{workspace_path}", &workspace_path);
 
         let model_path = "/home/wise/.config/.nite/models".to_string();
-        let model_files = vec!["Qwen_Qwen3-4B-Thinking-2507-Q8_0.gguf".to_string()];
+        let model_files = vec![model_filename.unwrap_or_else(|| "Qwen_Qwen3-4B-Thinking-2507-Q8_0.gguf".to_string())];
 
         // Load tokenizer from HuggingFace (Qwen2.5 tokenizer)
         // Suppress output during loading
@@ -557,9 +641,10 @@ impl Agent {
                     }
 
                     // Load the model
+                    let model_files = self.model_files.lock().await.clone();
                     let model = GgufModelBuilder::new(
                         self.model_path.clone(),
-                        self.model_files.clone(),
+                        model_files,
                     )
                     .build()
                     .await?;
@@ -575,9 +660,10 @@ impl Agent {
                     *model_guard = Some(Arc::new(model));
                 } else {
                     // Fallback if /dev/null can't be opened
+                    let model_files = self.model_files.lock().await.clone();
                     let model = GgufModelBuilder::new(
                         self.model_path.clone(),
-                        self.model_files.clone(),
+                        model_files,
                     )
                     .build()
                     .await?;
@@ -589,9 +675,10 @@ impl Agent {
             #[cfg(not(unix))]
             {
                 // On non-Unix systems, just load normally
+                let model_files = self.model_files.lock().await.clone();
                 let model = GgufModelBuilder::new(
                     self.model_path.clone(),
-                    self.model_files.clone(),
+                    model_files,
                 )
                 .build()
                 .await?;
@@ -601,6 +688,22 @@ impl Agent {
         }
 
         Ok(model_guard.as_ref().unwrap().clone())
+    }
+
+    /// Reload the model with a new model file
+    /// This clears the cached model and updates the model_files to use the new file
+    /// The model will be lazy-loaded on the next get_model() call
+    pub async fn reload_model(&self, new_model_filename: String) -> Result<()> {
+        // Clear the cached model
+        let mut model_guard = self.model.lock().await;
+        *model_guard = None;
+        drop(model_guard);
+
+        // Update the model files
+        let mut model_files_guard = self.model_files.lock().await;
+        *model_files_guard = vec![new_model_filename];
+
+        Ok(())
     }
 
     /// Request cancellation of the current generation
@@ -622,6 +725,40 @@ impl Agent {
     pub async fn clear_conversation(&self) {
         let mut conversation_guard = self.conversation.lock().await;
         *conversation_guard = None;
+    }
+
+    /// Restore conversation from JSON string
+    /// Takes a JSON array of messages with "role" and "content" fields
+    pub async fn restore_conversation(&self, messages_json: &str) -> Result<()> {
+        let messages: Vec<Value> = serde_json::from_str(messages_json)?;
+
+        // Create a new RequestBuilder
+        let mut request_builder = RequestBuilder::new()
+            .enable_thinking(true)
+            .set_tools(self.tools.clone())
+            .set_tool_choice(ToolChoice::Auto);
+
+        // Add each message to the RequestBuilder
+        for message in messages {
+            if let (Some(role_str), Some(content_str)) = (
+                message.get("role").and_then(|r| r.as_str()),
+                message.get("content").and_then(|c| c.as_str())
+            ) {
+                let role = match role_str {
+                    "system" => TextMessageRole::System,
+                    "user" => TextMessageRole::User,
+                    "assistant" => TextMessageRole::Assistant,
+                    _ => continue, // Skip unknown roles
+                };
+                request_builder = request_builder.add_message(role, content_str);
+            }
+        }
+
+        // Store the restored conversation
+        let mut conversation_guard = self.conversation.lock().await;
+        *conversation_guard = Some(request_builder);
+
+        Ok(())
     }
 
     /// Export the conversation directly from RequestBuilder
@@ -997,6 +1134,21 @@ impl Agent {
                                 tool_call.function.name.clone(),
                                 result.clone()
                             ));
+
+                            // Check if this was a background exec_command and extract session info
+                            if tool_call.function.name == "exec_command" {
+                                if let Ok(parsed) = serde_yaml::from_str::<serde_json::Value>(&result) {
+                                    if let Some(status) = parsed.get("status").and_then(|v| v.as_str()) {
+                                        if status == "Background" {
+                                            let session_id = parsed.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                            let command = parsed.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                            let log_file = parsed.get("log_file").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                            let _ = tx.send(AgentMessage::BackgroundTaskStarted(session_id, command, log_file));
+                                        }
+                                    }
+                                }
+                            }
+
                             result
                         },
                         Err(e) => {
@@ -1043,4 +1195,40 @@ pub async fn create_chat_session() -> Result<(Agent, mpsc::UnboundedReceiver<Age
     let agent = Agent::new_with_defaults().await?;
     let (_tx, rx) = mpsc::unbounded_channel();
     Ok((agent, rx))
+}
+
+/// Kill a background shell session by session ID
+/// This is a standalone function that can be called directly from the TUI
+pub async fn kill_shell_session(session_id: String) -> Result<()> {
+    ensure_global_state_initialized().await;
+    let state = GLOBAL_STATE.get().unwrap();
+
+    // Create session ID
+    let session_id_obj = colossal_linux_sandbox::types::SessionId::new(session_id.clone());
+
+    // First, try to kill all background jobs in the shell
+    // This will kill the background processes before terminating the shell
+    let kill_jobs_cmd = "kill $(jobs -p) 2>/dev/null || true";
+    let _ = state.manager.send_input_to_shell_session(
+        session_id_obj.clone(),
+        kill_jobs_cmd.to_string(),
+    ).await;
+
+    // Give it a moment to kill the jobs
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Terminate the session
+    state.manager.terminate_session(session_id_obj.clone()).await?;
+
+    // If this was the current shell session, clear it
+    let mut session_id_lock = state.shell_session_id.lock().await;
+    if let Some(current_id) = session_id_lock.as_ref() {
+        if current_id.as_str() == session_id_obj.as_str() {
+            *session_id_lock = None;
+            let mut has_background = state.session_has_background_process.lock().await;
+            *has_background = false;
+        }
+    }
+
+    Ok(())
 }

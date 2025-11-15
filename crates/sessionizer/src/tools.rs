@@ -5,10 +5,10 @@ use crate::shell::Shell;
 use crate::types::ExecCommandParams;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use tokio::process::Command;
 
 pub async fn exec_command(
     command: Vec<String>,
+    is_background: bool,
     _is_session: bool,
     _is_streaming: bool,
     manager: &SessionManager,
@@ -17,21 +17,35 @@ pub async fn exec_command(
     _approved_commands: &HashSet<Vec<String>>,
 ) -> Result<serde_json::Value, ColossalErr> {
     let cwd = std::env::current_dir().map_err(|e| ColossalErr::Io(e))?;
-    
+
     // Use the PTY-based command execution from the manager
     let params = ExecCommandParams {
         command,
         shell: shell.clone(),
         cwd,
         env: Default::default(),
-        timeout_ms: Some(10000),
+        timeout_ms: if is_background { None } else { Some(10000) },
         max_output_tokens: 1000,
         sandbox_policy: sandbox_policy.clone(),
+        is_background,
     };
 
     let result = manager.handle_exec_command_request(params).await?;
 
     Ok(result.to_json_value())
+}
+
+/// Read output from a background process
+pub async fn read_output(
+    session_id: String,
+    manager: &SessionManager,
+) -> Result<serde_json::Value, ColossalErr> {
+    let session_id = crate::types::SessionId::new(session_id);
+    let output = manager.read_background_output(session_id).await?;
+
+    Ok(serde_json::json!({
+        "output": output
+    }))
 }
 
 /// Execute the tools binary with sandboxing applied

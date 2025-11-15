@@ -1,9 +1,11 @@
 use color_eyre::Result;
-use std::{env, process::Command, time::{Duration, Instant}};
+use std::{env, process::Command, time::{Duration, Instant, SystemTime}, collections::HashMap};
 use sha2::{Sha256, Digest};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use ratatui::{
     crossterm::{
-        event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+        event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     },
     layout::{Constraint, Layout, Position},
     style::{Color, Modifier, Style},
@@ -38,18 +40,29 @@ const MESSAGE_BORDER_SET: symbols::border::Set = symbols::border::Set {
     horizontal_bottom: "─",
 };
 
+/// Todo item for tracking tasks (supports nesting)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TodoItem {
+    content: String,
+    status: String,  // pending, in_progress, completed
+    active_form: String,
+    #[serde(default)]
+    children: Vec<TodoItem>,
+}
+
 /// Available slash commands with descriptions for autocomplete
 const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("/bashes", "list and manage background tasks"),
     ("/clear", "clear conversation history and free up context"),
     ("/compact", "clear conversation history but keep a summary in context. optional: /compact [instructions for summarization]"),
     ("/exit", "exit the repl"),
     ("/export", "export the current conversation to a file or clipboard"),
+    ("/fork", "fork (copy) a saved conversation as a new conversation"),
     ("/help", "show help information and available commands"),
     ("/model", "set the ai model for colossal code"),
     ("/resume", "resume a conversation"),
     ("/review", "review uncommited changes"),
     ("/rewind", "restore the code and/or conversation to a previous point"),
+    ("/shells", "list and manage background shell sessions"),
     ("/status", "show tool statuses"),
     ("/stats", "show the total token count and duration of the current session"),
     ("/todos", "list current todo items"),
@@ -71,6 +84,32 @@ pub enum Mode {
     Visual,
     Search,
     SessionWindow,
+}
+
+/// Help panel tabs
+#[derive(Clone, Copy, PartialEq)]
+enum HelpTab {
+    General,
+    Commands,
+    CustomCommands,
+}
+
+impl HelpTab {
+    fn next(&self) -> Self {
+        match self {
+            HelpTab::General => HelpTab::Commands,
+            HelpTab::Commands => HelpTab::CustomCommands,
+            HelpTab::CustomCommands => HelpTab::General,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            HelpTab::General => "general",
+            HelpTab::Commands => "commands",
+            HelpTab::CustomCommands => "custom-commands",
+        }
+    }
 }
 
 /// AI Assistant modes (cycled with Shift+Tab)
@@ -116,6 +155,10 @@ async fn main() -> Result<()> {
     // Show loading spinner while initializing
     let terminal = ratatui::init();
 
+    // Enable bracketed paste mode for proper paste handling
+    use ratatui::crossterm::{execute, event::EnableBracketedPaste};
+    execute!(std::io::stdout(), EnableBracketedPaste)?;
+
     let app_result = {
         // Create a simple loading task that shows spinner
         let loading_handle = tokio::spawn(async {
@@ -142,21 +185,172 @@ async fn main() -> Result<()> {
         app.run(terminal).await
     };
 
+    // Disable bracketed paste mode before restoring terminal
+    use ratatui::crossterm::event::DisableBracketedPaste;
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+
     ratatui::restore();
     app_result
 }
 /// Message type to distinguish between user and agent messages
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MessageType {
     User,
     Agent,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 enum MessageState {
     Sent,        // Normal sent message
     Queued,      // Message queued, waiting to be sent
     Interrupted, // Message generation was interrupted (partial)
+}
+
+/// Saved conversation data structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SavedConversation {
+    id: String,
+    created_at: SystemTime,
+    updated_at: SystemTime,
+    git_branch: Option<String>,
+    working_directory: String,
+    message_count: usize,
+    preview: String,
+    messages: Vec<ConversationMessage>,
+    #[serde(default)]
+    forked_from: Option<String>,
+    #[serde(default)]
+    forked_at: Option<SystemTime>,
+}
+
+/// Individual message in a conversation (OLD FORMAT - kept for compatibility)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ConversationMessage {
+    role: String,  // "system", "user", "assistant"
+    content: String,
+}
+
+/// Enhanced saved conversation with complete UI state
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EnhancedSavedConversation {
+    id: String,
+    created_at: SystemTime,
+    updated_at: SystemTime,
+    git_branch: Option<String>,
+    working_directory: String,
+    message_count: usize,
+    preview: String,
+
+    // Complete UI message history
+    ui_messages: Vec<SavedUIMessage>,
+
+    // Agent conversation for LLM context restoration
+    agent_conversation: Option<String>,
+
+    // Fork metadata
+    #[serde(default)]
+    forked_from: Option<String>,
+    #[serde(default)]
+    forked_at: Option<SystemTime>,
+}
+
+/// Individual UI message with complete state
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SavedUIMessage {
+    content: String,
+    message_type: MessageType,
+    message_state: MessageState,
+    timestamp: SystemTime,
+    metadata: Option<UIMessageMetadata>,
+}
+
+/// Rich metadata for different message types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum UIMessageMetadata {
+    Thinking {
+        summaries: Vec<String>,
+        token_count: usize,
+        duration_secs: u64,
+    },
+    ToolCall {
+        tool_name: String,
+        arguments: String,
+        result: Option<String>,
+        status: String, // "started", "completed", "failed"
+    },
+    GenerationStats {
+        tokens_per_sec: f32,
+        token_count: usize,
+        time_to_first_token: f32,
+        stop_reason: String,
+    },
+    Error {
+        error_message: String,
+    },
+    Interrupt {
+        reason: String,
+    },
+    BackgroundTask {
+        session_id: String,
+        command: String,
+        log_file: String,
+    },
+    Command {
+        command: String,
+        feedback: String,
+    },
+}
+
+/// Model information with metadata
+#[derive(Debug, Clone)]
+struct ModelInfo {
+    filename: String,
+    display_name: String,
+    size_mb: f64,
+    quantization: Option<String>,
+    architecture: Option<String>,
+    parameter_count: Option<String>,
+    file_hash: Option<String>,
+    author: Option<String>,
+    version: Option<String>,
+}
+
+/// Metadata for displaying conversation in list
+#[derive(Debug, Clone)]
+struct ConversationMetadata {
+    id: String,
+    created_at: SystemTime,
+    updated_at: SystemTime,
+    git_branch: Option<String>,
+    message_count: usize,
+    preview: String,
+    file_path: std::path::PathBuf,
+    time_ago_str: String, // Static string calculated once
+    forked_from: Option<String>, // Parent conversation ID if this is a fork
+    forked_at: Option<SystemTime>, // When the fork was created
+}
+
+impl ConversationMetadata {
+    fn calculate_time_ago(updated_at: SystemTime) -> String {
+        let elapsed = updated_at.elapsed().unwrap_or(Duration::from_secs(0));
+        let secs = elapsed.as_secs();
+
+        if secs < 60 {
+            format!("{}s ago", secs)
+        } else if secs < 3600 {
+            format!("{}m ago", secs / 60)
+        } else if secs < 86400 {
+            format!("{}h ago", secs / 3600)
+        } else if secs < 604800 {
+            format!("{}d ago", secs / 86400)
+        } else if secs < 2592000 {
+            format!("{}w ago", secs / 604800)
+        } else if secs < 31536000 {
+            format!("{}mo ago", secs / 2592000)
+        } else {
+            format!("{}y ago", secs / 31536000)
+        }
+    }
 }
 
 /// Snapshot of UI state for frozen display in Navigation mode
@@ -182,6 +376,8 @@ struct App {
     messages: Vec<String>,
     message_types: Vec<MessageType>, // Track which messages are from user vs agent
     message_states: Vec<MessageState>, // Track state of each message
+    message_metadata: Vec<Option<UIMessageMetadata>>, // Rich metadata for each message
+    message_timestamps: Vec<SystemTime>, // Timestamp for each message
     input_modified: bool,
     mode: Mode,
     status_left: Line<'static>,
@@ -248,6 +444,8 @@ struct App {
     show_queue_choice: bool,  // Show the queue choice popup
     queue_choice_input: String,  // Collect user choice for queue
     interrupt_pending: Option<String>,  // Message waiting to send after cancel completes
+    export_pending: bool,  // Flag to trigger export in async context
+    save_pending: bool,    // Flag to trigger save conversation in async context
     // Navigation mode snapshot - frozen UI state while nav mode is active
     nav_snapshot: Option<AppSnapshot>,
     // Session manager window
@@ -261,37 +459,379 @@ struct App {
     // Vim keybindings toggle
     vim_mode_enabled: bool,
     vim_input_editor: RichEditor,
+    // Background tasks panel
+    show_background_tasks: bool,
+    background_tasks: Vec<(String, String, String, std::time::Instant)>, // (session_id, command, log_file, start_time)
+    background_tasks_selected: usize,
+    // Background task viewer
+    viewing_task: Option<(String, String, String, std::time::Instant)>, // (session_id, command, log_file, start_time)
+    // Help panel state
+    show_help: bool,
+    help_tab: HelpTab,
+    help_commands_selected: usize,
+    // Resume panel state
+    show_resume: bool,
+    resume_conversations: Vec<ConversationMetadata>,
+    resume_selected: usize,
+    resume_load_pending: bool,
+    is_fork_mode: bool,  // If true, next load will be a fork (new ID)
+    // Todos panel state
+    show_todos: bool,
+    // Conversation tracking (for update vs create)
+    current_conversation_id: Option<String>,
+    current_conversation_path: Option<std::path::PathBuf>,
+    // Fork metadata for current conversation
+    current_forked_from: Option<String>,
+    current_forked_at: Option<SystemTime>,
+    // Model selection panel state
+    show_model_selection: bool,
+    available_models: Vec<ModelInfo>,
+    model_selected_index: usize,
+    current_model: Option<String>,
 }
 impl App {
     fn get_config_file_path() -> Result<std::path::PathBuf> {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .map_err(|_| color_eyre::eyre::eyre!("Could not determine home directory"))?;
-        let config_dir = std::path::Path::new(&home).join(".config").join("nite");
+        let config_dir = std::path::Path::new(&home).join(".config").join(".nite");
         std::fs::create_dir_all(&config_dir)?;
         Ok(config_dir.join("nite.conf"))
     }
 
-    fn load_vim_mode_setting() -> bool {
+    fn load_config_value(key: &str) -> Option<String> {
         if let Ok(config_path) = Self::get_config_file_path() {
             if let Ok(content) = std::fs::read_to_string(config_path) {
                 for line in content.lines() {
-                    if line.starts_with("vim-keybind") {
+                    if line.starts_with(key) {
                         if let Some(value) = line.split('=').nth(1) {
-                            return value.trim() == "true";
+                            return Some(value.trim().to_string());
                         }
                     }
                 }
             }
         }
-        false
+        None
+    }
+
+    fn load_vim_mode_setting() -> bool {
+        Self::load_config_value("vim-keybind")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+    }
+
+    fn load_model_setting() -> Option<String> {
+        Self::load_config_value("model")
+    }
+
+    fn save_config(&self) -> Result<()> {
+        let config_path = Self::get_config_file_path()?;
+
+        // Read existing config to preserve other settings
+        let mut config_map = std::collections::HashMap::new();
+        if let Ok(content) = std::fs::read_to_string(&config_path) {
+            for line in content.lines() {
+                if let Some(idx) = line.find('=') {
+                    let key = line[..idx].trim();
+                    let value = line[idx + 1..].trim();
+                    config_map.insert(key.to_string(), value.to_string());
+                }
+            }
+        }
+
+        // Update with current values
+        config_map.insert("vim-keybind".to_string(), self.vim_mode_enabled.to_string());
+        if let Some(ref model) = self.current_model {
+            config_map.insert("model".to_string(), model.clone());
+        }
+
+        // Write back to file
+        let mut content = String::new();
+        for (key, value) in config_map.iter() {
+            content.push_str(&format!("{} = {}\n", key, value));
+        }
+        std::fs::write(config_path, content)?;
+        Ok(())
     }
 
     fn save_vim_mode_setting(&self) -> Result<()> {
-        let config_path = Self::get_config_file_path()?;
-        let content = format!("vim-keybind = {}\n", self.vim_mode_enabled);
-        std::fs::write(config_path, content)?;
+        self.save_config()
+    }
+
+    fn load_models(&mut self) -> Result<()> {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map_err(|_| color_eyre::eyre::eyre!("Could not determine home directory"))?;
+        let models_dir = std::path::Path::new(&home).join(".config").join(".nite").join("models");
+
+        if !models_dir.exists() {
+            self.available_models.clear();
+            return Ok(());
+        }
+
+        let mut models = Vec::new();
+        for entry in std::fs::read_dir(models_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("gguf") {
+                if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
+                    // Get file size
+                    let metadata = std::fs::metadata(&path)?;
+                    let size_bytes = metadata.len();
+                    let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
+
+                    // Extract metadata from filename
+                    let quantization = Self::extract_quantization(file_name);
+                    let architecture = Self::extract_architecture(file_name);
+                    let parameter_count = Self::extract_parameter_count(file_name);
+                    let author = Self::extract_author(file_name);
+                    let version = Self::extract_version(file_name);
+
+                    // Compute file hash (quick hash for integrity checking)
+                    let file_hash = Self::compute_file_hash(&path);
+
+                    // Create display name (remove .gguf extension)
+                    let display_name = file_name.strip_suffix(".gguf").unwrap_or(file_name).to_string();
+
+                    models.push(ModelInfo {
+                        filename: file_name.to_string(),
+                        display_name,
+                        size_mb,
+                        quantization,
+                        architecture,
+                        parameter_count,
+                        file_hash,
+                        author,
+                        version,
+                    });
+                }
+            }
+        }
+
+        // Sort models alphabetically by display name
+        models.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+        self.available_models = models;
+        self.model_selected_index = 0;
+
         Ok(())
+    }
+
+    fn extract_quantization(filename: &str) -> Option<String> {
+        // Common quantization patterns in GGUF filenames
+        let patterns = ["Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q3_K_M", "Q3_K_S", "Q2_K"];
+        for pattern in patterns {
+            if filename.to_uppercase().contains(pattern) {
+                return Some(pattern.to_string());
+            }
+        }
+        None
+    }
+
+    fn extract_architecture(filename: &str) -> Option<String> {
+        // Common model architectures in filenames
+        let architectures = [
+            ("qwen3", "Qwen3"),
+            ("qwen2.5", "Qwen2.5"),
+            ("qwen2", "Qwen2"),
+            ("qwen", "Qwen"),
+            ("llama-3.3", "Llama 3.3"),
+            ("llama-3.2", "Llama 3.2"),
+            ("llama-3.1", "Llama 3.1"),
+            ("llama-3", "Llama 3"),
+            ("llama3", "Llama 3"),
+            ("llama-2", "Llama 2"),
+            ("llama2", "Llama 2"),
+            ("llama", "Llama"),
+            ("mistral", "Mistral"),
+            ("mixtral", "Mixtral"),
+            ("phi-3", "Phi-3"),
+            ("phi3", "Phi-3"),
+            ("phi-2", "Phi-2"),
+            ("phi2", "Phi-2"),
+            ("gemma", "Gemma"),
+            ("deepseek", "DeepSeek"),
+            ("yi-", "Yi"),
+        ];
+
+        let lower = filename.to_lowercase();
+        for (pattern, name) in architectures {
+            if lower.contains(pattern) {
+                return Some(name.to_string());
+            }
+        }
+        None
+    }
+
+    fn extract_parameter_count(filename: &str) -> Option<String> {
+        // Extract parameter count from filename (e.g., 7B, 13B, 70B, 0.5B)
+        let patterns = [
+            (r"0.5[bB]", "0.5B"),
+            (r"1.5[bB]", "1.5B"),
+            (r"3[bB]", "3B"),
+            (r"4[bB]", "4B"),
+            (r"7[bB]", "7B"),
+            (r"8[bB]", "8B"),
+            (r"13[bB]", "13B"),
+            (r"14[bB]", "14B"),
+            (r"30[bB]", "30B"),
+            (r"34[bB]", "34B"),
+            (r"70[bB]", "70B"),
+        ];
+
+        for (pattern, value) in patterns {
+            if filename.contains(pattern) || filename.to_uppercase().contains(&pattern.to_uppercase()) {
+                return Some(value.to_string());
+            }
+        }
+        None
+    }
+
+    fn extract_author(filename: &str) -> Option<String> {
+        // Common author/publisher prefixes in model filenames
+        let lower = filename.to_lowercase();
+
+        // Check for organization prefixes (Org_ModelName or Org-ModelName patterns)
+        if lower.starts_with("meta-llama") || lower.starts_with("meta_llama") {
+            return Some("Meta".to_string());
+        }
+        if lower.starts_with("mistralai") || lower.starts_with("mistral-") {
+            return Some("Mistral AI".to_string());
+        }
+        if lower.starts_with("microsoft") {
+            return Some("Microsoft".to_string());
+        }
+        if lower.starts_with("google") {
+            return Some("Google".to_string());
+        }
+        if lower.starts_with("alibaba") || lower.starts_with("qwen") {
+            return Some("Alibaba".to_string());
+        }
+        if lower.starts_with("deepseek") {
+            return Some("DeepSeek".to_string());
+        }
+        if lower.starts_with("01-ai") || lower.starts_with("yi-") {
+            return Some("01.AI".to_string());
+        }
+
+        // Check for username_modelname pattern (common in HuggingFace)
+        if let Some(underscore_pos) = filename.find('_') {
+            if underscore_pos > 0 && underscore_pos < 20 {
+                let potential_author = &filename[..underscore_pos];
+                // Only return if it looks like a valid author (no numbers, reasonable length)
+                if !potential_author.chars().any(|c| c.is_numeric()) && potential_author.len() > 2 {
+                    return Some(potential_author.to_string());
+                }
+            }
+        }
+
+        None
+    }
+
+    fn extract_version(filename: &str) -> Option<String> {
+        // Extract version numbers from filename (e.g., v1, v2, 2024, etc.)
+        let lower = filename.to_lowercase();
+
+        // Check for v1, v2, v3 patterns
+        if lower.contains("v1.5") {
+            return Some("v1.5".to_string());
+        }
+        if lower.contains("v1") {
+            return Some("v1".to_string());
+        }
+        if lower.contains("v2") {
+            return Some("v2".to_string());
+        }
+        if lower.contains("v3") {
+            return Some("v3".to_string());
+        }
+
+        // Check for year-based versions (2024, 2025, etc.)
+        if lower.contains("2024") {
+            return Some("2024".to_string());
+        }
+        if lower.contains("2025") {
+            return Some("2025".to_string());
+        }
+        if lower.contains("2507") {
+            return Some("2507".to_string());
+        }
+
+        None
+    }
+
+    fn compute_file_hash(path: &std::path::Path) -> Option<String> {
+        use std::io::Read;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // For large files, only hash first and last 1MB for speed
+        let file = std::fs::File::open(path).ok()?;
+        let metadata = file.metadata().ok()?;
+        let file_size = metadata.len();
+
+        let mut hasher = DefaultHasher::new();
+
+        if file_size <= 2 * 1024 * 1024 {
+            // Small file, hash the whole thing
+            let mut buf = Vec::new();
+            std::fs::File::open(path).ok()?.read_to_end(&mut buf).ok()?;
+            buf.hash(&mut hasher);
+        } else {
+            // Large file, hash first 1MB + last 1MB + file size
+            let mut file = std::fs::File::open(path).ok()?;
+            let mut buf = vec![0u8; 1024 * 1024];
+
+            // Read first 1MB
+            file.read_exact(&mut buf).ok()?;
+            buf.hash(&mut hasher);
+
+            // Include file size in hash
+            file_size.hash(&mut hasher);
+
+            // Read last 1MB
+            use std::io::Seek;
+            file.seek(std::io::SeekFrom::End(-1024 * 1024)).ok()?;
+            file.read_exact(&mut buf).ok()?;
+            buf.hash(&mut hasher);
+        }
+
+        let hash = hasher.finish();
+        // Return first 12 characters of hex hash
+        Some(format!("{:012x}", hash))
+    }
+
+    fn initialize_config_file() -> Result<()> {
+        let config_path = Self::get_config_file_path()?;
+        // Only create if it doesn't exist
+        if !config_path.exists() {
+            let default_content = "vim-keybind = false\n";
+            std::fs::write(config_path, default_content)?;
+        }
+        Ok(())
+    }
+
+    fn initialize_conversations_dir() -> Result<()> {
+        let conversations_dir = Self::get_conversations_dir()?;
+        // Create the conversations directory if it doesn't exist
+        if !conversations_dir.exists() {
+            std::fs::create_dir_all(&conversations_dir)?;
+        }
+        Ok(())
+    }
+
+    // Helper method to add a message with full metadata tracking
+    fn add_message(
+        &mut self,
+        content: String,
+        message_type: MessageType,
+        message_state: MessageState,
+        metadata: Option<UIMessageMetadata>,
+    ) {
+        self.messages.push(content);
+        self.message_types.push(message_type);
+        self.message_states.push(message_state);
+        self.message_metadata.push(metadata);
+        self.message_timestamps.push(SystemTime::now());
     }
 
     fn get_history_file_path() -> Result<std::path::PathBuf> {
@@ -357,6 +897,70 @@ impl App {
             .collect();
         let contents = escaped_history.join("\n");
         let _ = std::fs::write(&self.history_file_path, contents);
+    }
+
+    /// Ensure conversation ID exists, generating one if needed
+    /// This should be called when the first real message is sent
+    fn ensure_conversation_id(&mut self) -> Result<()> {
+        if self.current_conversation_id.is_none() {
+            // Generate new conversation ID
+            let new_id = uuid::Uuid::new_v4().to_string();
+
+            // Get conversations directory
+            let conversations_dir = Self::get_conversations_dir()?;
+
+            // Create conversation-specific directory
+            let conversation_dir = conversations_dir.join(&new_id);
+            std::fs::create_dir_all(&conversation_dir)?;
+
+            // Set conversation ID and path (path will be set later during save)
+            self.current_conversation_id = Some(new_id);
+        }
+        Ok(())
+    }
+
+    /// Recursively parse a TodoItem from JSON
+    fn parse_todo_item(json: &serde_json::Value) -> Option<TodoItem> {
+        let content = json.get("content")?.as_str()?.to_string();
+        let status = json.get("status")?.as_str()?.to_string();
+        let active_form = json.get("activeForm")?.as_str()?.to_string();
+
+        // Recursively parse children
+        let children = if let Some(children_array) = json.get("children").and_then(|v| v.as_array()) {
+            children_array.iter()
+                .filter_map(|child| Self::parse_todo_item(child))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        Some(TodoItem {
+            content,
+            status,
+            active_form,
+            children,
+        })
+    }
+
+    /// Recursively format todos with indentation for display
+    fn format_todo_tree(todos: &[TodoItem], indent_level: usize, buffer: &mut String, counter: &mut usize) {
+        let indent = "  ".repeat(indent_level);
+        for todo in todos {
+            *counter += 1;
+            let status_icon = match todo.status.as_str() {
+                "completed" => "✓",
+                "in_progress" => "→",
+                "pending" => "○",
+                _ => "·",
+            };
+            buffer.push_str(&format!("{}{}. [{}] {}\n",
+                indent, counter, status_icon, todo.content));
+
+            // Recursively display children with increased indentation
+            if !todo.children.is_empty() {
+                Self::format_todo_tree(&todo.children, indent_level + 1, buffer, counter);
+            }
+        }
     }
 
     fn get_cursor_row(&self) -> usize {
@@ -551,8 +1155,15 @@ impl App {
         let history_file_path = Self::get_history_file_path()?;
         let command_history = Self::load_history(&history_file_path);
 
-        // Initialize agent and load model synchronously
-        let agent = Agent::new_with_defaults().await
+        // Initialize config file and directories
+        let _ = Self::initialize_config_file();
+        let _ = Self::initialize_conversations_dir();
+
+        // Load model selection from config
+        let current_model = Self::load_model_setting();
+
+        // Initialize agent with the selected model
+        let agent = Agent::new_with_model(current_model.clone()).await
             .map_err(|e| color_eyre::eyre::eyre!("Failed to initialize agent: {}", e))?;
 
         // Load model synchronously
@@ -583,6 +1194,36 @@ impl App {
                             // Request cancellation of current generation
                             agent_clone.request_cancel();
                         }
+                        AgentMessage::ClearContext => {
+                            // Clear the conversation context
+                            let agent_clone = agent_clone.clone();
+                            tokio::spawn(async move {
+                                agent_clone.clear_conversation().await;
+                            });
+                        }
+                        AgentMessage::ReloadModel(model_filename) => {
+                            // Reload the model with a new model file
+                            let agent_clone = agent_clone.clone();
+                            let tx_clone = output_tx_clone.clone();
+                            tokio::task::spawn_local(async move {
+                                match agent_clone.reload_model(model_filename).await {
+                                    Ok(_) => {
+                                        // Pre-load the model
+                                        match agent_clone.get_model().await {
+                                            Ok(_) => {
+                                                let _ = tx_clone.send(AgentMessage::ModelLoaded);
+                                            }
+                                            Err(e) => {
+                                                let _ = tx_clone.send(AgentMessage::Error(format!("Failed to load model: {}", e)));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = tx_clone.send(AgentMessage::Error(format!("Failed to reload model: {}", e)));
+                                    }
+                                }
+                            });
+                        }
                         _ => {
                             // Ignore other message types in the background thread
                         }
@@ -596,6 +1237,8 @@ impl App {
             messages: Vec::new(),
             message_types: Vec::new(),
             message_states: Vec::new(),
+            message_metadata: Vec::new(),
+            message_timestamps: Vec::new(),
             character_index: 0,
             input_modified: false,
             mode: Mode::Normal,
@@ -666,6 +1309,8 @@ impl App {
             show_queue_choice: false,
             queue_choice_input: String::new(),
             interrupt_pending: None,
+            export_pending: false,
+            save_pending: false,
             nav_snapshot: None,
             session_manager: SessionManager::new(),
             autocomplete_active: false,
@@ -675,6 +1320,27 @@ impl App {
             sandbox_enabled: false,
             vim_mode_enabled: Self::load_vim_mode_setting(),
             vim_input_editor: RichEditor::new(),
+            show_background_tasks: false,
+            background_tasks: Vec::new(),
+            background_tasks_selected: 0,
+            viewing_task: None,
+            show_help: false,
+            help_tab: HelpTab::General,
+            help_commands_selected: 0,
+            show_resume: false,
+            resume_conversations: Vec::new(),
+            resume_selected: 0,
+            resume_load_pending: false,
+            is_fork_mode: false,
+            show_todos: false,
+            current_conversation_id: None,
+            current_conversation_path: None,
+            current_forked_from: None,
+            current_forked_at: None,
+            show_model_selection: false,
+            available_models: Vec::new(),
+            model_selected_index: 0,
+            current_model,
         })
     }
     fn create_title_lines() -> Vec<Line<'static>> {
@@ -867,6 +1533,13 @@ impl App {
                         }
                         _ => return "Success".to_string(),
                     }
+                } else if status == Some("Background") {
+                    // Background command - show session info
+                    if let Some(session_id) = obj.get(&serde_yaml::Value::String("session_id".to_string()))
+                        .and_then(|v| v.as_str()) {
+                        return format!("Started in background (session {})", session_id);
+                    }
+                    return "Started in background".to_string();
                 } else if let Some(_err_status) = status {
                     // Get error message
                     if let Some(msg) = obj.get(&serde_yaml::Value::String("message".to_string()))
@@ -1229,6 +1902,7 @@ impl App {
         // Check if autocomplete should be triggered or updated
         self.update_autocomplete();
     }
+
     fn byte_index(&self) -> usize {
         self.input
             .char_indices()
@@ -1251,6 +1925,325 @@ impl App {
 
         // Update autocomplete after deletion
         self.update_autocomplete();
+    }
+
+    // Conversation persistence functions
+    fn get_conversations_dir() -> Result<std::path::PathBuf> {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map_err(|_| color_eyre::eyre::eyre!("Could not determine home directory"))?;
+        let conversations_dir = std::path::Path::new(&home)
+            .join(".config")
+            .join(".nite")
+            .join("conversations");
+        Ok(conversations_dir)
+    }
+
+    /// Get the path to the todos.json file for the current conversation
+    fn get_todos_path(&self) -> Result<std::path::PathBuf> {
+        if let Some(conversation_id) = &self.current_conversation_id {
+            let conversations_dir = Self::get_conversations_dir()?;
+            let conversation_dir = conversations_dir.join(conversation_id);
+            Ok(conversation_dir.join("todos.json"))
+        } else {
+            Err(color_eyre::eyre::eyre!("No active conversation"))
+        }
+    }
+
+    /// Save todos to the conversation-specific todos.json file
+    fn save_todos(&self, todos: &[TodoItem]) -> Result<()> {
+        let todos_path = self.get_todos_path()?;
+        let json = serde_json::to_string_pretty(todos)?;
+        std::fs::write(todos_path, json)?;
+        Ok(())
+    }
+
+    /// Load todos from the conversation-specific todos.json file
+    fn load_todos(&self) -> Result<Vec<TodoItem>> {
+        let todos_path = self.get_todos_path()?;
+        if todos_path.exists() {
+            let content = std::fs::read_to_string(todos_path)?;
+            let todos: Vec<TodoItem> = serde_json::from_str(&content)?;
+            Ok(todos)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    fn get_current_git_branch() -> Option<String> {
+        let current_dir = std::env::current_dir().ok()?;
+        let mut git_dir = current_dir.clone();
+
+        loop {
+            if git_dir.join(".git").exists() {
+                let head_path = git_dir.join(".git").join("HEAD");
+                if let Ok(head_content) = std::fs::read_to_string(&head_path) {
+                    if head_content.starts_with("ref: refs/heads/") {
+                        let branch = head_content
+                            .trim_start_matches("ref: refs/heads/")
+                            .trim()
+                            .to_string();
+                        return Some(branch);
+                    }
+                }
+                break;
+            }
+            if !git_dir.pop() {
+                break;
+            }
+        }
+        None
+    }
+
+    fn load_conversations_list(&mut self) -> Result<()> {
+        let conversations_dir = Self::get_conversations_dir()?;
+
+        if !conversations_dir.exists() {
+            self.resume_conversations.clear();
+            return Ok(());
+        }
+
+        let mut conversations = Vec::new();
+
+        for entry in std::fs::read_dir(conversations_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    // Try enhanced format first, fall back to old format
+                    if let Ok(conv) = serde_json::from_str::<EnhancedSavedConversation>(&content) {
+                        conversations.push(ConversationMetadata {
+                            time_ago_str: ConversationMetadata::calculate_time_ago(conv.updated_at),
+                            id: conv.id,
+                            created_at: conv.created_at,
+                            updated_at: conv.updated_at,
+                            git_branch: conv.git_branch,
+                            message_count: conv.message_count,
+                            preview: conv.preview,
+                            file_path: path.clone(),
+                            forked_from: conv.forked_from,
+                            forked_at: conv.forked_at,
+                        });
+                    } else if let Ok(conv) = serde_json::from_str::<SavedConversation>(&content) {
+                        // Support old format
+                        conversations.push(ConversationMetadata {
+                            time_ago_str: ConversationMetadata::calculate_time_ago(conv.updated_at),
+                            id: conv.id,
+                            created_at: conv.created_at,
+                            updated_at: conv.updated_at,
+                            git_branch: conv.git_branch,
+                            message_count: conv.message_count,
+                            preview: conv.preview,
+                            file_path: path.clone(),
+                            forked_from: conv.forked_from,
+                            forked_at: conv.forked_at,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Sort by updated_at (most recent first)
+        conversations.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+        self.resume_conversations = conversations;
+        Ok(())
+    }
+
+    fn delete_conversation(&mut self, metadata: &ConversationMetadata) -> Result<()> {
+        std::fs::remove_file(&metadata.file_path)?;
+        Ok(())
+    }
+
+    async fn save_conversation(&mut self) -> Result<()> {
+        if self.messages.is_empty() {
+            return Ok(());
+        }
+
+        // Export agent conversation for LLM context restoration
+        let agent_conversation = match &self.agent {
+            Some(agent) => agent.export_conversation().await,
+            None => None,
+        };
+
+        // Build UI messages with full state
+        let mut ui_messages = Vec::new();
+
+        for i in 0..self.messages.len() {
+            let content = self.messages[i].clone();
+            let message_type = self.message_types.get(i).cloned().unwrap_or(MessageType::Agent);
+            let message_state = self.message_states.get(i).copied().unwrap_or(MessageState::Sent);
+            let timestamp = self.message_timestamps.get(i).copied().unwrap_or_else(SystemTime::now);
+            let metadata = self.message_metadata.get(i).and_then(|m| m.clone());
+
+            ui_messages.push(SavedUIMessage {
+                content,
+                message_type,
+                message_state,
+                timestamp,
+                metadata,
+            });
+        }
+
+        // Extract preview from first user message in UI
+        let preview = self.messages.iter()
+            .enumerate()
+            .find(|(i, _)| matches!(self.message_types.get(*i), Some(MessageType::User)))
+            .map(|(_, msg)| msg.chars().take(100).collect::<String>())
+            .unwrap_or_else(|| "No preview available".to_string());
+
+        // Check if we're updating existing conversation or creating new one
+        let (conversation_id, created_at, file_path, forked_from, forked_at) = if let (Some(id), Some(path)) = (&self.current_conversation_id, &self.current_conversation_path) {
+            // UPDATE EXISTING - preserve ID, created_at, and fork metadata
+            let (existing_created_at, existing_forked_from, existing_forked_at) = if let Ok(content) = std::fs::read_to_string(path) {
+                if let Ok(existing) = serde_json::from_str::<EnhancedSavedConversation>(&content) {
+                    (existing.created_at, existing.forked_from, existing.forked_at)
+                } else {
+                    (SystemTime::now(), None, None)
+                }
+            } else {
+                (SystemTime::now(), None, None)
+            };
+
+            (id.clone(), existing_created_at, path.clone(), existing_forked_from, existing_forked_at)
+        } else {
+            // CREATE NEW - generate new ID
+            let conversations_dir = Self::get_conversations_dir()?;
+            std::fs::create_dir_all(&conversations_dir)?;
+
+            let new_id = uuid::Uuid::new_v4().to_string();
+            let new_path = conversations_dir.join(format!("{}.json", new_id));
+            let now = SystemTime::now();
+
+            (new_id, now, new_path, self.current_forked_from.clone(), self.current_forked_at)
+        };
+
+        // Create/update conversation
+        let now = SystemTime::now();
+        let conversation = EnhancedSavedConversation {
+            id: conversation_id.clone(),
+            created_at,
+            updated_at: now,
+            git_branch: Self::get_current_git_branch(),
+            working_directory: std::env::current_dir()
+                .ok()
+                .and_then(|p| p.to_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| String::from("unknown")),
+            message_count: ui_messages.len(),
+            preview,
+            ui_messages,
+            agent_conversation,
+            forked_from,
+            forked_at,
+        };
+
+        // Ensure directory exists
+        let conversations_dir = Self::get_conversations_dir()?;
+        std::fs::create_dir_all(&conversations_dir)?;
+
+        // Save to file
+        let json = serde_json::to_string_pretty(&conversation)?;
+        std::fs::write(&file_path, json)?;
+
+        // Track this conversation for future updates
+        self.current_conversation_id = Some(conversation_id);
+        self.current_conversation_path = Some(file_path);
+
+        Ok(())
+    }
+
+    async fn load_conversation(&mut self, metadata: &ConversationMetadata) -> Result<()> {
+        // Read the conversation file
+        let content = std::fs::read_to_string(&metadata.file_path)?;
+
+        // Try to load as enhanced format first, fall back to old format
+        let (ui_messages, agent_conversation) = if let Ok(enhanced) = serde_json::from_str::<EnhancedSavedConversation>(&content) {
+            (enhanced.ui_messages, enhanced.agent_conversation)
+        } else if let Ok(old_conv) = serde_json::from_str::<SavedConversation>(&content) {
+
+            // Convert old format to UI messages (basic conversion)
+            let ui_msgs: Vec<SavedUIMessage> = old_conv.messages.iter().map(|m| {
+                let message_type = if m.role == "user" {
+                    MessageType::User
+                } else {
+                    MessageType::Agent
+                };
+
+                SavedUIMessage {
+                    content: m.content.clone(),
+                    message_type,
+                    message_state: MessageState::Sent,
+                    timestamp: old_conv.created_at,
+                    metadata: None,
+                }
+            }).collect();
+
+            // Build agent conversation JSON from old format
+            let messages: Vec<Value> = old_conv.messages.iter()
+                .map(|m| json!({"role": m.role, "content": m.content}))
+                .collect();
+            let agent_json = serde_json::to_string(&messages).ok();
+
+            (ui_msgs, agent_json)
+        } else {
+            return Err(color_eyre::eyre::eyre!("Failed to parse conversation file"));
+        };
+
+        // Restore agent conversation for LLM context
+        if let (Some(agent), Some(agent_json)) = (&self.agent, &agent_conversation) {
+            agent.restore_conversation(agent_json).await
+                .map_err(|e| color_eyre::eyre::eyre!("Failed to restore agent conversation: {}", e))?;
+        }
+
+        // Clear current UI state
+        self.messages.clear();
+        self.message_types.clear();
+        self.message_states.clear();
+        self.message_metadata.clear();
+        self.message_timestamps.clear();
+
+        // Restore UI messages with complete state
+        for ui_msg in ui_messages {
+            self.messages.push(ui_msg.content);
+            self.message_types.push(ui_msg.message_type);
+            self.message_states.push(ui_msg.message_state);
+            self.message_metadata.push(ui_msg.metadata);
+            self.message_timestamps.push(ui_msg.timestamp);
+        }
+
+        // Update the conversation file's timestamp (only if NOT in fork mode)
+        if !self.is_fork_mode {
+            if let Ok(mut enhanced) = serde_json::from_str::<EnhancedSavedConversation>(&content) {
+                enhanced.updated_at = SystemTime::now();
+                let json = serde_json::to_string_pretty(&enhanced)?;
+                std::fs::write(&metadata.file_path, json)?;
+            }
+        }
+
+        // Track this conversation for future updates (unless in fork mode)
+        if self.is_fork_mode {
+            // In fork mode: don't track the ID/path so a new conversation is created on save
+            // Fork metadata is already set in the 'f' key handler
+            self.current_conversation_id = None;
+            self.current_conversation_path = None;
+            // Reset fork mode flag
+            self.is_fork_mode = false;
+
+            // Close resume panel and show fork confirmation
+            self.show_resume = false;
+            self.messages.push(format!(" ⎇ conversation forked from '{}'", metadata.preview));
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+
+            // Trigger immediate save to create the fork
+            self.save_pending = true;
+        } else {
+            self.current_conversation_id = Some(metadata.id.clone());
+            self.current_conversation_path = Some(metadata.file_path.clone());
+        }
+
+        Ok(())
     }
 
     fn update_autocomplete(&mut self) {
@@ -1342,222 +2335,11 @@ impl App {
         self.vim_input_editor.state.cursor.col = col;
     }
 
-    fn export_conversation(&mut self) {
-        use serde_json::json;
-
-        // Build OpenAI-format messages
-        let mut openai_messages = Vec::new();
-        let mut pending_tool_calls = Vec::new();
-        let mut current_assistant_content = String::new();
-        let mut thinking_content_added = false;
-
-        for (idx, message) in self.messages.iter().enumerate() {
-            // Skip only the export command itself
-            if message == "/export" {
-                continue;
-            }
-
-            let msg_type = self.message_types.get(idx);
-
-            // Handle command feedback - include as assistant messages
-            if message.starts_with("[COMMAND:") {
-                let content = message.trim_start_matches("[COMMAND:").trim_end_matches(']').trim();
-                openai_messages.push(json!({
-                    "role": "assistant",
-                    "content": format!("[System: {}]", content)
-                }));
-                continue;
-            }
-
-            // Handle tool calls
-            if message.starts_with("[TOOL_CALL_STARTED:") {
-                let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_STARTED:")
-                    .trim_end_matches("]")
-                    .splitn(2, '|')
-                    .collect();
-                if parts.len() >= 2 {
-                    let tool_name = parts[0];
-                    let arguments = parts[1];
-
-                    pending_tool_calls.push(json!({
-                        "id": format!("call_{}", idx),
-                        "type": "function",
-                        "function": {
-                            "name": tool_name,
-                            "arguments": arguments
-                        }
-                    }));
-                }
-                continue;
-            }
-
-            // Handle tool call completions
-            if message.starts_with("[TOOL_CALL_COMPLETED:") {
-                let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_COMPLETED:")
-                    .trim_end_matches("]")
-                    .splitn(3, '|')
-                    .collect();
-                if parts.len() >= 3 {
-                    let tool_name = parts[0];
-                    let result = parts[2];
-
-                    // Add assistant message with tool calls if we have any pending
-                    if !pending_tool_calls.is_empty() {
-                        // Add any accumulated assistant content before tool calls
-                        let content = if !current_assistant_content.is_empty() {
-                            let c = current_assistant_content.clone();
-                            current_assistant_content.clear();
-                            json!(c)
-                        } else {
-                            json!(null)
-                        };
-
-                        openai_messages.push(json!({
-                            "role": "assistant",
-                            "content": content,
-                            "tool_calls": pending_tool_calls.clone()
-                        }));
-                        pending_tool_calls.clear();
-                    }
-
-                    // Add tool response
-                    openai_messages.push(json!({
-                        "role": "tool",
-                        "tool_call_id": format!("call_{}", idx),
-                        "name": tool_name,
-                        "content": result
-                    }));
-                }
-                continue;
-            }
-
-            // Handle interrupt marker
-            if message == "● Interrupted" {
-                openai_messages.push(json!({
-                    "role": "assistant",
-                    "content": "[Interrupted by user]"
-                }));
-                continue;
-            }
-
-            // Handle "What should Nite do instead?" prompt
-            if message.starts_with(" ⎿ ") || message.trim() == "⎿ What should Nite do instead?" {
-                let prompt_text = message.trim_start().trim_start_matches("⎿ ").trim();
-                openai_messages.push(json!({
-                    "role": "assistant",
-                    "content": format!("[System prompt: {}]", prompt_text)
-                }));
-                continue;
-            }
-
-            // Skip thinking animation and other special markers except thinking summaries
-            if message.starts_with('[') && !message.starts_with("├── ") {
-                continue;
-            }
-
-            // Don't skip thinking summaries - we want to render them as static tree lines
-            // if message.starts_with("├── ") {
-            //     continue;
-            // }
-
-            match msg_type {
-                Some(MessageType::User) => {
-                    // Flush any pending tool calls before user message
-                    if !pending_tool_calls.is_empty() {
-                        let content = if !current_assistant_content.is_empty() {
-                            let c = current_assistant_content.clone();
-                            current_assistant_content.clear();
-                            json!(c)
-                        } else {
-                            json!(null)
-                        };
-
-                        openai_messages.push(json!({
-                            "role": "assistant",
-                            "content": content,
-                            "tool_calls": pending_tool_calls.clone()
-                        }));
-                        pending_tool_calls.clear();
-                    }
-
-                    // Flush any accumulated assistant content
-                    if !current_assistant_content.is_empty() {
-                        openai_messages.push(json!({
-                            "role": "assistant",
-                            "content": current_assistant_content.clone()
-                        }));
-                        current_assistant_content.clear();
-                    }
-
-                    // Check if this message was queued (sent while agent was processing)
-                    let msg_state = self.message_states.get(idx);
-                    let content = if matches!(msg_state, Some(MessageState::Queued)) {
-                        format!("[Queued message] {}", message)
-                    } else {
-                        message.to_string()
-                    };
-
-                    openai_messages.push(json!({
-                        "role": "user",
-                        "content": content
-                    }));
-                }
-                Some(MessageType::Agent) => {
-                    // Add raw thinking content before first agent message (if available)
-                    if !thinking_content_added && !self.thinking_raw_content.is_empty() {
-                        if !current_assistant_content.is_empty() {
-                            current_assistant_content.push('\n');
-                        }
-                        current_assistant_content.push_str(&self.thinking_raw_content);
-                        thinking_content_added = true;
-                    }
-
-                    // Accumulate assistant content
-                    if !current_assistant_content.is_empty() {
-                        current_assistant_content.push('\n');
-                    }
-                    current_assistant_content.push_str(message);
-                }
-                None => continue,
-            }
-        }
-
-        // Flush any remaining assistant content
-        if !current_assistant_content.is_empty() {
-            openai_messages.push(json!({
-                "role": "assistant",
-                "content": current_assistant_content
-            }));
-        }
-
-        // Flush any remaining tool calls
-        if !pending_tool_calls.is_empty() {
-            openai_messages.push(json!({
-                "role": "assistant",
-                "content": null,
-                "tool_calls": pending_tool_calls
-            }));
-        }
-
-        let export_json = json!(openai_messages);
-        let json_string = serde_json::to_string_pretty(&export_json).unwrap_or_else(|_| "{}".to_string());
-
-        // Try to copy to clipboard
-        use clipboard::{ClipboardProvider, ClipboardContext};
-        let clipboard_result: Result<(), Box<dyn std::error::Error>> = ClipboardContext::new()
-            .and_then(|mut ctx| ctx.set_contents(json_string));
-
-        if clipboard_result.is_ok() {
-            self.messages.push("[COMMAND: Conversation exported to clipboard]".to_string());
-        } else {
-            self.messages.push("[COMMAND: Failed to copy to clipboard]".to_string());
-        }
-        self.message_types.push(MessageType::Agent);
-        self.message_states.push(MessageState::Sent);
-    }
-
     async fn handle_slash_command_async(&mut self) {
         let command = self.input.trim().to_string();
+
+        // Clear generation stats from previous message when new message is added to UI
+        self.generation_stats = None;
 
         // Add command to messages as user message
         self.messages.push(command.clone());
@@ -1576,14 +2358,27 @@ impl App {
         // Parse and execute command
         let cmd_lower = command.to_lowercase();
         if cmd_lower == "/clear" {
+            // Save conversation before clearing
+            if let Err(e) = self.save_conversation().await {
+                eprintln!("[ERROR] Failed to save conversation before /clear: {}", e);
+            }
+
+            // Reset conversation tracking AFTER save (start fresh next time)
+            self.current_conversation_id = None;
+            self.current_conversation_path = None;
+
             // Clear all messages except the command itself
             let command_msg = self.messages.pop().unwrap();
             let command_type = self.message_types.pop().unwrap();
             let command_state = self.message_states.pop();
+            let command_metadata = self.message_metadata.pop();
+            let command_timestamp = self.message_timestamps.pop();
 
             self.messages.clear();
             self.message_types.clear();
             self.message_states.clear();
+            self.message_metadata.clear();
+            self.message_timestamps.clear();
 
             // Add back the command
             self.messages.push(command_msg);
@@ -1591,11 +2386,15 @@ impl App {
             if let Some(state) = command_state {
                 self.message_states.push(state);
             }
+            self.message_metadata.push(command_metadata.flatten());
+            self.message_timestamps.push(command_timestamp.unwrap_or_else(SystemTime::now));
 
             // Add confirmation message
             self.messages.push("[COMMAND: Conversation history cleared]".to_string());
             self.message_types.push(MessageType::Agent);
             self.message_states.push(MessageState::Sent);
+            self.message_metadata.push(None);
+            self.message_timestamps.push(SystemTime::now());
 
             // Clear agent conversation too
             if let Some(agent) = &self.agent {
@@ -1608,6 +2407,8 @@ impl App {
             self.messages.push("[COMMAND: Exiting...]".to_string());
             self.message_types.push(MessageType::Agent);
             self.message_states.push(MessageState::Sent);
+            // Trigger save before exit
+            self.save_pending = true;
             self.exit = true;
         } else if cmd_lower == "/export" {
             // Try to export from agent first
@@ -1658,6 +2459,9 @@ impl App {
     fn handle_slash_command(&mut self) {
         let command = self.input.trim().to_string();
 
+        // Clear generation stats from previous message when new message is added to UI
+        self.generation_stats = None;
+
         // Add command to messages as user message
         self.messages.push(command.clone());
         self.message_types.push(MessageType::User);
@@ -1675,6 +2479,9 @@ impl App {
         // Parse and execute command
         let cmd_lower = command.to_lowercase();
         if cmd_lower == "/clear" {
+            // Trigger save before clearing
+            self.save_pending = true;
+
             // Clear all messages except the command itself
             let command_msg = self.messages.pop().unwrap();
             let command_type = self.message_types.pop().unwrap();
@@ -1699,18 +2506,57 @@ impl App {
             // Reset generation stats
             self.generation_stats = None;
 
-            // TODO: Clear agent context when we have that functionality
+            // Clear agent context
+            if let Some(tx) = &self.agent_tx {
+                let _ = tx.send(AgentMessage::ClearContext);
+            }
         } else if cmd_lower == "/exit" {
             // Add confirmation message
             self.messages.push("[COMMAND: Exiting...]".to_string());
             self.message_types.push(MessageType::Agent);
             self.message_states.push(MessageState::Sent);
 
+            // Trigger save before exit
+            self.save_pending = true;
+
             // Set exit flag
             self.exit = true;
         } else if cmd_lower == "/export" {
-            // Export conversation to OpenAI JSON format
-            self.export_conversation();
+            // Export needs async, so we'll set a flag and handle it in the event loop
+            self.export_pending = true;
+        } else if cmd_lower == "/help" {
+            // Open help panel
+            self.show_help = true;
+            self.help_tab = HelpTab::General; // Start on general tab
+            self.help_commands_selected = 0; // Reset selection
+            // Early return to avoid adding command to messages
+            return;
+        } else if cmd_lower == "/resume" {
+            // Open resume panel and load conversations
+            if let Err(e) = self.load_conversations_list() {
+                self.messages.push(format!(" ⎿ Error loading conversations: {}", e));
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            } else {
+                self.show_resume = true;
+                self.is_fork_mode = false; // Normal resume
+                self.resume_selected = 0; // Reset selection
+            }
+            // Early return to avoid adding command to messages
+            return;
+        } else if cmd_lower == "/fork" {
+            // Fork (copy) a conversation - same UI but creates new ID
+            if let Err(e) = self.load_conversations_list() {
+                self.messages.push(format!(" ⎿ Error loading conversations: {}", e));
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            } else {
+                self.show_resume = true;  // Use same UI
+                self.is_fork_mode = true; // Fork mode - don't track ID
+                self.resume_selected = 0; // Reset selection
+            }
+            // Early return to avoid adding command to messages
+            return;
         } else if cmd_lower == "/vim" {
             // Toggle vim mode
             self.vim_mode_enabled = !self.vim_mode_enabled;
@@ -1726,6 +2572,63 @@ impl App {
             self.messages.push(format!("[COMMAND: Vim keybindings {}]", status));
             self.message_types.push(MessageType::Agent);
             self.message_states.push(MessageState::Sent);
+        } else if cmd_lower == "/todos" {
+            // Toggle todos panel
+            if self.show_todos {
+                // Closing the panel - add dismissal message
+                self.messages.push(" ⎿ todos dialog dismissed".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
+            self.show_todos = !self.show_todos;
+            // Early return to avoid adding command to messages
+            return;
+        } else if cmd_lower == "/shells" {
+            // Toggle background tasks panel
+            if self.show_background_tasks {
+                // Closing the panel - add dismissal message
+                self.messages.push(" ⎿ shells dialog dismissed".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
+            self.show_background_tasks = !self.show_background_tasks;
+            // Early return to avoid adding command to messages
+            return;
+        } else if cmd_lower == "/fork" {
+            // Fork current conversation immediately
+            if self.current_conversation_id.is_some() {
+                // Set fork metadata
+                self.current_forked_from = self.current_conversation_id.clone();
+                self.current_forked_at = Some(SystemTime::now());
+
+                // Clear conversation ID/path to create new conversation on next save
+                let parent_id = self.current_conversation_id.take().unwrap();
+                self.current_conversation_path = None;
+
+                // Trigger immediate save to create the fork
+                self.save_pending = true;
+
+                self.messages.push(format!(" ⎇ conversation forked from '{}'", parent_id));
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            } else {
+                self.messages.push(" ⎿ no conversation to fork (conversation not saved yet)".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
+            return;
+        } else if cmd_lower == "/model" {
+            // Open model selection panel
+            if let Err(e) = self.load_models() {
+                self.messages.push(format!(" ⎿ Error loading models: {}", e));
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            } else {
+                self.show_model_selection = true;
+                self.model_selected_index = 0;
+            }
+            // Early return to avoid adding command to messages
+            return;
         } else {
             // Unknown command
             self.messages.push(format!("[COMMAND: Unknown command '{}']", command));
@@ -1849,6 +2752,15 @@ impl App {
             } else {
                 // Normal message submission - agent is not processing
                 let user_message = self.input.clone();
+
+                // Ensure conversation ID exists (generate if this is the first message)
+                if let Err(e) = self.ensure_conversation_id() {
+                    eprintln!("[ERROR] Failed to generate conversation ID: {}", e);
+                }
+
+                // Clear generation stats from previous message when new message is added to UI
+                self.generation_stats = None;
+
                 self.messages.push(user_message.clone());
                 self.message_types.push(MessageType::User);
                 self.input.clear();
@@ -1871,9 +2783,6 @@ impl App {
                 self.is_thinking = true;
                 self.thinking_start_time = Some(Instant::now());
                 self.thinking_token_count = 0;
-
-                // Clear previous generation stats when starting new message
-                self.generation_stats = None;
 
                 // Clear raw thinking content for new conversation turn
                 self.thinking_raw_content.clear();
@@ -1908,6 +2817,7 @@ impl App {
             // Process agent messages if available
             let mut process_queued = false;
             let mut process_interrupt: Option<String> = None;
+            let mut pending_todos: Option<Vec<TodoItem>> = None;
             if let Some(rx) = &mut self.agent_rx {
                 while let Ok(msg) = rx.try_recv() {
                     // Skip processing agent messages if we've interrupted
@@ -2055,6 +2965,21 @@ impl App {
                             // Note: Don't clear thinking_raw_content here - it will be used in export
                         }
                         AgentMessage::ToolCallCompleted(tool_name, result) => {
+                            // Special handling for todo_write tool
+                            if tool_name == "todo_write" {
+                                // Parse the result to extract todos and store them for saving
+                                if let Ok(result_json) = serde_json::from_str::<serde_json::Value>(&result) {
+                                    if let Some(todos_array) = result_json.get("todos").and_then(|v| v.as_array()) {
+                                        let todos: Vec<TodoItem> = todos_array.iter()
+                                            .filter_map(|t| Self::parse_todo_item(t))
+                                            .collect();
+
+                                        // Store todos to be saved after message processing
+                                        pending_todos = Some(todos);
+                                    }
+                                }
+                            }
+
                             // If thinking is active, remove thinking animation temporarily
                             let was_thinking = if self.is_thinking {
                                 if let Some(last_msg) = self.messages.last() {
@@ -2127,6 +3052,10 @@ impl App {
                             // Store the generation stats
                             self.generation_stats = Some((tok_per_sec, token_count, time_to_first_token, stop_reason));
                         }
+                        AgentMessage::BackgroundTaskStarted(session_id, command, log_file) => {
+                            // Add background task to the list with current time as start time
+                            self.background_tasks.push((session_id, command, log_file, std::time::Instant::now()));
+                        }
                         AgentMessage::Done => {
                             // IMPORTANT: Remove thinking animation FIRST, unconditionally
                             if let Some(last_msg) = self.messages.last() {
@@ -2179,6 +3108,12 @@ impl App {
                                 process_queued = true;  // Set flag to process queued message after rx is dropped
                             }
                         }
+                        AgentMessage::ModelLoaded => {
+                            // Model has been loaded successfully
+                            self.messages.push(" ✔ Model loaded successfully".to_string());
+                            self.message_types.push(MessageType::Agent);
+                            self.message_states.push(MessageState::Sent);
+                        }
                         _ => {}
                     }
                 }
@@ -2209,6 +3144,13 @@ impl App {
                 }
             }
 
+            // Save pending todos if any (after rx borrow is dropped)
+            if let Some(todos) = pending_todos {
+                if let Err(e) = self.save_todos(&todos) {
+                    eprintln!("[ERROR] Failed to save todos: {}", e);
+                }
+            }
+
             // Process queued message after rx borrow is dropped
             if process_queued {
                 // Check if user is editing the next message to send (index 0)
@@ -2224,7 +3166,9 @@ impl App {
                         self.input = queued_msg.clone();
                         self.handle_slash_command();
                     } else {
-                        // Regular message
+                        // Regular message - clear generation stats from previous message when new message is added to UI
+                        self.generation_stats = None;
+
                         self.messages.push(queued_msg.clone());
                         self.message_types.push(MessageType::User);
                         self.message_states.push(MessageState::Queued);
@@ -2237,9 +3181,6 @@ impl App {
                         self.thinking_start_time = Some(Instant::now());
                         self.thinking_token_count = 0;
 
-                        // Clear previous generation stats when starting new message
-                        self.generation_stats = None;
-
                         // Clear raw thinking content for new conversation turn
                         self.thinking_raw_content.clear();
 
@@ -2250,6 +3191,80 @@ impl App {
                     }
                 }
                 // If editing next message, agent will wait until user submits or cancels
+            }
+
+            // Handle pending export
+            if self.export_pending {
+                self.export_pending = false;
+
+                if let Some(agent) = &self.agent {
+                    if let Some(json_string) = agent.export_conversation().await {
+                        // Try to copy to clipboard
+                        use clipboard::{ClipboardProvider, ClipboardContext};
+                        let clipboard_result: Result<(), Box<dyn std::error::Error>> = ClipboardContext::new()
+                            .and_then(|mut ctx| ctx.set_contents(json_string));
+
+                        if clipboard_result.is_ok() {
+                            self.messages.push("[COMMAND: Conversation exported to clipboard]".to_string());
+                        } else {
+                            self.messages.push("[COMMAND: Failed to copy to clipboard]".to_string());
+                        }
+                        self.message_types.push(MessageType::Agent);
+                        self.message_states.push(MessageState::Sent);
+                    } else {
+                        self.messages.push("[COMMAND: No conversation history available]".to_string());
+                        self.message_types.push(MessageType::Agent);
+                        self.message_states.push(MessageState::Sent);
+                    }
+                } else {
+                    self.messages.push("[COMMAND: No conversation history available]".to_string());
+                    self.message_types.push(MessageType::Agent);
+                    self.message_states.push(MessageState::Sent);
+                }
+            }
+
+            // Handle resume load pending
+            if self.resume_load_pending {
+                self.resume_load_pending = false;
+
+                if self.resume_selected < self.resume_conversations.len() {
+                    // Auto-save current conversation before loading a new one
+                    if self.current_conversation_id.is_some() && !self.messages.is_empty() {
+                        if let Err(e) = self.save_conversation().await {
+                            self.messages.push(format!(" ⎿ Warning: Failed to auto-save before resume: {}", e));
+                            self.message_types.push(MessageType::Agent);
+                            self.message_states.push(MessageState::Sent);
+                        }
+                    }
+
+                    let metadata = self.resume_conversations[self.resume_selected].clone();
+                    let is_fork = self.is_fork_mode;  // Capture before load
+
+                    match self.load_conversation(&metadata).await {
+                        Ok(_) => {
+                            // If fork mode, reset conversation ID (next save will create new file)
+                            if is_fork {
+                                self.current_conversation_id = None;
+                                self.current_conversation_path = None;
+                            }
+                            // Close resume panel
+                            self.show_resume = false;
+                        }
+                        Err(e) => {
+                            self.messages.push(format!(" ⎿ Error loading conversation: {}", e));
+                            self.message_types.push(MessageType::Agent);
+                            self.message_states.push(MessageState::Sent);
+                        }
+                    }
+                }
+            }
+
+            // Handle save pending (auto-save on /clear or /exit)
+            if self.save_pending {
+                self.save_pending = false;
+                if let Err(e) = self.save_conversation().await {
+                    eprintln!("[ERROR] Failed to save conversation: {}", e);
+                }
             }
 
             terminal.draw(|frame| self.draw(frame))?;
@@ -2266,11 +3281,236 @@ impl App {
                     }
                 }
             };
-            if event::poll(poll_duration)?
-                && let Event::Key(key) = event::read()?
-                    && key.kind == KeyEventKind::Press {
+            if event::poll(poll_duration)? {
+                match event::read()? {
+                    Event::Paste(data) if self.phase == Phase::Input && self.mode == Mode::Normal
+                        && !self.show_background_tasks && !self.show_help && self.viewing_task.is_none() => {
+                        // Handle paste for both vim and normal mode
+                        if self.vim_mode_enabled {
+                            // Paste into vim editor
+                            let current_text = self.vim_input_editor.get_text_content();
+                            let cursor = self.vim_input_editor.state.cursor;
+
+                            // Calculate byte position from cursor row/col
+                            let lines: Vec<&str> = current_text.lines().collect();
+                            let mut byte_pos = 0;
+                            for (row_idx, line) in lines.iter().enumerate() {
+                                if row_idx < cursor.row {
+                                    byte_pos += line.len() + 1; // +1 for newline
+                                } else if row_idx == cursor.row {
+                                    byte_pos += cursor.col.min(line.len());
+                                    break;
+                                }
+                            }
+
+                            // Insert clipboard contents at cursor position
+                            let mut new_text = current_text;
+                            new_text.insert_str(byte_pos, &data);
+
+                            // Update vim editor with new text
+                            self.vim_input_editor.set_text_content_preserving_mode(&new_text);
+
+                            // Calculate new cursor position (after pasted content)
+                            let new_byte_pos = byte_pos + data.len();
+                            let lines: Vec<&str> = new_text.lines().collect();
+                            let mut remaining = new_byte_pos;
+                            let mut new_row = 0;
+                            let mut new_col = 0;
+                            for (row_idx, line) in lines.iter().enumerate() {
+                                let line_len = line.len();
+                                if remaining <= line_len {
+                                    new_row = row_idx;
+                                    new_col = remaining;
+                                    break;
+                                }
+                                remaining = remaining.saturating_sub(line_len + 1);
+                                new_row = row_idx + 1;
+                            }
+
+                            // Update cursor position
+                            self.vim_input_editor.state.cursor.row = new_row;
+                            self.vim_input_editor.state.cursor.col = new_col;
+
+                            // Sync back to self.input
+                            self.sync_vim_input();
+                        } else {
+                            // Paste into normal mode
+                            let index = self.byte_index();
+                            self.input.insert_str(index, &data);
+                            self.character_index += data.chars().count();
+                            self.input_modified = true;
+                            self.update_autocomplete();
+                        }
+                    }
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
                         match self.mode {
                             Mode::Normal => {
+                                // Help panel key handlers (highest priority)
+                                if self.show_help {
+                                    match key.code {
+                                        KeyCode::Esc => {
+                                            self.show_help = false;
+                                            self.messages.push(" ⎿ help dialog dismissed".to_string());
+                                            self.message_types.push(MessageType::Agent);
+                                            self.message_states.push(MessageState::Sent);
+                                            continue;
+                                        }
+                                        KeyCode::Tab => {
+                                            self.help_tab = self.help_tab.next();
+                                            self.help_commands_selected = 0; // Reset selection when switching tabs
+                                            continue;
+                                        }
+                                        KeyCode::Up if self.help_tab == HelpTab::Commands => {
+                                            if self.help_commands_selected > 0 {
+                                                self.help_commands_selected -= 1;
+                                            }
+                                            continue;
+                                        }
+                                        KeyCode::Down if self.help_tab == HelpTab::Commands => {
+                                            if self.help_commands_selected < SLASH_COMMANDS.len().saturating_sub(1) {
+                                                self.help_commands_selected += 1;
+                                            }
+                                            continue;
+                                        }
+                                        _ => {
+                                            // Ignore other keys when help is open
+                                            continue;
+                                        }
+                                    }
+                                }
+
+                                // Resume panel key handlers
+                                if self.show_resume {
+                                    match key.code {
+                                        KeyCode::Esc => {
+                                            self.show_resume = false;
+                                            self.messages.push(" ⎿ resume dialog dismissed".to_string());
+                                            self.message_types.push(MessageType::Agent);
+                                            self.message_states.push(MessageState::Sent);
+                                            continue;
+                                        }
+                                        KeyCode::Up => {
+                                            if self.resume_selected > 0 {
+                                                self.resume_selected -= 1;
+                                            }
+                                            continue;
+                                        }
+                                        KeyCode::Down => {
+                                            if self.resume_selected < self.resume_conversations.len().saturating_sub(1) {
+                                                self.resume_selected += 1;
+                                            }
+                                            continue;
+                                        }
+                                        KeyCode::Enter => {
+                                            // Load selected conversation (set flag to handle async)
+                                            if self.resume_selected < self.resume_conversations.len() {
+                                                self.resume_load_pending = true;
+                                            }
+                                            continue;
+                                        }
+                                        KeyCode::Char('d') => {
+                                            // Delete selected conversation
+                                            if self.resume_selected < self.resume_conversations.len() {
+                                                let metadata = self.resume_conversations[self.resume_selected].clone();
+                                                if let Err(e) = self.delete_conversation(&metadata) {
+                                                    self.messages.push(format!(" ⎿ Error deleting conversation: {}", e));
+                                                    self.message_types.push(MessageType::Agent);
+                                                    self.message_states.push(MessageState::Sent);
+                                                } else {
+                                                    // Reload conversations list
+                                                    let _ = self.load_conversations_list();
+                                                    // Adjust selection if needed
+                                                    if self.resume_selected >= self.resume_conversations.len() && self.resume_selected > 0 {
+                                                        self.resume_selected -= 1;
+                                                    }
+                                                    // Close panel if no conversations left
+                                                    if self.resume_conversations.is_empty() {
+                                                        self.show_resume = false;
+                                                        self.messages.push(" ⎿ conversation deleted".to_string());
+                                                        self.message_types.push(MessageType::Agent);
+                                                        self.message_states.push(MessageState::Sent);
+                                                    }
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        KeyCode::Char('f') => {
+                                            // Fork selected conversation
+                                            if self.resume_selected < self.resume_conversations.len() {
+                                                let metadata = self.resume_conversations[self.resume_selected].clone();
+                                                // Set fork metadata
+                                                self.current_forked_from = Some(metadata.id.clone());
+                                                self.current_forked_at = Some(SystemTime::now());
+                                                // Set is_fork_mode and trigger load
+                                                self.is_fork_mode = true;
+                                                self.resume_load_pending = true;
+                                            }
+                                            continue;
+                                        }
+                                        _ => {
+                                            // Ignore other keys when resume panel is open
+                                            continue;
+                                        }
+                                    }
+                                }
+
+                                // Handle model selection panel keys
+                                if self.show_model_selection {
+                                    match key.code {
+                                        KeyCode::Esc => {
+                                            self.show_model_selection = false;
+                                            self.messages.push(" ⎿ model selection dismissed".to_string());
+                                            self.message_types.push(MessageType::Agent);
+                                            self.message_states.push(MessageState::Sent);
+                                            continue;
+                                        }
+                                        KeyCode::Up => {
+                                            if self.model_selected_index > 0 {
+                                                self.model_selected_index -= 1;
+                                            }
+                                            continue;
+                                        }
+                                        KeyCode::Down => {
+                                            if self.model_selected_index < self.available_models.len().saturating_sub(1) {
+                                                self.model_selected_index += 1;
+                                            }
+                                            continue;
+                                        }
+                                        KeyCode::Enter => {
+                                            // Select model
+                                            if self.model_selected_index < self.available_models.len() {
+                                                let selected_model = &self.available_models[self.model_selected_index];
+                                                self.current_model = Some(selected_model.filename.clone());
+                                                self.show_model_selection = false;
+
+                                                // Save model selection to config
+                                                if let Err(e) = self.save_config() {
+                                                    self.messages.push(format!(" ⚠ Failed to save model to config: {}", e));
+                                                    self.message_types.push(MessageType::Agent);
+                                                    self.message_states.push(MessageState::Sent);
+                                                }
+
+                                                // Send reload model message to agent
+                                                if let Some(ref tx) = self.agent_tx {
+                                                    let _ = tx.send(AgentMessage::ReloadModel(selected_model.filename.clone()));
+                                                    self.messages.push(format!(" ⟳ Loading model: {}", selected_model.display_name));
+                                                    self.message_types.push(MessageType::Agent);
+                                                    self.message_states.push(MessageState::Sent);
+                                                } else {
+                                                    self.messages.push(format!(" ✔ Model set to: {}", selected_model.display_name));
+                                                    self.message_types.push(MessageType::Agent);
+                                                    self.message_states.push(MessageState::Sent);
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        _ => {
+                                            // Ignore other keys when model selection panel is open
+                                            continue;
+                                        }
+                                    }
+                                }
+
                                 // Handle Shift+Tab to cycle assistant mode
                                 if key.modifiers.contains(KeyModifiers::SHIFT) && key.code == KeyCode::BackTab {
                                     self.assistant_mode = self.assistant_mode.next();
@@ -2420,7 +3660,7 @@ impl App {
                                     self.nav_scroll_offset = 0;
                                 } else {
                                     // Handle vim mode keybindings before other keys if vim mode is enabled
-                                    if self.vim_mode_enabled && self.phase == Phase::Input {
+                                    if self.vim_mode_enabled && self.phase == Phase::Input && !self.show_background_tasks {
                                         // Esc is now handled earlier (before agent interrupt check)
                                         // Let edtui handle the key event first (but not Enter, Ctrl+C, Up/Down for history, or Esc for interrupts)
                                         let handled = match key.code {
@@ -2457,8 +3697,29 @@ impl App {
                                         KeyCode::Char('c')
                                             if key.modifiers.contains(KeyModifiers::CONTROL) =>
                                         {
-                                            // Check if we're editing a queued message
-                                            if let Some(idx) = self.editing_queue_index.take() {
+                                            // Check if any UI panels are open and dismiss them first
+                                            if self.show_help {
+                                                self.show_help = false;
+                                                self.messages.push(" ⎿ help dialog dismissed".to_string());
+                                                self.message_types.push(MessageType::Agent);
+                                                self.message_states.push(MessageState::Sent);
+                                            } else if self.viewing_task.is_some() {
+                                                self.viewing_task = None;
+                                                self.messages.push(" ⎿ shell viewer dismissed".to_string());
+                                                self.message_types.push(MessageType::Agent);
+                                                self.message_states.push(MessageState::Sent);
+                                            } else if self.show_background_tasks {
+                                                self.show_background_tasks = false;
+                                                self.messages.push(" ⎿ shells dialog dismissed".to_string());
+                                                self.message_types.push(MessageType::Agent);
+                                                self.message_states.push(MessageState::Sent);
+                                            } else if self.show_resume {
+                                                self.show_resume = false;
+                                                self.messages.push(" ⎿ resume dialog dismissed".to_string());
+                                                self.message_types.push(MessageType::Agent);
+                                                self.message_states.push(MessageState::Sent);
+                                            } else if let Some(idx) = self.editing_queue_index.take() {
+                                                // Check if we're editing a queued message
                                                 // Remove the specific message being edited from queue
                                                 if idx < self.queued_messages.len() {
                                                     self.queued_messages.remove(idx);
@@ -2474,6 +3735,7 @@ impl App {
                                                 if let Some(last_press) = self.ctrl_c_pressed {
                                                     if last_press.elapsed().as_millis() < 1000 {
                                                         // Second Ctrl+C within 1 second - exit
+                                                        self.save_pending = true;  // Auto-save before exit
                                                         self.exit = true;
                                                     } else {
                                                         // Pressed too late, reset timer
@@ -2493,6 +3755,91 @@ impl App {
                                                 }
                                             }
                                         }
+                                        KeyCode::Esc if self.phase == Phase::Input && self.viewing_task.is_some() => {
+                                            // Close task viewer
+                                            self.viewing_task = None;
+                                            self.messages.push(" ⎿ shell viewer dismissed".to_string());
+                                            self.message_types.push(MessageType::Agent);
+                                            self.message_states.push(MessageState::Sent);
+                                        }
+                                        KeyCode::Enter if self.phase == Phase::Input && self.viewing_task.is_some() => {
+                                            // Close task viewer
+                                            self.viewing_task = None;
+                                            self.messages.push(" ⎿ shell viewer dismissed".to_string());
+                                            self.message_types.push(MessageType::Agent);
+                                            self.message_states.push(MessageState::Sent);
+                                        }
+                                        KeyCode::Char(' ') if self.phase == Phase::Input && self.viewing_task.is_some() => {
+                                            // Close task viewer
+                                            self.viewing_task = None;
+                                            self.messages.push(" ⎿ shell viewer dismissed".to_string());
+                                            self.message_types.push(MessageType::Agent);
+                                            self.message_states.push(MessageState::Sent);
+                                        }
+                                        KeyCode::Char('k') if self.phase == Phase::Input && self.viewing_task.is_some() => {
+                                            // Kill task from viewer
+                                            if let Some((session_id, _, _, _)) = self.viewing_task.take() {
+                                                // Remove from background tasks list
+                                                self.background_tasks.retain(|(sid, _, _, _)| sid != &session_id);
+                                                // Kill the shell session
+                                                std::thread::spawn(move || {
+                                                    let rt = tokio::runtime::Runtime::new().unwrap();
+                                                    rt.block_on(async {
+                                                        let _ = agent_core::kill_shell_session(session_id).await;
+                                                    });
+                                                });
+                                            }
+                                        }
+                                        KeyCode::Esc if self.phase == Phase::Input && self.show_todos => {
+                                            // Close todos panel
+                                            self.show_todos = false;
+                                            self.messages.push(" ⎿ todos dialog dismissed".to_string());
+                                            self.message_types.push(MessageType::Agent);
+                                            self.message_states.push(MessageState::Sent);
+                                        }
+                                        KeyCode::Esc if self.phase == Phase::Input && self.show_background_tasks => {
+                                            // Close background tasks panel
+                                            self.show_background_tasks = false;
+                                            self.messages.push(" ⎿ shells dialog dismissed".to_string());
+                                            self.message_types.push(MessageType::Agent);
+                                            self.message_states.push(MessageState::Sent);
+                                        }
+                                        KeyCode::Up if self.phase == Phase::Input && self.show_background_tasks => {
+                                            // Navigate background tasks
+                                            if !self.background_tasks.is_empty() && self.background_tasks_selected > 0 {
+                                                self.background_tasks_selected -= 1;
+                                            }
+                                        }
+                                        KeyCode::Down if self.phase == Phase::Input && self.show_background_tasks => {
+                                            // Navigate background tasks
+                                            if !self.background_tasks.is_empty() && self.background_tasks_selected < self.background_tasks.len() - 1 {
+                                                self.background_tasks_selected += 1;
+                                            }
+                                        }
+                                        KeyCode::Char('k') if self.phase == Phase::Input && self.show_background_tasks => {
+                                            // Kill selected background task
+                                            if !self.background_tasks.is_empty() && self.background_tasks_selected < self.background_tasks.len() {
+                                                let (session_id, _command, _log_file, _start_time) = self.background_tasks.remove(self.background_tasks_selected);
+                                                if self.background_tasks_selected >= self.background_tasks.len() && self.background_tasks_selected > 0 {
+                                                    self.background_tasks_selected -= 1;
+                                                }
+                                                // Kill the shell session directly
+                                                std::thread::spawn(move || {
+                                                    let rt = tokio::runtime::Runtime::new().unwrap();
+                                                    rt.block_on(async {
+                                                        let _ = agent_core::kill_shell_session(session_id).await;
+                                                    });
+                                                });
+                                            }
+                                        }
+                                        KeyCode::Enter if self.phase == Phase::Input && self.show_background_tasks => {
+                                            // View selected background task output
+                                            if !self.background_tasks.is_empty() && self.background_tasks_selected < self.background_tasks.len() {
+                                                let task = &self.background_tasks[self.background_tasks_selected];
+                                                self.viewing_task = Some((task.0.clone(), task.1.clone(), task.2.clone(), task.3));
+                                                self.show_background_tasks = false;
+                                            }
+                                        }
                                         KeyCode::Esc if self.phase == Phase::Input && self.autocomplete_active => {
                                             // Dismiss autocomplete
                                             self.autocomplete_active = false;
@@ -2509,7 +3856,7 @@ impl App {
                                                 self.autocomplete_selected_index = 0;
                                             }
                                         }
-                                        KeyCode::Enter if self.phase == Phase::Input => {
+                                        KeyCode::Enter if self.phase == Phase::Input && !self.show_background_tasks && self.viewing_task.is_none() => {
                                             // If autocomplete is active, apply selection instead of submitting
                                             if self.autocomplete_active {
                                                 if let Some((cmd, _desc)) = self.autocomplete_suggestions.get(self.autocomplete_selected_index) {
@@ -2523,15 +3870,20 @@ impl App {
                                                 self.submit_message();
                                             }
                                         }
-                                        KeyCode::Char(to_insert) if self.phase == Phase::Input => {
+                                        KeyCode::Char(to_insert) if self.phase == Phase::Input && !self.show_background_tasks => {
                                             if self.vim_mode_enabled {
-                                                self.vim_input_editor.handle_event(Event::Key(key));
-                                                self.sync_vim_input();
+                                                // Special case: Intercept '/' in vim Normal mode to do nothing (prevent search mode in input bar)
+                                                if to_insert == '/' && self.vim_input_editor.get_mode() == edtui::EditorMode::Normal {
+                                                    // Do nothing - '/' should not trigger search mode in input bar
+                                                } else {
+                                                    self.vim_input_editor.handle_event(Event::Key(key));
+                                                    self.sync_vim_input();
+                                                }
                                             } else {
                                                 self.enter_char(to_insert);
                                             }
                                         }
-                                        KeyCode::Backspace if self.phase == Phase::Input => {
+                                        KeyCode::Backspace if self.phase == Phase::Input && !self.show_background_tasks => {
                                             if self.vim_mode_enabled {
                                                 self.vim_input_editor.handle_event(Event::Key(key));
                                                 self.sync_vim_input();
@@ -2539,12 +3891,12 @@ impl App {
                                                 self.delete_char();
                                             }
                                         }
-                                        KeyCode::Left if self.phase == Phase::Input => {
+                                        KeyCode::Left if self.phase == Phase::Input && !self.show_background_tasks => {
                                             if !self.vim_mode_enabled {
                                                 self.move_cursor_left();
                                             }
                                         }
-                                        KeyCode::Right if self.phase == Phase::Input => {
+                                        KeyCode::Right if self.phase == Phase::Input && !self.show_background_tasks => {
                                             if !self.vim_mode_enabled {
                                                 self.move_cursor_right();
                                             }
@@ -2630,6 +3982,8 @@ impl App {
                                 if self.mode == Mode::Navigation && key.code == KeyCode::Char('q') {
                                     self.mode = Mode::Normal;
                                     self.nav_snapshot = None; // Clear snapshot, return to live state
+                                    self.message_types.push(MessageType::Agent);
+                                    self.message_states.push(MessageState::Sent);
                                     continue;
                                 }
                                 // Exit navigation on Ctrl+C (only in Navigation mode)
@@ -2638,6 +3992,8 @@ impl App {
                                    key.code == KeyCode::Char('c') {
                                     self.mode = Mode::Normal;
                                     self.nav_snapshot = None; // Clear snapshot, return to live state
+                                    self.message_types.push(MessageType::Agent);
+                                    self.message_states.push(MessageState::Sent);
                                     continue;
                                 }
                                 // Enter command mode on : (only in Navigation mode)
@@ -2737,7 +4093,18 @@ impl App {
                             }
                         }
                     }
+                    _ => {} // Ignore other events
+                }
+            }
         }
+
+        // Save conversation on exit if pending (for Ctrl+C exits)
+        if self.save_pending {
+            if let Err(e) = self.save_conversation().await {
+                eprintln!("[ERROR] Failed to save conversation on exit: {}", e);
+            }
+        }
+
         Ok(())
     }
     fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
@@ -2874,6 +4241,25 @@ impl App {
         self.nav_snapshot.as_ref().map(|s| &s.generation_stats).unwrap_or(&self.generation_stats)
     }
 
+    /// Format numbers in compact form: 1, 2, ..., 999, 1k, 1.1k, 1.2k, etc.
+    fn format_compact_number(&self, num: usize) -> String {
+        if num < 1000 {
+            num.to_string()
+        } else if num < 10000 {
+            // 1k, 1.1k, ..., 9.9k
+            format!("{:.1}k", num as f64 / 1000.0)
+        } else if num < 1000000 {
+            // 10k, 11k, ..., 999k
+            format!("{}k", num / 1000)
+        } else if num < 10000000 {
+            // 1.0m, 1.1m, ..., 9.9m
+            format!("{:.1}m", num as f64 / 1000000.0)
+        } else {
+            // 10m, 11m, ...
+            format!("{}m", num / 1000000)
+        }
+    }
+
     fn render_message_with_max_width(&self, message: &str, max_width: usize, highlight_pos: Option<usize>, is_agent: bool) -> Text<'static> {
         // Check for interrupt marker - render with RED circle and RED text
         if message == "● Interrupted" {
@@ -2905,7 +4291,7 @@ impl App {
             lines.push(Line::from(vec![
                 Span::raw(" "),  // Left margin
                 Span::raw("  "),  // Two spaces to align with "Interrupted" (after "● ")
-                Span::raw(message.trim_start().to_string()),
+                Span::styled(message.trim_start().to_string(), Style::default().fg(Color::DarkGray)),
             ]));
             return Text::from(lines);
         }
@@ -2949,12 +4335,14 @@ impl App {
                 // Show token count (from snapshot if in nav mode)
                 let token_count = self.get_thinking_token_count();
                 let token_info = if token_count > 0 {
-                    format!(" | ↓ {} tokens", token_count)
+                    let compact_tokens = self.format_compact_number(token_count);
+                    format!(" | ↓ {} tokens", compact_tokens)
                 } else {
                     String::new()
                 };
 
-                let status = format!(" [Esc to interrupt | {}s{}]", elapsed, token_info);
+                let compact_elapsed = self.format_compact_number(elapsed as usize);
+                let status = format!(" [Esc to interrupt | {}s{}]", compact_elapsed, token_info);
                 spans.push(Span::styled(status, Style::default().fg(Color::DarkGray)));
             }
 
@@ -3310,6 +4698,718 @@ impl App {
         frame.render_widget(paragraph, autocomplete_area);
     }
 
+    fn render_background_tasks(&self, frame: &mut Frame, task_area: ratatui::layout::Rect) {
+        use ratatui::widgets::{Block, Borders, List, ListItem};
+
+        // Create block with title
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" Background tasks ")
+            .title_bottom(Line::from(" ↑/↓ to select · Enter to view · k to kill · Esc to close ").centered());
+
+        let task_count_text = format!(" {} active shells", self.background_tasks.len());
+
+        // Build list items
+        let items: Vec<ListItem> = self.background_tasks.iter().enumerate().map(|(idx, (session_id, command, _log_file, _start_time))| {
+            let is_selected = idx == self.background_tasks_selected;
+
+            // Truncate command if too long
+            let max_cmd_len = task_area.width.saturating_sub(10) as usize;
+            let display_cmd = if command.len() > max_cmd_len {
+                format!("{} …", &command[..max_cmd_len.saturating_sub(2)])
+            } else {
+                command.clone()
+            };
+
+            let line = if is_selected {
+                Line::from(vec![
+                    Span::styled(">  ", Style::default().fg(Color::Blue)),
+                    Span::styled(display_cmd, Style::default().fg(Color::Blue)),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(display_cmd, Style::default().fg(Color::White)),
+                ])
+            };
+
+            ListItem::new(line)
+        }).collect();
+
+        // Create inner area for content
+        let inner = block.inner(task_area);
+
+        // Render block first
+        frame.render_widget(block, task_area);
+
+        // Render task count with dark gray color
+        let count_line = Line::from(Span::styled(task_count_text, Style::default().fg(Color::DarkGray)));
+        let count_para = ratatui::widgets::Paragraph::new(count_line);
+        let count_area = ratatui::layout::Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(count_para, count_area);
+
+        // Empty line after count
+        let list_area = ratatui::layout::Rect {
+            x: inner.x,
+            y: inner.y + 2,
+            width: inner.width,
+            height: inner.height.saturating_sub(2),
+        };
+
+        // Render list
+        let list = List::new(items);
+        frame.render_widget(list, list_area);
+    }
+
+    fn render_todos_panel(&self, frame: &mut Frame, todos_area: ratatui::layout::Rect) {
+        use ratatui::widgets::{Block, Borders, List, ListItem};
+
+        // Create block with title
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Magenta))
+            .title(" Todos ")
+            .title_bottom(Line::from(" Esc to close ").centered());
+
+        // Load todos
+        let todos = match self.load_todos() {
+            Ok(t) => t,
+            Err(_) => Vec::new(),
+        };
+
+        let todo_count_text = if todos.is_empty() {
+            " No active todos".to_string()
+        } else {
+            format!(" {} todos", todos.len())
+        };
+
+        // Build list items with hierarchical structure
+        let items: Vec<ListItem> = {
+            let mut result = Vec::new();
+            fn build_items(todos: &[TodoItem], indent: usize, items: &mut Vec<ListItem>) {
+                for todo in todos {
+                    let status_icon = match todo.status.as_str() {
+                        "completed" => "✓",
+                        "in_progress" => "→",
+                        "pending" => "○",
+                        _ => "·",
+                    };
+
+                    let indent_str = "  ".repeat(indent);
+                    let line = Line::from(vec![
+                        Span::raw(indent_str),
+                        Span::styled(format!("[{}] ", status_icon), Style::default().fg(Color::DarkGray)),
+                        Span::styled(todo.content.clone(), Style::default().fg(Color::White)),
+                    ]);
+
+                    items.push(ListItem::new(line));
+
+                    // Recursively add children
+                    if !todo.children.is_empty() {
+                        build_items(&todo.children, indent + 1, items);
+                    }
+                }
+            }
+            build_items(&todos, 0, &mut result);
+            result
+        };
+
+        // Create inner area for content
+        let inner = block.inner(todos_area);
+
+        // Render block first
+        frame.render_widget(block, todos_area);
+
+        // Render todo count with dark gray color
+        let count_line = Line::from(Span::styled(todo_count_text, Style::default().fg(Color::DarkGray)));
+        let count_para = ratatui::widgets::Paragraph::new(count_line);
+        let count_area = ratatui::layout::Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(count_para, count_area);
+
+        // Empty line after count
+        let list_area = ratatui::layout::Rect {
+            x: inner.x,
+            y: inner.y + 2,
+            width: inner.width,
+            height: inner.height.saturating_sub(2),
+        };
+
+        // Render list
+        let list = List::new(items);
+        frame.render_widget(list, list_area);
+    }
+
+    fn render_model_selection_panel(&self, frame: &mut Frame, model_area: ratatui::layout::Rect) {
+        use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+
+        // Create block with title
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Blue))
+            .title(" Select Model ")
+            .title_bottom(Line::from(" ↑/↓ to select · Enter to confirm · Esc to exit ").centered());
+
+        let inner = block.inner(model_area);
+        frame.render_widget(block, model_area);
+
+        if self.available_models.is_empty() {
+            // No models found
+            let content = vec![
+                Line::from(""),
+                Line::from(Span::styled("No models found.", Style::default().fg(Color::DarkGray))),
+                Line::from(""),
+                Line::from(Span::raw("Place .gguf model files in ~/.config/.nite/models/")),
+            ];
+            let para = Paragraph::new(content);
+            let content_area = ratatui::layout::Rect {
+                x: inner.x,
+                y: inner.y + 1,
+                width: inner.width,
+                height: inner.height.saturating_sub(1),
+            };
+            frame.render_widget(para, content_area);
+        } else {
+            // Show model count
+            let count_text = format!(" {} available models", self.available_models.len());
+            let count_line = Line::from(Span::styled(count_text, Style::default().fg(Color::DarkGray)));
+            let count_para = Paragraph::new(count_line);
+            let count_area = ratatui::layout::Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            };
+            frame.render_widget(count_para, count_area);
+
+            // Calculate available height for list items
+            let list_height = inner.height.saturating_sub(2) as usize;
+
+            // Each model takes 3 lines (title + metadata1 + metadata2)
+            // We'll assume worst case of 3 lines per model for scroll calculation
+            let lines_per_model = 3;
+            let visible_models = (list_height / lines_per_model).max(1);
+
+            // Calculate scroll offset to keep selected model visible
+            let scroll_offset = if self.model_selected_index >= visible_models {
+                self.model_selected_index - visible_models + 1
+            } else {
+                0
+            };
+
+            // Determine which models to render
+            let end_index = (scroll_offset + visible_models).min(self.available_models.len());
+            let models_to_render = &self.available_models[scroll_offset..end_index];
+
+            // Render list of models with > indicator and metadata
+            let items: Vec<ListItem> = models_to_render.iter().enumerate().map(|(display_idx, model)| {
+                let actual_idx = scroll_offset + display_idx;
+                let is_selected = actual_idx == self.model_selected_index;
+                let is_current = self.current_model.as_ref().map(|m| m == &model.filename).unwrap_or(false);
+
+                // Format size (GB if >= 1024 MB, otherwise MB)
+                let size_str = if model.size_mb >= 1024.0 {
+                    format!("{:.1}GB", model.size_mb / 1024.0)
+                } else {
+                    format!("{:.0}MB", model.size_mb)
+                };
+
+                // Build metadata string with all available info
+                let mut metadata_parts = Vec::new();
+
+                // Add architecture and parameter count first (most important)
+                if let Some(ref arch) = model.architecture {
+                    if let Some(ref params) = model.parameter_count {
+                        metadata_parts.push(format!("{} {}", arch, params));
+                    } else {
+                        metadata_parts.push(arch.clone());
+                    }
+                } else if let Some(ref params) = model.parameter_count {
+                    metadata_parts.push(params.clone());
+                }
+
+                // Add size and quantization
+                metadata_parts.push(size_str);
+                if let Some(ref quant) = model.quantization {
+                    metadata_parts.push(quant.clone());
+                }
+
+                let metadata = metadata_parts.join(" · ");
+
+                // Build second metadata line (author, version, hash)
+                let mut metadata2_parts = Vec::new();
+                if let Some(ref author) = model.author {
+                    metadata2_parts.push(author.clone());
+                }
+                if let Some(ref version) = model.version {
+                    metadata2_parts.push(format!("ver {}", version));
+                }
+                if let Some(ref hash) = model.file_hash {
+                    metadata2_parts.push(format!("hash {}", hash));
+                }
+                let metadata2 = if !metadata2_parts.is_empty() {
+                    Some(metadata2_parts.join(" · "))
+                } else {
+                    None
+                };
+
+                // Title line
+                let title_line = if is_selected {
+                    Line::from(vec![
+                        Span::styled(">  ", Style::default().fg(Color::Blue)),
+                        Span::styled(&model.display_name, Style::default().fg(Color::Blue)),
+                        if is_current {
+                            Span::styled(" ✔", Style::default().fg(Color::Green))
+                        } else {
+                            Span::raw("")
+                        },
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled(&model.display_name, Style::default().fg(Color::White)),
+                        if is_current {
+                            Span::styled(" ✔", Style::default().fg(Color::Green))
+                        } else {
+                            Span::raw("")
+                        },
+                    ])
+                };
+
+                // First metadata line (arch, size, quant)
+                let metadata_line1 = Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(metadata, Style::default().fg(Color::DarkGray)),
+                ]);
+
+                // Build lines vec
+                let mut lines = vec![title_line, metadata_line1];
+
+                // Second metadata line (author, version, hash) - only if we have data
+                if let Some(meta2) = metadata2 {
+                    let metadata_line2 = Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled(meta2, Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+                    ]);
+                    lines.push(metadata_line2);
+                }
+
+                ListItem::new(lines)
+            }).collect();
+
+            let list_area = ratatui::layout::Rect {
+                x: inner.x,
+                y: inner.y + 2,
+                width: inner.width,
+                height: inner.height.saturating_sub(2),
+            };
+
+            let list = List::new(items);
+            frame.render_widget(list, list_area);
+        }
+    }
+
+    fn render_help_panel(&self, frame: &mut Frame, help_area: ratatui::layout::Rect) {
+        use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+
+        // Create outer block with green border
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Green))
+            .title(" Nite v0.1.0 ");
+
+        // Create tab header
+        let tab_spans: Vec<Span> = vec![
+            Span::styled("  ", Style::default()),
+            if self.help_tab == HelpTab::General {
+                Span::styled("general", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled("general", Style::default().fg(Color::DarkGray))
+            },
+            Span::styled("   ", Style::default()),
+            if self.help_tab == HelpTab::Commands {
+                Span::styled("commands", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled("commands", Style::default().fg(Color::DarkGray))
+            },
+            Span::styled("   ", Style::default()),
+            if self.help_tab == HelpTab::CustomCommands {
+                Span::styled("custom-commands", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled("custom-commands", Style::default().fg(Color::DarkGray))
+            },
+            Span::styled("   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("(tab to cycle)", Style::default().fg(Color::DarkGray)),
+        ];
+
+        let inner = block.inner(help_area);
+        frame.render_widget(block, help_area);
+
+        // Render tab header
+        let tab_line = Line::from(tab_spans);
+        let tab_para = Paragraph::new(tab_line);
+        let tab_area = ratatui::layout::Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(tab_para, tab_area);
+
+        // Content area (below tabs)
+        let content_area = ratatui::layout::Rect {
+            x: inner.x,
+            y: inner.y + 2,
+            width: inner.width,
+            height: inner.height.saturating_sub(4), // Leave room for footer
+        };
+
+        // Render content based on active tab
+        match self.help_tab {
+            HelpTab::General => {
+                let content = vec![
+                    Line::from(""),
+                    Line::from(Span::styled("Nite — Rust TUI for LLM-powered coding", Style::default().fg(Color::Cyan))),
+                    Line::from(""),
+                    Line::from(Span::styled("Shortcuts:", Style::default().fg(Color::Yellow))),
+                    Line::from(vec![
+                        Span::styled("  /           ", Style::default().fg(Color::Magenta)),
+                        Span::raw("Slash commands          "),
+                        Span::styled("Esc         ", Style::default().fg(Color::Magenta)),
+                        Span::raw("Interrupt agent / Clear input"),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("  Ctrl+N      ", Style::default().fg(Color::Magenta)),
+                        Span::raw("Navigation mode         "),
+                        Span::styled("Ctrl+C      ", Style::default().fg(Color::Magenta)),
+                        Span::raw("Exit (double tap)"),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("  Ctrl+S      ", Style::default().fg(Color::Magenta)),
+                        Span::raw("Toggle sandbox          "),
+                        Span::styled("Shift+Tab   ", Style::default().fg(Color::Magenta)),
+                        Span::raw("Cycle assistant mode"),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("  ↑/↓         ", Style::default().fg(Color::Magenta)),
+                        Span::raw("History navigation      "),
+                        Span::styled("Tab         ", Style::default().fg(Color::Magenta)),
+                        Span::raw("Cycle help tabs"),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled("Assistant Modes", Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC))),
+                    Line::from(Span::styled(" (Shift+Tab to cycle):", Style::default().fg(Color::DarkGray))),
+                    Line::from(vec![
+                        Span::styled("  • None           ", Style::default().fg(Color::White)),
+                        Span::styled("Standard mode", Style::default().fg(Color::DarkGray)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("  • YOLO mode      ", Style::default().fg(Color::Red)),
+                        Span::styled("High-speed, minimal confirmation", Style::default().fg(Color::DarkGray)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("  • Plan mode      ", Style::default().fg(Color::Blue)),
+                        Span::styled("Review plan before execution", Style::default().fg(Color::DarkGray)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("  • Auto-accept    ", Style::default().fg(Color::Green)),
+                        Span::styled("Automatically accept edits", Style::default().fg(Color::DarkGray)),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled("Vim Mode:", Style::default().fg(Color::Yellow))),
+                    Line::from(vec![
+                        Span::styled("  /vim        ", Style::default().fg(Color::Magenta)),
+                        Span::raw("Toggle vim keybindings"),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("  i           ", Style::default().fg(Color::Magenta)),
+                        Span::raw("Insert mode          "),
+                        Span::styled("v           ", Style::default().fg(Color::Magenta)),
+                        Span::raw("Visual mode"),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("  Esc         ", Style::default().fg(Color::Magenta)),
+                        Span::raw("Normal mode          "),
+                        Span::styled("gg/G        ", Style::default().fg(Color::Magenta)),
+                        Span::raw("Jump to top/bottom"),
+                    ]),
+                ];
+                let para = Paragraph::new(content).wrap(Wrap { trim: false });
+                frame.render_widget(para, content_area);
+            }
+            HelpTab::Commands => {
+                // Build command list items
+                let items: Vec<ListItem> = SLASH_COMMANDS.iter().enumerate().map(|(idx, (cmd, desc))| {
+                    let is_selected = idx == self.help_commands_selected;
+
+                    let line = if is_selected {
+                        Line::from(vec![
+                            Span::styled(">  ", Style::default().fg(Color::Green)),
+                            Span::styled(*cmd, Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                            Span::raw("  "),
+                            Span::styled(*desc, Style::default().fg(Color::White)),
+                        ])
+                    } else {
+                        Line::from(vec![
+                            Span::raw("   "),
+                            Span::styled(*cmd, Style::default().fg(Color::Blue)),
+                            Span::raw("  "),
+                            Span::styled(*desc, Style::default().fg(Color::DarkGray)),
+                        ])
+                    };
+
+                    ListItem::new(line)
+                }).collect();
+
+                let list = List::new(items);
+                frame.render_widget(list, content_area);
+            }
+            HelpTab::CustomCommands => {
+                let content = vec![
+                    Line::from(""),
+                    Line::from(Span::styled("No custom commands found.", Style::default().fg(Color::DarkGray))),
+                    Line::from(""),
+                    Line::from(Span::raw("Custom commands can be added in:")),
+                    Line::from(Span::styled("  ~/.config/.nite/commands/", Style::default().fg(Color::Blue))),
+                    Line::from(""),
+                    Line::from(Span::styled("For more information, visit the documentation.", Style::default().fg(Color::DarkGray))),
+                ];
+                let para = Paragraph::new(content).wrap(Wrap { trim: false });
+                frame.render_widget(para, content_area);
+            }
+        }
+
+        // Footer
+        let footer_area = ratatui::layout::Rect {
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        };
+        let footer_line = Line::from(vec![
+            Span::styled("Esc", Style::default().fg(Color::Magenta)),
+            Span::styled(" to exit", Style::default().fg(Color::DarkGray)),
+        ]);
+        let footer_para = Paragraph::new(footer_line);
+        frame.render_widget(footer_para, footer_area);
+    }
+
+    fn render_resume_panel(&self, frame: &mut Frame, resume_area: ratatui::layout::Rect) {
+        use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+
+        // Create outer block with green border
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Green))
+            .title(" Saved Conversations ")
+            .title_bottom(Line::from(" ↑/↓ to select · Enter to restore · d to delete · f to fork · Esc to close ").centered());
+
+        let inner = block.inner(resume_area);
+        frame.render_widget(block, resume_area);
+
+        if self.resume_conversations.is_empty() {
+            // No conversations found
+            let content = vec![
+                Line::from(""),
+                Line::from(Span::styled("No saved conversations found.", Style::default().fg(Color::DarkGray))),
+                Line::from(""),
+                Line::from(Span::raw("Use /save to save your current conversation")),
+            ];
+            let para = Paragraph::new(content);
+            let content_area = ratatui::layout::Rect {
+                x: inner.x,
+                y: inner.y + 1,
+                width: inner.width,
+                height: inner.height.saturating_sub(1),
+            };
+            frame.render_widget(para, content_area);
+        } else {
+            // Show conversation count with fork count
+            let fork_count = self.resume_conversations.iter().filter(|c| c.forked_from.is_some()).count();
+            let count_text = if fork_count > 0 {
+                format!(" {} saved conversations ({} forks)", self.resume_conversations.len(), fork_count)
+            } else {
+                format!(" {} saved conversations", self.resume_conversations.len())
+            };
+            let count_line = Line::from(Span::styled(count_text, Style::default().fg(Color::DarkGray)));
+            let count_para = Paragraph::new(count_line);
+            let count_area = ratatui::layout::Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            };
+            frame.render_widget(count_para, count_area);
+
+            // Render list of conversations with > indicator and fork symbol
+            let items: Vec<ListItem> = self.resume_conversations.iter().enumerate().map(|(idx, conv)| {
+                let is_selected = idx == self.resume_selected;
+                let is_fork = conv.forked_from.is_some();
+
+                // Title line (preview) with > indicator and fork symbol
+                // Layout: ">  " (3 chars selected) or "  " (2 chars unselected) then "⎇ " for forks
+                let title_line = if is_selected {
+                    if is_fork {
+                        Line::from(vec![
+                            Span::styled(">  ⎇ ", Style::default().fg(Color::Green)),
+                            Span::styled(&conv.preview, Style::default().fg(Color::Green)),
+                        ])
+                    } else {
+                        Line::from(vec![
+                            Span::styled(">  ", Style::default().fg(Color::Green)),
+                            Span::styled(&conv.preview, Style::default().fg(Color::Green)),
+                        ])
+                    }
+                } else {
+                    if is_fork {
+                        Line::from(vec![
+                            Span::raw("  ⎇ "),
+                            Span::styled(&conv.preview, Style::default().fg(Color::White)),
+                        ])
+                    } else {
+                        Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(&conv.preview, Style::default().fg(Color::White)),
+                        ])
+                    }
+                };
+
+                // Metadata line at bottom (uses static time string)
+                let msg_count = format!("{} msgs", conv.message_count);
+                let branch_str = conv.git_branch.as_ref()
+                    .map(|b| format!(" • {}", b))
+                    .unwrap_or_default();
+
+                let metadata_line = Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("{} • {}{}", conv.time_ago_str, msg_count, branch_str),
+                        Style::default().fg(Color::DarkGray)
+                    ),
+                ]);
+
+                ListItem::new(vec![title_line, metadata_line])
+            }).collect();
+
+            let list_area = ratatui::layout::Rect {
+                x: inner.x,
+                y: inner.y + 2,
+                width: inner.width,
+                height: inner.height.saturating_sub(2),
+            };
+
+            let list = List::new(items);
+            frame.render_widget(list, list_area);
+        }
+    }
+
+    fn render_task_viewer(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+
+        if let Some((session_id, command, log_file, start_time)) = &self.viewing_task {
+            let runtime = start_time.elapsed();
+            let runtime_str = format!("{}m {}s", runtime.as_secs() / 60, runtime.as_secs() % 60);
+
+            // Create outer block
+            let outer_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(format!(" shell: {} ", session_id));
+
+            let outer_inner = outer_block.inner(area);
+            frame.render_widget(outer_block, area);
+
+            // Runtime and command area
+            let runtime_line = Line::from(vec![
+                Span::raw("runtime: "),
+                Span::raw(runtime_str),
+            ]);
+            let command_line = Line::from(vec![
+                Span::raw("command: "),
+                Span::raw(command.as_str()),
+            ]);
+
+            let header_para = Paragraph::new(vec![runtime_line, command_line]);
+            let header_area = ratatui::layout::Rect {
+                x: outer_inner.x,
+                y: outer_inner.y,
+                width: outer_inner.width,
+                height: 2,
+            };
+            frame.render_widget(header_para, header_area);
+
+            // Inner block for output
+            let output_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan));
+
+            let output_area = ratatui::layout::Rect {
+                x: outer_inner.x,
+                y: outer_inner.y + 2,
+                width: outer_inner.width,
+                height: outer_inner.height.saturating_sub(2),
+            };
+
+            let output_inner = output_block.inner(output_area);
+            frame.render_widget(output_block, output_area);
+
+            // Read log file and display (using tail to read only last 10 lines for performance)
+            use std::process::Command;
+            let log_content = Command::new("tail")
+                .arg("-n")
+                .arg("10")
+                .arg(log_file)
+                .output()
+                .ok()
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .unwrap_or_else(|| String::from("(no output yet)"));
+            let lines: Vec<&str> = log_content.lines().collect();
+            let total_lines = lines.len();
+
+            // Show last 10 lines in Gray
+            let mut all_lines: Vec<Line> = lines.iter()
+                .map(|line| Line::from(Span::styled(*line, Style::default().fg(Color::Gray))))
+                .collect();
+
+            // Always add the "...Showing 10 lines" text in DarkGray italic
+            all_lines.push(Line::from(Span::styled(
+                format!("...Showing {} lines", total_lines),
+                Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::ITALIC)
+            )));
+
+            let output_para = Paragraph::new(all_lines).wrap(Wrap { trim: false });
+            frame.render_widget(output_para, output_inner);
+
+            // Bottom instructions
+            let bottom_line = Line::from(" Press Esc/Enter/Space to close · k to kill ")
+                .centered();
+            let bottom_area = ratatui::layout::Rect {
+                x: area.x,
+                y: area.y + area.height - 1,
+                width: area.width,
+                height: 1,
+            };
+            frame.render_widget(Paragraph::new(bottom_line), bottom_area);
+        }
+    }
+
     fn render_status_bar(&self, frame: &mut Frame, status_area: ratatui::layout::Rect, mode: Mode, cursor_row: usize, cursor_col: usize, scroll_offset: usize) {
         let directory_width = self.status_left.width() as u16;
         // Create center text based on mode
@@ -3498,6 +5598,33 @@ impl App {
                 } else {
                     0
                 };
+                let background_tasks_height = if self.show_background_tasks {
+                    10 // Fixed height for background tasks panel
+                } else if self.viewing_task.is_some() {
+                    20 // Fixed height for task viewer
+                } else {
+                    0
+                };
+                let help_height = if self.show_help {
+                    25 // Fixed height for help panel
+                } else {
+                    0
+                };
+                let resume_height = if self.show_resume {
+                    25 // Fixed height for resume panel
+                } else {
+                    0
+                };
+                let todos_height = if self.show_todos {
+                    15 // Fixed height for todos panel
+                } else {
+                    0
+                };
+                let model_selection_height = if self.show_model_selection {
+                    20 // Fixed height for model selection panel
+                } else {
+                    0
+                };
                 let has_infobar = self.ctrl_c_pressed.is_some() || !self.queued_messages.is_empty();
 
                 // Build constraints dynamically
@@ -3521,6 +5648,26 @@ impl App {
 
                 if autocomplete_height > 0 {
                     constraints_vec.push(Constraint::Length(autocomplete_height)); // Autocomplete
+                }
+
+                if background_tasks_height > 0 {
+                    constraints_vec.push(Constraint::Length(background_tasks_height)); // Background tasks
+                }
+
+                if help_height > 0 {
+                    constraints_vec.push(Constraint::Length(help_height)); // Help panel
+                }
+
+                if resume_height > 0 {
+                    constraints_vec.push(Constraint::Length(resume_height)); // Resume panel
+                }
+
+                if todos_height > 0 {
+                    constraints_vec.push(Constraint::Length(todos_height)); // Todos panel
+                }
+
+                if model_selection_height > 0 {
+                    constraints_vec.push(Constraint::Length(model_selection_height)); // Model selection panel
                 }
 
                 constraints_vec.push(Constraint::Length(1)); // Status bar
@@ -3601,6 +5748,41 @@ impl App {
         let input_area_idx = idx;
         idx += 1;
         let autocomplete_area_idx = if has_autocomplete {
+            let i = idx;
+            idx += 1;
+            Some(i)
+        } else {
+            None
+        };
+        let background_tasks_area_idx = if self.show_background_tasks || self.viewing_task.is_some() {
+            let i = idx;
+            idx += 1;
+            Some(i)
+        } else {
+            None
+        };
+        let help_area_idx = if self.show_help {
+            let i = idx;
+            idx += 1;
+            Some(i)
+        } else {
+            None
+        };
+        let resume_area_idx = if self.show_resume {
+            let i = idx;
+            idx += 1;
+            Some(i)
+        } else {
+            None
+        };
+        let todos_area_idx = if self.show_todos {
+            let i = idx;
+            idx += 1;
+            Some(i)
+        } else {
+            None
+        };
+        let model_selection_area_idx = if self.show_model_selection {
             let i = idx;
             idx += 1;
             Some(i)
@@ -4305,6 +6487,37 @@ impl App {
             if let Some(idx) = autocomplete_area_idx {
                 let autocomplete_area = areas[idx];
                 self.render_autocomplete(frame, autocomplete_area);
+            }
+
+            // Render background tasks panel OR task viewer if active (same area)
+            if let Some(idx) = background_tasks_area_idx {
+                let background_tasks_area = areas[idx];
+                if self.viewing_task.is_some() {
+                    self.render_task_viewer(frame, background_tasks_area);
+                } else {
+                    self.render_background_tasks(frame, background_tasks_area);
+                }
+            }
+
+            // Render help panel below input bar
+            if let Some(idx) = help_area_idx {
+                let help_area = areas[idx];
+                self.render_help_panel(frame, help_area);
+            }
+
+            if let Some(idx) = resume_area_idx {
+                let resume_area = areas[idx];
+                self.render_resume_panel(frame, resume_area);
+            }
+
+            if let Some(idx) = todos_area_idx {
+                let todos_area = areas[idx];
+                self.render_todos_panel(frame, todos_area);
+            }
+
+            if let Some(idx) = model_selection_area_idx {
+                let model_area = areas[idx];
+                self.render_model_selection_panel(frame, model_area);
             }
         }
     }

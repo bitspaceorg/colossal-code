@@ -167,7 +167,16 @@ impl Execute for JoinLineWithLineBelow {
             return;
         }
         state.capture();
+
+        // Get current line length to position cursor and add space
+        let current_line_len = state.lines.len_col(state.cursor.row).unwrap_or_default();
+
+        // Join lines (removes newline between them)
         state.lines.join_lines(state.cursor.row);
+
+        // Insert a space at the join point
+        let join_point = Index2::new(state.cursor.row, current_line_len);
+        let _ = state.lines.insert(join_point, ' ');
     }
 }
 

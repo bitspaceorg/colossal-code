@@ -6,6 +6,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToolName {
     ExecCommand,
+    ReadOutput,
     DeletePath,
     DeleteMany,
     GetFiles,
@@ -16,6 +17,7 @@ pub enum ToolName {
     SemanticSearch,
     WebSearch,
     HtmlToText,
+    TodoWrite,
 }
 
 /// Build a specific tool definition
@@ -47,6 +49,28 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                         }),
                     );
                     params.insert("required".to_string(), json!(["command"]));
+                    params
+                }),
+            },
+        },
+        ToolName::ReadOutput => Tool {
+            tp: ToolType::Function,
+            function: Function {
+                name: "read_output".to_string(),
+                description: Some("Read output from a background shell process by session ID".to_string()),
+                parameters: Some({
+                    let mut params = HashMap::new();
+                    params.insert("type".to_string(), json!("object"));
+                    params.insert(
+                        "properties".to_string(),
+                        json!({
+                            "session_id": {
+                                "type": "string",
+                                "description": "The session ID of the background process"
+                            }
+                        }),
+                    );
+                    params.insert("required".to_string(), json!(["session_id"]));
                     params
                 }),
             },
@@ -361,6 +385,54 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                 }),
             },
         },
+        ToolName::TodoWrite => Tool {
+            tp: ToolType::Function,
+            function: Function {
+                name: "todo_write".to_string(),
+                description: Some("Create or update a hierarchical task list to track your work. Use this proactively for complex multi-step tasks to organize your approach and demonstrate thoroughness. Supports nested subtasks via the 'children' array. Each task has: content (what needs to be done), status (pending/in_progress/completed), activeForm (present continuous form), and optional children (array of subtasks). Mark tasks as in_progress when you start them, and completed when finished. Use nesting to break down complex tasks into manageable subtasks.".to_string()),
+                parameters: Some({
+                    let mut params = HashMap::new();
+                    params.insert("type".to_string(), json!("object"));
+                    params.insert(
+                        "properties".to_string(),
+                        json!({
+                            "todos": {
+                                "type": "array",
+                                "description": "Array of todo items representing the complete hierarchical task list. Each todo can have nested children for subtasks.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "content": {
+                                            "type": "string",
+                                            "description": "The task description in imperative form (e.g., 'Run tests', 'Fix authentication bug')"
+                                        },
+                                        "status": {
+                                            "type": "string",
+                                            "enum": ["pending", "in_progress", "completed"],
+                                            "description": "Current status of the task"
+                                        },
+                                        "activeForm": {
+                                            "type": "string",
+                                            "description": "Present continuous form shown during execution (e.g., 'Running tests', 'Fixing authentication bug')"
+                                        },
+                                        "children": {
+                                            "type": "array",
+                                            "description": "Optional array of subtasks. Each child has the same structure (recursive). Use this to break down complex tasks.",
+                                            "items": {
+                                                "$ref": "#"
+                                            }
+                                        }
+                                    },
+                                    "required": ["content", "status", "activeForm"]
+                                }
+                            }
+                        }),
+                    );
+                    params.insert("required".to_string(), json!(["todos"]));
+                    params
+                }),
+            },
+        },
     }
 }
 
@@ -373,6 +445,7 @@ pub fn build_tools(tool_names: &[ToolName]) -> Vec<Tool> {
 pub fn get_all_tools() -> Vec<Tool> {
     build_tools(&[
         ToolName::ExecCommand,
+        ToolName::ReadOutput,
         ToolName::DeletePath,
         ToolName::DeleteMany,
         ToolName::GetFiles,
@@ -383,6 +456,7 @@ pub fn get_all_tools() -> Vec<Tool> {
         ToolName::SemanticSearch,
         ToolName::WebSearch,
         ToolName::HtmlToText,
+        ToolName::TodoWrite,
     ])
 }
 

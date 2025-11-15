@@ -3,9 +3,9 @@ use crate::actions::delete::DeleteToEndOfLine;
 use crate::actions::motion::{FindCharBackward, FindCharForward, MoveHalfPageDown, MoveToFirstRow, MoveToLastRow, TillCharBackward, TillCharForward};
 use crate::actions::search::StartSearch;
 use crate::actions::{
-    Action, Append, AppendCharToSearch, AppendNewline, ChangeInnerBetween, ChangeInnerWord,
+    Action, Append, AppendCharToSearch, ChangeInnerBetween, ChangeInnerWord,
     ChangeSelection, Composed, CopyLine, CopySelection, DeleteChar, DeleteLine, DeleteSelection,
-    Execute, FindNext, FindPrevious, InsertChar, InsertNewline, JoinLineWithLineBelow, LineBreak,
+    Execute, FindNext, FindPrevious, InsertChar, JoinLineWithLineBelow, LineBreak,
     MoveBackward, MoveDown, MoveForward, MoveHalfPageUp, MoveToEndOfLine, MoveToFirst,
     MoveToMatchinBracket, MoveToStartOfLine, MoveUp, MoveWordBackward,
     MoveWordForward, MoveWordForwardToEndOfWord, Paste, Redo, RemoveChar, RemoveCharFromSearch, SelectInnerBetween,
@@ -107,19 +107,21 @@ impl Default for KeyEventHandler {
                     SwitchMode(EditorMode::Insert).into(),
                 ]).into(),
             ),
-            // 'o' creates a newline and enters insert mode (allows input bar to grow up to 4 lines)
+            // 'o' creates a newline AFTER current line and enters insert mode
             (
                 KeyEventRegister::n(vec![KeyEvent::Char('o')]),
                 Composed(vec![
                     SwitchMode(EditorMode::Insert).into(),
+                    MoveToEndOfLine().into(),
                     LineBreak(1).into(),
                 ]).into(),
             ),
-            // 'O' also creates a newline and enters insert mode
+            // 'O' creates a newline BEFORE current line and enters insert mode
             (
                 KeyEventRegister::n(vec![KeyEvent::Char('O')]),
                 Composed(vec![
                     SwitchMode(EditorMode::Insert).into(),
+                    MoveToFirst().into(),
                     LineBreak(1).into(),
                 ]).into(),
             ),
