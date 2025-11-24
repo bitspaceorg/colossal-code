@@ -62,6 +62,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "resume a conversation"),
     ("/review", "review uncommited changes"),
     ("/rewind", "restore the code and/or conversation to a previous point"),
+    ("/safety", "configure safety mode (yolo/regular/readonly) and permissions"),
     ("/shells", "list and manage background shell sessions"),
     ("/status", "show tool statuses"),
     ("/stats", "show the total token count and duration of the current session"),
@@ -119,6 +120,7 @@ enum AssistantMode {
     Yolo,
     Plan,
     AutoAccept,
+    ReadOnly,
 }
 
 impl AssistantMode {
@@ -127,7 +129,8 @@ impl AssistantMode {
             AssistantMode::None => AssistantMode::Yolo,
             AssistantMode::Yolo => AssistantMode::Plan,
             AssistantMode::Plan => AssistantMode::AutoAccept,
-            AssistantMode::AutoAccept => AssistantMode::None,
+            AssistantMode::AutoAccept => AssistantMode::ReadOnly,
+            AssistantMode::ReadOnly => AssistantMode::None,
         }
     }
 
@@ -137,6 +140,27 @@ impl AssistantMode {
             AssistantMode::Yolo => Some(("YOLO mode".to_string(), Color::Red)),
             AssistantMode::Plan => Some(("plan mode".to_string(), Color::Blue)),
             AssistantMode::AutoAccept => Some(("auto-accept edits".to_string(), Color::Green)),
+            AssistantMode::ReadOnly => Some(("read-only".to_string(), Color::Yellow)),
+        }
+    }
+
+    /// Convert to safety config mode
+    fn to_safety_mode(&self) -> Option<agent_core::safety_config::SafetyMode> {
+        match self {
+            AssistantMode::Yolo => Some(agent_core::safety_config::SafetyMode::Yolo),
+            AssistantMode::ReadOnly => Some(agent_core::safety_config::SafetyMode::ReadOnly),
+            AssistantMode::None | AssistantMode::Plan | AssistantMode::AutoAccept => {
+                Some(agent_core::safety_config::SafetyMode::Regular)
+            }
+        }
+    }
+
+    /// Create from safety config mode
+    fn from_safety_mode(mode: agent_core::safety_config::SafetyMode) -> Self {
+        match mode {
+            agent_core::safety_config::SafetyMode::Yolo => AssistantMode::Yolo,
+            agent_core::safety_config::SafetyMode::ReadOnly => AssistantMode::ReadOnly,
+            agent_core::safety_config::SafetyMode::Regular => AssistantMode::None,
         }
     }
 }
@@ -315,6 +339,28 @@ struct ModelInfo {
     version: Option<String>,
 }
 
+/// File change statistics for rewind points
+#[derive(Debug, Clone)]
+struct FileChange {
+    path: String,
+    insertions: usize,
+    deletions: usize,
+}
+
+/// Rewind point capturing conversation state at a specific moment
+#[derive(Debug, Clone)]
+struct RewindPoint {
+    messages: Vec<String>,
+    message_types: Vec<MessageType>,
+    message_states: Vec<MessageState>,
+    message_metadata: Vec<Option<UIMessageMetadata>>,
+    message_timestamps: Vec<SystemTime>,
+    timestamp: SystemTime,
+    preview: String,  // Description of this rewind point
+    message_count: usize,
+    file_changes: Vec<FileChange>,  // Files modified in this rewind point
+}
+
 /// Metadata for displaying conversation in list
 #[derive(Debug, Clone)]
 struct ConversationMetadata {
@@ -443,6 +489,10 @@ struct App {
     editing_queue_index: Option<usize>,  // Index of queue message being edited (if any)
     show_queue_choice: bool,  // Show the queue choice popup
     queue_choice_input: String,  // Collect user choice for queue
+    show_approval_prompt: bool,  // Show approval request popup
+    approval_prompt_content: String,  // Content of approval request
+    show_sandbox_prompt: bool,  // Show sandbox permission prompt
+    sandbox_blocked_path: String,  // Path that was blocked by sandbox
     interrupt_pending: Option<String>,  // Message waiting to send after cancel completes
     export_pending: bool,  // Flag to trigger export in async context
     save_pending: bool,    // Flag to trigger save conversation in async context
@@ -488,6 +538,12 @@ struct App {
     available_models: Vec<ModelInfo>,
     model_selected_index: usize,
     current_model: Option<String>,
+    // Rewind panel state
+    show_rewind: bool,
+    rewind_points: Vec<RewindPoint>,
+    rewind_selected: usize,
+    current_file_changes: Vec<FileChange>,  // Track file changes since last rewind point
+    last_tool_args: Option<(String, String)>,  // (tool_name, arguments) for tracking file changes
 }
 impl App {
     fn get_config_file_path() -> Result<std::path::PathBuf> {
@@ -861,21 +917,46 @@ impl App {
 
     fn load_history(history_file: &std::path::Path) -> Vec<String> {
         if let Ok(contents) = std::fs::read_to_string(history_file) {
-            contents.lines()
+            let history: Vec<String> = contents.lines()
                 .map(|s| {
                     // Unescape newlines: \n becomes actual newline
                     s.replace("\\n", "\n")
                         .replace("\\\\", "\\")  // Handle escaped backslashes
                 })
-                .collect()
+                .collect();
+
+            // Remove consecutive duplicates
+            Self::deduplicate_history(history)
         } else {
             Vec::new()
         }
     }
 
+    /// Remove consecutive duplicate entries from history
+    fn deduplicate_history(history: Vec<String>) -> Vec<String> {
+        let mut deduplicated = Vec::new();
+        let mut last_entry: Option<&String> = None;
+
+        for entry in &history {
+            if Some(entry) != last_entry {
+                deduplicated.push(entry.clone());
+                last_entry = Some(entry);
+            }
+        }
+
+        deduplicated
+    }
+
     fn save_to_history(&mut self, command: &str) {
         if command.trim().is_empty() {
             return;
+        }
+
+        // Don't add duplicate if it's the same as the last entry
+        if let Some(last_command) = self.command_history.last() {
+            if last_command == command {
+                return; // Skip duplicate
+            }
         }
 
         // Add to in-memory history
@@ -1162,6 +1243,11 @@ impl App {
         // Load model selection from config
         let current_model = Self::load_model_setting();
 
+        // Enable sandbox by default (SAFE_MODE environment variable)
+        unsafe {
+            std::env::set_var("SAFE_MODE", "1");
+        }
+
         // Initialize agent with the selected model
         let agent = Agent::new_with_model(current_model.clone()).await
             .map_err(|e| color_eyre::eyre::eyre!("Failed to initialize agent: {}", e))?;
@@ -1222,6 +1308,12 @@ impl App {
                                         let _ = tx_clone.send(AgentMessage::Error(format!("Failed to reload model: {}", e)));
                                     }
                                 }
+                            });
+                        }
+                        AgentMessage::ApprovalResponse(approved) => {
+                            let agent_clone = agent_clone.clone();
+                            tokio::task::spawn_local(async move {
+                                agent_clone.handle_approval_response(approved).await;
                             });
                         }
                         _ => {
@@ -1308,6 +1400,10 @@ impl App {
             editing_queue_index: None,
             show_queue_choice: false,
             queue_choice_input: String::new(),
+            show_approval_prompt: false,
+            approval_prompt_content: String::new(),
+            show_sandbox_prompt: false,
+            sandbox_blocked_path: String::new(),
             interrupt_pending: None,
             export_pending: false,
             save_pending: false,
@@ -1317,7 +1413,7 @@ impl App {
             autocomplete_suggestions: Vec::new(),
             autocomplete_selected_index: 0,
             thinking_raw_content: String::new(),
-            sandbox_enabled: false,
+            sandbox_enabled: true,  // Default to sandbox enabled for safety
             vim_mode_enabled: Self::load_vim_mode_setting(),
             vim_input_editor: RichEditor::new(),
             show_background_tasks: false,
@@ -1340,6 +1436,11 @@ impl App {
             show_model_selection: false,
             available_models: Vec::new(),
             model_selected_index: 0,
+            show_rewind: false,
+            rewind_points: Vec::new(),
+            rewind_selected: 0,
+            current_file_changes: Vec::new(),
+            last_tool_args: None,
             current_model,
         })
     }
@@ -1429,9 +1530,10 @@ impl App {
                 for (k, v) in obj.iter() {
                     let val_str = match v {
                         serde_json::Value::String(s) => {
-                            // Truncate very long strings
-                            if s.len() > 100 {
-                                format!("\"{}...\"", &s[..97])
+                            // Truncate very long strings (using char-based slicing for UTF-8 safety)
+                            if s.chars().count() > 100 {
+                                let truncated: String = s.chars().take(97).collect();
+                                format!("\"{}...\"", truncated)
                             } else {
                                 format!("\"{}\"", s)
                             }
@@ -2056,6 +2158,103 @@ impl App {
         Ok(())
     }
 
+    fn track_file_change(&mut self, tool_name: &str, arguments: &str, result: &str) {
+        // Only track Write and Edit tool calls
+        if tool_name != "Write" && tool_name != "Edit" {
+            return;
+        }
+
+        // Parse the arguments to get file_path
+        if let Ok(args_json) = serde_json::from_str::<serde_json::Value>(arguments) {
+            if let Some(file_path) = args_json.get("file_path").and_then(|v| v.as_str()) {
+                // Extract filename from path
+                let path = std::path::Path::new(file_path);
+                let filename = path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(file_path)
+                    .to_string();
+
+                // Parse result to count insertions/deletions
+                let (insertions, deletions) = if tool_name == "Edit" {
+                    // For Edit, count lines in old_string and new_string
+                    let old_lines = args_json.get("old_string")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.lines().count())
+                        .unwrap_or(0);
+                    let new_lines = args_json.get("new_string")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.lines().count())
+                        .unwrap_or(0);
+
+                    if new_lines > old_lines {
+                        (new_lines - old_lines, 0)
+                    } else {
+                        (0, old_lines - new_lines)
+                    }
+                } else {
+                    // For Write, count lines in content
+                    let lines = args_json.get("content")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.lines().count())
+                        .unwrap_or(0);
+                    (lines, 0)
+                };
+
+                // Check if file already tracked, update it
+                if let Some(existing) = self.current_file_changes.iter_mut().find(|fc| fc.path == filename) {
+                    existing.insertions += insertions;
+                    existing.deletions += deletions;
+                } else {
+                    // Add new file change
+                    self.current_file_changes.push(FileChange {
+                        path: filename,
+                        insertions,
+                        deletions,
+                    });
+                }
+            }
+        }
+    }
+
+    fn create_rewind_point(&mut self) {
+        // Only create rewind points if we have messages
+        if self.messages.is_empty() {
+            return;
+        }
+
+        // Extract preview from the most recent user message
+        let preview = self.messages.iter()
+            .enumerate()
+            .rev()
+            .find(|(i, _)| matches!(self.message_types.get(*i), Some(MessageType::User)))
+            .map(|(_, msg)| msg.chars().take(80).collect::<String>())
+            .unwrap_or_else(|| format!("{} messages", self.messages.len()));
+
+        // Create a snapshot of the current conversation state
+        let rewind_point = RewindPoint {
+            messages: self.messages.clone(),
+            message_types: self.message_types.clone(),
+            message_states: self.message_states.clone(),
+            message_metadata: self.message_metadata.clone(),
+            message_timestamps: self.message_timestamps.clone(),
+            timestamp: SystemTime::now(),
+            preview,
+            message_count: self.messages.len(),
+            file_changes: self.current_file_changes.clone(),
+        };
+
+        // Add to rewind points list
+        self.rewind_points.push(rewind_point);
+
+        // Reset file changes tracker for next rewind point
+        self.current_file_changes.clear();
+
+        // Limit to last 50 rewind points to avoid memory issues
+        if self.rewind_points.len() > 50 {
+            self.rewind_points.remove(0);
+        }
+    }
+
     async fn save_conversation(&mut self) -> Result<()> {
         if self.messages.is_empty() {
             return Ok(());
@@ -2544,6 +2743,18 @@ impl App {
             }
             // Early return to avoid adding command to messages
             return;
+        } else if cmd_lower == "/rewind" {
+            // Open rewind panel to restore to previous conversation state
+            if self.rewind_points.is_empty() {
+                self.messages.push(" ⎿ No rewind points available yet".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            } else {
+                self.show_rewind = true;
+                self.rewind_selected = self.rewind_points.len().saturating_sub(1); // Start at most recent
+            }
+            // Early return to avoid adding command to messages
+            return;
         } else if cmd_lower == "/fork" {
             // Fork (copy) a conversation - same UI but creates new ID
             if let Err(e) = self.load_conversations_list() {
@@ -2629,6 +2840,58 @@ impl App {
             }
             // Early return to avoid adding command to messages
             return;
+        } else if cmd_lower.starts_with("/safety") {
+            // Parse safety command arguments
+            let parts: Vec<&str> = command.split_whitespace().collect();
+
+            if parts.len() == 1 {
+                // No args - show current status (no UI spam)
+                if let Ok(config) = agent_core::safety_config::SafetyConfig::load() {
+                    self.messages.push(format!("[SAFETY] {}", config.status_string()));
+                    self.message_types.push(MessageType::Agent);
+                    self.message_states.push(MessageState::Sent);
+                }
+            } else {
+                // Handle subcommands (silently update, sync with assistant_mode)
+                match parts[1].to_lowercase().as_str() {
+                    "yolo" => {
+                        let mut config = agent_core::safety_config::SafetyConfig::load()
+                            .unwrap_or_default();
+                        config.set_mode(agent_core::safety_config::SafetyMode::Yolo);
+                        let _ = config.save();
+                        self.assistant_mode = AssistantMode::Yolo;
+                    }
+                    "regular" => {
+                        let mut config = agent_core::safety_config::SafetyConfig::load()
+                            .unwrap_or_default();
+                        config.set_mode(agent_core::safety_config::SafetyMode::Regular);
+                        let _ = config.save();
+                        self.assistant_mode = AssistantMode::None;
+                    }
+                    "readonly" | "read-only" => {
+                        let mut config = agent_core::safety_config::SafetyConfig::load()
+                            .unwrap_or_default();
+                        config.set_mode(agent_core::safety_config::SafetyMode::ReadOnly);
+                        let _ = config.save();
+                        self.assistant_mode = AssistantMode::ReadOnly;
+                    }
+                    "permissions" | "perms" => {
+                        let mut config = agent_core::safety_config::SafetyConfig::load()
+                            .unwrap_or_default();
+                        config.toggle_ask_permission();
+                        let _ = config.save();
+                    }
+                    "sandbox" => {
+                        let mut config = agent_core::safety_config::SafetyConfig::load()
+                            .unwrap_or_default();
+                        config.toggle_sandbox();
+                        let _ = config.save();
+                        self.sandbox_enabled = config.sandbox_enabled;
+                    }
+                    _ => {}
+                }
+            }
+            return;
         } else {
             // Unknown command
             self.messages.push(format!("[COMMAND: Unknown command '{}']", command));
@@ -2710,6 +2973,109 @@ impl App {
                 self.input_modified = false;
                 self.show_queue_choice = false;
                 self.queue_choice_input.clear();
+                return;
+            }
+
+            // Check if we're in approval prompt mode
+            if self.show_approval_prompt {
+                let choice = self.input.trim();
+                match choice {
+                    "0" => {
+                        // Approve
+                        if let Some(tx) = &self.agent_tx {
+                            let _ = tx.send(AgentMessage::ApprovalResponse(true));
+                        }
+                        self.messages.push(" ⎿ Approved".to_string());
+                        self.message_types.push(MessageType::Agent);
+                        self.message_states.push(MessageState::Sent);
+                    }
+                    "1" => {
+                        // Deny
+                        if let Some(tx) = &self.agent_tx {
+                            let _ = tx.send(AgentMessage::ApprovalResponse(false));
+                        }
+                        self.messages.push(" ⎿ Denied".to_string());
+                        self.message_types.push(MessageType::Agent);
+                        self.message_states.push(MessageState::Sent);
+                    }
+                    "2" => {
+                        // Interrupt - deny and interrupt
+                        if let Some(tx) = &self.agent_tx {
+                            let _ = tx.send(AgentMessage::ApprovalResponse(false));
+                            let _ = tx.send(AgentMessage::Cancel);
+                        }
+                        self.messages.push(" ⎿ Interrupted. What should Nite do instead?".to_string());
+                        self.message_types.push(MessageType::Agent);
+                        self.message_states.push(MessageState::Sent);
+                    }
+                    _ => {
+                        // Invalid choice, keep the popup
+                        self.input.clear();
+                        self.reset_cursor();
+                        self.input_modified = false;
+                        return;
+                    }
+                }
+                self.input.clear();
+                self.reset_cursor();
+                self.input_modified = false;
+                self.show_approval_prompt = false;
+                self.approval_prompt_content.clear();
+                return;
+            }
+
+            // Check if we're in sandbox permission prompt mode
+            if self.show_sandbox_prompt {
+                let choice = self.input.trim();
+                match choice {
+                    "0" => {
+                        // Accept - add path to writable roots dynamically
+                        let path = std::path::PathBuf::from(&self.sandbox_blocked_path);
+                        let path_display = self.sandbox_blocked_path.clone();
+
+                        // Add the root in an async context
+                        tokio::spawn(async move {
+                            if let Err(e) = agent_core::add_writable_root(path).await {
+                                eprintln!("Failed to add writable root: {}", e);
+                            }
+                        });
+
+                        self.messages.push(format!(" ⎿ Added '{}' to writable roots", path_display));
+                        self.message_types.push(MessageType::Agent);
+                        self.message_states.push(MessageState::Sent);
+                        self.messages.push(" ⎿ The agent can now write to this path. Continuing...".to_string());
+                        self.message_types.push(MessageType::Agent);
+                        self.message_states.push(MessageState::Sent);
+                    }
+                    "1" => {
+                        // Deny - just close the prompt
+                        self.messages.push(" ⎿ Sandbox access denied".to_string());
+                        self.message_types.push(MessageType::Agent);
+                        self.message_states.push(MessageState::Sent);
+                    }
+                    "2" => {
+                        // Interrupt - let user tell Nite what to do instead
+                        if let Some(tx) = &self.agent_tx {
+                            let _ = tx.send(AgentMessage::Cancel);
+                        }
+                        // Agent will be interrupted, user can type their message
+                        self.messages.push(" ⎿ Interrupted. What should Nite do instead?".to_string());
+                        self.message_types.push(MessageType::Agent);
+                        self.message_states.push(MessageState::Sent);
+                    }
+                    _ => {
+                        // Invalid choice, keep the popup
+                        self.input.clear();
+                        self.reset_cursor();
+                        self.input_modified = false;
+                        return;
+                    }
+                }
+                self.input.clear();
+                self.reset_cursor();
+                self.input_modified = false;
+                self.show_sandbox_prompt = false;
+                self.sandbox_blocked_path.clear();
                 return;
             }
 
@@ -2818,6 +3184,8 @@ impl App {
             let mut process_queued = false;
             let mut process_interrupt: Option<String> = None;
             let mut pending_todos: Option<Vec<TodoItem>> = None;
+            let mut create_rewind = false;
+            let mut pending_file_change: Option<(String, String, String)> = None; // (tool_name, args, result)
             if let Some(rx) = &mut self.agent_rx {
                 while let Ok(msg) = rx.try_recv() {
                     // Skip processing agent messages if we've interrupted
@@ -2897,6 +3265,11 @@ impl App {
                             self.thinking_position = 0;
                         }
                         AgentMessage::AgentResponse(text) => {
+                            // Skip empty responses
+                            if text.is_empty() {
+                                continue;
+                            }
+
                             // IMPORTANT: Remove thinking animation FIRST, unconditionally
                             if let Some(last_msg) = self.messages.last() {
                                 if last_msg == "[THINKING_ANIMATION]" {
@@ -2953,6 +3326,9 @@ impl App {
                                 self.message_types.push(MessageType::Agent);
                             }
 
+                            // Store raw arguments for file change tracking
+                            self.last_tool_args = Some((tool_name.clone(), arguments.clone()));
+
                             // Format arguments for display
                             let formatted_args = Self::format_tool_arguments(&tool_name, &arguments);
                             self.messages.push(format!("[TOOL_CALL_STARTED:{}|{}]", tool_name, formatted_args));
@@ -2965,6 +3341,29 @@ impl App {
                             // Note: Don't clear thinking_raw_content here - it will be used in export
                         }
                         AgentMessage::ToolCallCompleted(tool_name, result) => {
+                            // Check for sandbox permission errors and offer to add to writable roots
+                            if let Ok(result_yaml) = serde_yaml::from_str::<serde_yaml::Value>(&result) {
+                                if let Some(obj) = result_yaml.as_mapping() {
+                                    if let Some(msg) = obj.get(&serde_yaml::Value::String("message".to_string()))
+                                        .and_then(|v| v.as_str()) {
+                                        // Check if this is a sandbox permission error
+                                        if msg.contains("Sandbox denied") || msg.contains("permission denied") {
+                                            // Try to extract file path from the error message
+                                            // Typical format: "Sandbox denied (code N): path/to/file"
+                                            if let Some(path_start) = msg.find("): ") {
+                                                let potential_path = msg[path_start + 3..].trim();
+                                                // Basic validation that it looks like a path
+                                                if potential_path.starts_with('/') || potential_path.starts_with('.') {
+                                                    // Show sandbox permission prompt
+                                                    self.sandbox_blocked_path = potential_path.to_string();
+                                                    self.show_sandbox_prompt = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             // Special handling for todo_write tool
                             if tool_name == "todo_write" {
                                 // Parse the result to extract todos and store them for saving
@@ -2977,6 +3376,13 @@ impl App {
                                         // Store todos to be saved after message processing
                                         pending_todos = Some(todos);
                                     }
+                                }
+                            }
+
+                            // Track file changes for Write and Edit tools using stored raw arguments
+                            if let Some((stored_tool, stored_args)) = &self.last_tool_args {
+                                if stored_tool == &tool_name {
+                                    pending_file_change = Some((tool_name.clone(), stored_args.clone(), result.clone()));
                                 }
                             }
 
@@ -3017,6 +3423,10 @@ impl App {
                                 self.messages.push("[THINKING_ANIMATION]".to_string());
                                 self.message_types.push(MessageType::Agent);
                             }
+                        }
+                        AgentMessage::RequestApproval(content) => {
+                            self.show_approval_prompt = true;
+                            self.approval_prompt_content = content;
                         }
                         AgentMessage::ThinkingComplete(_residual_tokens) => {
                             // Thinking has ended - handle residual tokens if any
@@ -3105,6 +3515,9 @@ impl App {
                                     }
                                 }
 
+                                // Set flag to create a rewind point after rx is dropped
+                                create_rewind = true;
+
                                 process_queued = true;  // Set flag to process queued message after rx is dropped
                             }
                         }
@@ -3149,6 +3562,16 @@ impl App {
                 if let Err(e) = self.save_todos(&todos) {
                     eprintln!("[ERROR] Failed to save todos: {}", e);
                 }
+            }
+
+            // Track file change after rx borrow is dropped
+            if let Some((tool_name, args, result)) = pending_file_change {
+                self.track_file_change(&tool_name, &args, &result);
+            }
+
+            // Create rewind point after rx borrow is dropped
+            if create_rewind {
+                self.create_rewind_point();
             }
 
             // Process queued message after rx borrow is dropped
@@ -3454,6 +3877,60 @@ impl App {
                                     }
                                 }
 
+                                // Rewind panel key handlers
+                                if self.show_rewind {
+                                    match key.code {
+                                        KeyCode::Esc => {
+                                            self.show_rewind = false;
+                                            self.messages.push(" ⎿ rewind dialog dismissed".to_string());
+                                            self.message_types.push(MessageType::Agent);
+                                            self.message_states.push(MessageState::Sent);
+                                            continue;
+                                        }
+                                        KeyCode::Up => {
+                                            if self.rewind_selected > 0 {
+                                                self.rewind_selected -= 1;
+                                            }
+                                            continue;
+                                        }
+                                        KeyCode::Down => {
+                                            if self.rewind_selected < self.rewind_points.len().saturating_sub(1) {
+                                                self.rewind_selected += 1;
+                                            }
+                                            continue;
+                                        }
+                                        KeyCode::Enter => {
+                                            // Restore to selected rewind point
+                                            if self.rewind_selected < self.rewind_points.len() {
+                                                let point = self.rewind_points[self.rewind_selected].clone();
+
+                                                // Restore conversation state
+                                                self.messages = point.messages;
+                                                self.message_types = point.message_types;
+                                                self.message_states = point.message_states;
+                                                self.message_metadata = point.message_metadata;
+                                                self.message_timestamps = point.message_timestamps;
+
+                                                // Remove all rewind points after the selected one
+                                                self.rewind_points.truncate(self.rewind_selected + 1);
+
+                                                // Close rewind panel
+                                                self.show_rewind = false;
+
+                                                // Show confirmation message
+                                                self.messages.push(format!(" ⏮ Rewound to: {}", point.preview));
+                                                self.message_types.push(MessageType::Agent);
+                                                self.message_states.push(MessageState::Sent);
+                                            }
+                                            continue;
+                                        }
+                                        _ => {
+                                            // Ignore other keys when rewind panel is open
+                                            continue;
+                                        }
+                                    }
+                                }
+
                                 // Handle model selection panel keys
                                 if self.show_model_selection {
                                     match key.code {
@@ -3514,12 +3991,31 @@ impl App {
                                 // Handle Shift+Tab to cycle assistant mode
                                 if key.modifiers.contains(KeyModifiers::SHIFT) && key.code == KeyCode::BackTab {
                                     self.assistant_mode = self.assistant_mode.next();
+
+                                    // Sync to safety config
+                                    if let Some(safety_mode) = self.assistant_mode.to_safety_mode() {
+                                        let mut config = agent_core::safety_config::SafetyConfig::load()
+                                            .unwrap_or_default();
+                                        config.set_mode(safety_mode);
+                                        let _ = config.save();
+                                    }
+
                                     continue;
                                 }
 
                                 // Handle Ctrl+S to toggle sandbox mode
                                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
                                     self.sandbox_enabled = !self.sandbox_enabled;
+
+                                    // Set/unset SAFE_MODE environment variable
+                                    unsafe {
+                                        if self.sandbox_enabled {
+                                            std::env::set_var("SAFE_MODE", "1");
+                                        } else {
+                                            std::env::remove_var("SAFE_MODE");
+                                        }
+                                    }
+
                                     continue;
                                 }
 
@@ -3716,6 +4212,11 @@ impl App {
                                             } else if self.show_resume {
                                                 self.show_resume = false;
                                                 self.messages.push(" ⎿ resume dialog dismissed".to_string());
+                                                self.message_types.push(MessageType::Agent);
+                                                self.message_states.push(MessageState::Sent);
+                                            } else if self.show_rewind {
+                                                self.show_rewind = false;
+                                                self.messages.push(" ⎿ rewind dialog dismissed".to_string());
                                                 self.message_types.push(MessageType::Agent);
                                                 self.message_states.push(MessageState::Sent);
                                             } else if let Some(idx) = self.editing_queue_index.take() {
@@ -4331,13 +4832,16 @@ impl App {
             }
 
             // Add status info: [Esc to interrupt | Xs | ↓ N tokens] (using snapshot data if in nav mode)
+            // Only show token count if we have actual thinking tokens (from thinking models)
             if let Some(elapsed) = self.get_thinking_elapsed_secs() {
-                // Show token count (from snapshot if in nav mode)
                 let token_count = self.get_thinking_token_count();
+
+                // Only show token info if we have tokens (meaning this is a thinking model)
                 let token_info = if token_count > 0 {
                     let compact_tokens = self.format_compact_number(token_count);
                     format!(" | ↓ {} tokens", compact_tokens)
                 } else {
+                    // No tokens yet - this is either waiting for first token or a non-thinking model
                     String::new()
                 };
 
@@ -4597,6 +5101,56 @@ impl App {
             Span::raw("Interrupt & send   "),
             Span::styled("3: ", Style::default().fg(Color::Yellow)),
             Span::raw("Cancel"),
+        ];
+        lines.push(Line::from(option_spans));
+
+        lines
+    }
+
+    fn render_sandbox_prompt(&self) -> Vec<Line> {
+        let mut lines = Vec::new();
+
+        // First line: question with path
+        lines.push(Line::from(vec![
+            Span::styled("● ", Style::default().fg(Color::Red)),
+            Span::raw("Add "),
+            Span::styled(&self.sandbox_blocked_path, Style::default().fg(Color::Yellow)),
+            Span::raw(" to writable roots?"),
+        ]));
+
+        // Second line: options
+        let option_spans = vec![
+            Span::raw("  "),
+            Span::styled("0: ", Style::default().fg(Color::Yellow)),
+            Span::raw("Accept   "),
+            Span::styled("1: ", Style::default().fg(Color::Yellow)),
+            Span::raw("Deny   "),
+            Span::styled("2: ", Style::default().fg(Color::Yellow)),
+            Span::raw("Interrupt and tell Nite what to do"),
+        ];
+        lines.push(Line::from(option_spans));
+
+        lines
+    }
+
+    fn render_approval_prompt(&self) -> Vec<Line> {
+        let mut lines = Vec::new();
+
+        // First line: question with content
+        lines.push(Line::from(vec![
+            Span::styled("● ", Style::default().fg(Color::Yellow)),
+            Span::raw(&self.approval_prompt_content),
+        ]));
+
+        // Second line: options
+        let option_spans = vec![
+            Span::raw("  "),
+            Span::styled("0: ", Style::default().fg(Color::Yellow)),
+            Span::raw("Approve   "),
+            Span::styled("1: ", Style::default().fg(Color::Yellow)),
+            Span::raw("Deny   "),
+            Span::styled("2: ", Style::default().fg(Color::Yellow)),
+            Span::raw("Interrupt and tell Nite what to do"),
         ];
         lines.push(Line::from(option_spans));
 
@@ -5256,22 +5810,40 @@ impl App {
             };
             frame.render_widget(count_para, count_area);
 
+            // Calculate visible window for scrolling
+            // Each conversation takes 2 lines (title + metadata)
+            let lines_per_item = 2;
+            let visible_height = inner.height.saturating_sub(2) as usize;
+            let max_visible_items = visible_height / lines_per_item;
+
+            // Calculate scroll offset to keep selected item visible
+            let scroll_offset = if self.resume_selected >= max_visible_items {
+                self.resume_selected.saturating_sub(max_visible_items - 1)
+            } else {
+                0
+            };
+
+            // Slice conversations to show only the visible window
+            let visible_end = (scroll_offset + max_visible_items).min(self.resume_conversations.len());
+            let visible_conversations = &self.resume_conversations[scroll_offset..visible_end];
+
             // Render list of conversations with > indicator and fork symbol
-            let items: Vec<ListItem> = self.resume_conversations.iter().enumerate().map(|(idx, conv)| {
-                let is_selected = idx == self.resume_selected;
+            let items: Vec<ListItem> = visible_conversations.iter().enumerate().map(|(local_idx, conv)| {
+                let actual_idx = scroll_offset + local_idx;
+                let is_selected = actual_idx == self.resume_selected;
                 let is_fork = conv.forked_from.is_some();
 
                 // Title line (preview) with > indicator and fork symbol
-                // Layout: ">  " (3 chars selected) or "  " (2 chars unselected) then "⎇ " for forks
+                // Layout: "> " (selected) or "  " (unselected) then "⎇ " for forks - no extra offset
                 let title_line = if is_selected {
                     if is_fork {
                         Line::from(vec![
-                            Span::styled(">  ⎇ ", Style::default().fg(Color::Green)),
+                            Span::styled("> ⎇ ", Style::default().fg(Color::Green)),
                             Span::styled(&conv.preview, Style::default().fg(Color::Green)),
                         ])
                     } else {
                         Line::from(vec![
-                            Span::styled(">  ", Style::default().fg(Color::Green)),
+                            Span::styled("> ", Style::default().fg(Color::Green)),
                             Span::styled(&conv.preview, Style::default().fg(Color::Green)),
                         ])
                     }
@@ -5304,6 +5876,147 @@ impl App {
                 ]);
 
                 ListItem::new(vec![title_line, metadata_line])
+            }).collect();
+
+            let list_area = ratatui::layout::Rect {
+                x: inner.x,
+                y: inner.y + 2,
+                width: inner.width,
+                height: inner.height.saturating_sub(2),
+            };
+
+            let list = List::new(items);
+            frame.render_widget(list, list_area);
+        }
+    }
+
+    fn render_rewind_panel(&self, frame: &mut Frame, rewind_area: ratatui::layout::Rect) {
+        use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+
+        // Create outer block with yellow border
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(" Rewind Conversation ")
+            .title_bottom(Line::from(" ↑/↓ to select · Enter to restore · Esc to close ").centered());
+
+        let inner = block.inner(rewind_area);
+        frame.render_widget(block, rewind_area);
+
+        if self.rewind_points.is_empty() {
+            // No rewind points found
+            let content = vec![
+                Line::from(""),
+                Line::from(Span::styled("No rewind points available.", Style::default().fg(Color::DarkGray))),
+                Line::from(""),
+                Line::from(Span::raw("Rewind points are created automatically as you interact")),
+            ];
+            let para = Paragraph::new(content);
+            let content_area = ratatui::layout::Rect {
+                x: inner.x,
+                y: inner.y + 1,
+                width: inner.width,
+                height: inner.height.saturating_sub(1),
+            };
+            frame.render_widget(para, content_area);
+        } else {
+            // Show rewind point count
+            let count_text = format!(" {} rewind points", self.rewind_points.len());
+            let count_line = Line::from(Span::styled(count_text, Style::default().fg(Color::DarkGray)));
+            let count_para = Paragraph::new(count_line);
+            let count_area = ratatui::layout::Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            };
+            frame.render_widget(count_para, count_area);
+
+            // Calculate visible window for scrolling
+            // Each rewind point takes 2 lines (preview + metadata)
+            let lines_per_item = 2;
+            let visible_height = inner.height.saturating_sub(2) as usize;
+            let max_visible_items = visible_height / lines_per_item;
+
+            // Calculate scroll offset to keep selected item visible
+            let scroll_offset = if self.rewind_selected >= max_visible_items {
+                self.rewind_selected.saturating_sub(max_visible_items - 1)
+            } else {
+                0
+            };
+
+            // Slice rewind points to show only the visible window
+            let visible_end = (scroll_offset + max_visible_items).min(self.rewind_points.len());
+            let visible_points = &self.rewind_points[scroll_offset..visible_end];
+
+            // Render list of rewind points
+            let items: Vec<ListItem> = visible_points.iter().enumerate().map(|(local_idx, point)| {
+                let actual_idx = scroll_offset + local_idx;
+                let is_selected = actual_idx == self.rewind_selected;
+
+                // Preview line with > indicator
+                let preview_line = if is_selected {
+                    Line::from(vec![
+                        Span::styled("> ", Style::default().fg(Color::Yellow)),
+                        Span::styled(&point.preview, Style::default().fg(Color::Yellow)),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(&point.preview, Style::default().fg(Color::White)),
+                    ])
+                };
+
+                // Metadata line (message count, time ago, and file changes)
+                let elapsed = point.timestamp.elapsed().unwrap_or(Duration::from_secs(0));
+                let time_ago = if elapsed.as_secs() < 60 {
+                    format!("{}s ago", elapsed.as_secs())
+                } else if elapsed.as_secs() < 3600 {
+                    format!("{}m ago", elapsed.as_secs() / 60)
+                } else if elapsed.as_secs() < 86400 {
+                    format!("{}h ago", elapsed.as_secs() / 3600)
+                } else {
+                    format!("{}d ago", elapsed.as_secs() / 86400)
+                };
+
+                // Calculate total insertions and deletions
+                let total_insertions: usize = point.file_changes.iter().map(|fc| fc.insertions).sum();
+                let total_deletions: usize = point.file_changes.iter().map(|fc| fc.deletions).sum();
+                let files_count = point.file_changes.len();
+
+                let mut metadata_parts = vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("{} msgs • {}", point.message_count, time_ago),
+                        Style::default().fg(Color::DarkGray)
+                    ),
+                ];
+
+                // Add file changes if any
+                if files_count > 0 {
+                    metadata_parts.push(Span::styled(
+                        format!(" • {} file{}", files_count, if files_count == 1 { "" } else { "s" }),
+                        Style::default().fg(Color::DarkGray)
+                    ));
+
+                    if total_insertions > 0 {
+                        metadata_parts.push(Span::styled(
+                            format!(" +{}", total_insertions),
+                            Style::default().fg(Color::Green)
+                        ));
+                    }
+                    if total_deletions > 0 {
+                        metadata_parts.push(Span::styled(
+                            format!(" -{}", total_deletions),
+                            Style::default().fg(Color::Red)
+                        ));
+                    }
+                }
+
+                let metadata_line = Line::from(metadata_parts);
+
+                ListItem::new(vec![preview_line, metadata_line])
             }).collect();
 
             let list_area = ratatui::layout::Rect {
@@ -5592,6 +6305,8 @@ impl App {
                 };
                 // Add space for queue choice popup, survey, autocomplete, and infobar if active
                 let queue_choice_height = if self.show_queue_choice { 2 } else { 0 };
+                let approval_prompt_height = if self.show_approval_prompt { 2 } else { 0 };
+                let sandbox_prompt_height = if self.show_sandbox_prompt { 2 } else { 0 };
                 let survey_height = self.survey.get_height();
                 let autocomplete_height = if self.autocomplete_active && self.mode == Mode::Normal {
                     self.autocomplete_suggestions.len().min(10) as u16
@@ -5612,6 +6327,11 @@ impl App {
                 };
                 let resume_height = if self.show_resume {
                     25 // Fixed height for resume panel
+                } else {
+                    0
+                };
+                let rewind_height = if self.show_rewind {
+                    25 // Fixed height for rewind panel
                 } else {
                     0
                 };
@@ -5637,6 +6357,12 @@ impl App {
                 if queue_choice_height > 0 {
                     constraints_vec.push(Constraint::Length(queue_choice_height));
                 }
+                if approval_prompt_height > 0 {
+                    constraints_vec.push(Constraint::Length(approval_prompt_height));
+                }
+                if sandbox_prompt_height > 0 {
+                    constraints_vec.push(Constraint::Length(sandbox_prompt_height));
+                }
                 if survey_height > 0 {
                     constraints_vec.push(Constraint::Length(survey_height));
                 }
@@ -5660,6 +6386,10 @@ impl App {
 
                 if resume_height > 0 {
                     constraints_vec.push(Constraint::Length(resume_height)); // Resume panel
+                }
+
+                if rewind_height > 0 {
+                    constraints_vec.push(Constraint::Length(rewind_height)); // Rewind panel
                 }
 
                 if todos_height > 0 {
@@ -5714,8 +6444,10 @@ impl App {
         }
 
         let status_area = areas[areas.len() - 1];
-        // Determine area indices based on whether queue choice popup, survey/thank_you and infobar are active
+        // Determine area indices based on whether queue choice popup, sandbox prompt, survey/thank_you and infobar are active
         let has_queue_choice = self.show_queue_choice;
+        let has_approval_prompt = self.show_approval_prompt;
+        let has_sandbox_prompt = self.show_sandbox_prompt;
         let has_survey_or_thanks = self.survey.is_active() || self.survey.has_thank_you();
         let has_infobar = self.ctrl_c_pressed.is_some() || !self.queued_messages.is_empty();
         let has_autocomplete = self.autocomplete_active && self.mode == Mode::Normal;
@@ -5725,6 +6457,20 @@ impl App {
         // Calculate indices dynamically
         let mut idx = 3;
         let queue_choice_area_idx = if has_queue_choice {
+            let i = idx;
+            idx += 1;
+            Some(i)
+        } else {
+            None
+        };
+        let approval_prompt_area_idx = if has_approval_prompt {
+            let i = idx;
+            idx += 1;
+            Some(i)
+        } else {
+            None
+        };
+        let sandbox_prompt_area_idx = if has_sandbox_prompt {
             let i = idx;
             idx += 1;
             Some(i)
@@ -5769,6 +6515,13 @@ impl App {
             None
         };
         let resume_area_idx = if self.show_resume {
+            let i = idx;
+            idx += 1;
+            Some(i)
+        } else {
+            None
+        };
+        let rewind_area_idx = if self.show_rewind {
             let i = idx;
             idx += 1;
             Some(i)
@@ -6456,6 +7209,22 @@ impl App {
                 frame.render_widget(queue_widget, queue_area);
             }
 
+            // Render approval prompt if active
+            if let Some(idx) = approval_prompt_area_idx {
+                let prompt_area = areas[idx];
+                let prompt_lines = self.render_approval_prompt();
+                let prompt_widget = Paragraph::new(prompt_lines);
+                frame.render_widget(prompt_widget, prompt_area);
+            }
+
+            // Render sandbox permission prompt if active
+            if let Some(idx) = sandbox_prompt_area_idx {
+                let prompt_area = areas[idx];
+                let prompt_lines = self.render_sandbox_prompt();
+                let prompt_widget = Paragraph::new(prompt_lines);
+                frame.render_widget(prompt_widget, prompt_area);
+            }
+
             // Render survey if active
             if let Some(idx) = survey_area_idx {
                 let survey_area = areas[idx];
@@ -6508,6 +7277,11 @@ impl App {
             if let Some(idx) = resume_area_idx {
                 let resume_area = areas[idx];
                 self.render_resume_panel(frame, resume_area);
+            }
+
+            if let Some(idx) = rewind_area_idx {
+                let rewind_area = areas[idx];
+                self.render_rewind_panel(frame, rewind_area);
             }
 
             if let Some(idx) = todos_area_idx {

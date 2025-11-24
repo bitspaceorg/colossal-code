@@ -1,0 +1,59 @@
+# model.yaml is an open standard for defining cross-platform, composable AI models
+# Learn more at https://modelyaml.org
+model: qwen/qwen3-coder-30b
+base:
+  - key: lmstudio-community/qwen3-coder-30b-a3b-instruct-gguf
+    sources:
+      - type: huggingface
+        user: lmstudio-community
+        repo: Qwen3-Coder-30B-A3B-Instruct-GGUF
+  - key: lmstudio-community/qwen3-coder-30b-a3b-instruct-mlx-4bit
+    sources:
+      - type: huggingface
+        user: lmstudio-community
+        repo: Qwen3-Coder-30B-A3B-Instruct-MLX-4bit
+  - key: lmstudio-community/qwen3-coder-30b-a3b-instruct-mlx-5bit
+    sources:
+      - type: huggingface
+        user: lmstudio-community
+        repo: Qwen3-Coder-30B-A3B-Instruct-MLX-5bit
+  - key: lmstudio-community/qwen3-coder-30b-a3b-instruct-mlx-6bit
+    sources:
+      - type: huggingface
+        user: lmstudio-community
+        repo: Qwen3-Coder-30B-A3B-Instruct-MLX-6bit
+  - key: lmstudio-community/qwen3-coder-30b-a3b-instruct-mlx-8bit
+    sources:
+      - type: huggingface
+        user: lmstudio-community
+        repo: Qwen3-Coder-30B-A3B-Instruct-MLX-8bit
+metadataOverrides:
+  domain: llm
+  architectures:
+    - qwen3moe
+  compatibilityTypes:
+    - gguf
+    - safetensors
+  paramsStrings:
+    - 30B
+  minMemoryUsageBytes: 15000000000
+  contextLengths:
+    - 262144
+  vision: false
+  reasoning: false
+  trainedForToolUse: true
+config:
+  operation:
+    fields:
+      - key: llm.prediction.temperature
+        value: 0.7
+      - key: llm.prediction.topPSampling
+        value:
+          checked: true
+          value: 0.8
+      - key: llm.prediction.topKSampling
+        value: 20
+      - key: llm.prediction.repeatPenalty
+        value:
+          checked: true
+          value: 1.05

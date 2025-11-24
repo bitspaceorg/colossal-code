@@ -13,6 +13,8 @@ pub struct ExecCommandParams {
     pub max_output_tokens: u32,
     pub sandbox_policy: crate::protocol::SandboxPolicy,
     pub is_background: bool,
+    #[serde(default)]
+    pub ask_for_approval: Option<crate::safety::AskForApproval>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

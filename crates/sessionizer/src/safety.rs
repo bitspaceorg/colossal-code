@@ -1,21 +1,23 @@
 use std::collections::HashSet;
 use crate::protocol::SandboxPolicy;
 
-#[derive(Debug, Clone, Copy)]
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum SandboxType {
     MacosSeatbelt,
     LinuxSeccomp,
     None,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum SafetyCheck {
     AutoApprove { sandbox_type: SandboxType },
     AskUser,
     Reject { reason: String },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum AskForApproval {
     OnRequest,  // Used for safe mode - requires user approval
     Never,      // Used for YOLO mode - no approval required (default)

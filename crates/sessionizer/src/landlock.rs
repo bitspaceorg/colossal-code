@@ -94,32 +94,22 @@ fn apply_linux_landlock_policy(
             for writable_root in writable_roots {
                 let root_path = &writable_root.root;
                 if root_path.exists() {
-                    eprintln!("[LANDLOCK DEBUG] Adding writable root: {}", root_path.display());
-
                     let path_fd = landlock::PathFd::new(root_path).map_err(|e| {
-                        eprintln!("[LANDLOCK ERROR] Failed to open PathFd for {}: {}", root_path.display(), e);
                         ColossalErr::Io(std::io::Error::new(
                             std::io::ErrorKind::NotFound,
                             format!("Failed to open {}: {}", root_path.display(), e)
                         ))
                     })?;
 
-                    eprintln!("[LANDLOCK DEBUG] Successfully opened PathFd for {}", root_path.display());
-
                     ruleset = ruleset.add_rule(landlock::PathBeneath::new(
                         path_fd,
                         AccessFs::from_all(abi),  // Full read/write access
                     )).map_err(|e| {
-                        eprintln!("[LANDLOCK ERROR] Failed to add rule for {}: {}", root_path.display(), e);
                         ColossalErr::Io(std::io::Error::new(
                             std::io::ErrorKind::PermissionDenied,
                             format!("Failed to add rule for {}: {}", root_path.display(), e)
                         ))
                     })?;
-
-                    eprintln!("[LANDLOCK DEBUG] Successfully added rule for {}", root_path.display());
-                } else {
-                    eprintln!("[LANDLOCK DEBUG] Skipping non-existent path: {}", root_path.display());
                 }
             }
 

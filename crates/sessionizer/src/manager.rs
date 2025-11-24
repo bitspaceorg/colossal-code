@@ -279,7 +279,7 @@ impl SessionManager {
         let approved_commands: HashSet<Vec<String>> = HashSet::new();
         let safety_check = assess_command_safety(
             &params.command,
-            crate::safety::yolo_mode(), // YOLO mode enabled by default
+            params.ask_for_approval.unwrap_or(crate::safety::yolo_mode()),
             &params.sandbox_policy,
             &approved_commands,
             false,
@@ -720,7 +720,7 @@ impl SessionManager {
             }
         }
         
-        self.send_input_to_shell_session(session_id, format!("{}\n", command)).await
+        self.send_input_to_shell_session(session_id, format!("{}\n", command), None).await
     }
 
     /// Execute a command in a persistent shell session and return aggregated output (non-streaming)
@@ -730,8 +730,33 @@ impl SessionManager {
         command: String,
         timeout_ms: Option<u64>,
         max_output_tokens: u32,
+        ask_for_approval: Option<crate::safety::AskForApproval>,
     ) -> Result<ExecCommandOutput, ColossalErr> {
         let start_time = Instant::now();
+
+        // Check safety before executing
+        {
+            let sessions = self.persistent_shell_sessions.lock().unwrap();
+            let session = sessions.iter().find(|(id, _)| *id == session_id)
+                .map(|(_, session)| session)
+                .ok_or_else(|| ColossalErr::Sandbox(crate::error::SandboxErr::Denied(-1, format!("unknown session id {}", session_id.as_str()), ())))?;
+            
+            let approved_commands: HashSet<Vec<String>> = HashSet::new();
+            let command_parts = shlex::split(&command).unwrap_or_else(|| vec![command.clone()]);
+            let safety_check = assess_command_safety(
+                &command_parts,
+                ask_for_approval.unwrap_or(crate::safety::yolo_mode()),
+                session.sandbox_policy(),
+                &approved_commands,
+                true, // is_pty
+            );
+            
+            match safety_check {
+                crate::safety::SafetyCheck::AutoApprove { .. } => {},
+                crate::safety::SafetyCheck::AskUser => return Err(ColossalErr::Sandbox(SandboxErr::Denied(-1, "User approval required".to_string(), ()))),
+                crate::safety::SafetyCheck::Reject { reason } => return Err(ColossalErr::Sandbox(SandboxErr::Denied(-1, reason, ()))),
+            }
+        }
 
         // Wait for shell to be ready before sending commands
         {
@@ -745,7 +770,7 @@ impl SessionManager {
         }
 
         // First, send Ctrl+C to clear any potentially hung state in the shell
-        let _ = self.send_input_to_shell_session(session_id.clone(), "\x03".to_string()).await;
+        let _ = self.send_input_to_shell_session(session_id.clone(), "\x03".to_string(), None).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Generate a unique marker to detect command completion
@@ -813,7 +838,38 @@ impl SessionManager {
         &self,
         session_id: SessionId,
         input: String,
+        ask_for_approval: Option<crate::safety::AskForApproval>,
     ) -> Result<Receiver<StreamEvent>, ColossalErr> {
+        // Check safety if approval strategy is provided
+        if let Some(approval_strategy) = ask_for_approval {
+            let sessions = self.persistent_shell_sessions.lock().unwrap();
+            let session = sessions.iter().find(|(id, _)| *id == session_id)
+                .map(|(_, session)| session)
+                .ok_or_else(|| ColossalErr::Sandbox(SandboxErr::Denied(-1, format!("unknown session id {}", session_id.as_str()), ())))?;
+            
+            let approved_commands: HashSet<Vec<String>> = HashSet::new();
+            // Split input into potential command parts
+            // Input might be "ls -la\n" or just "ls -la".
+            let command_parts = shlex::split(&input).unwrap_or_else(|| vec![input.clone()]);
+            
+            // Only check if it looks like a command (not just control chars)
+            if !input.trim().is_empty() && !input.chars().all(|c| c.is_control()) {
+                let safety_check = assess_command_safety(
+                    &command_parts,
+                    approval_strategy,
+                    session.sandbox_policy(),
+                    &approved_commands,
+                    true, // is_pty
+                );
+                
+                match safety_check {
+                    crate::safety::SafetyCheck::AutoApprove { .. } => {},
+                    crate::safety::SafetyCheck::AskUser => return Err(ColossalErr::Sandbox(SandboxErr::Denied(-1, "User approval required".to_string(), ()))),
+                    crate::safety::SafetyCheck::Reject { reason } => return Err(ColossalErr::Sandbox(SandboxErr::Denied(-1, reason, ()))),
+                }
+            }
+        }
+
         let (writer_tx, output_rx) = {
             let sessions = self.persistent_shell_sessions.lock().unwrap();
             let session = sessions.iter().find(|(id, _)| *id == session_id)
@@ -895,6 +951,7 @@ impl SessionManager {
             export_command,
             Some(2000), // 2 second timeout
             100, // small output limit
+            None,
         ).await;
         
         Ok(())
@@ -1258,7 +1315,7 @@ impl SessionManager {
         let approved_commands: HashSet<Vec<String>> = HashSet::new();
         let safety_check = assess_command_safety(
             &params.command,
-            crate::safety::yolo_mode(),
+            params.ask_for_approval.unwrap_or(crate::safety::yolo_mode()),
             &params.sandbox_policy,
             &approved_commands,
             false,

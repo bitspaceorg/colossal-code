@@ -44,12 +44,15 @@ pub struct ThinkingSummarizer {
     summaries: Vec<(String, usize, usize)>,  // (summary, real_token_count, chunk_count)
     last_sent_count: usize,  // Track how many summaries we've already sent
     client: reqwest::Client,
+    token_threshold: usize,  // Configurable threshold for summary generation
 }
 
 impl ThinkingSummarizer {
-    const TOKEN_THRESHOLD: usize = 200;
-
     pub fn new() -> Self {
+        Self::with_threshold(200)
+    }
+
+    pub fn with_threshold(token_threshold: usize) -> Self {
         Self {
             buffer: String::new(),
             token_count: 0,
@@ -57,6 +60,7 @@ impl ThinkingSummarizer {
             summaries: Vec::new(),
             last_sent_count: 0,
             client: reqwest::Client::new(),
+            token_threshold,
         }
     }
 
@@ -69,9 +73,12 @@ impl ThinkingSummarizer {
             if let Ok(encoding) = tokenizer.encode(self.buffer.clone(), false) {
                 self.token_count = encoding.len();
             }
+        } else {
+            // Fallback if tokenizer fails: approximate 1 token ~= 4 chars
+            self.token_count = self.buffer.len() / 4;
         }
 
-        if self.token_count >= Self::TOKEN_THRESHOLD {
+        if self.token_count >= self.token_threshold {
             if let Ok(summary) = self.summarize_buffer().await {
                 self.summaries.push((summary, self.token_count, self.chunk_count));
             }

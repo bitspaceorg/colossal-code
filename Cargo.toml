@@ -1,7 +1,11 @@
 [package]
-name = "tui"
+name = "nite"
 version = "0.1.0"
 edition = "2024"
+
+[[bin]]
+name = "nite"
+path = "src/main.rs"
 
 [dependencies]
 color-eyre = "0.6.5"

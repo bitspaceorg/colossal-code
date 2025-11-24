@@ -3,10 +3,6 @@ name = "agent_core"
 version = "0.1.0"
 edition = "2024"
 
-[[bin]]
-name = "agent_core"
-path = "src/main.rs"
-
 [lib]
 name = "agent_core"
 path = "src/lib.rs"
@@ -37,6 +33,8 @@ scraper = "0.20"
 html2text = "0.12"
 rayon = "1.10"
 tokenizers = { version = "0.21", features = ["http"] }
+dirs = "5.0"
+toml = "0.8"
 
 [patch.crates-io]
 cudarc = { git = "https://github.com/coreylowman/cudarc", rev = "d2c412731524531b7507777fa45496ff667fe718" }

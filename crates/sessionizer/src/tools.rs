@@ -28,6 +28,7 @@ pub async fn exec_command(
         max_output_tokens: 1000,
         sandbox_policy: sandbox_policy.clone(),
         is_background,
+        ask_for_approval: None,
     };
 
     let result = manager.handle_exec_command_request(params).await?;
