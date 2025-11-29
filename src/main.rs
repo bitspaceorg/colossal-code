@@ -16,7 +16,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use edtui::clipboard::ClipboardTrait;
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, task};
 use std::sync::Arc;
 use agent_core::{Agent, AgentMessage};
 use markdown_renderer;
@@ -3312,15 +3312,16 @@ impl App {
                             }
                         }
                         AgentMessage::ToolCallStarted(tool_name, arguments) => {
-                            // IMPORTANT: Remove thinking animation FIRST, unconditionally
-                            if let Some(last_msg) = self.messages.last() {
-                                if last_msg == "[THINKING_ANIMATION]" {
-                                    self.messages.pop();
-                                    self.message_types.pop();
-                                }
-                            }
+                            // Keep thinking animation running during tool calls
+                            // Don't remove thinking animation - let it continue during tool execution
+                            // if let Some(last_msg) = self.messages.last() {
+                            //     if last_msg == "[THINKING_ANIMATION]" {
+                            //         self.messages.pop();
+                            //         self.message_types.pop();
+                            //     }
+                            // }
 
-                            // THEN convert summary to static tree line if it exists
+                            // Convert summary to static tree line if it exists, but keep the animation running
                             if let Some((current_summary, _token_count, _chunk_count)) = self.thinking_current_summary.take() {
                                 self.messages.push(format!("├── {}", current_summary));
                                 self.message_types.push(MessageType::Agent);
@@ -3334,10 +3335,11 @@ impl App {
                             self.messages.push(format!("[TOOL_CALL_STARTED:{}|{}]", tool_name, formatted_args));
                             self.message_types.push(MessageType::Agent);
 
-                            // Don't re-add thinking animation - tool is executing now
-                            self.is_thinking = false;
-                            self.thinking_start_time = None;
-                            self.thinking_token_count = 0;
+                            // Keep thinking animation running during tool calls
+                            // Don't stop thinking animation - let it continue during tool execution
+                            // self.is_thinking = false;
+                            // self.thinking_start_time = None;
+                            // self.thinking_token_count = 0;
                             // Note: Don't clear thinking_raw_content here - it will be used in export
                         }
                         AgentMessage::ToolCallCompleted(tool_name, result) => {
@@ -3998,6 +4000,15 @@ impl App {
                                             .unwrap_or_default();
                                         config.set_mode(safety_mode);
                                         let _ = config.save();
+
+                                        // Update agent with new safety config to refresh available tools
+                                        if let Some(agent_arc) = &self.agent {
+                                            let agent_clone = Arc::clone(agent_arc);
+                                            let config_clone = config.clone();
+                                            task::spawn(async move {
+                                                let _ = agent_clone.update_safety_config(config_clone).await;
+                                            });
+                                        }
                                     }
 
                                     continue;

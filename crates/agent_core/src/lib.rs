@@ -615,8 +615,8 @@ pub struct Agent {
     model: Arc<Mutex<Option<Arc<Model>>>>,
     model_path: String,
     model_files: Arc<Mutex<Vec<String>>>,
-    system_prompt: String,
-    tools: Vec<Tool>,
+    system_prompt: Arc<Mutex<String>>,
+    tools: Arc<Mutex<Vec<Tool>>>,
     thinking_summarizer: Arc<Mutex<thinking_summarizer::ThinkingSummarizer>>,
     /// Flag to cancel current generation
     cancel_requested: Arc<AtomicBool>,
@@ -628,6 +628,8 @@ pub struct Agent {
     has_thinking_capability: Arc<Mutex<bool>>,
     /// Thinking tags configuration (opening/closing tags and summary interval)
     thinking_tags: Arc<Mutex<model_config::ThinkingTags>>,
+    /// Safety configuration for tool access
+    safety_config: Arc<Mutex<safety_config::SafetyConfig>>,
 }
 
 impl Agent {
@@ -673,6 +675,7 @@ impl Agent {
         system_prompt: String,
         tools: Vec<Tool>,
         tokenizer: Tokenizer,
+        safety_config: safety_config::SafetyConfig,
     ) -> Self {
         // Load thinking configuration from model.yaml or detect from filename
         let (has_thinking_capability, thinking_tags) = if !model_files.is_empty() {
@@ -690,14 +693,15 @@ impl Agent {
             model: Arc::new(Mutex::new(None)),
             model_path,
             model_files: Arc::new(Mutex::new(model_files)),
-            system_prompt,
-            tools,
+            system_prompt: Arc::new(Mutex::new(system_prompt)),
+            tools: Arc::new(Mutex::new(tools)),
             thinking_summarizer: Arc::new(Mutex::new(summarizer)),
             cancel_requested: Arc::new(AtomicBool::new(false)),
             tokenizer: Arc::new(tokenizer),
             conversation: Arc::new(Mutex::new(None)),
             has_thinking_capability: Arc::new(Mutex::new(has_thinking_capability)),
             thinking_tags: Arc::new(Mutex::new(thinking_tags)),
+            safety_config: Arc::new(Mutex::new(safety_config)),
         }
     }
 
@@ -732,8 +736,14 @@ impl Agent {
             .display()
             .to_string();
 
-        // Get tools
-        let tools = get_all_tools();
+        // Load safety configuration
+        let safety_config = safety_config::SafetyConfig::load().unwrap_or_default();
+        // Get tools based on safety mode
+        let tools = if safety_config.mode == safety_config::SafetyMode::ReadOnly {
+            tools::get_readonly_tools()
+        } else {
+            tools::get_all_tools()
+        };
         let tools_section = generate_tools_section(&tools);
 
         // Read system prompt
@@ -744,10 +754,15 @@ impl Agent {
             });
 
         // Replace placeholders
-        let system_prompt = system_prompt_template
+        let mut system_prompt = system_prompt_template
             .replace("{tools_section}", &tools_section)
             .replace("{os_version}", &os_version)
             .replace("{workspace_path}", &workspace_path);
+
+        // Add safety mode suffix if needed
+        if let Some(suffix) = safety_config.get_system_prompt_suffix() {
+            system_prompt.push_str(&suffix);
+        }
 
         let model_path = "/home/wise/.config/.nite/models".to_string();
         let model_files = vec![model_filename.unwrap_or_else(|| "Qwen_Qwen3-4B-Thinking-2507-Q8_0.gguf".to_string())];
@@ -804,7 +819,7 @@ impl Agent {
         let tokenizer = Tokenizer::from_pretrained("Qwen/Qwen2.5-0.5B", None)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
-        Ok(Self::new(model_path, model_files, system_prompt, tools, tokenizer))
+        Ok(Self::new(model_path, model_files, system_prompt, tools, tokenizer, safety_config))
     }
 
     /// Get or initialize the model (lazy loading)
@@ -959,6 +974,86 @@ impl Agent {
         *self.has_thinking_capability.lock().await
     }
 
+    /// Update the safety configuration and refresh tools based on the new mode
+    pub async fn update_safety_config(&self, new_safety_config: safety_config::SafetyConfig) -> Result<()> {
+        // Clone the safety config to use in multiple places
+        let safety_config_for_update = new_safety_config.clone();
+
+        // Update the tools based on the new safety mode
+        let new_tools = if new_safety_config.mode == safety_config::SafetyMode::ReadOnly {
+            tools::get_readonly_tools()
+        } else {
+            tools::get_all_tools()
+        };
+
+        // Update the safety configuration
+        {
+            let mut config_guard = self.safety_config.lock().await;
+            *config_guard = safety_config_for_update;
+        }
+
+        // Update tools in the agent
+        {
+            let mut tools_guard = self.tools.lock().await;
+            *tools_guard = new_tools.clone();
+        }
+
+        // Update system prompt with new tools section
+        let tools_section = generate_tools_section(&new_tools);
+        let os_info = std::env::consts::OS;
+        let os_version = if os_info == "linux" {
+            std::fs::read_to_string("/etc/os-release")
+                .ok()
+                .and_then(|content| {
+                    content.lines()
+                        .find(|line| line.starts_with("PRETTY_NAME="))
+                        .map(|line| line.trim_start_matches("PRETTY_NAME=").trim_matches('"').to_string())
+                })
+                .unwrap_or_else(|| "Linux".to_string())
+        } else {
+            os_info.to_string()
+        };
+        let workspace_path = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .display()
+            .to_string();
+
+        // Read system prompt and apply new tools section
+        let system_prompt_template = read_system_prompt()
+            .unwrap_or_else(|e| {
+                eprintln!("Warning: Failed to read .niterules, using default: {}", e);
+                get_default_niterules()
+            });
+
+        // Update the system prompt with new tools
+        let mut updated_system_prompt = system_prompt_template
+            .replace("{tools_section}", &tools_section)
+            .replace("{os_version}", &os_version)
+            .replace("{workspace_path}", &workspace_path);
+
+        // Add safety mode suffix if needed
+        if let Some(suffix) = new_safety_config.get_system_prompt_suffix() {
+            updated_system_prompt.push_str(&suffix);
+        }
+
+        // Update the system prompt in the agent
+        {
+            let mut system_prompt_guard = self.system_prompt.lock().await;
+            *system_prompt_guard = updated_system_prompt;
+        }
+
+        // If there's an active conversation, update the tools in the request builder
+        {
+            let mut conversation_guard = self.conversation.lock().await;
+            if let Some(ref mut conversation) = *conversation_guard {
+                // Create a new request builder with updated tools
+                *conversation_guard = Some(conversation.clone().set_tools(new_tools));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Clear the conversation history
     pub async fn clear_conversation(&self) {
         let mut conversation_guard = self.conversation.lock().await;
@@ -971,8 +1066,12 @@ impl Agent {
         let messages: Vec<Value> = serde_json::from_str(messages_json)?;
 
         // Create a new RequestBuilder
+        let tools = {
+            let tools_guard = self.tools.lock().await;
+            tools_guard.clone()
+        };
         let mut request_builder = RequestBuilder::new()
-            .set_tools(self.tools.clone())
+            .set_tools(tools)
             .set_tool_choice(ToolChoice::Auto);
 
         // Only enable thinking if model has capability
@@ -1049,13 +1148,21 @@ impl Agent {
             )
         } else {
             // Start new conversation with system prompt
+            let system_prompt_content = {
+                let system_prompt_guard = self.system_prompt.lock().await;
+                system_prompt_guard.clone()
+            };
             let system_msg = "You are Nite 3, a coding agent deployed in the best TUI colossal code. You live inside the terminal, running lean, fast, and sharp. Your role is to serve as the developer's right hand.";
-            let full_user_msg = format!("{}\n\n{}", self.system_prompt, user_message);
+            let full_user_msg = format!("{}\n\n{}", system_prompt_content, user_message);
 
+            let tools = {
+                let tools_guard = self.tools.lock().await;
+                tools_guard.clone()
+            };
             let mut builder = RequestBuilder::new()
                 .add_message(TextMessageRole::System, system_msg)
                 .add_message(TextMessageRole::User, &full_user_msg)
-                .set_tools(self.tools.clone())
+                .set_tools(tools)
                 .set_tool_choice(ToolChoice::Auto);
 
             // Only enable thinking if model has capability
