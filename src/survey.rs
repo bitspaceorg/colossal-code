@@ -1,9 +1,9 @@
+use rand::Rng;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
 };
 use std::time::Instant;
-use rand::Rng;
 
 /// Survey question with customizable options
 #[derive(Clone)]
@@ -147,7 +147,10 @@ impl Survey {
                 Span::raw(question.question.clone()),
             ];
             if question.optional {
-                question_spans.push(Span::styled(" (optional)", Style::default().fg(Color::DarkGray)));
+                question_spans.push(Span::styled(
+                    " (optional)",
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
             lines.push(Line::from(question_spans));
 
@@ -169,10 +172,7 @@ impl Survey {
             // Show option 0 last (dismiss/cancel)
             if !question.options.is_empty() {
                 option_spans.push(Span::raw("   "));
-                option_spans.push(Span::styled(
-                    "0: ",
-                    Style::default().fg(Color::Yellow),
-                ));
+                option_spans.push(Span::styled("0: ", Style::default().fg(Color::Yellow)));
                 option_spans.push(Span::raw(question.options[0].clone()));
             }
 

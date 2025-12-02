@@ -914,6 +914,106 @@ impl MistralRsForServerBuilder {
         }
         Ok(mistralrs)
     }
+
+    /// Adds a model configuration to an existing mistralrs instance.
+    pub async fn add_model_config_to_existing(
+        mut self,
+        model_config: ModelConfig,
+        mistralrs: SharedMistralRsState,
+    ) -> Result<String> {
+        let model = model_config.model.clone();
+        let dtype = get_model_dtype(&model)?;
+        let auto_device_map_params = get_auto_device_map_params(&model)?;
+        let device = if let Some(device) = self.device.take() {
+            device
+        } else {
+            init_device(self.cpu, self.seed)?
+        };
+
+        let loader: Box<dyn Loader> = LoaderBuilder::new(model)
+            .with_no_kv_cache(self.no_kv_cache)
+            .with_chat_template(
+                model_config
+                    .chat_template
+                    .clone()
+                    .or(self.chat_template.clone()),
+            )
+            .with_jinja_explicit(
+                model_config
+                    .jinja_explicit
+                    .clone()
+                    .or(self.jinja_explicit.clone()),
+            )
+            .build()?;
+
+        let mapper = init_mapper(
+            &model_config
+                .num_device_layers
+                .clone()
+                .or(self.num_device_layers.clone()),
+            &auto_device_map_params,
+        );
+        let paged_attn = configure_paged_attn(&device, self.paged_attn);
+        let cache_config = init_cache_config(
+            self.paged_attn_block_size,
+            self.paged_attn_gpu_mem,
+            self.paged_attn_gpu_mem_usage,
+            self.paged_ctxt_len,
+            self.paged_cache_type,
+            !paged_attn,
+            auto_device_map_params.max_seq_len(),
+        )?;
+        let isq = model_config
+            .in_situ_quant
+            .as_ref()
+            .or(self.in_situ_quant.as_ref())
+            .and_then(|isq| parse_isq_value(isq, Some(&device)).ok());
+
+        let pipeline: LoadedPipeline = loader.load_model_from_hf(
+            None,
+            self.token_source.clone(),
+            &dtype,
+            &device,
+            false,
+            mapper,
+            isq,
+            cache_config,
+        )?;
+
+        let scheduler_config = init_scheduler_config(&cache_config, &pipeline, self.max_seqs).await;
+        let bert_model = get_bert_model(self.enable_search, self.search_bert_model.clone());
+
+        let engine_config = mistralrs_core::EngineConfig {
+            truncate_sequence: self.truncate_sequence,
+            no_kv_cache: self.no_kv_cache,
+            no_prefix_cache: false,
+            prefix_cache_n: self.prefix_cache_n,
+            disable_eos_stop: false,
+            throughput_logging_enabled: !self.interactive_mode,
+            search_embedding_model: bert_model,
+            search_callback: self.search_callback.clone(),
+            tool_callbacks: HashMap::new(),
+            tool_callbacks_with_tools: HashMap::new(),
+        };
+
+        let mut add_model_config = mistralrs_core::AddModelConfig::new(engine_config);
+        if let Some(mcp_config) = self.mcp_client_config.clone() {
+            add_model_config = add_model_config.with_mcp_config(mcp_config);
+        }
+
+        let pipeline_name = pipeline.lock().await.name();
+        mistralrs
+            .add_model(
+                pipeline_name.clone(),
+                pipeline,
+                scheduler_config,
+                add_model_config,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to add model {}: {}", pipeline_name, e))?;
+
+        Ok(pipeline_name)
+    }
 }
 
 // TODO: replace with best device?

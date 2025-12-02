@@ -198,6 +198,18 @@ pub struct TokenizationRequest {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+/// Embedding request for a batch of inputs.
+pub struct EmbeddingRequest {
+    pub inputs: Vec<String>,
+    pub normalize: bool,
+    pub id: usize,
+    pub model_id: Option<String>,
+    #[serde(default = "default_responder")]
+    #[serde(skip)]
+    pub response: Sender<Response>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 /// Request to detokenize some text.
 pub struct DetokenizationRequest {
     pub tokens: Vec<u32>,
@@ -215,6 +227,7 @@ pub enum Request {
     ReIsq(IsqType),
     Tokenize(TokenizationRequest),
     Detokenize(DetokenizationRequest),
+    Embedding(EmbeddingRequest),
     // Sending a terminate request causes the `run` function to return to the thread created in `MistralRs::new`,
     // and then Engine will be dropped.
     Terminate,
@@ -245,6 +258,13 @@ impl Debug for Request {
             }
             Request::Detokenize(req) => {
                 write!(f, "Tokenization Request {:?}", req.tokens)
+            }
+            Request::Embedding(req) => {
+                write!(
+                    f,
+                    "Embedding Request {{ inputs: {}, normalize: {} }}",
+                    req.inputs.len(), req.normalize
+                )
             }
             Request::Terminate => write!(f, "Termination Request"),
             Request::TerminateAllSeqsNextStep => write!(f, "Terminate All Seqs Next Step"),

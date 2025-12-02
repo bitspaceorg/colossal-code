@@ -7,7 +7,7 @@ use axum::{
     extract::{Json, State},
     http::{self},
     response::{
-        sse::{Event, KeepAlive},
+        sse::{Event, KeepAlive, KeepAliveStream},
         IntoResponse, Sse,
     },
 };
@@ -85,6 +85,8 @@ pub type ChatCompletionStreamer = BaseStreamer<
     ChatCompletionOnDoneCallback,
 >;
 
+pub type ChatCompletionSseStream = KeepAliveStream<ChatCompletionStreamer>;
+
 impl futures::Stream for ChatCompletionStreamer {
     type Item = Result<Event, axum::Error>;
 
@@ -159,6 +161,7 @@ impl futures::Stream for ChatCompletionStreamer {
                 Response::ImageGeneration(_) => unreachable!(),
                 Response::Speech { .. } => unreachable!(),
                 Response::Raw { .. } => unreachable!(),
+                Response::Embedding(_) => unreachable!(),
             },
             Poll::Pending | Poll::Ready(None) => Poll::Pending,
         }
@@ -167,7 +170,7 @@ impl futures::Stream for ChatCompletionStreamer {
 
 /// Represents different types of chat completion responses.
 pub type ChatCompletionResponder =
-    BaseCompletionResponder<ChatCompletionResponse, ChatCompletionStreamer>;
+    BaseCompletionResponder<ChatCompletionResponse, ChatCompletionSseStream>;
 
 type JsonModelError = BaseJsonModelError<ChatCompletionResponse>;
 impl ErrorToResponse for JsonModelError {}
@@ -543,7 +546,7 @@ pub fn create_streamer(
     state: SharedMistralRsState,
     on_chunk: Option<ChatCompletionOnChunkCallback>,
     on_done: Option<ChatCompletionOnDoneCallback>,
-) -> Sse<ChatCompletionStreamer> {
+) -> Sse<ChatCompletionSseStream> {
     let streamer = base_create_streamer(rx, state, on_chunk, on_done);
     let keep_alive_interval = get_keep_alive_interval();
 
@@ -583,5 +586,6 @@ pub fn match_responses(state: SharedMistralRsState, response: Response) -> ChatC
         Response::ImageGeneration(_) => unreachable!(),
         Response::Speech { .. } => unreachable!(),
         Response::Raw { .. } => unreachable!(),
+        Response::Embedding(_) => unreachable!(),
     }
 }

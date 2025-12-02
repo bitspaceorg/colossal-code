@@ -88,6 +88,7 @@ pub fn nccl_daemon_replicator(request_sender: Sender<Request>) {
                             continue;
                         }
                         Request::TerminateAllSeqsNextStep => Request::TerminateAllSeqsNextStep,
+                        other => other,
                     };
 
                     request_sender.send(req).await.unwrap();
@@ -150,6 +151,7 @@ pub fn ring_daemon_replicator(request_sender: Sender<Request>) {
                             continue;
                         }
                         Request::TerminateAllSeqsNextStep => Request::TerminateAllSeqsNextStep,
+                        other => other,
                     };
 
                     request_sender.send(req).await.unwrap();

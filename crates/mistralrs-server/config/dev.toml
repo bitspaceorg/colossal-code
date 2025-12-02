@@ -1,0 +1,19 @@
+[server]
+host = "127.0.0.1"
+port = 8080
+max_total_concurrent_requests = 64
+cors_allowed_origins = ["*"]
+
+[scheduler]
+max_loaded_models = 2
+keep_alive_default = "300s"
+max_parallel_requests_per_model = 4
+
+[auth]
+enabled = false
+api_keys = ["local-dev"]
+
+[models."demo"]
+source = "in-memory"
+pinned = true
+keep_alive = "300s"

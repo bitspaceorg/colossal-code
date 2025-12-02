@@ -208,6 +208,31 @@ generate_repr!(CompletionChunkResponse);
 #[cfg_attr(feature = "pyo3_macros", pyclass)]
 #[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
+/// Embedding response payload compatible with OpenAI embeddings API.
+pub struct EmbeddingResponse {
+    pub id: String,
+    pub object: String,
+    pub model: String,
+    pub data: Vec<EmbeddingData>,
+    pub usage: Usage,
+}
+
+generate_repr!(EmbeddingResponse);
+
+#[cfg_attr(feature = "pyo3_macros", pyclass)]
+#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
+#[derive(Debug, Clone, Serialize)]
+pub struct EmbeddingData {
+    pub object: String,
+    pub embedding: Vec<f32>,
+    pub index: usize,
+}
+
+generate_repr!(EmbeddingData);
+
+#[cfg_attr(feature = "pyo3_macros", pyclass)]
+#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
+#[derive(Debug, Clone, Serialize)]
 pub struct ImageChoice {
     pub url: Option<String>,
     pub b64_json: Option<String>,
@@ -240,6 +265,8 @@ pub enum Response {
     CompletionModelError(String, CompletionResponse),
     CompletionDone(CompletionResponse),
     CompletionChunk(CompletionChunkResponse),
+    // Embeddings
+    Embedding(EmbeddingResponse),
     // Image generation
     ImageGeneration(ImageGenerationResponse),
     // Speech generation
@@ -263,6 +290,8 @@ pub enum ResponseOk {
     // Completion
     CompletionDone(CompletionResponse),
     CompletionChunk(CompletionChunkResponse),
+    // Embeddings
+    Embedding(EmbeddingResponse),
     // Image generation
     ImageGeneration(ImageGenerationResponse),
     // Speech generation
@@ -331,6 +360,7 @@ impl Response {
             Self::Chunk(x) => Ok(ResponseOk::Chunk(x)),
             Self::CompletionDone(x) => Ok(ResponseOk::CompletionDone(x)),
             Self::CompletionChunk(x) => Ok(ResponseOk::CompletionChunk(x)),
+            Self::Embedding(x) => Ok(ResponseOk::Embedding(x)),
             Self::InternalError(e) => Err(Box::new(ResponseErr::InternalError(e))),
             Self::ValidationError(e) => Err(Box::new(ResponseErr::ValidationError(e))),
             Self::ModelError(e, x) => Err(Box::new(ResponseErr::ModelError(e, x))),

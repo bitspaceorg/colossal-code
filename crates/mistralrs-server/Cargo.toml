@@ -1,0 +1,49 @@
+[workspace]
+members = [
+    "crates/mistralrs-server-config",
+    "crates/mistralrs-server-core",
+    "crates/mistralrs-server-scheduler",
+    "crates/mistralrs-server-api",
+    "crates/mistralrs-server-tests",
+    "mistralrs-server"
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.7", features = ["macros", "json", "http2", "ws", "tokio", "tower-log", "query"], default-features = false }
+base64 = "0.22"
+bytes = "1"
+config = "0.14"
+dashmap = "5"
+futures = "0.3"
+http = "1"
+hyper = { version = "1", features = ["http1", "http2", "server", "client"], default-features = false }
+parking_lot = "0.12"
+prometheus = "0.13"
+rand = "0.8"
+reqwest = { version = "0.12", features = ["json", "stream"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = "0.7"
+toml = "0.8"
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["trace", "auth", "cors", "limit", "timeout", "request-id"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+validator = { version = "0.18", features = ["derive"] }
+num_cpus = "1"
+clap = { version = "4", features = ["derive"] }
+color-eyre = "0.6"
+humantime = "2"
+humantime-serde = "1"
+mistralrs-core = { path = "../../external/mistral.rs/mistralrs-core" }

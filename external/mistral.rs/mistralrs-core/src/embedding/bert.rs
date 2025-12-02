@@ -4,7 +4,8 @@ use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::{embedding, layer_norm, linear, Embedding, LayerNorm, Linear, Module, VarBuilder};
 use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
 use serde::Deserialize;
-use tokenizers::Tokenizer;
+use std::borrow::Cow;
+use tokenizers::{InputSequence, PaddingParams, PaddingStrategy, Tokenizer};
 
 use crate::{engine::BertEmbeddingModel, layers::Activation, GLOBAL_HF_CACHE};
 use mistralrs_quant::log::once_log_info;
@@ -401,6 +402,7 @@ impl BertModel {
 pub struct BertPipeline {
     pub model: BertModel,
     pub tokenizer: Tokenizer,
+    device: Device,
 }
 
 impl BertPipeline {
@@ -435,6 +437,91 @@ impl BertPipeline {
             VarBuilder::from_mmaped_safetensors(&[weights_filename], DType::F32, device)?
         };
         let model = BertModel::load(vb, &config)?;
-        Ok(Self { model, tokenizer })
+        Ok(Self {
+            model,
+            tokenizer,
+            device: device.clone(),
+        })
+    }
+}
+
+impl BertPipeline {
+    pub fn embed(
+        &mut self,
+        sentences: &[String],
+        normalize: bool,
+    ) -> anyhow::Result<(Vec<Vec<f32>>, Vec<usize>)> {
+        if sentences.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        self.tokenizer.with_padding(Some(PaddingParams {
+            strategy: PaddingStrategy::BatchLongest,
+            ..Default::default()
+        }));
+
+        let inputs = sentences
+            .iter()
+            .map(|s| InputSequence::Raw(Cow::from(s.as_str())))
+            .collect::<Vec<_>>();
+        let encodings = self
+            .tokenizer
+            .encode_batch(inputs, true)
+            .map_err(candle_core::Error::msg)?;
+
+        let mut embeddings = Vec::with_capacity(encodings.len());
+        let mut counts = Vec::with_capacity(encodings.len());
+        let chunk_size = 4;
+
+        for chunk in encodings.chunks(chunk_size) {
+            let mut token_ids = Vec::with_capacity(chunk.len());
+            let mut attention_masks = Vec::with_capacity(chunk.len());
+            let mut chunk_counts = Vec::with_capacity(chunk.len());
+            for encoding in chunk {
+                let mask = encoding.get_attention_mask().to_vec();
+                let token_count = mask.iter().filter(|&&value| value != 0).count().max(1);
+                chunk_counts.push(token_count);
+                counts.push(token_count);
+                token_ids.push(Tensor::new(encoding.get_ids(), &self.device)?);
+                attention_masks.push(Tensor::new(mask.as_slice(), &self.device)?);
+            }
+            let token_ids = Tensor::stack(&token_ids, 0)?;
+            let attention_mask = Tensor::stack(&attention_masks, 0)?;
+            let token_type_ids = token_ids.zeros_like()?;
+
+            let sequence_output = self
+                .model
+                .forward(&token_ids, &token_type_ids, Some(&attention_mask))?
+                .to_dtype(DType::F32)?;
+            let summed = sequence_output.sum(1)?;
+            let chunk_vectors = summed.to_vec2::<f32>()?;
+            for (mut vec, count) in chunk_vectors.into_iter().zip(chunk_counts.into_iter()) {
+                let denom = count as f32;
+                if denom > 0.0 {
+                    for value in &mut vec {
+                        *value /= denom;
+                    }
+                }
+                if normalize {
+                    normalize_vec(&mut vec);
+                }
+                embeddings.push(vec);
+            }
+        }
+
+        Ok((embeddings, counts))
+    }
+}
+
+fn normalize_vec(vec: &mut [f32]) {
+    let norm = vec
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt();
+    if norm > 0.0 {
+        for value in vec.iter_mut() {
+            *value /= norm;
+        }
     }
 }

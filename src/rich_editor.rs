@@ -1,13 +1,13 @@
 //! A rich editor that combines edtui navigation with rich formatting
-use edtui::{EditorState, EditorView, EditorEventHandler, EditorTheme};
+use edtui::{EditorEventHandler, EditorState, EditorTheme, EditorView};
+use markdown_renderer::{RendererConfig, render_markdown_text};
 use ratatui::{
+    buffer::Buffer,
     crossterm::event::Event,
     layout::Rect,
     text::{Line, Span},
     widgets::Widget,
-    buffer::Buffer,
 };
-use markdown_renderer::{RendererConfig, render_markdown_text};
 use std::path::PathBuf;
 
 /// Context for expanding thinking animation placeholders
@@ -111,7 +111,15 @@ impl RichEditor {
 }
 // Helper function to create rich content from messages with proper styling
 // This creates the visual content matching the actual render logic
-pub fn create_rich_content_from_messages(messages: &[String], message_types: &[crate::MessageType], tips: &[&str], visible_tips: usize, border_set: ratatui::symbols::border::Set, wrap_width: usize, thinking_context: &ThinkingContext) -> Vec<Line<'static>> {
+pub fn create_rich_content_from_messages(
+    messages: &[String],
+    message_types: &[crate::MessageType],
+    tips: &[&str],
+    visible_tips: usize,
+    border_set: ratatui::symbols::border::Set,
+    wrap_width: usize,
+    thinking_context: &ThinkingContext,
+) -> Vec<Line<'static>> {
     let mut content = Vec::new();
 
     // Add tips with proper formatting and styling (replicating render_tips functionality)
@@ -124,7 +132,10 @@ pub fn create_rich_content_from_messages(messages: &[String], message_types: &[c
             if !parts[0].is_empty() {
                 spans.push(Span::raw(parts[0].to_string()));
             }
-            spans.push(Span::styled(".niterules", ratatui::style::Style::default().fg(ratatui::style::Color::Magenta)));
+            spans.push(Span::styled(
+                ".niterules",
+                ratatui::style::Style::default().fg(ratatui::style::Color::Magenta),
+            ));
             remaining = parts.get(1).unwrap_or(&"").to_string();
         }
         if remaining.contains("/help") {
@@ -132,7 +143,10 @@ pub fn create_rich_content_from_messages(messages: &[String], message_types: &[c
             if !parts[0].is_empty() {
                 spans.push(Span::raw(parts[0].to_string()));
             }
-            spans.push(Span::styled("/help", ratatui::style::Style::default().fg(ratatui::style::Color::Magenta)));
+            spans.push(Span::styled(
+                "/help",
+                ratatui::style::Style::default().fg(ratatui::style::Color::Magenta),
+            ));
             remaining = parts.get(1).unwrap_or(&"").to_string();
         }
         if remaining.contains("Alt+n") {
@@ -140,7 +154,10 @@ pub fn create_rich_content_from_messages(messages: &[String], message_types: &[c
             if !parts[0].is_empty() {
                 spans.push(Span::raw(parts[0].to_string()));
             }
-            spans.push(Span::styled("Alt+n", ratatui::style::Style::default().fg(ratatui::style::Color::Yellow)));
+            spans.push(Span::styled(
+                "Alt+n",
+                ratatui::style::Style::default().fg(ratatui::style::Color::Yellow),
+            ));
             remaining = parts.get(1).unwrap_or(&"").to_string();
         }
         if !remaining.is_empty() {
@@ -160,7 +177,9 @@ pub fn create_rich_content_from_messages(messages: &[String], message_types: &[c
 
         // Handle thinking animation
         if message == "[THINKING_ANIMATION]" {
-            let text_with_dots = if let Some((summary, _token_count, _chunk_count)) = &thinking_context.current_summary {
+            let text_with_dots = if let Some((summary, _token_count, _chunk_count)) =
+                &thinking_context.current_summary
+            {
                 format!("{}...", summary)
             } else {
                 format!("{}...", thinking_context.current_word)
@@ -182,7 +201,8 @@ pub fn create_rich_content_from_messages(messages: &[String], message_types: &[c
 
         // Handle tool calls
         if message.starts_with("[TOOL_CALL_COMPLETED:") {
-            let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_COMPLETED:")
+            let parts: Vec<&str> = message
+                .trim_start_matches("[TOOL_CALL_COMPLETED:")
                 .trim_end_matches("]")
                 .splitn(3, '|')
                 .collect();
@@ -190,19 +210,26 @@ pub fn create_rich_content_from_messages(messages: &[String], message_types: &[c
                 let tool_name = parts[0];
                 let args = parts[1];
                 let result = parts[2];
-                content.push(Line::from(vec![Span::raw(format!(" ● {}({})", tool_name, args))]));
+                content.push(Line::from(vec![Span::raw(format!(
+                    " ● {}({})",
+                    tool_name, args
+                ))]));
                 content.push(Line::from(vec![Span::raw(format!(" │ ⎿  {}", result))]));
                 continue;
             }
         } else if message.starts_with("[TOOL_CALL_STARTED:") {
-            let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_STARTED:")
+            let parts: Vec<&str> = message
+                .trim_start_matches("[TOOL_CALL_STARTED:")
                 .trim_end_matches("]")
                 .splitn(2, '|')
                 .collect();
             if parts.len() >= 2 {
                 let tool_name = parts[0];
                 let args = parts[1];
-                content.push(Line::from(vec![Span::raw(format!(" ● {}({})", tool_name, args))]));
+                content.push(Line::from(vec![Span::raw(format!(
+                    " ● {}({})",
+                    tool_name, args
+                ))]));
                 continue;
             }
         }
@@ -211,7 +238,7 @@ pub fn create_rich_content_from_messages(messages: &[String], message_types: &[c
         if message.starts_with(" ⎿ ") {
             content.push(Line::from(vec![Span::styled(
                 format!(" {}", message),
-                ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)
+                ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
             )]));
             continue;
         }
@@ -220,7 +247,9 @@ pub fn create_rich_content_from_messages(messages: &[String], message_types: &[c
         if message == "● Interrupted"
             || message.starts_with("[COMMAND:")
             || message.starts_with("├── ")
-            || message.contains("tok/sec") {  // Generation stats
+            || message.contains("tok/sec")
+        {
+            // Generation stats
             content.push(Line::from(vec![Span::raw(format!(" {}", message))]));
             continue;
         }
@@ -236,16 +265,16 @@ pub fn create_rich_content_from_messages(messages: &[String], message_types: &[c
                     // First line: 1 space left margin + white bullet
                     let mut spans = vec![
                         Span::raw(" "),
-                        Span::styled("● ", ratatui::style::Style::default().fg(ratatui::style::Color::White)),
+                        Span::styled(
+                            "● ",
+                            ratatui::style::Style::default().fg(ratatui::style::Color::White),
+                        ),
                     ];
                     spans.extend(md_line.spans.iter().cloned());
                     content.push(Line::from(spans));
                 } else {
                     // Subsequent lines: 1 space margin + 2 spaces alignment
-                    let mut spans = vec![
-                        Span::raw(" "),
-                        Span::raw("  "),
-                    ];
+                    let mut spans = vec![Span::raw(" "), Span::raw("  ")];
                     spans.extend(md_line.spans.iter().cloned());
                     content.push(Line::from(spans));
                 }
@@ -275,10 +304,10 @@ pub fn create_rich_content_from_messages(messages: &[String], message_types: &[c
             } else {
                 render_markdown_text(message)
             };
-            let max_line_width = markdown_text.lines.iter()
-                .map(|line| {
-                    line.spans.iter().map(|s| s.content.len()).sum::<usize>()
-                })
+            let max_line_width = markdown_text
+                .lines
+                .iter()
+                .map(|line| line.spans.iter().map(|s| s.content.len()).sum::<usize>())
                 .max()
                 .unwrap_or(0);
 
@@ -291,14 +320,14 @@ pub fn create_rich_content_from_messages(messages: &[String], message_types: &[c
 
             // Top border
             let horizontal_top = border_set.horizontal_top.repeat(border_width + 4);
-            let border_top = format!("{}{}{}",
-                border_set.top_left,
-                horizontal_top,
-                border_set.top_right
+            let border_top = format!(
+                "{}{}{}",
+                border_set.top_left, horizontal_top, border_set.top_right
             );
-            content.push(Line::from(vec![
-                Span::styled(border_top, ratatui::style::Style::default().fg(border_color))
-            ]));
+            content.push(Line::from(vec![Span::styled(
+                border_top,
+                ratatui::style::Style::default().fg(border_color),
+            )]));
 
             // Content lines with borders
             for (line_idx, md_line) in markdown_text.lines.iter().enumerate() {
@@ -307,25 +336,31 @@ pub fn create_rich_content_from_messages(messages: &[String], message_types: &[c
                 let prefix = if line_idx == 0 { " > " } else { "   " };
 
                 let mut line_spans = vec![
-                    Span::styled(border_set.vertical_left.to_string(), ratatui::style::Style::default().fg(border_color)),
+                    Span::styled(
+                        border_set.vertical_left.to_string(),
+                        ratatui::style::Style::default().fg(border_color),
+                    ),
                     Span::raw(prefix.to_string()),
                 ];
                 line_spans.extend(md_line.spans.iter().cloned());
                 line_spans.push(Span::raw(" ".repeat(padding_needed + 1)));
-                line_spans.push(Span::styled(border_set.vertical_right.to_string(), ratatui::style::Style::default().fg(border_color)));
+                line_spans.push(Span::styled(
+                    border_set.vertical_right.to_string(),
+                    ratatui::style::Style::default().fg(border_color),
+                ));
                 content.push(Line::from(line_spans));
             }
 
             // Bottom border
             let horizontal_bottom = border_set.horizontal_bottom.repeat(border_width + 4);
-            let border_bottom = format!("{}{}{}",
-                border_set.bottom_left,
-                horizontal_bottom,
-                border_set.bottom_right
+            let border_bottom = format!(
+                "{}{}{}",
+                border_set.bottom_left, horizontal_bottom, border_set.bottom_right
             );
-            content.push(Line::from(vec![
-                Span::styled(border_bottom, ratatui::style::Style::default().fg(border_color))
-            ]));
+            content.push(Line::from(vec![Span::styled(
+                border_bottom,
+                ratatui::style::Style::default().fg(border_color),
+            )]));
         } else {
             // Other messages without borders (plain text)
             content.push(Line::from(vec![Span::raw(format!(" {}", message))]));
@@ -336,7 +371,14 @@ pub fn create_rich_content_from_messages(messages: &[String], message_types: &[c
 }
 // Helper function to create plain content for edtui navigation
 // MUST match rendered output EXACTLY character-by-character
-pub fn create_plain_content_for_editor(messages: &[String], message_types: &[crate::MessageType], tips: &[&str], visible_tips: usize, wrap_width: usize, thinking_context: &ThinkingContext) -> String {
+pub fn create_plain_content_for_editor(
+    messages: &[String],
+    message_types: &[crate::MessageType],
+    tips: &[&str],
+    visible_tips: usize,
+    wrap_width: usize,
+    thinking_context: &ThinkingContext,
+) -> String {
     let mut content = Vec::new();
 
     // Add tips - matching render_tips() exactly
@@ -355,7 +397,9 @@ pub fn create_plain_content_for_editor(messages: &[String], message_types: &[cra
 
         // Handle thinking animation
         if message == "[THINKING_ANIMATION]" {
-            let text_with_dots = if let Some((summary, _token_count, _chunk_count)) = &thinking_context.current_summary {
+            let text_with_dots = if let Some((summary, _token_count, _chunk_count)) =
+                &thinking_context.current_summary
+            {
                 format!("{}...", summary)
             } else {
                 format!("{}...", thinking_context.current_word)
@@ -377,7 +421,8 @@ pub fn create_plain_content_for_editor(messages: &[String], message_types: &[cra
 
         // Handle tool calls
         if message.starts_with("[TOOL_CALL_COMPLETED:") {
-            let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_COMPLETED:")
+            let parts: Vec<&str> = message
+                .trim_start_matches("[TOOL_CALL_COMPLETED:")
                 .trim_end_matches("]")
                 .splitn(3, '|')
                 .collect();
@@ -390,7 +435,8 @@ pub fn create_plain_content_for_editor(messages: &[String], message_types: &[cra
                 continue;
             }
         } else if message.starts_with("[TOOL_CALL_STARTED:") {
-            let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_STARTED:")
+            let parts: Vec<&str> = message
+                .trim_start_matches("[TOOL_CALL_STARTED:")
                 .trim_end_matches("]")
                 .splitn(2, '|')
                 .collect();
@@ -407,7 +453,9 @@ pub fn create_plain_content_for_editor(messages: &[String], message_types: &[cra
             || message.starts_with("[COMMAND:")
             || message.starts_with(" ⎿ ")
             || message.starts_with("├── ")
-            || message.contains("tok/sec") {  // Generation stats
+            || message.contains("tok/sec")
+        {
+            // Generation stats
             content.push(format!(" {}", message));
             continue;
         }
@@ -452,10 +500,10 @@ pub fn create_plain_content_for_editor(messages: &[String], message_types: &[cra
             } else {
                 render_markdown_text(message)
             };
-            let max_line_width = markdown_text.lines.iter()
-                .map(|line| {
-                    line.spans.iter().map(|s| s.content.len()).sum::<usize>()
-                })
+            let max_line_width = markdown_text
+                .lines
+                .iter()
+                .map(|line| line.spans.iter().map(|s| s.content.len()).sum::<usize>())
                 .max()
                 .unwrap_or(0);
 
@@ -473,7 +521,12 @@ pub fn create_plain_content_for_editor(messages: &[String], message_types: &[cra
                 let prefix = if line_idx == 0 { " > " } else { "   " };
 
                 // Format: │<prefix><line_text><padding> │
-                content.push(format!("│{}{}{} │", prefix, line_text, " ".repeat(padding_needed)));
+                content.push(format!(
+                    "│{}{}{} │",
+                    prefix,
+                    line_text,
+                    " ".repeat(padding_needed)
+                ));
             }
 
             // Bottom border

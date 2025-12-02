@@ -1,0 +1,26 @@
+4. Rewire API layer to new manager semantics (continued)
+   - Replace in-memory manager instantiation in binary/tests with `MistralModelManager` + `SharedMistralRsState`. Remove SSE stub generator and use the upstream chunk streams (wrap `CompletionResponder`/`ChatCompletionResponder` into our envelope; ensure `/api/generate` SSE compatibility with our `{data/meta/error}` envelope by converting streaming chunks into SSE events matching upstream format).
+     * Done in Iteration 2.4 – the CLI now instantiates `MistralModelManager`, SSE headers include `x-request-id`, and the HTTP tests exercise the streaming envelope through the real manager using a mocked `EngineHandle` behind the `real-manager` feature flag.
+   - Update `/api/chat`, `/api/generate`, `/api/embeddings`, `/v1/*` to map request payloads to `ChatCompletionRequest`/`CompletionRequest` and consume `CompletionResponder`/`ChatCompletionResponder`. Reuse upstream streaming helpers via adapters so we don’t reimplement SSE logic.
+   - Ensure tool-calling + structured outputs pass through transparently by translating our request schema to upstream `Tool`/`Grammar` types.
+
+5. Lifecycle endpoints & jobs
+   - Implement `/api/pull` as asynchronous model download using hf-hub or HTTP to GGUF path (leveraging `LoaderBuilder::load_model_from_hf` with `token_source`). Track job progress in shared state, expose `/api/jobs/{id}` updates, and emit logs.
+   - `/api/load` => call `add_model` (with ModelConfig built from config override); `/api/unload` => `remove_model`. Use scheduler’s `on_model_loaded/on_model_unloaded` to keep resource accounting.
+   - `/api/tags`, `/api/show`, `/api/ps` should query `MistralRs::list_models` + metadata (context length, quantization, pinned, keep_alive). `/api/logs/{model}` pulls from our per-model log buffer fed by inference handlers.
+
+6. Config & security alignment
+   - Add builder toggles for paged attention, prefix cache, device selection, search, MCP from config file. Support env overrides for huggingface tokens and GPU IDs.
+   - Keep existing auth/rate-limit middleware unchanged; ensure SSE responses still include request IDs and JSON envelope at stream start/end.
+
+7. Testing strategy
+   - Because real models are huge, add a feature flag (e.g., `mock-manager`) to keep the stub for unit/integration tests, but gate default build behind real manager. Provide lightweight smoke test using tiny mistral.rs model (if available) or upstream “toy” pipeline.
+   - Add integration tests that spin up the router with a `MistralModelManager` pointing at a mocked `SharedMistralRsState` (via trait object or using mistral.rs’s test utilities) to validate request translation and SSE bridging without needing GPU downloads. ✅ `mistralrs-server-tests --features real-manager` now covers streaming completions, chat tooling, logs, and pull jobs using a mocked `EngineHandle`.
+
+8. Observability & metrics
+   - Tap upstream metrics (throughput, tokens/sec) and expose them via `/metrics`. Map scheduler events to Prometheus counters/gauges.
+   - Ensure tracing spans capture load/unload, request IDs, and tool-call events.
+
+9. Rollout plan
+   - Stage changes: (a) add deps + feature flag, (b) introduce new manager alongside stub, (c) migrate API/binary to new manager, (d) deprecate stub once tests updated.
+   - Provide migration notes in README (new config syntax, HF auth env vars, GPU requirements, etc.).

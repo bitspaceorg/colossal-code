@@ -105,9 +105,7 @@ async fn do_search(
                 &mut *get_mut_arcmutex!(this.bert_pipeline)
             {
                 // Semantic reranking with embeddings
-                let device = get_mut_arcmutex!(this.pipeline).device();
                 search::rag::compute_most_similar(
-                    &device,
                     &tool_call_params.query,
                     results.iter().map(|(res, _)| res).collect::<Vec<_>>(),
                     bert_pipeline,
@@ -503,6 +501,9 @@ pub(super) async fn search_request(this: Arc<Engine>, request: NormalRequest) {
                                 })
                                 .await
                                 .unwrap(),
+                            ResponseOk::Embedding(_) => {
+                                unreachable!("embedding response not expected in search flow")
+                            }
                         };
                         return;
                     }
@@ -614,6 +615,9 @@ pub(super) async fn search_request(this: Arc<Engine>, request: NormalRequest) {
                                     })
                                     .await
                                     .unwrap(),
+                                ResponseOk::Embedding(_) => {
+                                    unreachable!("embedding response not expected in search flow")
+                                }
                             };
                             return;
                         }

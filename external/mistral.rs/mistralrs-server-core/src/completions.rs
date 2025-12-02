@@ -12,7 +12,7 @@ use axum::{
     extract::{Json, State},
     http::{self},
     response::{
-        sse::{Event, KeepAlive},
+        sse::{Event, KeepAlive, KeepAliveStream},
         IntoResponse, Sse,
     },
 };
@@ -80,6 +80,8 @@ pub type CompletionOnDoneCallback = OnDoneCallback<CompletionChunkResponse>;
 /// into Server-Sent Events (SSE) format for real-time streaming to clients.
 pub type CompletionStreamer =
     BaseStreamer<CompletionChunkResponse, CompletionOnChunkCallback, CompletionOnDoneCallback>;
+
+pub type CompletionSseStream = KeepAliveStream<CompletionStreamer>;
 
 impl futures::Stream for CompletionStreamer {
     type Item = Result<Event, axum::Error>;
@@ -152,6 +154,7 @@ impl futures::Stream for CompletionStreamer {
                 Response::ModelError(_, _) => unreachable!(),
                 Response::Speech { .. } => unreachable!(),
                 Response::Raw { .. } => unreachable!(),
+                Response::Embedding(_) => unreachable!(),
             },
             Poll::Pending | Poll::Ready(None) => Poll::Pending,
         }
@@ -159,7 +162,7 @@ impl futures::Stream for CompletionStreamer {
 }
 
 /// Represents different types of completion responses.
-pub type CompletionResponder = BaseCompletionResponder<CompletionResponse, CompletionStreamer>;
+pub type CompletionResponder = BaseCompletionResponder<CompletionResponse, CompletionSseStream>;
 
 /// JSON error response structure for model errors.
 type JsonModelError = BaseJsonModelError<CompletionResponse>;
@@ -308,7 +311,7 @@ pub fn create_streamer(
     state: SharedMistralRsState,
     on_chunk: Option<CompletionOnChunkCallback>,
     on_done: Option<CompletionOnDoneCallback>,
-) -> Sse<CompletionStreamer> {
+) -> Sse<CompletionSseStream> {
     let streamer = base_create_streamer(rx, state, on_chunk, on_done);
     let keep_alive_interval = get_keep_alive_interval();
 
@@ -348,5 +351,6 @@ pub fn match_responses(state: SharedMistralRsState, response: Response) -> Compl
         Response::ImageGeneration(_) => unreachable!(),
         Response::Speech { .. } => unreachable!(),
         Response::Raw { .. } => unreachable!(),
+        Response::Embedding(_) => unreachable!(),
     }
 }

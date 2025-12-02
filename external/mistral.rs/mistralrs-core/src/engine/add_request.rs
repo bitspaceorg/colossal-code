@@ -1,7 +1,7 @@
 use crate::{
     pipeline::NormalCache,
     prefix_cacher::MatchingCache,
-    request::{DetokenizationRequest, NormalRequest, TokenizationRequest},
+    request::{DetokenizationRequest, EmbeddingRequest, NormalRequest, TokenizationRequest},
     sequence::SeqStepType,
     tools::{ToolCallingMatcher, ToolChoice},
     ModelCategory, RequestMessage, Response,
@@ -48,6 +48,7 @@ impl Engine {
             }
             Request::Tokenize(req) => self.tokenize_text(req).await,
             Request::Detokenize(req) => self.detokenize_text(req).await,
+            Request::Embedding(req) => self.handle_embedding_request(req).await,
             Request::Terminate => (),
             Request::TerminateAllSeqsNextStep => {
                 TERMINATE_ALL_NEXT_STEP.store(true, Ordering::SeqCst)
@@ -690,5 +691,61 @@ impl Engine {
             .send(Ok(txt))
             .await
             .expect("Sender disconnected unexpectedly!");
+    }
+
+    async fn handle_embedding_request(&self, request: EmbeddingRequest) {
+        let EmbeddingRequest {
+            inputs,
+            normalize,
+            id,
+            model_id,
+            response,
+        } = request;
+        let mut guard = get_mut_arcmutex!(self.bert_pipeline);
+        let Some(pipeline) = guard.as_mut() else {
+            let err = anyhow::Error::msg("embedding model not configured");
+            let _ = response
+                .send(Response::ValidationError(err.into()))
+                .await;
+            return;
+        };
+        match pipeline.embed(&inputs, normalize) {
+            Ok((vectors, counts)) => {
+                let prompt_tokens = counts.iter().sum();
+                let usage = crate::response::Usage {
+                    completion_tokens: 0,
+                    prompt_tokens,
+                    total_tokens: prompt_tokens,
+                    avg_tok_per_sec: 0.0,
+                    avg_prompt_tok_per_sec: 0.0,
+                    avg_compl_tok_per_sec: 0.0,
+                    total_time_sec: 0.0,
+                    total_prompt_time_sec: 0.0,
+                    total_completion_time_sec: 0.0,
+                };
+                let data = vectors
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, embedding)| crate::response::EmbeddingData {
+                        object: "embedding".to_string(),
+                        embedding,
+                        index,
+                    })
+                    .collect();
+                let resp = crate::response::EmbeddingResponse {
+                    id: format!("emb-{id}"),
+                    object: "list".to_string(),
+                    model: model_id.unwrap_or_else(|| "unknown".to_string()),
+                    data,
+                    usage,
+                };
+                let _ = response.send(Response::Embedding(resp)).await;
+            }
+            Err(err) => {
+                let _ = response
+                    .send(Response::InternalError(err.into()))
+                    .await;
+            }
+        }
     }
 }

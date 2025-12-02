@@ -1,0 +1,43 @@
+[package]
+name = "mistralrs-server-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+validator.workspace = true
+parking_lot.workspace = true
+mistralrs-server-config = { path = "../mistralrs-server-config" }
+mistralrs-core.workspace = true
+candle-core = { git = "https://github.com/EricLBuehler/candle.git", rev = "7511e510" }
+candle-nn = { git = "https://github.com/EricLBuehler/candle.git", rev = "7511e510" }
+hf-hub = "0.4"
+tokio-stream.workspace = true
+humantime-serde.workspace = true
+dashmap.workspace = true
+prometheus.workspace = true
+upstream-mistralrs-server-core = { package = "mistralrs-server-core", path = "../../../../external/mistral.rs/mistralrs-server-core" }
+axum.workspace = true
+futures.workspace = true
+indexmap = { version = "2", features = ["serde"] }
+either = "1"
+humantime = "2"
+
+[features]
+default = []
+mock-manager = []
+gpu = ["mistralrs-core/cuda"]
+cuda = ["mistralrs-core/cuda"]
+metal = ["mistralrs-core/metal"]
+flash-attn = ["mistralrs-core/flash-attn"]
+accelerate = ["mistralrs-core/accelerate"]
+mkl = ["mistralrs-core/mkl"]
+nccl = ["mistralrs-core/nccl"]

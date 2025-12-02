@@ -1,28 +1,31 @@
+use agent_core::{Agent, AgentMessage};
 use color_eyre::Result;
-use std::{env, process::Command, time::{Duration, Instant, SystemTime}, collections::HashMap};
-use sha2::{Sha256, Digest};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use edtui::clipboard::ClipboardTrait;
+use markdown_renderer;
 use ratatui::{
-    crossterm::{
-        event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    },
+    DefaultTerminal, Frame,
+    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     layout::{Constraint, Layout, Position},
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Paragraph},
-    DefaultTerminal, Frame,
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use edtui::clipboard::ClipboardTrait;
-use tokio::{sync::mpsc, task};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use agent_core::{Agent, AgentMessage};
-use markdown_renderer;
+use std::{
+    collections::HashMap,
+    env,
+    process::Command,
+    time::{Duration, Instant, SystemTime},
+};
+use tokio::{sync::mpsc, task};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 mod rich_editor;
-use rich_editor::{RichEditor, create_rich_content_from_messages, ThinkingContext};
+use rich_editor::{RichEditor, ThinkingContext, create_rich_content_from_messages};
 mod survey;
 use survey::{Survey, SurveyQuestion};
 mod session_manager;
@@ -44,7 +47,7 @@ const MESSAGE_BORDER_SET: symbols::border::Set = symbols::border::Set {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TodoItem {
     content: String,
-    status: String,  // pending, in_progress, completed
+    status: String, // pending, in_progress, completed
     active_form: String,
     #[serde(default)]
     children: Vec<TodoItem>,
@@ -53,19 +56,37 @@ struct TodoItem {
 /// Available slash commands with descriptions for autocomplete
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "clear conversation history and free up context"),
-    ("/compact", "clear conversation history but keep a summary in context. optional: /compact [instructions for summarization]"),
+    (
+        "/compact",
+        "clear conversation history but keep a summary in context. optional: /compact [instructions for summarization]",
+    ),
     ("/exit", "exit the repl"),
-    ("/export", "export the current conversation to a file or clipboard"),
-    ("/fork", "fork (copy) a saved conversation as a new conversation"),
+    (
+        "/export",
+        "export the current conversation to a file or clipboard",
+    ),
+    (
+        "/fork",
+        "fork (copy) a saved conversation as a new conversation",
+    ),
     ("/help", "show help information and available commands"),
     ("/model", "set the ai model for colossal code"),
     ("/resume", "resume a conversation"),
     ("/review", "review uncommited changes"),
-    ("/rewind", "restore the code and/or conversation to a previous point"),
-    ("/safety", "configure safety mode (yolo/regular/readonly) and permissions"),
+    (
+        "/rewind",
+        "restore the code and/or conversation to a previous point",
+    ),
+    (
+        "/safety",
+        "configure safety mode (yolo/regular/readonly) and permissions",
+    ),
     ("/shells", "list and manage background shell sessions"),
     ("/status", "show tool statuses"),
-    ("/stats", "show the total token count and duration of the current session"),
+    (
+        "/stats",
+        "show the total token count and duration of the current session",
+    ),
     ("/todos", "list current todo items"),
     ("/vim", "toggle between vim and normal editing modes"),
 ];
@@ -180,7 +201,7 @@ async fn main() -> Result<()> {
     let terminal = ratatui::init();
 
     // Enable bracketed paste mode for proper paste handling
-    use ratatui::crossterm::{execute, event::EnableBracketedPaste};
+    use ratatui::crossterm::{event::EnableBracketedPaste, execute};
     execute!(std::io::stdout(), EnableBracketedPaste)?;
 
     let app_result = {
@@ -250,7 +271,7 @@ struct SavedConversation {
 /// Individual message in a conversation (OLD FORMAT - kept for compatibility)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ConversationMessage {
-    role: String,  // "system", "user", "assistant"
+    role: String, // "system", "user", "assistant"
     content: String,
 }
 
@@ -356,9 +377,9 @@ struct RewindPoint {
     message_metadata: Vec<Option<UIMessageMetadata>>,
     message_timestamps: Vec<SystemTime>,
     timestamp: SystemTime,
-    preview: String,  // Description of this rewind point
+    preview: String, // Description of this rewind point
     message_count: usize,
-    file_changes: Vec<FileChange>,  // Files modified in this rewind point
+    file_changes: Vec<FileChange>, // Files modified in this rewind point
 }
 
 /// Metadata for displaying conversation in list
@@ -371,8 +392,8 @@ struct ConversationMetadata {
     message_count: usize,
     preview: String,
     file_path: std::path::PathBuf,
-    time_ago_str: String, // Static string calculated once
-    forked_from: Option<String>, // Parent conversation ID if this is a fork
+    time_ago_str: String,          // Static string calculated once
+    forked_from: Option<String>,   // Parent conversation ID if this is a fork
     forked_at: Option<SystemTime>, // When the fork was created
 }
 
@@ -476,7 +497,7 @@ struct App {
     thinking_last_word_change: Instant,
     thinking_last_tick: Instant,
     thinking_start_time: Option<Instant>, // Track when thinking started for elapsed time display
-    thinking_token_count: usize, // Real-time count of thinking tokens generated
+    thinking_token_count: usize,          // Real-time count of thinking tokens generated
     // Generation statistics (only for latest response)
     generation_stats: Option<(f32, usize, f32, String)>, // (tok_per_sec, token_count, time_to_first_token, stop_reason)
     // Command history
@@ -485,17 +506,17 @@ struct App {
     temp_input: Option<String>,
     history_file_path: std::path::PathBuf,
     // Message queue system
-    queued_messages: Vec<String>,  // Queue of messages waiting to be sent
-    editing_queue_index: Option<usize>,  // Index of queue message being edited (if any)
-    show_queue_choice: bool,  // Show the queue choice popup
-    queue_choice_input: String,  // Collect user choice for queue
-    show_approval_prompt: bool,  // Show approval request popup
-    approval_prompt_content: String,  // Content of approval request
-    show_sandbox_prompt: bool,  // Show sandbox permission prompt
-    sandbox_blocked_path: String,  // Path that was blocked by sandbox
-    interrupt_pending: Option<String>,  // Message waiting to send after cancel completes
-    export_pending: bool,  // Flag to trigger export in async context
-    save_pending: bool,    // Flag to trigger save conversation in async context
+    queued_messages: Vec<String>, // Queue of messages waiting to be sent
+    editing_queue_index: Option<usize>, // Index of queue message being edited (if any)
+    show_queue_choice: bool,      // Show the queue choice popup
+    queue_choice_input: String,   // Collect user choice for queue
+    show_approval_prompt: bool,   // Show approval request popup
+    approval_prompt_content: String, // Content of approval request
+    show_sandbox_prompt: bool,    // Show sandbox permission prompt
+    sandbox_blocked_path: String, // Path that was blocked by sandbox
+    interrupt_pending: Option<String>, // Message waiting to send after cancel completes
+    export_pending: bool,         // Flag to trigger export in async context
+    save_pending: bool,           // Flag to trigger save conversation in async context
     // Navigation mode snapshot - frozen UI state while nav mode is active
     nav_snapshot: Option<AppSnapshot>,
     // Session manager window
@@ -524,7 +545,7 @@ struct App {
     resume_conversations: Vec<ConversationMetadata>,
     resume_selected: usize,
     resume_load_pending: bool,
-    is_fork_mode: bool,  // If true, next load will be a fork (new ID)
+    is_fork_mode: bool, // If true, next load will be a fork (new ID)
     // Todos panel state
     show_todos: bool,
     // Conversation tracking (for update vs create)
@@ -542,8 +563,8 @@ struct App {
     show_rewind: bool,
     rewind_points: Vec<RewindPoint>,
     rewind_selected: usize,
-    current_file_changes: Vec<FileChange>,  // Track file changes since last rewind point
-    last_tool_args: Option<(String, String)>,  // (tool_name, arguments) for tracking file changes
+    current_file_changes: Vec<FileChange>, // Track file changes since last rewind point
+    last_tool_args: Option<(String, String)>, // (tool_name, arguments) for tracking file changes
 }
 impl App {
     fn get_config_file_path() -> Result<std::path::PathBuf> {
@@ -618,7 +639,10 @@ impl App {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .map_err(|_| color_eyre::eyre::eyre!("Could not determine home directory"))?;
-        let models_dir = std::path::Path::new(&home).join(".config").join(".nite").join("models");
+        let models_dir = std::path::Path::new(&home)
+            .join(".config")
+            .join(".nite")
+            .join("models");
 
         if !models_dir.exists() {
             self.available_models.clear();
@@ -647,7 +671,10 @@ impl App {
                     let file_hash = Self::compute_file_hash(&path);
 
                     // Create display name (remove .gguf extension)
-                    let display_name = file_name.strip_suffix(".gguf").unwrap_or(file_name).to_string();
+                    let display_name = file_name
+                        .strip_suffix(".gguf")
+                        .unwrap_or(file_name)
+                        .to_string();
 
                     models.push(ModelInfo {
                         filename: file_name.to_string(),
@@ -674,7 +701,9 @@ impl App {
 
     fn extract_quantization(filename: &str) -> Option<String> {
         // Common quantization patterns in GGUF filenames
-        let patterns = ["Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q3_K_M", "Q3_K_S", "Q2_K"];
+        let patterns = [
+            "Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q3_K_M", "Q3_K_S", "Q2_K",
+        ];
         for pattern in patterns {
             if filename.to_uppercase().contains(pattern) {
                 return Some(pattern.to_string());
@@ -735,7 +764,9 @@ impl App {
         ];
 
         for (pattern, value) in patterns {
-            if filename.contains(pattern) || filename.to_uppercase().contains(&pattern.to_uppercase()) {
+            if filename.contains(pattern)
+                || filename.to_uppercase().contains(&pattern.to_uppercase())
+            {
                 return Some(value.to_string());
             }
         }
@@ -816,9 +847,9 @@ impl App {
     }
 
     fn compute_file_hash(path: &std::path::Path) -> Option<String> {
-        use std::io::Read;
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
+        use std::io::Read;
 
         // For large files, only hash first and last 1MB for speed
         let file = std::fs::File::open(path).ok()?;
@@ -917,11 +948,11 @@ impl App {
 
     fn load_history(history_file: &std::path::Path) -> Vec<String> {
         if let Ok(contents) = std::fs::read_to_string(history_file) {
-            let history: Vec<String> = contents.lines()
+            let history: Vec<String> = contents
+                .lines()
                 .map(|s| {
                     // Unescape newlines: \n becomes actual newline
-                    s.replace("\\n", "\n")
-                        .replace("\\\\", "\\")  // Handle escaped backslashes
+                    s.replace("\\n", "\n").replace("\\\\", "\\") // Handle escaped backslashes
                 })
                 .collect();
 
@@ -964,16 +995,17 @@ impl App {
 
         // Keep only last 1000 commands
         if self.command_history.len() > 1000 {
-            self.command_history.drain(0..self.command_history.len() - 1000);
+            self.command_history
+                .drain(0..self.command_history.len() - 1000);
         }
 
         // Write to file - escape newlines and backslashes
-        let escaped_history: Vec<String> = self.command_history
+        let escaped_history: Vec<String> = self
+            .command_history
             .iter()
             .map(|cmd| {
                 // Escape backslashes first, then newlines
-                cmd.replace("\\", "\\\\")
-                    .replace("\n", "\\n")
+                cmd.replace("\\", "\\\\").replace("\n", "\\n")
             })
             .collect();
         let contents = escaped_history.join("\n");
@@ -1007,8 +1039,10 @@ impl App {
         let active_form = json.get("activeForm")?.as_str()?.to_string();
 
         // Recursively parse children
-        let children = if let Some(children_array) = json.get("children").and_then(|v| v.as_array()) {
-            children_array.iter()
+        let children = if let Some(children_array) = json.get("children").and_then(|v| v.as_array())
+        {
+            children_array
+                .iter()
                 .filter_map(|child| Self::parse_todo_item(child))
                 .collect()
         } else {
@@ -1024,7 +1058,12 @@ impl App {
     }
 
     /// Recursively format todos with indentation for display
-    fn format_todo_tree(todos: &[TodoItem], indent_level: usize, buffer: &mut String, counter: &mut usize) {
+    fn format_todo_tree(
+        todos: &[TodoItem],
+        indent_level: usize,
+        buffer: &mut String,
+        counter: &mut usize,
+    ) {
         let indent = "  ".repeat(indent_level);
         for todo in todos {
             *counter += 1;
@@ -1034,8 +1073,10 @@ impl App {
                 "pending" => "○",
                 _ => "·",
             };
-            buffer.push_str(&format!("{}{}. [{}] {}\n",
-                indent, counter, status_icon, todo.content));
+            buffer.push_str(&format!(
+                "{}{}. [{}] {}\n",
+                indent, counter, status_icon, todo.content
+            ));
 
             // Recursively display children with increased indentation
             if !todo.children.is_empty() {
@@ -1249,11 +1290,14 @@ impl App {
         }
 
         // Initialize agent with the selected model
-        let agent = Agent::new_with_model(current_model.clone()).await
+        let agent = Agent::new_with_model(current_model.clone())
+            .await
             .map_err(|e| color_eyre::eyre::eyre!("Failed to initialize agent: {}", e))?;
 
         // Load model synchronously
-        let _ = agent.get_model().await
+        let _ = agent
+            .get_model()
+            .await
             .map_err(|e| color_eyre::eyre::eyre!("Failed to load model: {}", e))?;
 
         let agent_arc = Arc::new(agent);
@@ -1300,12 +1344,17 @@ impl App {
                                                 let _ = tx_clone.send(AgentMessage::ModelLoaded);
                                             }
                                             Err(e) => {
-                                                let _ = tx_clone.send(AgentMessage::Error(format!("Failed to load model: {}", e)));
+                                                let _ = tx_clone.send(AgentMessage::Error(
+                                                    format!("Failed to load model: {}", e),
+                                                ));
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        let _ = tx_clone.send(AgentMessage::Error(format!("Failed to reload model: {}", e)));
+                                        let _ = tx_clone.send(AgentMessage::Error(format!(
+                                            "Failed to reload model: {}",
+                                            e
+                                        )));
                                     }
                                 }
                             });
@@ -1363,26 +1412,142 @@ impl App {
             thinking_last_update: Instant::now(),
             // thinking_snowflake_frames: vec!["✽", "✻", "✹", "❆", "❅"],
             thinking_snowflake_frames: vec!["✽ ", "✻ ", "✹ ", "❆ ", "❅ "],
-            thinking_words: vec!["Discombobulating", "Fabricating", "Procrastinating", "Dilly-dallying", "Waffling",
-                "Rambling", "Babbling", "Daydreaming", "Woolgathering", "Muddling", "Overthinking", "Pondering",
-                "Wondering", "Speculating", "Ruminating", "Meditating", "Contemplating", "Justifying",
-                "Rationalizing", "Concocting", "Scheming", "Contriving", "Improvising", "Inventing", "Juggling",
-                "Balancing", "Spinning", "Flipping", "Twisting", "Tangling", "Untangling", "Wrangling",
-                "Wrestling", "Struggling", "Scrambling", "Hustling", "Bustling", "Fidgeting", "Squirming",
-                "Floundering", "Stumbling", "Trudging", "Meandering", "Wandering", "Roaming", "Drifting",
-                "Sailing", "Surfing", "Skimming", "Scanning", "Browsing", "Foraging", "Hunting", "Tracking",
-                "Digging", "Excavating", "Burrowing", "Mining", "Fishing", "Netting", "Harvesting", "Sifting",
-                "Filtering", "Shuffling", "Juggling", "Mixing", "Blending", "Stirring", "Brewing", "Stewing",
-                "Marinating", "Cooking", "Baking", "Toasting", "Roasting", "Grilling", "Seasoning", "Garnishing",
-                "Polishing", "Refining", "Sharpening", "Sanding", "Hammering", "Chiseling", "Painting",
-                "Sketching", "Drafting", "Editing", "Proofing", "Revising", "Rewriting", "Compiling",
-                "Assembling", "Skedaddling", "Bamboozling", "Hoodwinking", "Ramshackling", "Fiddling",
-                "Hocus-pocusing", "Abracadabra-ing", "Wiggling", "Quibbling", "Flipping", "Flopping", "Fizzling",
-                "Gobsmacking", "Zig-zagging", "Zapping", "Snickering", "Shazam-ing", "Floofing", "Snazzling",
-                "Glorpifying", "Yapping", "Crinkling", "Boopity-booping", "Bumbling", "Mumbling", "Razzle-dazzling",
-                "Piffle-poofing", "Squashing", "Flabbering", "Mingling", "Mangling", "Bippity-boppitying",
-                "Jumble-wumbling", "Ding-a-linging", "Skronking", "Zoodling", "Zaddling", "Dippy-dappitying",
-                "Swozzling", "Frazzling", "Snarf-blasting"],
+            thinking_words: vec![
+                "Discombobulating",
+                "Fabricating",
+                "Procrastinating",
+                "Dilly-dallying",
+                "Waffling",
+                "Rambling",
+                "Babbling",
+                "Daydreaming",
+                "Woolgathering",
+                "Muddling",
+                "Overthinking",
+                "Pondering",
+                "Wondering",
+                "Speculating",
+                "Ruminating",
+                "Meditating",
+                "Contemplating",
+                "Justifying",
+                "Rationalizing",
+                "Concocting",
+                "Scheming",
+                "Contriving",
+                "Improvising",
+                "Inventing",
+                "Juggling",
+                "Balancing",
+                "Spinning",
+                "Flipping",
+                "Twisting",
+                "Tangling",
+                "Untangling",
+                "Wrangling",
+                "Wrestling",
+                "Struggling",
+                "Scrambling",
+                "Hustling",
+                "Bustling",
+                "Fidgeting",
+                "Squirming",
+                "Floundering",
+                "Stumbling",
+                "Trudging",
+                "Meandering",
+                "Wandering",
+                "Roaming",
+                "Drifting",
+                "Sailing",
+                "Surfing",
+                "Skimming",
+                "Scanning",
+                "Browsing",
+                "Foraging",
+                "Hunting",
+                "Tracking",
+                "Digging",
+                "Excavating",
+                "Burrowing",
+                "Mining",
+                "Fishing",
+                "Netting",
+                "Harvesting",
+                "Sifting",
+                "Filtering",
+                "Shuffling",
+                "Juggling",
+                "Mixing",
+                "Blending",
+                "Stirring",
+                "Brewing",
+                "Stewing",
+                "Marinating",
+                "Cooking",
+                "Baking",
+                "Toasting",
+                "Roasting",
+                "Grilling",
+                "Seasoning",
+                "Garnishing",
+                "Polishing",
+                "Refining",
+                "Sharpening",
+                "Sanding",
+                "Hammering",
+                "Chiseling",
+                "Painting",
+                "Sketching",
+                "Drafting",
+                "Editing",
+                "Proofing",
+                "Revising",
+                "Rewriting",
+                "Compiling",
+                "Assembling",
+                "Skedaddling",
+                "Bamboozling",
+                "Hoodwinking",
+                "Ramshackling",
+                "Fiddling",
+                "Hocus-pocusing",
+                "Abracadabra-ing",
+                "Wiggling",
+                "Quibbling",
+                "Flipping",
+                "Flopping",
+                "Fizzling",
+                "Gobsmacking",
+                "Zig-zagging",
+                "Zapping",
+                "Snickering",
+                "Shazam-ing",
+                "Floofing",
+                "Snazzling",
+                "Glorpifying",
+                "Yapping",
+                "Crinkling",
+                "Boopity-booping",
+                "Bumbling",
+                "Mumbling",
+                "Razzle-dazzling",
+                "Piffle-poofing",
+                "Squashing",
+                "Flabbering",
+                "Mingling",
+                "Mangling",
+                "Bippity-boppitying",
+                "Jumble-wumbling",
+                "Ding-a-linging",
+                "Skronking",
+                "Zoodling",
+                "Zaddling",
+                "Dippy-dappitying",
+                "Swozzling",
+                "Frazzling",
+                "Snarf-blasting",
+            ],
             thinking_current_word: "Thinking".to_string(),
             thinking_current_summary: None,
             thinking_position: 0,
@@ -1413,7 +1578,7 @@ impl App {
             autocomplete_suggestions: Vec::new(),
             autocomplete_selected_index: 0,
             thinking_raw_content: String::new(),
-            sandbox_enabled: true,  // Default to sandbox enabled for safety
+            sandbox_enabled: true, // Default to sandbox enabled for safety
             vim_mode_enabled: Self::load_vim_mode_setting(),
             vim_input_editor: RichEditor::new(),
             show_background_tasks: false,
@@ -1450,12 +1615,7 @@ impl App {
  > > / /__/ /_/ / /__/ /_/ /\ \_\ \/ __ |/ /__  / /__/ /_/ / // / _/  
 /_/  \___/\____/____/\____/___/___/_/ |_/____/  \___/\____/____/___/  
 ";
-        let colors = [
-            Color::Cyan,
-            Color::Blue,
-            Color::Magenta,
-            Color::Red,
-        ];
+        let colors = [Color::Cyan, Color::Blue, Color::Magenta, Color::Red];
         ascii_art
             .lines()
             .map(|line| {
@@ -1477,33 +1637,50 @@ impl App {
     fn get_mode_content(&mut self) -> Line<'static> {
         // Check if we have cached content for current mode
         if let Some((cached_mode, cached_content)) = &self.cached_mode_content
-            && *cached_mode == self.mode {
-                return cached_content.clone();
-            }
+            && *cached_mode == self.mode
+        {
+            return cached_content.clone();
+        }
         // Generate new content for current mode
         let content = match self.mode {
-            Mode::Normal => Line::from(vec![
-                Span::styled("> ", Style::default().fg(Color::Magenta)),
-            ]),
+            Mode::Normal => Line::from(vec![Span::styled(
+                "> ",
+                Style::default().fg(Color::Magenta),
+            )]),
             Mode::Navigation => Line::from(vec![
                 Span::styled(" > ", Style::default().fg(Color::Yellow)),
-                Span::styled("NAV MODE - hjkl: move, gg: top, G: bottom, /: search, n/N: next/prev, v: visual, q: exit nav", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    "NAV MODE - hjkl: move, gg: top, G: bottom, /: search, n/N: next/prev, v: visual, q: exit nav",
+                    Style::default().fg(Color::Yellow),
+                ),
             ]),
             Mode::Command => Line::from(vec![
                 Span::styled(" > CMD MODE : ", Style::default().fg(Color::Green)),
-                Span::styled(self.command_input.clone(), Style::default().fg(Color::Green)),
+                Span::styled(
+                    self.command_input.clone(),
+                    Style::default().fg(Color::Green),
+                ),
             ]),
             Mode::Visual => Line::from(vec![
                 Span::styled(" > ", Style::default().fg(Color::Magenta)),
-                Span::styled("VISUAL MODE - hjkl: move, y: yank, d: delete, ESC: back to nav", Style::default().fg(Color::Magenta)),
+                Span::styled(
+                    "VISUAL MODE - hjkl: move, y: yank, d: delete, ESC: back to nav",
+                    Style::default().fg(Color::Magenta),
+                ),
             ]),
             Mode::Search => Line::from(vec![
                 Span::styled(" > SEARCH MODE / ", Style::default().fg(Color::Cyan)),
-                Span::styled(self.editor.search_query.clone(), Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    self.editor.search_query.clone(),
+                    Style::default().fg(Color::Cyan),
+                ),
             ]),
             Mode::SessionWindow => Line::from(vec![
                 Span::styled(" > ", Style::default().fg(Color::Blue)),
-                Span::styled("SESSION WINDOW - ↑↓: navigate, Esc/Alt+w: close", Style::default().fg(Color::Blue)),
+                Span::styled(
+                    "SESSION WINDOW - ↑↓: navigate, Esc/Alt+w: close",
+                    Style::default().fg(Color::Blue),
+                ),
             ]),
         };
         // Cache the content
@@ -1537,18 +1714,20 @@ impl App {
                             } else {
                                 format!("\"{}\"", s)
                             }
-                        },
+                        }
                         serde_json::Value::Number(n) => n.to_string(),
                         serde_json::Value::Bool(b) => b.to_string(),
                         serde_json::Value::Array(arr) => {
-                            let items: Vec<String> = arr.iter().take(3).map(|item| {
-                                match item {
+                            let items: Vec<String> = arr
+                                .iter()
+                                .take(3)
+                                .map(|item| match item {
                                     serde_json::Value::String(s) => format!("\"{}\"", s),
                                     _ => format!("{}", item),
-                                }
-                            }).collect();
+                                })
+                                .collect();
                             format!("[{}]", items.join(", "))
-                        },
+                        }
                         serde_json::Value::Null => "null".to_string(),
                         serde_json::Value::Object(_) => "{...}".to_string(),
                     };
@@ -1569,54 +1748,74 @@ impl App {
         if let Ok(result) = serde_yaml::from_str::<serde_yaml::Value>(result_yaml) {
             if let Some(obj) = result.as_mapping() {
                 // Check status
-                let status = obj.get(&serde_yaml::Value::String("status".to_string()))
+                let status = obj
+                    .get(&serde_yaml::Value::String("status".to_string()))
                     .and_then(|v| v.as_str());
 
                 if status == Some("Success") {
                     // Extract specific info based on tool
                     match tool_name {
                         "read_file" => {
-                            if let Some(content) = obj.get(&serde_yaml::Value::String("content".to_string()))
-                                .and_then(|v| v.as_str()) {
+                            if let Some(content) = obj
+                                .get(&serde_yaml::Value::String("content".to_string()))
+                                .and_then(|v| v.as_str())
+                            {
                                 let lines = content.lines().count();
                                 let chars = content.chars().count();
                                 return format!("Read {} lines ({} chars)", lines, chars);
                             }
                         }
                         "get_files" | "get_files_recursive" => {
-                            if let Some(files) = obj.get(&serde_yaml::Value::String("files".to_string()))
-                                .and_then(|v| v.as_sequence()) {
+                            if let Some(files) = obj
+                                .get(&serde_yaml::Value::String("files".to_string()))
+                                .and_then(|v| v.as_sequence())
+                            {
                                 if files.is_empty() {
                                     return "No files found".to_string();
                                 }
                                 // Show first few files
-                                let file_names: Vec<String> = files.iter()
+                                let file_names: Vec<String> = files
+                                    .iter()
                                     .take(3)
                                     .filter_map(|f| f.as_str())
                                     .map(|s| s.to_string())
                                     .collect();
                                 if files.len() > 3 {
-                                    return format!("Found {} files ({}... +{})", files.len(), file_names.join(", "), files.len() - 3);
+                                    return format!(
+                                        "Found {} files ({}... +{})",
+                                        files.len(),
+                                        file_names.join(", "),
+                                        files.len() - 3
+                                    );
                                 } else {
-                                    return format!("Found {} files ({})", files.len(), file_names.join(", "));
+                                    return format!(
+                                        "Found {} files ({})",
+                                        files.len(),
+                                        file_names.join(", ")
+                                    );
                                 }
                             }
                         }
                         "search_files_with_regex" | "grep" => {
-                            if let Some(results) = obj.get(&serde_yaml::Value::String("results".to_string()))
-                                .and_then(|v| v.as_sequence()) {
+                            if let Some(results) = obj
+                                .get(&serde_yaml::Value::String("results".to_string()))
+                                .and_then(|v| v.as_sequence())
+                            {
                                 if results.is_empty() {
                                     return "No matches found".to_string();
                                 }
-                                return format!("Found {} matches in {} files",
+                                return format!(
+                                    "Found {} matches in {} files",
                                     results.len(),
                                     results.iter().filter_map(|r| r.get("file")).count().max(1)
                                 );
                             }
                         }
                         "exec_command" => {
-                            if let Some(cmd_out) = obj.get(&serde_yaml::Value::String("cmd_out".to_string()))
-                                .and_then(|v| v.as_str()) {
+                            if let Some(cmd_out) = obj
+                                .get(&serde_yaml::Value::String("cmd_out".to_string()))
+                                .and_then(|v| v.as_str())
+                            {
                                 let lines = cmd_out.lines().count();
                                 // Show first line of output if available
                                 if let Some(first_line) = cmd_out.lines().next() {
@@ -1637,15 +1836,19 @@ impl App {
                     }
                 } else if status == Some("Background") {
                     // Background command - show session info
-                    if let Some(session_id) = obj.get(&serde_yaml::Value::String("session_id".to_string()))
-                        .and_then(|v| v.as_str()) {
+                    if let Some(session_id) = obj
+                        .get(&serde_yaml::Value::String("session_id".to_string()))
+                        .and_then(|v| v.as_str())
+                    {
                         return format!("Started in background (session {})", session_id);
                     }
                     return "Started in background".to_string();
                 } else if let Some(_err_status) = status {
                     // Get error message
-                    if let Some(msg) = obj.get(&serde_yaml::Value::String("message".to_string()))
-                        .and_then(|v| v.as_str()) {
+                    if let Some(msg) = obj
+                        .get(&serde_yaml::Value::String("message".to_string()))
+                        .and_then(|v| v.as_str())
+                    {
                         return format!("Error: {}", msg);
                     }
                     return "Failed".to_string();
@@ -1656,7 +1859,8 @@ impl App {
         // Fallback: try to extract first meaningful line
         for line in result_yaml.lines() {
             let trimmed = line.trim();
-            if !trimmed.is_empty() && !trimmed.starts_with("status:") && !trimmed.starts_with("---") {
+            if !trimmed.is_empty() && !trimmed.starts_with("status:") && !trimmed.starts_with("---")
+            {
                 if trimmed.len() > 60 {
                     return format!("{}...", &trimmed[..57]);
                 }
@@ -1668,7 +1872,7 @@ impl App {
     }
 
     fn create_thinking_highlight_spans(text: &str, position: usize) -> Vec<(String, Color)> {
-        let base_color = Color::Rgb(224, 135, 57);    // #e08739
+        let base_color = Color::Rgb(224, 135, 57); // #e08739
         let bright_color = Color::Rgb(255, 215, 153); // #ffd799
         let medium_color = Color::Rgb(255, 179, 102); // #ffb366
 
@@ -1685,10 +1889,10 @@ impl App {
                 let window_pos = position - i - 1;
 
                 match window_pos {
-                    0 => bright_color,           // Character right before position (brightest)
-                    1 => bright_color,           // Second brightest
-                    2 | 3 => medium_color,       // Medium brightness
-                    4 | 5 | 6 => base_color,     // Fading back to base
+                    0 => bright_color,       // Character right before position (brightest)
+                    1 => bright_color,       // Second brightest
+                    2 | 3 => medium_color,   // Medium brightness
+                    4 | 5 | 6 => base_color, // Fading back to base
                     _ => base_color,
                 }
             } else {
@@ -1718,7 +1922,8 @@ impl App {
     fn update_animation(&mut self) {
         // Update thinking loader animation
         if self.is_thinking && self.thinking_last_update.elapsed() >= Duration::from_millis(100) {
-            self.thinking_loader_frame = (self.thinking_loader_frame + 1) % self.thinking_snowflake_frames.len();
+            self.thinking_loader_frame =
+                (self.thinking_loader_frame + 1) % self.thinking_snowflake_frames.len();
             self.thinking_last_update = Instant::now();
         }
 
@@ -1728,7 +1933,8 @@ impl App {
             if self.thinking_last_word_change.elapsed() >= Duration::from_secs(4) {
                 use rand::seq::SliceRandom;
                 let mut rng = rand::thread_rng();
-                self.thinking_current_word = self.thinking_words.choose(&mut rng).unwrap().to_string();
+                self.thinking_current_word =
+                    self.thinking_words.choose(&mut rng).unwrap().to_string();
                 self.thinking_position = 0;
                 self.thinking_last_word_change = Instant::now();
             }
@@ -1738,7 +1944,7 @@ impl App {
                 // Calculate text length based on what's actually being displayed
                 // Always add 3 for the "..." at the end
                 let text_len = if let Some((ref summary, _, _)) = self.thinking_current_summary {
-                    summary.len() + 3  // summary + "..."
+                    summary.len() + 3 // summary + "..."
                 } else {
                     let text_with_dots = format!("{}...", self.thinking_current_word);
                     text_with_dots.len()
@@ -1764,18 +1970,25 @@ impl App {
                     }
                     if found_incomplete {
                         self.visible_chars[current_line] += 10;
-                        if self.visible_chars[current_line] > self.title_lines[current_line].width() {
-                            self.visible_chars[current_line] = self.title_lines[current_line].width();
+                        if self.visible_chars[current_line] > self.title_lines[current_line].width()
+                        {
+                            self.visible_chars[current_line] =
+                                self.title_lines[current_line].width();
                         }
                         self.last_update = Instant::now();
-                        if self.visible_chars.iter().zip(self.title_lines.iter())
-                            .all(|(visible, line)| *visible >= line.width()) {
+                        if self
+                            .visible_chars
+                            .iter()
+                            .zip(self.title_lines.iter())
+                            .all(|(visible, line)| *visible >= line.width())
+                        {
                             animation_complete = true;
                         }
                     } else {
                         animation_complete = true;
                     }
-                    if animation_complete && self.last_update.elapsed() >= Duration::from_nanos(900) {
+                    if animation_complete && self.last_update.elapsed() >= Duration::from_nanos(900)
+                    {
                         self.phase = Phase::Tips;
                         self.visible_tips = 0;
                         self.last_update = Instant::now();
@@ -1804,10 +2017,12 @@ impl App {
         Self::compute_status_left_impl(self.vim_mode_enabled, mode)
     }
 
-    fn compute_status_left_impl(vim_mode_enabled: bool, vim_input_mode: edtui::EditorMode) -> Result<Line<'static>> {
-        let current_dir = env::current_dir().map_err(|e| {
-            color_eyre::eyre::eyre!("Failed to get current directory: {}", e)
-        })?;
+    fn compute_status_left_impl(
+        vim_mode_enabled: bool,
+        vim_input_mode: edtui::EditorMode,
+    ) -> Result<Line<'static>> {
+        let current_dir = env::current_dir()
+            .map_err(|e| color_eyre::eyre::eyre!("Failed to get current directory: {}", e))?;
         let dir_string = current_dir.to_string_lossy().to_string();
         let home_dir = env::var("HOME").unwrap_or_else(|_| "/home".to_string());
         let display_path = if dir_string.starts_with(&home_dir) {
@@ -1830,9 +2045,10 @@ impl App {
                             .current_dir(&git_dir)
                             .output();
                         if let Ok(output) = git_status
-                            && !output.stdout.is_empty() {
-                                git_info.push('*');
-                            }
+                            && !output.stdout.is_empty()
+                        {
+                            git_info.push('*');
+                        }
                         git_info.push(')');
                     } else {
                         git_info = " (git)".to_string();
@@ -1934,7 +2150,9 @@ impl App {
             prev_line_end = content_str.chars().count();
         }
         let prev_line_length = prev_line_end - prev_line_start;
-        let target_col = current_col.saturating_sub(indent_width).min(prev_line_length as u16);
+        let target_col = current_col
+            .saturating_sub(indent_width)
+            .min(prev_line_length as u16);
         self.character_index = prev_line_start + (target_col as usize);
         self.character_index = self.clamp_cursor(self.character_index);
     }
@@ -1991,7 +2209,9 @@ impl App {
             next_line_width += cw;
         }
         let next_line_length = next_line_end - next_line_start;
-        let target_col = current_col.saturating_sub(indent_width).min(next_line_length as u16);
+        let target_col = current_col
+            .saturating_sub(indent_width)
+            .min(next_line_length as u16);
         self.character_index = next_line_start + (target_col as usize);
         self.character_index = self.clamp_cursor(self.character_index);
     }
@@ -2169,7 +2389,8 @@ impl App {
             if let Some(file_path) = args_json.get("file_path").and_then(|v| v.as_str()) {
                 // Extract filename from path
                 let path = std::path::Path::new(file_path);
-                let filename = path.file_name()
+                let filename = path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or(file_path)
                     .to_string();
@@ -2177,11 +2398,13 @@ impl App {
                 // Parse result to count insertions/deletions
                 let (insertions, deletions) = if tool_name == "Edit" {
                     // For Edit, count lines in old_string and new_string
-                    let old_lines = args_json.get("old_string")
+                    let old_lines = args_json
+                        .get("old_string")
                         .and_then(|v| v.as_str())
                         .map(|s| s.lines().count())
                         .unwrap_or(0);
-                    let new_lines = args_json.get("new_string")
+                    let new_lines = args_json
+                        .get("new_string")
                         .and_then(|v| v.as_str())
                         .map(|s| s.lines().count())
                         .unwrap_or(0);
@@ -2193,7 +2416,8 @@ impl App {
                     }
                 } else {
                     // For Write, count lines in content
-                    let lines = args_json.get("content")
+                    let lines = args_json
+                        .get("content")
                         .and_then(|v| v.as_str())
                         .map(|s| s.lines().count())
                         .unwrap_or(0);
@@ -2201,7 +2425,11 @@ impl App {
                 };
 
                 // Check if file already tracked, update it
-                if let Some(existing) = self.current_file_changes.iter_mut().find(|fc| fc.path == filename) {
+                if let Some(existing) = self
+                    .current_file_changes
+                    .iter_mut()
+                    .find(|fc| fc.path == filename)
+                {
                     existing.insertions += insertions;
                     existing.deletions += deletions;
                 } else {
@@ -2223,7 +2451,9 @@ impl App {
         }
 
         // Extract preview from the most recent user message
-        let preview = self.messages.iter()
+        let preview = self
+            .messages
+            .iter()
             .enumerate()
             .rev()
             .find(|(i, _)| matches!(self.message_types.get(*i), Some(MessageType::User)))
@@ -2271,9 +2501,21 @@ impl App {
 
         for i in 0..self.messages.len() {
             let content = self.messages[i].clone();
-            let message_type = self.message_types.get(i).cloned().unwrap_or(MessageType::Agent);
-            let message_state = self.message_states.get(i).copied().unwrap_or(MessageState::Sent);
-            let timestamp = self.message_timestamps.get(i).copied().unwrap_or_else(SystemTime::now);
+            let message_type = self
+                .message_types
+                .get(i)
+                .cloned()
+                .unwrap_or(MessageType::Agent);
+            let message_state = self
+                .message_states
+                .get(i)
+                .copied()
+                .unwrap_or(MessageState::Sent);
+            let timestamp = self
+                .message_timestamps
+                .get(i)
+                .copied()
+                .unwrap_or_else(SystemTime::now);
             let metadata = self.message_metadata.get(i).and_then(|m| m.clone());
 
             ui_messages.push(SavedUIMessage {
@@ -2286,37 +2528,62 @@ impl App {
         }
 
         // Extract preview from first user message in UI
-        let preview = self.messages.iter()
+        let preview = self
+            .messages
+            .iter()
             .enumerate()
             .find(|(i, _)| matches!(self.message_types.get(*i), Some(MessageType::User)))
             .map(|(_, msg)| msg.chars().take(100).collect::<String>())
             .unwrap_or_else(|| "No preview available".to_string());
 
         // Check if we're updating existing conversation or creating new one
-        let (conversation_id, created_at, file_path, forked_from, forked_at) = if let (Some(id), Some(path)) = (&self.current_conversation_id, &self.current_conversation_path) {
-            // UPDATE EXISTING - preserve ID, created_at, and fork metadata
-            let (existing_created_at, existing_forked_from, existing_forked_at) = if let Ok(content) = std::fs::read_to_string(path) {
-                if let Ok(existing) = serde_json::from_str::<EnhancedSavedConversation>(&content) {
-                    (existing.created_at, existing.forked_from, existing.forked_at)
-                } else {
-                    (SystemTime::now(), None, None)
-                }
+        let (conversation_id, created_at, file_path, forked_from, forked_at) =
+            if let (Some(id), Some(path)) = (
+                &self.current_conversation_id,
+                &self.current_conversation_path,
+            ) {
+                // UPDATE EXISTING - preserve ID, created_at, and fork metadata
+                let (existing_created_at, existing_forked_from, existing_forked_at) =
+                    if let Ok(content) = std::fs::read_to_string(path) {
+                        if let Ok(existing) =
+                            serde_json::from_str::<EnhancedSavedConversation>(&content)
+                        {
+                            (
+                                existing.created_at,
+                                existing.forked_from,
+                                existing.forked_at,
+                            )
+                        } else {
+                            (SystemTime::now(), None, None)
+                        }
+                    } else {
+                        (SystemTime::now(), None, None)
+                    };
+
+                (
+                    id.clone(),
+                    existing_created_at,
+                    path.clone(),
+                    existing_forked_from,
+                    existing_forked_at,
+                )
             } else {
-                (SystemTime::now(), None, None)
+                // CREATE NEW - generate new ID
+                let conversations_dir = Self::get_conversations_dir()?;
+                std::fs::create_dir_all(&conversations_dir)?;
+
+                let new_id = uuid::Uuid::new_v4().to_string();
+                let new_path = conversations_dir.join(format!("{}.json", new_id));
+                let now = SystemTime::now();
+
+                (
+                    new_id,
+                    now,
+                    new_path,
+                    self.current_forked_from.clone(),
+                    self.current_forked_at,
+                )
             };
-
-            (id.clone(), existing_created_at, path.clone(), existing_forked_from, existing_forked_at)
-        } else {
-            // CREATE NEW - generate new ID
-            let conversations_dir = Self::get_conversations_dir()?;
-            std::fs::create_dir_all(&conversations_dir)?;
-
-            let new_id = uuid::Uuid::new_v4().to_string();
-            let new_path = conversations_dir.join(format!("{}.json", new_id));
-            let now = SystemTime::now();
-
-            (new_id, now, new_path, self.current_forked_from.clone(), self.current_forked_at)
-        };
 
         // Create/update conversation
         let now = SystemTime::now();
@@ -2357,42 +2624,49 @@ impl App {
         let content = std::fs::read_to_string(&metadata.file_path)?;
 
         // Try to load as enhanced format first, fall back to old format
-        let (ui_messages, agent_conversation) = if let Ok(enhanced) = serde_json::from_str::<EnhancedSavedConversation>(&content) {
-            (enhanced.ui_messages, enhanced.agent_conversation)
-        } else if let Ok(old_conv) = serde_json::from_str::<SavedConversation>(&content) {
+        let (ui_messages, agent_conversation) =
+            if let Ok(enhanced) = serde_json::from_str::<EnhancedSavedConversation>(&content) {
+                (enhanced.ui_messages, enhanced.agent_conversation)
+            } else if let Ok(old_conv) = serde_json::from_str::<SavedConversation>(&content) {
+                // Convert old format to UI messages (basic conversion)
+                let ui_msgs: Vec<SavedUIMessage> = old_conv
+                    .messages
+                    .iter()
+                    .map(|m| {
+                        let message_type = if m.role == "user" {
+                            MessageType::User
+                        } else {
+                            MessageType::Agent
+                        };
 
-            // Convert old format to UI messages (basic conversion)
-            let ui_msgs: Vec<SavedUIMessage> = old_conv.messages.iter().map(|m| {
-                let message_type = if m.role == "user" {
-                    MessageType::User
-                } else {
-                    MessageType::Agent
-                };
+                        SavedUIMessage {
+                            content: m.content.clone(),
+                            message_type,
+                            message_state: MessageState::Sent,
+                            timestamp: old_conv.created_at,
+                            metadata: None,
+                        }
+                    })
+                    .collect();
 
-                SavedUIMessage {
-                    content: m.content.clone(),
-                    message_type,
-                    message_state: MessageState::Sent,
-                    timestamp: old_conv.created_at,
-                    metadata: None,
-                }
-            }).collect();
+                // Build agent conversation JSON from old format
+                let messages: Vec<Value> = old_conv
+                    .messages
+                    .iter()
+                    .map(|m| json!({"role": m.role, "content": m.content}))
+                    .collect();
+                let agent_json = serde_json::to_string(&messages).ok();
 
-            // Build agent conversation JSON from old format
-            let messages: Vec<Value> = old_conv.messages.iter()
-                .map(|m| json!({"role": m.role, "content": m.content}))
-                .collect();
-            let agent_json = serde_json::to_string(&messages).ok();
-
-            (ui_msgs, agent_json)
-        } else {
-            return Err(color_eyre::eyre::eyre!("Failed to parse conversation file"));
-        };
+                (ui_msgs, agent_json)
+            } else {
+                return Err(color_eyre::eyre::eyre!("Failed to parse conversation file"));
+            };
 
         // Restore agent conversation for LLM context
         if let (Some(agent), Some(agent_json)) = (&self.agent, &agent_conversation) {
-            agent.restore_conversation(agent_json).await
-                .map_err(|e| color_eyre::eyre::eyre!("Failed to restore agent conversation: {}", e))?;
+            agent.restore_conversation(agent_json).await.map_err(|e| {
+                color_eyre::eyre::eyre!("Failed to restore agent conversation: {}", e)
+            })?;
         }
 
         // Clear current UI state
@@ -2431,7 +2705,10 @@ impl App {
 
             // Close resume panel and show fork confirmation
             self.show_resume = false;
-            self.messages.push(format!(" ⎇ conversation forked from '{}'", metadata.preview));
+            self.messages.push(format!(
+                " ⎇ conversation forked from '{}'",
+                metadata.preview
+            ));
             self.message_types.push(MessageType::Agent);
             self.message_states.push(MessageState::Sent);
 
@@ -2451,7 +2728,11 @@ impl App {
         // Only trigger if input starts with "/" or " /" (but not "@/" or other prefixes)
         let should_show = if input_trimmed.starts_with('/') {
             // Check that it's not preceded by @ or other non-space characters
-            let prefix = self.input.chars().take_while(|&c| c != '/').collect::<String>();
+            let prefix = self
+                .input
+                .chars()
+                .take_while(|&c| c != '/')
+                .collect::<String>();
             prefix.is_empty() || prefix.chars().all(|c| c.is_whitespace())
         } else {
             false
@@ -2509,7 +2790,8 @@ impl App {
 
     fn sync_input_to_vim(&mut self) {
         // Sync self.input to edtui editor by replacing text, preserving mode
-        self.vim_input_editor.set_text_content_preserving_mode(&self.input);
+        self.vim_input_editor
+            .set_text_content_preserving_mode(&self.input);
 
         // Sync cursor position to vim editor
         // Convert linear character_index to row/col
@@ -2586,10 +2868,12 @@ impl App {
                 self.message_states.push(state);
             }
             self.message_metadata.push(command_metadata.flatten());
-            self.message_timestamps.push(command_timestamp.unwrap_or_else(SystemTime::now));
+            self.message_timestamps
+                .push(command_timestamp.unwrap_or_else(SystemTime::now));
 
             // Add confirmation message
-            self.messages.push("[COMMAND: Conversation history cleared]".to_string());
+            self.messages
+                .push("[COMMAND: Conversation history cleared]".to_string());
             self.message_types.push(MessageType::Agent);
             self.message_states.push(MessageState::Sent);
             self.message_metadata.push(None);
@@ -2614,14 +2898,16 @@ impl App {
             if let Some(agent) = &self.agent {
                 if let Some(json_string) = agent.export_conversation().await {
                     // Try to copy to clipboard
-                    use clipboard::{ClipboardProvider, ClipboardContext};
-                    let clipboard_result: Result<(), Box<dyn std::error::Error>> = ClipboardContext::new()
-                        .and_then(|mut ctx| ctx.set_contents(json_string));
+                    use clipboard::{ClipboardContext, ClipboardProvider};
+                    let clipboard_result: Result<(), Box<dyn std::error::Error>> =
+                        ClipboardContext::new().and_then(|mut ctx| ctx.set_contents(json_string));
 
                     if clipboard_result.is_ok() {
-                        self.messages.push("[COMMAND: Conversation exported to clipboard]".to_string());
+                        self.messages
+                            .push("[COMMAND: Conversation exported to clipboard]".to_string());
                     } else {
-                        self.messages.push("[COMMAND: Failed to copy to clipboard]".to_string());
+                        self.messages
+                            .push("[COMMAND: Failed to copy to clipboard]".to_string());
                     }
                     self.message_types.push(MessageType::Agent);
                     self.message_states.push(MessageState::Sent);
@@ -2630,7 +2916,8 @@ impl App {
             }
 
             // Fallback to old export if agent export not available
-            self.messages.push("[COMMAND: No conversation history available]".to_string());
+            self.messages
+                .push("[COMMAND: No conversation history available]".to_string());
             self.message_types.push(MessageType::Agent);
             self.message_states.push(MessageState::Sent);
         } else if cmd_lower == "/vim" {
@@ -2644,12 +2931,18 @@ impl App {
 
             let _ = self.save_vim_mode_setting();
 
-            let status = if self.vim_mode_enabled { "enabled" } else { "disabled" };
-            self.messages.push(format!("[COMMAND: Vim keybindings {}]", status));
+            let status = if self.vim_mode_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            self.messages
+                .push(format!("[COMMAND: Vim keybindings {}]", status));
             self.message_types.push(MessageType::Agent);
             self.message_states.push(MessageState::Sent);
         } else {
-            self.messages.push(format!("[COMMAND: Unknown command '{}']", command));
+            self.messages
+                .push(format!("[COMMAND: Unknown command '{}']", command));
             self.message_types.push(MessageType::Agent);
             self.message_states.push(MessageState::Sent);
         }
@@ -2698,7 +2991,8 @@ impl App {
             }
 
             // Add confirmation message
-            self.messages.push("[COMMAND: Conversation history cleared]".to_string());
+            self.messages
+                .push("[COMMAND: Conversation history cleared]".to_string());
             self.message_types.push(MessageType::Agent);
             self.message_states.push(MessageState::Sent);
 
@@ -2733,7 +3027,8 @@ impl App {
         } else if cmd_lower == "/resume" {
             // Open resume panel and load conversations
             if let Err(e) = self.load_conversations_list() {
-                self.messages.push(format!(" ⎿ Error loading conversations: {}", e));
+                self.messages
+                    .push(format!(" ⎿ Error loading conversations: {}", e));
                 self.message_types.push(MessageType::Agent);
                 self.message_states.push(MessageState::Sent);
             } else {
@@ -2746,7 +3041,8 @@ impl App {
         } else if cmd_lower == "/rewind" {
             // Open rewind panel to restore to previous conversation state
             if self.rewind_points.is_empty() {
-                self.messages.push(" ⎿ No rewind points available yet".to_string());
+                self.messages
+                    .push(" ⎿ No rewind points available yet".to_string());
                 self.message_types.push(MessageType::Agent);
                 self.message_states.push(MessageState::Sent);
             } else {
@@ -2758,11 +3054,12 @@ impl App {
         } else if cmd_lower == "/fork" {
             // Fork (copy) a conversation - same UI but creates new ID
             if let Err(e) = self.load_conversations_list() {
-                self.messages.push(format!(" ⎿ Error loading conversations: {}", e));
+                self.messages
+                    .push(format!(" ⎿ Error loading conversations: {}", e));
                 self.message_types.push(MessageType::Agent);
                 self.message_states.push(MessageState::Sent);
             } else {
-                self.show_resume = true;  // Use same UI
+                self.show_resume = true; // Use same UI
                 self.is_fork_mode = true; // Fork mode - don't track ID
                 self.resume_selected = 0; // Reset selection
             }
@@ -2779,8 +3076,13 @@ impl App {
 
             let _ = self.save_vim_mode_setting();
 
-            let status = if self.vim_mode_enabled { "enabled" } else { "disabled" };
-            self.messages.push(format!("[COMMAND: Vim keybindings {}]", status));
+            let status = if self.vim_mode_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            self.messages
+                .push(format!("[COMMAND: Vim keybindings {}]", status));
             self.message_types.push(MessageType::Agent);
             self.message_states.push(MessageState::Sent);
         } else if cmd_lower == "/todos" {
@@ -2819,11 +3121,13 @@ impl App {
                 // Trigger immediate save to create the fork
                 self.save_pending = true;
 
-                self.messages.push(format!(" ⎇ conversation forked from '{}'", parent_id));
+                self.messages
+                    .push(format!(" ⎇ conversation forked from '{}'", parent_id));
                 self.message_types.push(MessageType::Agent);
                 self.message_states.push(MessageState::Sent);
             } else {
-                self.messages.push(" ⎿ no conversation to fork (conversation not saved yet)".to_string());
+                self.messages
+                    .push(" ⎿ no conversation to fork (conversation not saved yet)".to_string());
                 self.message_types.push(MessageType::Agent);
                 self.message_states.push(MessageState::Sent);
             }
@@ -2831,7 +3135,8 @@ impl App {
         } else if cmd_lower == "/model" {
             // Open model selection panel
             if let Err(e) = self.load_models() {
-                self.messages.push(format!(" ⎿ Error loading models: {}", e));
+                self.messages
+                    .push(format!(" ⎿ Error loading models: {}", e));
                 self.message_types.push(MessageType::Agent);
                 self.message_states.push(MessageState::Sent);
             } else {
@@ -2847,7 +3152,8 @@ impl App {
             if parts.len() == 1 {
                 // No args - show current status (no UI spam)
                 if let Ok(config) = agent_core::safety_config::SafetyConfig::load() {
-                    self.messages.push(format!("[SAFETY] {}", config.status_string()));
+                    self.messages
+                        .push(format!("[SAFETY] {}", config.status_string()));
                     self.message_types.push(MessageType::Agent);
                     self.message_states.push(MessageState::Sent);
                 }
@@ -2855,35 +3161,35 @@ impl App {
                 // Handle subcommands (silently update, sync with assistant_mode)
                 match parts[1].to_lowercase().as_str() {
                     "yolo" => {
-                        let mut config = agent_core::safety_config::SafetyConfig::load()
-                            .unwrap_or_default();
+                        let mut config =
+                            agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
                         config.set_mode(agent_core::safety_config::SafetyMode::Yolo);
                         let _ = config.save();
                         self.assistant_mode = AssistantMode::Yolo;
                     }
                     "regular" => {
-                        let mut config = agent_core::safety_config::SafetyConfig::load()
-                            .unwrap_or_default();
+                        let mut config =
+                            agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
                         config.set_mode(agent_core::safety_config::SafetyMode::Regular);
                         let _ = config.save();
                         self.assistant_mode = AssistantMode::None;
                     }
                     "readonly" | "read-only" => {
-                        let mut config = agent_core::safety_config::SafetyConfig::load()
-                            .unwrap_or_default();
+                        let mut config =
+                            agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
                         config.set_mode(agent_core::safety_config::SafetyMode::ReadOnly);
                         let _ = config.save();
                         self.assistant_mode = AssistantMode::ReadOnly;
                     }
                     "permissions" | "perms" => {
-                        let mut config = agent_core::safety_config::SafetyConfig::load()
-                            .unwrap_or_default();
+                        let mut config =
+                            agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
                         config.toggle_ask_permission();
                         let _ = config.save();
                     }
                     "sandbox" => {
-                        let mut config = agent_core::safety_config::SafetyConfig::load()
-                            .unwrap_or_default();
+                        let mut config =
+                            agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
                         config.toggle_sandbox();
                         let _ = config.save();
                         self.sandbox_enabled = config.sandbox_enabled;
@@ -2894,7 +3200,8 @@ impl App {
             return;
         } else {
             // Unknown command
-            self.messages.push(format!("[COMMAND: Unknown command '{}']", command));
+            self.messages
+                .push(format!("[COMMAND: Unknown command '{}']", command));
             self.message_types.push(MessageType::Agent);
             self.message_states.push(MessageState::Sent);
         }
@@ -3004,7 +3311,8 @@ impl App {
                             let _ = tx.send(AgentMessage::ApprovalResponse(false));
                             let _ = tx.send(AgentMessage::Cancel);
                         }
-                        self.messages.push(" ⎿ Interrupted. What should Nite do instead?".to_string());
+                        self.messages
+                            .push(" ⎿ Interrupted. What should Nite do instead?".to_string());
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
                     }
@@ -3040,10 +3348,13 @@ impl App {
                             }
                         });
 
-                        self.messages.push(format!(" ⎿ Added '{}' to writable roots", path_display));
+                        self.messages
+                            .push(format!(" ⎿ Added '{}' to writable roots", path_display));
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
-                        self.messages.push(" ⎿ The agent can now write to this path. Continuing...".to_string());
+                        self.messages.push(
+                            " ⎿ The agent can now write to this path. Continuing...".to_string(),
+                        );
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
                     }
@@ -3059,7 +3370,8 @@ impl App {
                             let _ = tx.send(AgentMessage::Cancel);
                         }
                         // Agent will be interrupted, user can type their message
-                        self.messages.push(" ⎿ Interrupted. What should Nite do instead?".to_string());
+                        self.messages
+                            .push(" ⎿ Interrupted. What should Nite do instead?".to_string());
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
                     }
@@ -3225,25 +3537,28 @@ impl App {
                         }
                         AgentMessage::ThinkingSummary(summary) => {
                             // Parse summary format: "text|token_count|chunk_count"
-                            let (summary_text, token_count, chunk_count) = if let Some(last_pipe) = summary.rfind('|') {
-                                let chunk_str = &summary[last_pipe + 1..];
-                                let chunk_count = chunk_str.parse::<usize>().unwrap_or(0);
+                            let (summary_text, token_count, chunk_count) =
+                                if let Some(last_pipe) = summary.rfind('|') {
+                                    let chunk_str = &summary[last_pipe + 1..];
+                                    let chunk_count = chunk_str.parse::<usize>().unwrap_or(0);
 
-                                let summary_without_chunk = &summary[..last_pipe];
-                                if let Some(first_pipe) = summary_without_chunk.rfind('|') {
-                                    let text = summary_without_chunk[..first_pipe].to_string();
-                                    let token_str = &summary_without_chunk[first_pipe + 1..];
-                                    let token_count = token_str.parse::<usize>().unwrap_or(0);
-                                    (text, token_count, chunk_count)
+                                    let summary_without_chunk = &summary[..last_pipe];
+                                    if let Some(first_pipe) = summary_without_chunk.rfind('|') {
+                                        let text = summary_without_chunk[..first_pipe].to_string();
+                                        let token_str = &summary_without_chunk[first_pipe + 1..];
+                                        let token_count = token_str.parse::<usize>().unwrap_or(0);
+                                        (text, token_count, chunk_count)
+                                    } else {
+                                        (summary.clone(), 0, 0)
+                                    }
                                 } else {
                                     (summary.clone(), 0, 0)
-                                }
-                            } else {
-                                (summary.clone(), 0, 0)
-                            };
+                                };
 
                             // If we have a current summary, move it to a static tree line
-                            if let Some((old_summary, old_tokens, old_chunks)) = self.thinking_current_summary.take() {
+                            if let Some((old_summary, old_tokens, old_chunks)) =
+                                self.thinking_current_summary.take()
+                            {
                                 // Remove the thinking animation temporarily
                                 if let Some(last_msg) = self.messages.last() {
                                     if last_msg == "[THINKING_ANIMATION]" {
@@ -3260,7 +3575,8 @@ impl App {
                                 self.message_types.push(MessageType::Agent);
                             }
                             // Store new summary as current (will show with snowflake)
-                            self.thinking_current_summary = Some((summary_text, token_count, chunk_count));
+                            self.thinking_current_summary =
+                                Some((summary_text, token_count, chunk_count));
                             // Reset animation position to start wave from beginning
                             self.thinking_position = 0;
                         }
@@ -3279,7 +3595,9 @@ impl App {
                             }
 
                             // THEN convert summary to static tree line if it exists
-                            if let Some((final_summary, _token_count, _chunk_count)) = self.thinking_current_summary.take() {
+                            if let Some((final_summary, _token_count, _chunk_count)) =
+                                self.thinking_current_summary.take()
+                            {
                                 self.messages.push(format!("├── {}", final_summary));
                                 self.message_types.push(MessageType::Agent);
                             }
@@ -3322,7 +3640,9 @@ impl App {
                             // }
 
                             // Convert summary to static tree line if it exists, but keep the animation running
-                            if let Some((current_summary, _token_count, _chunk_count)) = self.thinking_current_summary.take() {
+                            if let Some((current_summary, _token_count, _chunk_count)) =
+                                self.thinking_current_summary.take()
+                            {
                                 self.messages.push(format!("├── {}", current_summary));
                                 self.message_types.push(MessageType::Agent);
                             }
@@ -3331,8 +3651,12 @@ impl App {
                             self.last_tool_args = Some((tool_name.clone(), arguments.clone()));
 
                             // Format arguments for display
-                            let formatted_args = Self::format_tool_arguments(&tool_name, &arguments);
-                            self.messages.push(format!("[TOOL_CALL_STARTED:{}|{}]", tool_name, formatted_args));
+                            let formatted_args =
+                                Self::format_tool_arguments(&tool_name, &arguments);
+                            self.messages.push(format!(
+                                "[TOOL_CALL_STARTED:{}|{}]",
+                                tool_name, formatted_args
+                            ));
                             self.message_types.push(MessageType::Agent);
 
                             // Keep thinking animation running during tool calls
@@ -3344,20 +3668,29 @@ impl App {
                         }
                         AgentMessage::ToolCallCompleted(tool_name, result) => {
                             // Check for sandbox permission errors and offer to add to writable roots
-                            if let Ok(result_yaml) = serde_yaml::from_str::<serde_yaml::Value>(&result) {
+                            if let Ok(result_yaml) =
+                                serde_yaml::from_str::<serde_yaml::Value>(&result)
+                            {
                                 if let Some(obj) = result_yaml.as_mapping() {
-                                    if let Some(msg) = obj.get(&serde_yaml::Value::String("message".to_string()))
-                                        .and_then(|v| v.as_str()) {
+                                    if let Some(msg) = obj
+                                        .get(&serde_yaml::Value::String("message".to_string()))
+                                        .and_then(|v| v.as_str())
+                                    {
                                         // Check if this is a sandbox permission error
-                                        if msg.contains("Sandbox denied") || msg.contains("permission denied") {
+                                        if msg.contains("Sandbox denied")
+                                            || msg.contains("permission denied")
+                                        {
                                             // Try to extract file path from the error message
                                             // Typical format: "Sandbox denied (code N): path/to/file"
                                             if let Some(path_start) = msg.find("): ") {
                                                 let potential_path = msg[path_start + 3..].trim();
                                                 // Basic validation that it looks like a path
-                                                if potential_path.starts_with('/') || potential_path.starts_with('.') {
+                                                if potential_path.starts_with('/')
+                                                    || potential_path.starts_with('.')
+                                                {
                                                     // Show sandbox permission prompt
-                                                    self.sandbox_blocked_path = potential_path.to_string();
+                                                    self.sandbox_blocked_path =
+                                                        potential_path.to_string();
                                                     self.show_sandbox_prompt = true;
                                                 }
                                             }
@@ -3369,9 +3702,14 @@ impl App {
                             // Special handling for todo_write tool
                             if tool_name == "todo_write" {
                                 // Parse the result to extract todos and store them for saving
-                                if let Ok(result_json) = serde_json::from_str::<serde_json::Value>(&result) {
-                                    if let Some(todos_array) = result_json.get("todos").and_then(|v| v.as_array()) {
-                                        let todos: Vec<TodoItem> = todos_array.iter()
+                                if let Ok(result_json) =
+                                    serde_json::from_str::<serde_json::Value>(&result)
+                                {
+                                    if let Some(todos_array) =
+                                        result_json.get("todos").and_then(|v| v.as_array())
+                                    {
+                                        let todos: Vec<TodoItem> = todos_array
+                                            .iter()
                                             .filter_map(|t| Self::parse_todo_item(t))
                                             .collect();
 
@@ -3384,7 +3722,11 @@ impl App {
                             // Track file changes for Write and Edit tools using stored raw arguments
                             if let Some((stored_tool, stored_args)) = &self.last_tool_args {
                                 if stored_tool == &tool_name {
-                                    pending_file_change = Some((tool_name.clone(), stored_args.clone(), result.clone()));
+                                    pending_file_change = Some((
+                                        tool_name.clone(),
+                                        stored_args.clone(),
+                                        result.clone(),
+                                    ));
                                 }
                             }
 
@@ -3409,13 +3751,18 @@ impl App {
                             for msg in self.messages.iter_mut().rev() {
                                 if msg.starts_with(&format!("[TOOL_CALL_STARTED:{}|", tool_name)) {
                                     // Extract args: everything between first | and final ]
-                                    let args = msg.trim_start_matches(&format!("[TOOL_CALL_STARTED:{}|", tool_name))
+                                    let args = msg
+                                        .trim_start_matches(&format!(
+                                            "[TOOL_CALL_STARTED:{}|",
+                                            tool_name
+                                        ))
                                         .trim_end_matches("]");
-                                    let formatted_result = Self::format_tool_result(&tool_name, &result);
-                                    *msg = format!("[TOOL_CALL_COMPLETED:{}|{}|{}]",
-                                        tool_name,
-                                        args,
-                                        formatted_result);
+                                    let formatted_result =
+                                        Self::format_tool_result(&tool_name, &result);
+                                    *msg = format!(
+                                        "[TOOL_CALL_COMPLETED:{}|{}|{}]",
+                                        tool_name, args, formatted_result
+                                    );
                                     break;
                                 }
                             }
@@ -3460,13 +3807,24 @@ impl App {
                             self.thinking_token_count = 0;
                             self.agent_response_started = false;
                         }
-                        AgentMessage::GenerationStats(tok_per_sec, token_count, time_to_first_token, stop_reason) => {
+                        AgentMessage::GenerationStats(
+                            tok_per_sec,
+                            token_count,
+                            time_to_first_token,
+                            stop_reason,
+                        ) => {
                             // Store the generation stats
-                            self.generation_stats = Some((tok_per_sec, token_count, time_to_first_token, stop_reason));
+                            self.generation_stats =
+                                Some((tok_per_sec, token_count, time_to_first_token, stop_reason));
                         }
                         AgentMessage::BackgroundTaskStarted(session_id, command, log_file) => {
                             // Add background task to the list with current time as start time
-                            self.background_tasks.push((session_id, command, log_file, std::time::Instant::now()));
+                            self.background_tasks.push((
+                                session_id,
+                                command,
+                                log_file,
+                                std::time::Instant::now(),
+                            ));
                         }
                         AgentMessage::Done => {
                             // IMPORTANT: Remove thinking animation FIRST, unconditionally
@@ -3478,7 +3836,9 @@ impl App {
                             }
 
                             // THEN convert summary to static tree line if it exists
-                            if let Some((final_summary, _token_count, _chunk_count)) = self.thinking_current_summary.take() {
+                            if let Some((final_summary, _token_count, _chunk_count)) =
+                                self.thinking_current_summary.take()
+                            {
                                 self.messages.push(format!("├── {}", final_summary));
                                 self.message_types.push(MessageType::Agent);
                             }
@@ -3503,7 +3863,8 @@ impl App {
                                 self.message_states.push(MessageState::Sent);
 
                                 // Add the prompt message
-                                self.messages.push(" ⎿ What should Nite do instead?".to_string());
+                                self.messages
+                                    .push(" ⎿ What should Nite do instead?".to_string());
                                 self.message_types.push(MessageType::Agent);
                                 self.message_states.push(MessageState::Sent);
 
@@ -3520,12 +3881,13 @@ impl App {
                                 // Set flag to create a rewind point after rx is dropped
                                 create_rewind = true;
 
-                                process_queued = true;  // Set flag to process queued message after rx is dropped
+                                process_queued = true; // Set flag to process queued message after rx is dropped
                             }
                         }
                         AgentMessage::ModelLoaded => {
                             // Model has been loaded successfully
-                            self.messages.push(" ✔ Model loaded successfully".to_string());
+                            self.messages
+                                .push(" ✔ Model loaded successfully".to_string());
                             self.message_types.push(MessageType::Agent);
                             self.message_states.push(MessageState::Sent);
                         }
@@ -3625,24 +3987,29 @@ impl App {
                 if let Some(agent) = &self.agent {
                     if let Some(json_string) = agent.export_conversation().await {
                         // Try to copy to clipboard
-                        use clipboard::{ClipboardProvider, ClipboardContext};
-                        let clipboard_result: Result<(), Box<dyn std::error::Error>> = ClipboardContext::new()
-                            .and_then(|mut ctx| ctx.set_contents(json_string));
+                        use clipboard::{ClipboardContext, ClipboardProvider};
+                        let clipboard_result: Result<(), Box<dyn std::error::Error>> =
+                            ClipboardContext::new()
+                                .and_then(|mut ctx| ctx.set_contents(json_string));
 
                         if clipboard_result.is_ok() {
-                            self.messages.push("[COMMAND: Conversation exported to clipboard]".to_string());
+                            self.messages
+                                .push("[COMMAND: Conversation exported to clipboard]".to_string());
                         } else {
-                            self.messages.push("[COMMAND: Failed to copy to clipboard]".to_string());
+                            self.messages
+                                .push("[COMMAND: Failed to copy to clipboard]".to_string());
                         }
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
                     } else {
-                        self.messages.push("[COMMAND: No conversation history available]".to_string());
+                        self.messages
+                            .push("[COMMAND: No conversation history available]".to_string());
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
                     }
                 } else {
-                    self.messages.push("[COMMAND: No conversation history available]".to_string());
+                    self.messages
+                        .push("[COMMAND: No conversation history available]".to_string());
                     self.message_types.push(MessageType::Agent);
                     self.message_states.push(MessageState::Sent);
                 }
@@ -3656,14 +4023,17 @@ impl App {
                     // Auto-save current conversation before loading a new one
                     if self.current_conversation_id.is_some() && !self.messages.is_empty() {
                         if let Err(e) = self.save_conversation().await {
-                            self.messages.push(format!(" ⎿ Warning: Failed to auto-save before resume: {}", e));
+                            self.messages.push(format!(
+                                " ⎿ Warning: Failed to auto-save before resume: {}",
+                                e
+                            ));
                             self.message_types.push(MessageType::Agent);
                             self.message_states.push(MessageState::Sent);
                         }
                     }
 
                     let metadata = self.resume_conversations[self.resume_selected].clone();
-                    let is_fork = self.is_fork_mode;  // Capture before load
+                    let is_fork = self.is_fork_mode; // Capture before load
 
                     match self.load_conversation(&metadata).await {
                         Ok(_) => {
@@ -3676,7 +4046,8 @@ impl App {
                             self.show_resume = false;
                         }
                         Err(e) => {
-                            self.messages.push(format!(" ⎿ Error loading conversation: {}", e));
+                            self.messages
+                                .push(format!(" ⎿ Error loading conversation: {}", e));
                             self.message_types.push(MessageType::Agent);
                             self.message_states.push(MessageState::Sent);
                         }
@@ -3700,16 +4071,21 @@ impl App {
                 Phase::Ascii | Phase::Tips => Duration::from_millis(30),
                 Phase::Input => {
                     if self.agent_processing || self.is_thinking {
-                        Duration::from_millis(16)  // ~60fps when agent is responding or thinking
+                        Duration::from_millis(16) // ~60fps when agent is responding or thinking
                     } else {
-                        Duration::from_millis(50)  // Responsive but not too aggressive
+                        Duration::from_millis(50) // Responsive but not too aggressive
                     }
                 }
             };
             if event::poll(poll_duration)? {
                 match event::read()? {
-                    Event::Paste(data) if self.phase == Phase::Input && self.mode == Mode::Normal
-                        && !self.show_background_tasks && !self.show_help && self.viewing_task.is_none() => {
+                    Event::Paste(data)
+                        if self.phase == Phase::Input
+                            && self.mode == Mode::Normal
+                            && !self.show_background_tasks
+                            && !self.show_help
+                            && self.viewing_task.is_none() =>
+                    {
                         // Handle paste for both vim and normal mode
                         if self.vim_mode_enabled {
                             // Paste into vim editor
@@ -3733,7 +4109,8 @@ impl App {
                             new_text.insert_str(byte_pos, &data);
 
                             // Update vim editor with new text
-                            self.vim_input_editor.set_text_content_preserving_mode(&new_text);
+                            self.vim_input_editor
+                                .set_text_content_preserving_mode(&new_text);
 
                             // Calculate new cursor position (after pasted content)
                             let new_byte_pos = byte_pos + data.len();
@@ -3775,7 +4152,8 @@ impl App {
                                     match key.code {
                                         KeyCode::Esc => {
                                             self.show_help = false;
-                                            self.messages.push(" ⎿ help dialog dismissed".to_string());
+                                            self.messages
+                                                .push(" ⎿ help dialog dismissed".to_string());
                                             self.message_types.push(MessageType::Agent);
                                             self.message_states.push(MessageState::Sent);
                                             continue;
@@ -3792,7 +4170,9 @@ impl App {
                                             continue;
                                         }
                                         KeyCode::Down if self.help_tab == HelpTab::Commands => {
-                                            if self.help_commands_selected < SLASH_COMMANDS.len().saturating_sub(1) {
+                                            if self.help_commands_selected
+                                                < SLASH_COMMANDS.len().saturating_sub(1)
+                                            {
                                                 self.help_commands_selected += 1;
                                             }
                                             continue;
@@ -3809,7 +4189,8 @@ impl App {
                                     match key.code {
                                         KeyCode::Esc => {
                                             self.show_resume = false;
-                                            self.messages.push(" ⎿ resume dialog dismissed".to_string());
+                                            self.messages
+                                                .push(" ⎿ resume dialog dismissed".to_string());
                                             self.message_types.push(MessageType::Agent);
                                             self.message_states.push(MessageState::Sent);
                                             continue;
@@ -3821,39 +4202,57 @@ impl App {
                                             continue;
                                         }
                                         KeyCode::Down => {
-                                            if self.resume_selected < self.resume_conversations.len().saturating_sub(1) {
+                                            if self.resume_selected
+                                                < self.resume_conversations.len().saturating_sub(1)
+                                            {
                                                 self.resume_selected += 1;
                                             }
                                             continue;
                                         }
                                         KeyCode::Enter => {
                                             // Load selected conversation (set flag to handle async)
-                                            if self.resume_selected < self.resume_conversations.len() {
+                                            if self.resume_selected
+                                                < self.resume_conversations.len()
+                                            {
                                                 self.resume_load_pending = true;
                                             }
                                             continue;
                                         }
                                         KeyCode::Char('d') => {
                                             // Delete selected conversation
-                                            if self.resume_selected < self.resume_conversations.len() {
-                                                let metadata = self.resume_conversations[self.resume_selected].clone();
-                                                if let Err(e) = self.delete_conversation(&metadata) {
-                                                    self.messages.push(format!(" ⎿ Error deleting conversation: {}", e));
+                                            if self.resume_selected
+                                                < self.resume_conversations.len()
+                                            {
+                                                let metadata = self.resume_conversations
+                                                    [self.resume_selected]
+                                                    .clone();
+                                                if let Err(e) = self.delete_conversation(&metadata)
+                                                {
+                                                    self.messages.push(format!(
+                                                        " ⎿ Error deleting conversation: {}",
+                                                        e
+                                                    ));
                                                     self.message_types.push(MessageType::Agent);
                                                     self.message_states.push(MessageState::Sent);
                                                 } else {
                                                     // Reload conversations list
                                                     let _ = self.load_conversations_list();
                                                     // Adjust selection if needed
-                                                    if self.resume_selected >= self.resume_conversations.len() && self.resume_selected > 0 {
+                                                    if self.resume_selected
+                                                        >= self.resume_conversations.len()
+                                                        && self.resume_selected > 0
+                                                    {
                                                         self.resume_selected -= 1;
                                                     }
                                                     // Close panel if no conversations left
                                                     if self.resume_conversations.is_empty() {
                                                         self.show_resume = false;
-                                                        self.messages.push(" ⎿ conversation deleted".to_string());
+                                                        self.messages.push(
+                                                            " ⎿ conversation deleted".to_string(),
+                                                        );
                                                         self.message_types.push(MessageType::Agent);
-                                                        self.message_states.push(MessageState::Sent);
+                                                        self.message_states
+                                                            .push(MessageState::Sent);
                                                     }
                                                 }
                                             }
@@ -3861,10 +4260,15 @@ impl App {
                                         }
                                         KeyCode::Char('f') => {
                                             // Fork selected conversation
-                                            if self.resume_selected < self.resume_conversations.len() {
-                                                let metadata = self.resume_conversations[self.resume_selected].clone();
+                                            if self.resume_selected
+                                                < self.resume_conversations.len()
+                                            {
+                                                let metadata = self.resume_conversations
+                                                    [self.resume_selected]
+                                                    .clone();
                                                 // Set fork metadata
-                                                self.current_forked_from = Some(metadata.id.clone());
+                                                self.current_forked_from =
+                                                    Some(metadata.id.clone());
                                                 self.current_forked_at = Some(SystemTime::now());
                                                 // Set is_fork_mode and trigger load
                                                 self.is_fork_mode = true;
@@ -3884,7 +4288,8 @@ impl App {
                                     match key.code {
                                         KeyCode::Esc => {
                                             self.show_rewind = false;
-                                            self.messages.push(" ⎿ rewind dialog dismissed".to_string());
+                                            self.messages
+                                                .push(" ⎿ rewind dialog dismissed".to_string());
                                             self.message_types.push(MessageType::Agent);
                                             self.message_states.push(MessageState::Sent);
                                             continue;
@@ -3896,7 +4301,9 @@ impl App {
                                             continue;
                                         }
                                         KeyCode::Down => {
-                                            if self.rewind_selected < self.rewind_points.len().saturating_sub(1) {
+                                            if self.rewind_selected
+                                                < self.rewind_points.len().saturating_sub(1)
+                                            {
                                                 self.rewind_selected += 1;
                                             }
                                             continue;
@@ -3904,7 +4311,9 @@ impl App {
                                         KeyCode::Enter => {
                                             // Restore to selected rewind point
                                             if self.rewind_selected < self.rewind_points.len() {
-                                                let point = self.rewind_points[self.rewind_selected].clone();
+                                                let point = self.rewind_points
+                                                    [self.rewind_selected]
+                                                    .clone();
 
                                                 // Restore conversation state
                                                 self.messages = point.messages;
@@ -3914,13 +4323,17 @@ impl App {
                                                 self.message_timestamps = point.message_timestamps;
 
                                                 // Remove all rewind points after the selected one
-                                                self.rewind_points.truncate(self.rewind_selected + 1);
+                                                self.rewind_points
+                                                    .truncate(self.rewind_selected + 1);
 
                                                 // Close rewind panel
                                                 self.show_rewind = false;
 
                                                 // Show confirmation message
-                                                self.messages.push(format!(" ⏮ Rewound to: {}", point.preview));
+                                                self.messages.push(format!(
+                                                    " ⏮ Rewound to: {}",
+                                                    point.preview
+                                                ));
                                                 self.message_types.push(MessageType::Agent);
                                                 self.message_states.push(MessageState::Sent);
                                             }
@@ -3938,7 +4351,8 @@ impl App {
                                     match key.code {
                                         KeyCode::Esc => {
                                             self.show_model_selection = false;
-                                            self.messages.push(" ⎿ model selection dismissed".to_string());
+                                            self.messages
+                                                .push(" ⎿ model selection dismissed".to_string());
                                             self.message_types.push(MessageType::Agent);
                                             self.message_states.push(MessageState::Sent);
                                             continue;
@@ -3950,33 +4364,50 @@ impl App {
                                             continue;
                                         }
                                         KeyCode::Down => {
-                                            if self.model_selected_index < self.available_models.len().saturating_sub(1) {
+                                            if self.model_selected_index
+                                                < self.available_models.len().saturating_sub(1)
+                                            {
                                                 self.model_selected_index += 1;
                                             }
                                             continue;
                                         }
                                         KeyCode::Enter => {
                                             // Select model
-                                            if self.model_selected_index < self.available_models.len() {
-                                                let selected_model = &self.available_models[self.model_selected_index];
-                                                self.current_model = Some(selected_model.filename.clone());
+                                            if self.model_selected_index
+                                                < self.available_models.len()
+                                            {
+                                                let selected_model = &self.available_models
+                                                    [self.model_selected_index];
+                                                self.current_model =
+                                                    Some(selected_model.filename.clone());
                                                 self.show_model_selection = false;
 
                                                 // Save model selection to config
                                                 if let Err(e) = self.save_config() {
-                                                    self.messages.push(format!(" ⚠ Failed to save model to config: {}", e));
+                                                    self.messages.push(format!(
+                                                        " ⚠ Failed to save model to config: {}",
+                                                        e
+                                                    ));
                                                     self.message_types.push(MessageType::Agent);
                                                     self.message_states.push(MessageState::Sent);
                                                 }
 
                                                 // Send reload model message to agent
                                                 if let Some(ref tx) = self.agent_tx {
-                                                    let _ = tx.send(AgentMessage::ReloadModel(selected_model.filename.clone()));
-                                                    self.messages.push(format!(" ⟳ Loading model: {}", selected_model.display_name));
+                                                    let _ = tx.send(AgentMessage::ReloadModel(
+                                                        selected_model.filename.clone(),
+                                                    ));
+                                                    self.messages.push(format!(
+                                                        " ⟳ Loading model: {}",
+                                                        selected_model.display_name
+                                                    ));
                                                     self.message_types.push(MessageType::Agent);
                                                     self.message_states.push(MessageState::Sent);
                                                 } else {
-                                                    self.messages.push(format!(" ✔ Model set to: {}", selected_model.display_name));
+                                                    self.messages.push(format!(
+                                                        " ✔ Model set to: {}",
+                                                        selected_model.display_name
+                                                    ));
                                                     self.message_types.push(MessageType::Agent);
                                                     self.message_states.push(MessageState::Sent);
                                                 }
@@ -3991,13 +4422,17 @@ impl App {
                                 }
 
                                 // Handle Shift+Tab to cycle assistant mode
-                                if key.modifiers.contains(KeyModifiers::SHIFT) && key.code == KeyCode::BackTab {
+                                if key.modifiers.contains(KeyModifiers::SHIFT)
+                                    && key.code == KeyCode::BackTab
+                                {
                                     self.assistant_mode = self.assistant_mode.next();
 
                                     // Sync to safety config
-                                    if let Some(safety_mode) = self.assistant_mode.to_safety_mode() {
-                                        let mut config = agent_core::safety_config::SafetyConfig::load()
-                                            .unwrap_or_default();
+                                    if let Some(safety_mode) = self.assistant_mode.to_safety_mode()
+                                    {
+                                        let mut config =
+                                            agent_core::safety_config::SafetyConfig::load()
+                                                .unwrap_or_default();
                                         config.set_mode(safety_mode);
                                         let _ = config.save();
 
@@ -4006,7 +4441,9 @@ impl App {
                                             let agent_clone = Arc::clone(agent_arc);
                                             let config_clone = config.clone();
                                             task::spawn(async move {
-                                                let _ = agent_clone.update_safety_config(config_clone).await;
+                                                let _ = agent_clone
+                                                    .update_safety_config(config_clone)
+                                                    .await;
                                             });
                                         }
                                     }
@@ -4015,7 +4452,9 @@ impl App {
                                 }
 
                                 // Handle Ctrl+S to toggle sandbox mode
-                                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+                                if key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && key.code == KeyCode::Char('s')
+                                {
                                     self.sandbox_enabled = !self.sandbox_enabled;
 
                                     // Set/unset SAFE_MODE environment variable
@@ -4034,7 +4473,8 @@ impl App {
                                 // If in Insert/Visual mode, exit to Normal mode instead of interrupting
                                 if self.vim_mode_enabled && key.code == KeyCode::Esc {
                                     let vim_mode = self.vim_input_editor.get_mode();
-                                    let is_in_normal_mode = matches!(vim_mode, edtui::EditorMode::Normal);
+                                    let is_in_normal_mode =
+                                        matches!(vim_mode, edtui::EditorMode::Normal);
 
                                     if !is_in_normal_mode {
                                         // In Insert or Visual mode - send to vim to exit to Normal mode
@@ -4046,9 +4486,13 @@ impl App {
                                 }
 
                                 // Handle Esc to interrupt agent processing
-                                if key.code == KeyCode::Esc && (self.agent_processing || self.is_thinking) {
+                                if key.code == KeyCode::Esc
+                                    && (self.agent_processing || self.is_thinking)
+                                {
                                     // If we have a current thinking summary, convert it to static tree line FIRST
-                                    if let Some((current_summary, _token_count, _chunk_count)) = self.thinking_current_summary.take() {
+                                    if let Some((current_summary, _token_count, _chunk_count)) =
+                                        self.thinking_current_summary.take()
+                                    {
                                         // Remove thinking animation
                                         if let Some(last_msg) = self.messages.last() {
                                             if last_msg == "[THINKING_ANIMATION]" {
@@ -4097,7 +4541,8 @@ impl App {
                                     self.message_states.push(MessageState::Sent);
 
                                     // Add the prompt message
-                                    self.messages.push(" ⎿ What should Nite do instead?".to_string());
+                                    self.messages
+                                        .push(" ⎿ What should Nite do instead?".to_string());
                                     self.message_types.push(MessageType::Agent);
                                     self.message_states.push(MessageState::Sent);
 
@@ -4115,7 +4560,9 @@ impl App {
                                     if let KeyCode::Char(c) = key.code {
                                         // Check if typing this character would make a valid survey choice
                                         let potential_input = format!("{}{}", self.input, c);
-                                        if let Some(is_dismiss) = self.survey.check_number_input(&potential_input) {
+                                        if let Some(is_dismiss) =
+                                            self.survey.check_number_input(&potential_input)
+                                        {
                                             // Valid choice - auto-submit
                                             self.input.clear();
                                             self.reset_cursor();
@@ -4131,21 +4578,26 @@ impl App {
                                     }
                                 }
 
-                                if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('w') {
+                                if key.modifiers.contains(KeyModifiers::ALT)
+                                    && key.code == KeyCode::Char('w')
+                                {
                                     // Toggle session window
                                     if self.mode == Mode::SessionWindow {
                                         self.mode = Mode::Normal;
                                     } else {
                                         self.mode = Mode::SessionWindow;
                                     }
-                                } else if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('n') {
+                                } else if key.modifiers.contains(KeyModifiers::ALT)
+                                    && key.code == KeyCode::Char('n')
+                                {
                                     // Capture snapshot of current UI state before entering nav mode
                                     // Calculate elapsed time NOW and freeze it
-                                    let elapsed_secs = if let Some(start_time) = self.thinking_start_time {
-                                        start_time.elapsed().as_secs()
-                                    } else {
-                                        0
-                                    };
+                                    let elapsed_secs =
+                                        if let Some(start_time) = self.thinking_start_time {
+                                            start_time.elapsed().as_secs()
+                                        } else {
+                                            0
+                                        };
 
                                     self.nav_snapshot = Some(AppSnapshot {
                                         messages: self.messages.clone(),
@@ -4154,7 +4606,9 @@ impl App {
                                         is_thinking: self.is_thinking,
                                         thinking_elapsed_secs: elapsed_secs,
                                         thinking_token_count: self.thinking_token_count,
-                                        thinking_current_summary: self.thinking_current_summary.clone(),
+                                        thinking_current_summary: self
+                                            .thinking_current_summary
+                                            .clone(),
                                         thinking_position: self.thinking_position,
                                         thinking_loader_frame: self.thinking_loader_frame,
                                         thinking_current_word: self.thinking_current_word.clone(),
@@ -4167,24 +4621,34 @@ impl App {
                                     self.nav_scroll_offset = 0;
                                 } else {
                                     // Handle vim mode keybindings before other keys if vim mode is enabled
-                                    if self.vim_mode_enabled && self.phase == Phase::Input && !self.show_background_tasks {
+                                    if self.vim_mode_enabled
+                                        && self.phase == Phase::Input
+                                        && !self.show_background_tasks
+                                    {
                                         // Esc is now handled earlier (before agent interrupt check)
                                         // Let edtui handle the key event first (but not Enter, Ctrl+C, Up/Down for history, or Esc for interrupts)
                                         let handled = match key.code {
                                             KeyCode::Char(c) => {
                                                 // Skip Ctrl+C - let it fall through to quit confirmation
-                                                if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
+                                                if key.modifiers.contains(KeyModifiers::CONTROL)
+                                                    && c == 'c'
+                                                {
                                                     false
                                                 } else {
-                                                    self.vim_input_editor.handle_event(Event::Key(key));
+                                                    self.vim_input_editor
+                                                        .handle_event(Event::Key(key));
                                                     self.sync_vim_input();
                                                     // Update autocomplete after vim input changes
                                                     self.update_autocomplete();
                                                     true
                                                 }
                                             }
-                                            KeyCode::Backspace | KeyCode::Delete | KeyCode::Home | KeyCode::End |
-                                            KeyCode::Left | KeyCode::Right => {
+                                            KeyCode::Backspace
+                                            | KeyCode::Delete
+                                            | KeyCode::Home
+                                            | KeyCode::End
+                                            | KeyCode::Left
+                                            | KeyCode::Right => {
                                                 self.vim_input_editor.handle_event(Event::Key(key));
                                                 self.sync_vim_input();
                                                 // Update autocomplete after vim input changes
@@ -4193,7 +4657,7 @@ impl App {
                                             }
                                             // Up/Down are NEVER sent to vim - they're always for history/autocomplete
                                             // This ensures command history works properly
-                                            _ => false
+                                            _ => false,
                                         };
                                         if handled {
                                             continue;
@@ -4207,30 +4671,37 @@ impl App {
                                             // Check if any UI panels are open and dismiss them first
                                             if self.show_help {
                                                 self.show_help = false;
-                                                self.messages.push(" ⎿ help dialog dismissed".to_string());
+                                                self.messages
+                                                    .push(" ⎿ help dialog dismissed".to_string());
                                                 self.message_types.push(MessageType::Agent);
                                                 self.message_states.push(MessageState::Sent);
                                             } else if self.viewing_task.is_some() {
                                                 self.viewing_task = None;
-                                                self.messages.push(" ⎿ shell viewer dismissed".to_string());
+                                                self.messages
+                                                    .push(" ⎿ shell viewer dismissed".to_string());
                                                 self.message_types.push(MessageType::Agent);
                                                 self.message_states.push(MessageState::Sent);
                                             } else if self.show_background_tasks {
                                                 self.show_background_tasks = false;
-                                                self.messages.push(" ⎿ shells dialog dismissed".to_string());
+                                                self.messages
+                                                    .push(" ⎿ shells dialog dismissed".to_string());
                                                 self.message_types.push(MessageType::Agent);
                                                 self.message_states.push(MessageState::Sent);
                                             } else if self.show_resume {
                                                 self.show_resume = false;
-                                                self.messages.push(" ⎿ resume dialog dismissed".to_string());
+                                                self.messages
+                                                    .push(" ⎿ resume dialog dismissed".to_string());
                                                 self.message_types.push(MessageType::Agent);
                                                 self.message_states.push(MessageState::Sent);
                                             } else if self.show_rewind {
                                                 self.show_rewind = false;
-                                                self.messages.push(" ⎿ rewind dialog dismissed".to_string());
+                                                self.messages
+                                                    .push(" ⎿ rewind dialog dismissed".to_string());
                                                 self.message_types.push(MessageType::Agent);
                                                 self.message_states.push(MessageState::Sent);
-                                            } else if let Some(idx) = self.editing_queue_index.take() {
+                                            } else if let Some(idx) =
+                                                self.editing_queue_index.take()
+                                            {
                                                 // Check if we're editing a queued message
                                                 // Remove the specific message being edited from queue
                                                 if idx < self.queued_messages.len() {
@@ -4239,7 +4710,9 @@ impl App {
                                                 self.input.clear();
                                                 self.character_index = 0;
                                                 self.input_modified = false;
-                                            } else if !self.queued_messages.is_empty() && self.input.is_empty() {
+                                            } else if !self.queued_messages.is_empty()
+                                                && self.input.is_empty()
+                                            {
                                                 // Remove the most recent (last) queued message
                                                 self.queued_messages.pop();
                                             } else if self.input.is_empty() {
@@ -4247,7 +4720,7 @@ impl App {
                                                 if let Some(last_press) = self.ctrl_c_pressed {
                                                     if last_press.elapsed().as_millis() < 1000 {
                                                         // Second Ctrl+C within 1 second - exit
-                                                        self.save_pending = true;  // Auto-save before exit
+                                                        self.save_pending = true; // Auto-save before exit
                                                         self.exit = true;
                                                     } else {
                                                         // Pressed too late, reset timer
@@ -4267,100 +4740,176 @@ impl App {
                                                 }
                                             }
                                         }
-                                        KeyCode::Esc if self.phase == Phase::Input && self.viewing_task.is_some() => {
+                                        KeyCode::Esc
+                                            if self.phase == Phase::Input
+                                                && self.viewing_task.is_some() =>
+                                        {
                                             // Close task viewer
                                             self.viewing_task = None;
-                                            self.messages.push(" ⎿ shell viewer dismissed".to_string());
+                                            self.messages
+                                                .push(" ⎿ shell viewer dismissed".to_string());
                                             self.message_types.push(MessageType::Agent);
                                             self.message_states.push(MessageState::Sent);
                                         }
-                                        KeyCode::Enter if self.phase == Phase::Input && self.viewing_task.is_some() => {
+                                        KeyCode::Enter
+                                            if self.phase == Phase::Input
+                                                && self.viewing_task.is_some() =>
+                                        {
                                             // Close task viewer
                                             self.viewing_task = None;
-                                            self.messages.push(" ⎿ shell viewer dismissed".to_string());
+                                            self.messages
+                                                .push(" ⎿ shell viewer dismissed".to_string());
                                             self.message_types.push(MessageType::Agent);
                                             self.message_states.push(MessageState::Sent);
                                         }
-                                        KeyCode::Char(' ') if self.phase == Phase::Input && self.viewing_task.is_some() => {
+                                        KeyCode::Char(' ')
+                                            if self.phase == Phase::Input
+                                                && self.viewing_task.is_some() =>
+                                        {
                                             // Close task viewer
                                             self.viewing_task = None;
-                                            self.messages.push(" ⎿ shell viewer dismissed".to_string());
+                                            self.messages
+                                                .push(" ⎿ shell viewer dismissed".to_string());
                                             self.message_types.push(MessageType::Agent);
                                             self.message_states.push(MessageState::Sent);
                                         }
-                                        KeyCode::Char('k') if self.phase == Phase::Input && self.viewing_task.is_some() => {
+                                        KeyCode::Char('k')
+                                            if self.phase == Phase::Input
+                                                && self.viewing_task.is_some() =>
+                                        {
                                             // Kill task from viewer
-                                            if let Some((session_id, _, _, _)) = self.viewing_task.take() {
+                                            if let Some((session_id, _, _, _)) =
+                                                self.viewing_task.take()
+                                            {
                                                 // Remove from background tasks list
-                                                self.background_tasks.retain(|(sid, _, _, _)| sid != &session_id);
+                                                self.background_tasks
+                                                    .retain(|(sid, _, _, _)| sid != &session_id);
                                                 // Kill the shell session
                                                 std::thread::spawn(move || {
-                                                    let rt = tokio::runtime::Runtime::new().unwrap();
+                                                    let rt =
+                                                        tokio::runtime::Runtime::new().unwrap();
                                                     rt.block_on(async {
-                                                        let _ = agent_core::kill_shell_session(session_id).await;
+                                                        let _ = agent_core::kill_shell_session(
+                                                            session_id,
+                                                        )
+                                                        .await;
                                                     });
                                                 });
                                             }
                                         }
-                                        KeyCode::Esc if self.phase == Phase::Input && self.show_todos => {
+                                        KeyCode::Esc
+                                            if self.phase == Phase::Input && self.show_todos =>
+                                        {
                                             // Close todos panel
                                             self.show_todos = false;
-                                            self.messages.push(" ⎿ todos dialog dismissed".to_string());
+                                            self.messages
+                                                .push(" ⎿ todos dialog dismissed".to_string());
                                             self.message_types.push(MessageType::Agent);
                                             self.message_states.push(MessageState::Sent);
                                         }
-                                        KeyCode::Esc if self.phase == Phase::Input && self.show_background_tasks => {
+                                        KeyCode::Esc
+                                            if self.phase == Phase::Input
+                                                && self.show_background_tasks =>
+                                        {
                                             // Close background tasks panel
                                             self.show_background_tasks = false;
-                                            self.messages.push(" ⎿ shells dialog dismissed".to_string());
+                                            self.messages
+                                                .push(" ⎿ shells dialog dismissed".to_string());
                                             self.message_types.push(MessageType::Agent);
                                             self.message_states.push(MessageState::Sent);
                                         }
-                                        KeyCode::Up if self.phase == Phase::Input && self.show_background_tasks => {
+                                        KeyCode::Up
+                                            if self.phase == Phase::Input
+                                                && self.show_background_tasks =>
+                                        {
                                             // Navigate background tasks
-                                            if !self.background_tasks.is_empty() && self.background_tasks_selected > 0 {
+                                            if !self.background_tasks.is_empty()
+                                                && self.background_tasks_selected > 0
+                                            {
                                                 self.background_tasks_selected -= 1;
                                             }
                                         }
-                                        KeyCode::Down if self.phase == Phase::Input && self.show_background_tasks => {
+                                        KeyCode::Down
+                                            if self.phase == Phase::Input
+                                                && self.show_background_tasks =>
+                                        {
                                             // Navigate background tasks
-                                            if !self.background_tasks.is_empty() && self.background_tasks_selected < self.background_tasks.len() - 1 {
+                                            if !self.background_tasks.is_empty()
+                                                && self.background_tasks_selected
+                                                    < self.background_tasks.len() - 1
+                                            {
                                                 self.background_tasks_selected += 1;
                                             }
                                         }
-                                        KeyCode::Char('k') if self.phase == Phase::Input && self.show_background_tasks => {
+                                        KeyCode::Char('k')
+                                            if self.phase == Phase::Input
+                                                && self.show_background_tasks =>
+                                        {
                                             // Kill selected background task
-                                            if !self.background_tasks.is_empty() && self.background_tasks_selected < self.background_tasks.len() {
-                                                let (session_id, _command, _log_file, _start_time) = self.background_tasks.remove(self.background_tasks_selected);
-                                                if self.background_tasks_selected >= self.background_tasks.len() && self.background_tasks_selected > 0 {
+                                            if !self.background_tasks.is_empty()
+                                                && self.background_tasks_selected
+                                                    < self.background_tasks.len()
+                                            {
+                                                let (session_id, _command, _log_file, _start_time) =
+                                                    self.background_tasks
+                                                        .remove(self.background_tasks_selected);
+                                                if self.background_tasks_selected
+                                                    >= self.background_tasks.len()
+                                                    && self.background_tasks_selected > 0
+                                                {
                                                     self.background_tasks_selected -= 1;
                                                 }
                                                 // Kill the shell session directly
                                                 std::thread::spawn(move || {
-                                                    let rt = tokio::runtime::Runtime::new().unwrap();
+                                                    let rt =
+                                                        tokio::runtime::Runtime::new().unwrap();
                                                     rt.block_on(async {
-                                                        let _ = agent_core::kill_shell_session(session_id).await;
+                                                        let _ = agent_core::kill_shell_session(
+                                                            session_id,
+                                                        )
+                                                        .await;
                                                     });
                                                 });
                                             }
                                         }
-                                        KeyCode::Enter if self.phase == Phase::Input && self.show_background_tasks => {
+                                        KeyCode::Enter
+                                            if self.phase == Phase::Input
+                                                && self.show_background_tasks =>
+                                        {
                                             // View selected background task output
-                                            if !self.background_tasks.is_empty() && self.background_tasks_selected < self.background_tasks.len() {
-                                                let task = &self.background_tasks[self.background_tasks_selected];
-                                                self.viewing_task = Some((task.0.clone(), task.1.clone(), task.2.clone(), task.3));
+                                            if !self.background_tasks.is_empty()
+                                                && self.background_tasks_selected
+                                                    < self.background_tasks.len()
+                                            {
+                                                let task = &self.background_tasks
+                                                    [self.background_tasks_selected];
+                                                self.viewing_task = Some((
+                                                    task.0.clone(),
+                                                    task.1.clone(),
+                                                    task.2.clone(),
+                                                    task.3,
+                                                ));
                                                 self.show_background_tasks = false;
                                             }
                                         }
-                                        KeyCode::Esc if self.phase == Phase::Input && self.autocomplete_active => {
+                                        KeyCode::Esc
+                                            if self.phase == Phase::Input
+                                                && self.autocomplete_active =>
+                                        {
                                             // Dismiss autocomplete
                                             self.autocomplete_active = false;
                                             self.autocomplete_suggestions.clear();
                                             self.autocomplete_selected_index = 0;
                                         }
-                                        KeyCode::Tab if self.phase == Phase::Input && self.autocomplete_active => {
+                                        KeyCode::Tab
+                                            if self.phase == Phase::Input
+                                                && self.autocomplete_active =>
+                                        {
                                             // Apply autocomplete selection
-                                            if let Some((cmd, _desc)) = self.autocomplete_suggestions.get(self.autocomplete_selected_index) {
+                                            if let Some((cmd, _desc)) = self
+                                                .autocomplete_suggestions
+                                                .get(self.autocomplete_selected_index)
+                                            {
                                                 self.input = cmd.clone();
                                                 self.character_index = self.input.chars().count();
                                                 self.autocomplete_active = false;
@@ -4368,12 +4917,20 @@ impl App {
                                                 self.autocomplete_selected_index = 0;
                                             }
                                         }
-                                        KeyCode::Enter if self.phase == Phase::Input && !self.show_background_tasks && self.viewing_task.is_none() => {
+                                        KeyCode::Enter
+                                            if self.phase == Phase::Input
+                                                && !self.show_background_tasks
+                                                && self.viewing_task.is_none() =>
+                                        {
                                             // If autocomplete is active, apply selection instead of submitting
                                             if self.autocomplete_active {
-                                                if let Some((cmd, _desc)) = self.autocomplete_suggestions.get(self.autocomplete_selected_index) {
+                                                if let Some((cmd, _desc)) = self
+                                                    .autocomplete_suggestions
+                                                    .get(self.autocomplete_selected_index)
+                                                {
                                                     self.input = cmd.clone();
-                                                    self.character_index = self.input.chars().count();
+                                                    self.character_index =
+                                                        self.input.chars().count();
                                                     self.autocomplete_active = false;
                                                     self.autocomplete_suggestions.clear();
                                                     self.autocomplete_selected_index = 0;
@@ -4382,20 +4939,30 @@ impl App {
                                                 self.submit_message();
                                             }
                                         }
-                                        KeyCode::Char(to_insert) if self.phase == Phase::Input && !self.show_background_tasks => {
+                                        KeyCode::Char(to_insert)
+                                            if self.phase == Phase::Input
+                                                && !self.show_background_tasks =>
+                                        {
                                             if self.vim_mode_enabled {
                                                 // Special case: Intercept '/' in vim Normal mode to do nothing (prevent search mode in input bar)
-                                                if to_insert == '/' && self.vim_input_editor.get_mode() == edtui::EditorMode::Normal {
+                                                if to_insert == '/'
+                                                    && self.vim_input_editor.get_mode()
+                                                        == edtui::EditorMode::Normal
+                                                {
                                                     // Do nothing - '/' should not trigger search mode in input bar
                                                 } else {
-                                                    self.vim_input_editor.handle_event(Event::Key(key));
+                                                    self.vim_input_editor
+                                                        .handle_event(Event::Key(key));
                                                     self.sync_vim_input();
                                                 }
                                             } else {
                                                 self.enter_char(to_insert);
                                             }
                                         }
-                                        KeyCode::Backspace if self.phase == Phase::Input && !self.show_background_tasks => {
+                                        KeyCode::Backspace
+                                            if self.phase == Phase::Input
+                                                && !self.show_background_tasks =>
+                                        {
                                             if self.vim_mode_enabled {
                                                 self.vim_input_editor.handle_event(Event::Key(key));
                                                 self.sync_vim_input();
@@ -4403,22 +4970,31 @@ impl App {
                                                 self.delete_char();
                                             }
                                         }
-                                        KeyCode::Left if self.phase == Phase::Input && !self.show_background_tasks => {
+                                        KeyCode::Left
+                                            if self.phase == Phase::Input
+                                                && !self.show_background_tasks =>
+                                        {
                                             if !self.vim_mode_enabled {
                                                 self.move_cursor_left();
                                             }
                                         }
-                                        KeyCode::Right if self.phase == Phase::Input && !self.show_background_tasks => {
+                                        KeyCode::Right
+                                            if self.phase == Phase::Input
+                                                && !self.show_background_tasks =>
+                                        {
                                             if !self.vim_mode_enabled {
                                                 self.move_cursor_right();
                                             }
                                         }
                                         KeyCode::Up if self.phase == Phase::Input => {
                                             // Check if autocomplete is active
-                                            if self.autocomplete_active && !self.autocomplete_suggestions.is_empty() {
+                                            if self.autocomplete_active
+                                                && !self.autocomplete_suggestions.is_empty()
+                                            {
                                                 // Navigate autocomplete suggestions (cycle)
                                                 if self.autocomplete_selected_index == 0 {
-                                                    self.autocomplete_selected_index = self.autocomplete_suggestions.len() - 1;
+                                                    self.autocomplete_selected_index =
+                                                        self.autocomplete_suggestions.len() - 1;
                                                 } else {
                                                     self.autocomplete_selected_index -= 1;
                                                 }
@@ -4439,9 +5015,13 @@ impl App {
                                         }
                                         KeyCode::Down if self.phase == Phase::Input => {
                                             // Check if autocomplete is active
-                                            if self.autocomplete_active && !self.autocomplete_suggestions.is_empty() {
+                                            if self.autocomplete_active
+                                                && !self.autocomplete_suggestions.is_empty()
+                                            {
                                                 // Navigate autocomplete suggestions (cycle)
-                                                if self.autocomplete_selected_index >= self.autocomplete_suggestions.len() - 1 {
+                                                if self.autocomplete_selected_index
+                                                    >= self.autocomplete_suggestions.len() - 1
+                                                {
                                                     self.autocomplete_selected_index = 0;
                                                 } else {
                                                     self.autocomplete_selected_index += 1;
@@ -4462,7 +5042,8 @@ impl App {
                                                     for (row, line) in lines.iter().enumerate() {
                                                         if row == cursor_row + 1 {
                                                             // Found next line - move to its end
-                                                            self.character_index = char_count + line.chars().count();
+                                                            self.character_index =
+                                                                char_count + line.chars().count();
                                                             break;
                                                         }
                                                         char_count += line.chars().count() + 1; // +1 for newline
@@ -4478,7 +5059,8 @@ impl App {
                                                     }
                                                 } else {
                                                     // On last line but not at end - move to end
-                                                    self.character_index = self.input.chars().count();
+                                                    self.character_index =
+                                                        self.input.chars().count();
                                                     if self.vim_mode_enabled {
                                                         self.sync_input_to_vim();
                                                     }
@@ -4499,9 +5081,10 @@ impl App {
                                     continue;
                                 }
                                 // Exit navigation on Ctrl+C (only in Navigation mode)
-                                if self.mode == Mode::Navigation &&
-                                   key.modifiers.contains(KeyModifiers::CONTROL) &&
-                                   key.code == KeyCode::Char('c') {
+                                if self.mode == Mode::Navigation
+                                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && key.code == KeyCode::Char('c')
+                                {
                                     self.mode = Mode::Normal;
                                     self.nav_snapshot = None; // Clear snapshot, return to live state
                                     self.message_types.push(MessageType::Agent);
@@ -4526,19 +5109,32 @@ impl App {
 
                                 // Detect yank operations by checking if clipboard content changed
                                 let new_clipboard_content = self.editor.state.clip.get_text();
-                                if new_clipboard_content != old_clipboard_content && !new_clipboard_content.is_empty() {
+                                if new_clipboard_content != old_clipboard_content
+                                    && !new_clipboard_content.is_empty()
+                                {
                                     // Flash the yanked content
                                     if let Some(sel) = old_selection {
                                         // Had a selection - flash it
-                                        self.flash_highlight = Some((sel, std::time::Instant::now()));
+                                        self.flash_highlight =
+                                            Some((sel, std::time::Instant::now()));
                                     } else {
                                         // No selection - must be yy (yank line)
                                         // Flash the current line
-                                        let line_selection = edtui::state::selection::Selection::new(
-                                            edtui::Index2::new(old_cursor.row, 0),
-                                            edtui::Index2::new(old_cursor.row, self.editor.state.lines.len_col(old_cursor.row).unwrap_or(0).saturating_sub(1))
-                                        );
-                                        self.flash_highlight = Some((line_selection, std::time::Instant::now()));
+                                        let line_selection =
+                                            edtui::state::selection::Selection::new(
+                                                edtui::Index2::new(old_cursor.row, 0),
+                                                edtui::Index2::new(
+                                                    old_cursor.row,
+                                                    self.editor
+                                                        .state
+                                                        .lines
+                                                        .len_col(old_cursor.row)
+                                                        .unwrap_or(0)
+                                                        .saturating_sub(1),
+                                                ),
+                                            );
+                                        self.flash_highlight =
+                                            Some((line_selection, std::time::Instant::now()));
                                     }
                                 }
 
@@ -4562,15 +5158,25 @@ impl App {
                                     }
                                     KeyCode::Enter => {
                                         // Execute command (go to line)
-                                        if let Ok(line_num) = self.command_input.trim().parse::<usize>() {
+                                        if let Ok(line_num) =
+                                            self.command_input.trim().parse::<usize>()
+                                        {
                                             if line_num > 0 {
                                                 let current_col = self.editor.state.cursor.col;
                                                 let target_row = line_num.saturating_sub(1);
-                                                let max_row = self.editor.state.lines.len().saturating_sub(1);
-                                                self.editor.state.cursor.row = target_row.min(max_row);
+                                                let max_row =
+                                                    self.editor.state.lines.len().saturating_sub(1);
+                                                self.editor.state.cursor.row =
+                                                    target_row.min(max_row);
                                                 // Maintain column or clip to line length
-                                                let line_len = self.editor.state.lines.len_col(self.editor.state.cursor.row).unwrap_or(0);
-                                                self.editor.state.cursor.col = current_col.min(line_len.saturating_sub(1).max(0));
+                                                let line_len = self
+                                                    .editor
+                                                    .state
+                                                    .lines
+                                                    .len_col(self.editor.state.cursor.row)
+                                                    .unwrap_or(0);
+                                                self.editor.state.cursor.col = current_col
+                                                    .min(line_len.saturating_sub(1).max(0));
                                             }
                                         }
                                         self.mode = Mode::Navigation;
@@ -4625,7 +5231,9 @@ impl App {
         let mut current_width = 0;
         for word in text.split_whitespace() {
             let word_width = word.width();
-            if current_width + word_width + (if current_line.is_empty() { 0 } else { 1 }) > max_width {
+            if current_width + word_width + (if current_line.is_empty() { 0 } else { 1 })
+                > max_width
+            {
                 if !current_line.is_empty() {
                     lines.push(current_line);
                     current_line = String::new();
@@ -4666,7 +5274,7 @@ impl App {
         // Check if this is a thinking summary (tree line starting with ├──)
         if message.starts_with("├── ") {
             return Text::from(vec![Line::from(vec![
-                Span::raw(" "),  // 1 space left margin
+                Span::raw(" "), // 1 space left margin
                 Span::styled(message.to_string(), Style::default().fg(Color::DarkGray)),
             ])]);
         }
@@ -4693,7 +5301,7 @@ impl App {
             if idx == 0 {
                 // First line: 1 space left margin + white bullet
                 let mut spans = vec![
-                    Span::raw(" "),  // 1 space left margin (matching thinking animation)
+                    Span::raw(" "), // 1 space left margin (matching thinking animation)
                     Span::styled("● ", Style::default().fg(Color::White)),
                 ];
                 // Add the spans from the markdown line
@@ -4702,8 +5310,8 @@ impl App {
             } else {
                 // Subsequent lines: 1 space left margin + 2 spaces to align with text after bullet
                 let mut spans = vec![
-                    Span::raw(" "),   // 1 space left margin
-                    Span::raw("  "),  // 2 spaces to align with text after "● "
+                    Span::raw(" "),  // 1 space left margin
+                    Span::raw("  "), // 2 spaces to align with text after "● "
                 ];
                 // Add the spans from the markdown line
                 spans.extend(line.spans.iter().cloned());
@@ -4716,22 +5324,40 @@ impl App {
 
     // Helper to get snapshot or live data
     fn get_messages(&self) -> &Vec<String> {
-        self.nav_snapshot.as_ref().map(|s| &s.messages).unwrap_or(&self.messages)
+        self.nav_snapshot
+            .as_ref()
+            .map(|s| &s.messages)
+            .unwrap_or(&self.messages)
     }
     fn get_message_types(&self) -> &Vec<MessageType> {
-        self.nav_snapshot.as_ref().map(|s| &s.message_types).unwrap_or(&self.message_types)
+        self.nav_snapshot
+            .as_ref()
+            .map(|s| &s.message_types)
+            .unwrap_or(&self.message_types)
     }
     fn get_thinking_loader_frame(&self) -> usize {
-        self.nav_snapshot.as_ref().map(|s| s.thinking_loader_frame).unwrap_or(self.thinking_loader_frame)
+        self.nav_snapshot
+            .as_ref()
+            .map(|s| s.thinking_loader_frame)
+            .unwrap_or(self.thinking_loader_frame)
     }
     fn get_thinking_current_summary(&self) -> &Option<(String, usize, usize)> {
-        self.nav_snapshot.as_ref().map(|s| &s.thinking_current_summary).unwrap_or(&self.thinking_current_summary)
+        self.nav_snapshot
+            .as_ref()
+            .map(|s| &s.thinking_current_summary)
+            .unwrap_or(&self.thinking_current_summary)
     }
     fn get_thinking_position(&self) -> usize {
-        self.nav_snapshot.as_ref().map(|s| s.thinking_position).unwrap_or(self.thinking_position)
+        self.nav_snapshot
+            .as_ref()
+            .map(|s| s.thinking_position)
+            .unwrap_or(self.thinking_position)
     }
     fn get_thinking_current_word(&self) -> &str {
-        self.nav_snapshot.as_ref().map(|s| s.thinking_current_word.as_str()).unwrap_or(&self.thinking_current_word)
+        self.nav_snapshot
+            .as_ref()
+            .map(|s| s.thinking_current_word.as_str())
+            .unwrap_or(&self.thinking_current_word)
     }
     fn get_thinking_elapsed_secs(&self) -> Option<u64> {
         if let Some(snapshot) = &self.nav_snapshot {
@@ -4743,14 +5369,21 @@ impl App {
             }
         } else {
             // Return live elapsed time
-            self.thinking_start_time.map(|start| start.elapsed().as_secs())
+            self.thinking_start_time
+                .map(|start| start.elapsed().as_secs())
         }
     }
     fn get_thinking_token_count(&self) -> usize {
-        self.nav_snapshot.as_ref().map(|s| s.thinking_token_count).unwrap_or(self.thinking_token_count)
+        self.nav_snapshot
+            .as_ref()
+            .map(|s| s.thinking_token_count)
+            .unwrap_or(self.thinking_token_count)
     }
     fn get_generation_stats(&self) -> &Option<(f32, usize, f32, String)> {
-        self.nav_snapshot.as_ref().map(|s| &s.generation_stats).unwrap_or(&self.generation_stats)
+        self.nav_snapshot
+            .as_ref()
+            .map(|s| &s.generation_stats)
+            .unwrap_or(&self.generation_stats)
     }
 
     /// Format numbers in compact form: 1, 2, ..., 999, 1k, 1.1k, 1.2k, etc.
@@ -4772,7 +5405,13 @@ impl App {
         }
     }
 
-    fn render_message_with_max_width(&self, message: &str, max_width: usize, highlight_pos: Option<usize>, is_agent: bool) -> Text<'static> {
+    fn render_message_with_max_width(
+        &self,
+        message: &str,
+        max_width: usize,
+        highlight_pos: Option<usize>,
+        is_agent: bool,
+    ) -> Text<'static> {
         // Check for interrupt marker - render with RED circle and RED text
         if message == "● Interrupted" {
             let mut lines = Vec::new();
@@ -4786,10 +5425,14 @@ impl App {
 
         // Check for command execution feedback
         if message.starts_with("[COMMAND:") {
-            let content = message.trim_start_matches("[COMMAND:").trim_end_matches(']').trim().to_string();
+            let content = message
+                .trim_start_matches("[COMMAND:")
+                .trim_end_matches(']')
+                .trim()
+                .to_string();
             let mut lines = Vec::new();
             lines.push(Line::from(vec![
-                Span::raw(" "),  // Left margin
+                Span::raw(" "),                                        // Left margin
                 Span::styled("● ", Style::default().fg(Color::Green)), // Green circle for command
                 Span::styled(content, Style::default().fg(Color::Green)),
             ]));
@@ -4797,13 +5440,18 @@ impl App {
         }
 
         // Check for "What should Nite do instead?" prompt (only for agent messages)
-        if is_agent && (message.starts_with(" ⎿ ") || message.trim() == "⎿ What should Nite do instead?") {
+        if is_agent
+            && (message.starts_with(" ⎿ ") || message.trim() == "⎿ What should Nite do instead?")
+        {
             let mut lines = Vec::new();
             // Add left margin + extra space to align with text after bullet
             lines.push(Line::from(vec![
                 Span::raw(" "),  // Left margin
-                Span::raw("  "),  // Two spaces to align with "Interrupted" (after "● ")
-                Span::styled(message.trim_start().to_string(), Style::default().fg(Color::DarkGray)),
+                Span::raw("  "), // Two spaces to align with "Interrupted" (after "● ")
+                Span::styled(
+                    message.trim_start().to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]));
             return Text::from(lines);
         }
@@ -4821,7 +5469,9 @@ impl App {
 
             // Use current summary if available, otherwise use random word (from snapshot if in nav mode)
             // Always add "..." to the end
-            let text_with_dots = if let Some((summary, _token_count, _chunk_count)) = self.get_thinking_current_summary() {
+            let text_with_dots = if let Some((summary, _token_count, _chunk_count)) =
+                self.get_thinking_current_summary()
+            {
                 // format!("{} ({}rt {}ct)...", summary, token_count, chunk_count)
                 format!("{}...", summary)
             } else {
@@ -4829,12 +5479,18 @@ impl App {
             };
 
             // Get color-coded spans for the wave effect (using snapshot position if in nav mode)
-            let color_spans = Self::create_thinking_highlight_spans(&text_with_dots, self.get_thinking_position());
+            let color_spans = Self::create_thinking_highlight_spans(
+                &text_with_dots,
+                self.get_thinking_position(),
+            );
 
             // Build the line with one space padding on the left, then snowflake, then text
             let mut spans = Vec::new();
             spans.push(Span::raw(" ")); // One character to the left
-            spans.push(Span::styled(current_frame, Style::default().fg(Color::Rgb(255, 165, 0)))); // Orange snowflake
+            spans.push(Span::styled(
+                current_frame,
+                Style::default().fg(Color::Rgb(255, 165, 0)),
+            )); // Orange snowflake
             spans.push(Span::raw(" ")); // One space between snowflake and text
 
             // Add the color-coded text spans
@@ -4868,7 +5524,8 @@ impl App {
         // Check if this is a tool call message
         if message.starts_with("[TOOL_CALL_COMPLETED:") {
             // Format: [TOOL_CALL_COMPLETED:tool_name|args|result]
-            let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_COMPLETED:")
+            let parts: Vec<&str> = message
+                .trim_start_matches("[TOOL_CALL_COMPLETED:")
                 .trim_end_matches("]")
                 .splitn(3, '|')
                 .collect();
@@ -4882,7 +5539,7 @@ impl App {
 
                 // First line: 1 space left margin + ● ToolName(args)
                 let mut line1_spans = Vec::new();
-                line1_spans.push(Span::raw(" "));  // 1 space left margin (matching thinking animation)
+                line1_spans.push(Span::raw(" ")); // 1 space left margin (matching thinking animation)
                 line1_spans.push(Span::styled("● ", Style::default().fg(Color::Blue)));
                 line1_spans.push(Span::styled(tool_name, Style::default().fg(Color::Cyan)));
                 line1_spans.push(Span::raw("("));
@@ -4892,7 +5549,7 @@ impl App {
 
                 // Second line: 1 space left margin + │ ⎿ Result
                 let mut line2_spans = Vec::new();
-                line2_spans.push(Span::raw(" "));  // 1 space left margin
+                line2_spans.push(Span::raw(" ")); // 1 space left margin
                 line2_spans.push(Span::styled("│ ⎿  ", Style::default().fg(Color::DarkGray)));
                 // Color errors red, everything else green
                 let result_color = if result.starts_with("Error:") || result == "Failed" {
@@ -4907,7 +5564,8 @@ impl App {
             }
         } else if message.starts_with("[TOOL_CALL_STARTED:") {
             // Format: [TOOL_CALL_STARTED:tool_name|args]
-            let parts: Vec<&str> = message.trim_start_matches("[TOOL_CALL_STARTED:")
+            let parts: Vec<&str> = message
+                .trim_start_matches("[TOOL_CALL_STARTED:")
                 .trim_end_matches("]")
                 .splitn(2, '|')
                 .collect();
@@ -4921,7 +5579,10 @@ impl App {
                 // Single line: 1 space margin + ● ToolName(args)
                 let mut line_spans = Vec::new();
                 line_spans.push(Span::raw(" ".to_string())); // 1 space left margin
-                line_spans.push(Span::styled("● ".to_string(), Style::default().fg(Color::Blue)));
+                line_spans.push(Span::styled(
+                    "● ".to_string(),
+                    Style::default().fg(Color::Blue),
+                ));
                 line_spans.push(Span::styled(tool_name, Style::default().fg(Color::Cyan)));
                 line_spans.push(Span::raw("(".to_string()));
                 line_spans.push(Span::styled(args, Style::default().fg(Color::Yellow)));
@@ -4936,7 +5597,11 @@ impl App {
         let is_user_message = !is_agent && !message.starts_with('[');
 
         // Determine content width based on message type
-        let content_width = if is_user_message { 80 } else { max_width.saturating_sub(4) };
+        let content_width = if is_user_message {
+            80
+        } else {
+            max_width.saturating_sub(4)
+        };
 
         // For user messages, render markdown; for others use plain text
         let content_lines: Vec<Line<'static>> = if is_user_message {
@@ -4957,7 +5622,10 @@ impl App {
         } else {
             // Plain text wrapping for error messages and other special cases
             let wrapped_lines = Self::wrap_text(message, content_width);
-            wrapped_lines.iter().map(|s| Line::from(s.to_string())).collect()
+            wrapped_lines
+                .iter()
+                .map(|s| Line::from(s.to_string()))
+                .collect()
         };
 
         let mut lines = Vec::new();
@@ -5007,7 +5675,7 @@ impl App {
             // Add " > " prefix on first line only
             let prefix = if line_idx == 0 { " > " } else { "   " };
             let padding = " ".repeat(max_line_width.saturating_add(1).saturating_sub(line_width));
-           
+
             if let (Some(h_line), Some(h_col)) = (highlight_line, highlight_col) {
                 if line_idx == h_line {
                     // This line contains the highlight
@@ -5023,28 +5691,46 @@ impl App {
                         if h_col > 0 {
                             let before_text: String = line_chars[..h_col].iter().collect();
                             // Use plain style for user messages with highlight, content_style for errors
-                            let style = if is_user_message { Style::default() } else { content_style };
+                            let style = if is_user_message {
+                                Style::default()
+                            } else {
+                                content_style
+                            };
                             spans.push(Span::styled(before_text, style));
                         }
 
                         // Add highlighted character
                         let highlight_char = line_chars[h_col];
-                        spans.push(Span::styled(highlight_char.to_string(), Style::default().fg(Color::Blue)));
+                        spans.push(Span::styled(
+                            highlight_char.to_string(),
+                            Style::default().fg(Color::Blue),
+                        ));
 
                         // Add text after highlight
                         if h_col + 1 < line_chars.len() {
                             let after_text: String = line_chars[h_col + 1..].iter().collect();
-                            let style = if is_user_message { Style::default() } else { content_style };
+                            let style = if is_user_message {
+                                Style::default()
+                            } else {
+                                content_style
+                            };
                             spans.push(Span::styled(after_text, style));
                         }
                     } else {
                         // Highlight is at end of line or beyond
-                        let style = if is_user_message { Style::default() } else { content_style };
+                        let style = if is_user_message {
+                            Style::default()
+                        } else {
+                            content_style
+                        };
                         spans.push(Span::styled(line_string, style));
                     }
 
                     spans.push(Span::raw(padding));
-                    spans.push(Span::styled(MESSAGE_BORDER_SET.vertical_right, border_style));
+                    spans.push(Span::styled(
+                        MESSAGE_BORDER_SET.vertical_right,
+                        border_style,
+                    ));
                     lines.push(Line::from(spans));
                 } else {
                     // Normal line without highlight (within highlight branch but different line)
@@ -5061,7 +5747,10 @@ impl App {
                     }
 
                     spans.push(Span::raw(padding));
-                    spans.push(Span::styled(MESSAGE_BORDER_SET.vertical_right, border_style));
+                    spans.push(Span::styled(
+                        MESSAGE_BORDER_SET.vertical_right,
+                        border_style,
+                    ));
                     lines.push(Line::from(spans));
                 }
             } else {
@@ -5081,11 +5770,16 @@ impl App {
                 }
 
                 spans.push(Span::raw(padding));
-                spans.push(Span::styled(MESSAGE_BORDER_SET.vertical_right, border_style));
+                spans.push(Span::styled(
+                    MESSAGE_BORDER_SET.vertical_right,
+                    border_style,
+                ));
                 lines.push(Line::from(spans));
             }
         }
-        let horizontal = MESSAGE_BORDER_SET.horizontal_bottom.repeat(max_line_width + 4);
+        let horizontal = MESSAGE_BORDER_SET
+            .horizontal_bottom
+            .repeat(max_line_width + 4);
         lines.push(Line::from(vec![
             Span::styled(MESSAGE_BORDER_SET.bottom_left, border_style),
             Span::styled(horizontal, border_style),
@@ -5125,7 +5819,10 @@ impl App {
         lines.push(Line::from(vec![
             Span::styled("● ", Style::default().fg(Color::Red)),
             Span::raw("Add "),
-            Span::styled(&self.sandbox_blocked_path, Style::default().fg(Color::Yellow)),
+            Span::styled(
+                &self.sandbox_blocked_path,
+                Style::default().fg(Color::Yellow),
+            ),
             Span::raw(" to writable roots?"),
         ]));
 
@@ -5169,8 +5866,7 @@ impl App {
     }
 
     fn render_tips(&self) -> Vec<Line<'_>> {
-        TIPS
-            .iter()
+        TIPS.iter()
             .take(self.visible_tips)
             .map(|&tip| {
                 let mut spans = Vec::new();
@@ -5181,7 +5877,10 @@ impl App {
                     if !parts[0].is_empty() {
                         spans.push(Span::raw(parts[0].to_string()));
                     }
-                    spans.push(Span::styled(".niterules", Style::default().fg(Color::Magenta)));
+                    spans.push(Span::styled(
+                        ".niterules",
+                        Style::default().fg(Color::Magenta),
+                    ));
                     remaining = parts.get(1).unwrap_or(&"").to_string();
                 }
                 if remaining.contains("/help") {
@@ -5231,35 +5930,41 @@ impl App {
         };
 
         // Create lines with command highlighted and description in gray
-        let lines: Vec<Line> = self.autocomplete_suggestions.iter().enumerate().map(|(idx, (cmd, desc))| {
-            let is_selected = idx == self.autocomplete_selected_index;
+        let lines: Vec<Line> = self
+            .autocomplete_suggestions
+            .iter()
+            .enumerate()
+            .map(|(idx, (cmd, desc))| {
+                let is_selected = idx == self.autocomplete_selected_index;
 
-            // Format: "  /command                         description"
-            let cmd_style = if is_selected {
-                Style::default().fg(Color::Blue).add_modifier(ratatui::style::Modifier::BOLD) // Same as directory color
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
+                // Format: "  /command                         description"
+                let cmd_style = if is_selected {
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(ratatui::style::Modifier::BOLD) // Same as directory color
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
 
-            let desc_style = if is_selected {
-                Style::default().fg(Color::Blue) // Same as directory color
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
+                let desc_style = if is_selected {
+                    Style::default().fg(Color::Blue) // Same as directory color
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
 
-            // Pad command to align descriptions (find max command length)
-            let max_cmd_len = 35; // Fixed width for alignment
-            let padded_cmd = format!("{:width$}", cmd, width = max_cmd_len);
+                // Pad command to align descriptions (find max command length)
+                let max_cmd_len = 35; // Fixed width for alignment
+                let padded_cmd = format!("{:width$}", cmd, width = max_cmd_len);
 
-            Line::from(vec![
-                Span::raw("  "),
-                Span::styled(padded_cmd, cmd_style),
-                Span::styled(desc.clone(), desc_style),
-            ])
-        }).collect();
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(padded_cmd, cmd_style),
+                    Span::styled(desc.clone(), desc_style),
+                ])
+            })
+            .collect();
 
-        let paragraph = Paragraph::new(lines)
-            .scroll((scroll_offset as u16, 0));
+        let paragraph = Paragraph::new(lines).scroll((scroll_offset as u16, 0));
         frame.render_widget(paragraph, autocomplete_area);
     }
 
@@ -5272,36 +5977,43 @@ impl App {
             .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(Style::default().fg(Color::Cyan))
             .title(" Background tasks ")
-            .title_bottom(Line::from(" ↑/↓ to select · Enter to view · k to kill · Esc to close ").centered());
+            .title_bottom(
+                Line::from(" ↑/↓ to select · Enter to view · k to kill · Esc to close ").centered(),
+            );
 
         let task_count_text = format!(" {} active shells", self.background_tasks.len());
 
         // Build list items
-        let items: Vec<ListItem> = self.background_tasks.iter().enumerate().map(|(idx, (session_id, command, _log_file, _start_time))| {
-            let is_selected = idx == self.background_tasks_selected;
+        let items: Vec<ListItem> = self
+            .background_tasks
+            .iter()
+            .enumerate()
+            .map(|(idx, (session_id, command, _log_file, _start_time))| {
+                let is_selected = idx == self.background_tasks_selected;
 
-            // Truncate command if too long
-            let max_cmd_len = task_area.width.saturating_sub(10) as usize;
-            let display_cmd = if command.len() > max_cmd_len {
-                format!("{} …", &command[..max_cmd_len.saturating_sub(2)])
-            } else {
-                command.clone()
-            };
+                // Truncate command if too long
+                let max_cmd_len = task_area.width.saturating_sub(10) as usize;
+                let display_cmd = if command.len() > max_cmd_len {
+                    format!("{} …", &command[..max_cmd_len.saturating_sub(2)])
+                } else {
+                    command.clone()
+                };
 
-            let line = if is_selected {
-                Line::from(vec![
-                    Span::styled(">  ", Style::default().fg(Color::Blue)),
-                    Span::styled(display_cmd, Style::default().fg(Color::Blue)),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(display_cmd, Style::default().fg(Color::White)),
-                ])
-            };
+                let line = if is_selected {
+                    Line::from(vec![
+                        Span::styled(">  ", Style::default().fg(Color::Blue)),
+                        Span::styled(display_cmd, Style::default().fg(Color::Blue)),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled(display_cmd, Style::default().fg(Color::White)),
+                    ])
+                };
 
-            ListItem::new(line)
-        }).collect();
+                ListItem::new(line)
+            })
+            .collect();
 
         // Create inner area for content
         let inner = block.inner(task_area);
@@ -5310,7 +6022,10 @@ impl App {
         frame.render_widget(block, task_area);
 
         // Render task count with dark gray color
-        let count_line = Line::from(Span::styled(task_count_text, Style::default().fg(Color::DarkGray)));
+        let count_line = Line::from(Span::styled(
+            task_count_text,
+            Style::default().fg(Color::DarkGray),
+        ));
         let count_para = ratatui::widgets::Paragraph::new(count_line);
         let count_area = ratatui::layout::Rect {
             x: inner.x,
@@ -5371,7 +6086,10 @@ impl App {
                     let indent_str = "  ".repeat(indent);
                     let line = Line::from(vec![
                         Span::raw(indent_str),
-                        Span::styled(format!("[{}] ", status_icon), Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            format!("[{}] ", status_icon),
+                            Style::default().fg(Color::DarkGray),
+                        ),
                         Span::styled(todo.content.clone(), Style::default().fg(Color::White)),
                     ]);
 
@@ -5394,7 +6112,10 @@ impl App {
         frame.render_widget(block, todos_area);
 
         // Render todo count with dark gray color
-        let count_line = Line::from(Span::styled(todo_count_text, Style::default().fg(Color::DarkGray)));
+        let count_line = Line::from(Span::styled(
+            todo_count_text,
+            Style::default().fg(Color::DarkGray),
+        ));
         let count_para = ratatui::widgets::Paragraph::new(count_line);
         let count_area = ratatui::layout::Rect {
             x: inner.x,
@@ -5426,7 +6147,9 @@ impl App {
             .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(Style::default().fg(Color::Blue))
             .title(" Select Model ")
-            .title_bottom(Line::from(" ↑/↓ to select · Enter to confirm · Esc to exit ").centered());
+            .title_bottom(
+                Line::from(" ↑/↓ to select · Enter to confirm · Esc to exit ").centered(),
+            );
 
         let inner = block.inner(model_area);
         frame.render_widget(block, model_area);
@@ -5435,9 +6158,14 @@ impl App {
             // No models found
             let content = vec![
                 Line::from(""),
-                Line::from(Span::styled("No models found.", Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(
+                    "No models found.",
+                    Style::default().fg(Color::DarkGray),
+                )),
                 Line::from(""),
-                Line::from(Span::raw("Place .gguf model files in ~/.config/.nite/models/")),
+                Line::from(Span::raw(
+                    "Place .gguf model files in ~/.config/.nite/models/",
+                )),
             ];
             let para = Paragraph::new(content);
             let content_area = ratatui::layout::Rect {
@@ -5450,7 +6178,10 @@ impl App {
         } else {
             // Show model count
             let count_text = format!(" {} available models", self.available_models.len());
-            let count_line = Line::from(Span::styled(count_text, Style::default().fg(Color::DarkGray)));
+            let count_line = Line::from(Span::styled(
+                count_text,
+                Style::default().fg(Color::DarkGray),
+            ));
             let count_para = Paragraph::new(count_line);
             let count_area = ratatui::layout::Rect {
                 x: inner.x,
@@ -5480,100 +6211,113 @@ impl App {
             let models_to_render = &self.available_models[scroll_offset..end_index];
 
             // Render list of models with > indicator and metadata
-            let items: Vec<ListItem> = models_to_render.iter().enumerate().map(|(display_idx, model)| {
-                let actual_idx = scroll_offset + display_idx;
-                let is_selected = actual_idx == self.model_selected_index;
-                let is_current = self.current_model.as_ref().map(|m| m == &model.filename).unwrap_or(false);
+            let items: Vec<ListItem> = models_to_render
+                .iter()
+                .enumerate()
+                .map(|(display_idx, model)| {
+                    let actual_idx = scroll_offset + display_idx;
+                    let is_selected = actual_idx == self.model_selected_index;
+                    let is_current = self
+                        .current_model
+                        .as_ref()
+                        .map(|m| m == &model.filename)
+                        .unwrap_or(false);
 
-                // Format size (GB if >= 1024 MB, otherwise MB)
-                let size_str = if model.size_mb >= 1024.0 {
-                    format!("{:.1}GB", model.size_mb / 1024.0)
-                } else {
-                    format!("{:.0}MB", model.size_mb)
-                };
-
-                // Build metadata string with all available info
-                let mut metadata_parts = Vec::new();
-
-                // Add architecture and parameter count first (most important)
-                if let Some(ref arch) = model.architecture {
-                    if let Some(ref params) = model.parameter_count {
-                        metadata_parts.push(format!("{} {}", arch, params));
+                    // Format size (GB if >= 1024 MB, otherwise MB)
+                    let size_str = if model.size_mb >= 1024.0 {
+                        format!("{:.1}GB", model.size_mb / 1024.0)
                     } else {
-                        metadata_parts.push(arch.clone());
+                        format!("{:.0}MB", model.size_mb)
+                    };
+
+                    // Build metadata string with all available info
+                    let mut metadata_parts = Vec::new();
+
+                    // Add architecture and parameter count first (most important)
+                    if let Some(ref arch) = model.architecture {
+                        if let Some(ref params) = model.parameter_count {
+                            metadata_parts.push(format!("{} {}", arch, params));
+                        } else {
+                            metadata_parts.push(arch.clone());
+                        }
+                    } else if let Some(ref params) = model.parameter_count {
+                        metadata_parts.push(params.clone());
                     }
-                } else if let Some(ref params) = model.parameter_count {
-                    metadata_parts.push(params.clone());
-                }
 
-                // Add size and quantization
-                metadata_parts.push(size_str);
-                if let Some(ref quant) = model.quantization {
-                    metadata_parts.push(quant.clone());
-                }
+                    // Add size and quantization
+                    metadata_parts.push(size_str);
+                    if let Some(ref quant) = model.quantization {
+                        metadata_parts.push(quant.clone());
+                    }
 
-                let metadata = metadata_parts.join(" · ");
+                    let metadata = metadata_parts.join(" · ");
 
-                // Build second metadata line (author, version, hash)
-                let mut metadata2_parts = Vec::new();
-                if let Some(ref author) = model.author {
-                    metadata2_parts.push(author.clone());
-                }
-                if let Some(ref version) = model.version {
-                    metadata2_parts.push(format!("ver {}", version));
-                }
-                if let Some(ref hash) = model.file_hash {
-                    metadata2_parts.push(format!("hash {}", hash));
-                }
-                let metadata2 = if !metadata2_parts.is_empty() {
-                    Some(metadata2_parts.join(" · "))
-                } else {
-                    None
-                };
+                    // Build second metadata line (author, version, hash)
+                    let mut metadata2_parts = Vec::new();
+                    if let Some(ref author) = model.author {
+                        metadata2_parts.push(author.clone());
+                    }
+                    if let Some(ref version) = model.version {
+                        metadata2_parts.push(format!("ver {}", version));
+                    }
+                    if let Some(ref hash) = model.file_hash {
+                        metadata2_parts.push(format!("hash {}", hash));
+                    }
+                    let metadata2 = if !metadata2_parts.is_empty() {
+                        Some(metadata2_parts.join(" · "))
+                    } else {
+                        None
+                    };
 
-                // Title line
-                let title_line = if is_selected {
-                    Line::from(vec![
-                        Span::styled(">  ", Style::default().fg(Color::Blue)),
-                        Span::styled(&model.display_name, Style::default().fg(Color::Blue)),
-                        if is_current {
-                            Span::styled(" ✔", Style::default().fg(Color::Green))
-                        } else {
-                            Span::raw("")
-                        },
-                    ])
-                } else {
-                    Line::from(vec![
+                    // Title line
+                    let title_line = if is_selected {
+                        Line::from(vec![
+                            Span::styled(">  ", Style::default().fg(Color::Blue)),
+                            Span::styled(&model.display_name, Style::default().fg(Color::Blue)),
+                            if is_current {
+                                Span::styled(" ✔", Style::default().fg(Color::Green))
+                            } else {
+                                Span::raw("")
+                            },
+                        ])
+                    } else {
+                        Line::from(vec![
+                            Span::raw("   "),
+                            Span::styled(&model.display_name, Style::default().fg(Color::White)),
+                            if is_current {
+                                Span::styled(" ✔", Style::default().fg(Color::Green))
+                            } else {
+                                Span::raw("")
+                            },
+                        ])
+                    };
+
+                    // First metadata line (arch, size, quant)
+                    let metadata_line1 = Line::from(vec![
                         Span::raw("   "),
-                        Span::styled(&model.display_name, Style::default().fg(Color::White)),
-                        if is_current {
-                            Span::styled(" ✔", Style::default().fg(Color::Green))
-                        } else {
-                            Span::raw("")
-                        },
-                    ])
-                };
-
-                // First metadata line (arch, size, quant)
-                let metadata_line1 = Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(metadata, Style::default().fg(Color::DarkGray)),
-                ]);
-
-                // Build lines vec
-                let mut lines = vec![title_line, metadata_line1];
-
-                // Second metadata line (author, version, hash) - only if we have data
-                if let Some(meta2) = metadata2 {
-                    let metadata_line2 = Line::from(vec![
-                        Span::raw("   "),
-                        Span::styled(meta2, Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+                        Span::styled(metadata, Style::default().fg(Color::DarkGray)),
                     ]);
-                    lines.push(metadata_line2);
-                }
 
-                ListItem::new(lines)
-            }).collect();
+                    // Build lines vec
+                    let mut lines = vec![title_line, metadata_line1];
+
+                    // Second metadata line (author, version, hash) - only if we have data
+                    if let Some(meta2) = metadata2 {
+                        let metadata_line2 = Line::from(vec![
+                            Span::raw("   "),
+                            Span::styled(
+                                meta2,
+                                Style::default()
+                                    .fg(Color::DarkGray)
+                                    .add_modifier(Modifier::DIM),
+                            ),
+                        ]);
+                        lines.push(metadata_line2);
+                    }
+
+                    ListItem::new(lines)
+                })
+                .collect();
 
             let list_area = ratatui::layout::Rect {
                 x: inner.x,
@@ -5601,19 +6345,34 @@ impl App {
         let tab_spans: Vec<Span> = vec![
             Span::styled("  ", Style::default()),
             if self.help_tab == HelpTab::General {
-                Span::styled("general", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                Span::styled(
+                    "general",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
                 Span::styled("general", Style::default().fg(Color::DarkGray))
             },
             Span::styled("   ", Style::default()),
             if self.help_tab == HelpTab::Commands {
-                Span::styled("commands", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                Span::styled(
+                    "commands",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
                 Span::styled("commands", Style::default().fg(Color::DarkGray))
             },
             Span::styled("   ", Style::default()),
             if self.help_tab == HelpTab::CustomCommands {
-                Span::styled("custom-commands", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                Span::styled(
+                    "custom-commands",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
                 Span::styled("custom-commands", Style::default().fg(Color::DarkGray))
             },
@@ -5648,9 +6407,15 @@ impl App {
             HelpTab::General => {
                 let content = vec![
                     Line::from(""),
-                    Line::from(Span::styled("Nite — Rust TUI for LLM-powered coding", Style::default().fg(Color::Cyan))),
+                    Line::from(Span::styled(
+                        "Nite — Rust TUI for LLM-powered coding",
+                        Style::default().fg(Color::Cyan),
+                    )),
                     Line::from(""),
-                    Line::from(Span::styled("Shortcuts:", Style::default().fg(Color::Yellow))),
+                    Line::from(Span::styled(
+                        "Shortcuts:",
+                        Style::default().fg(Color::Yellow),
+                    )),
                     Line::from(vec![
                         Span::styled("  /           ", Style::default().fg(Color::Magenta)),
                         Span::raw("Slash commands          "),
@@ -5676,26 +6441,46 @@ impl App {
                         Span::raw("Cycle help tabs"),
                     ]),
                     Line::from(""),
-                    Line::from(Span::styled("Assistant Modes", Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC))),
-                    Line::from(Span::styled(" (Shift+Tab to cycle):", Style::default().fg(Color::DarkGray))),
+                    Line::from(Span::styled(
+                        "Assistant Modes",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::ITALIC),
+                    )),
+                    Line::from(Span::styled(
+                        " (Shift+Tab to cycle):",
+                        Style::default().fg(Color::DarkGray),
+                    )),
                     Line::from(vec![
                         Span::styled("  • None           ", Style::default().fg(Color::White)),
                         Span::styled("Standard mode", Style::default().fg(Color::DarkGray)),
                     ]),
                     Line::from(vec![
                         Span::styled("  • YOLO mode      ", Style::default().fg(Color::Red)),
-                        Span::styled("High-speed, minimal confirmation", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            "High-speed, minimal confirmation",
+                            Style::default().fg(Color::DarkGray),
+                        ),
                     ]),
                     Line::from(vec![
                         Span::styled("  • Plan mode      ", Style::default().fg(Color::Blue)),
-                        Span::styled("Review plan before execution", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            "Review plan before execution",
+                            Style::default().fg(Color::DarkGray),
+                        ),
                     ]),
                     Line::from(vec![
                         Span::styled("  • Auto-accept    ", Style::default().fg(Color::Green)),
-                        Span::styled("Automatically accept edits", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            "Automatically accept edits",
+                            Style::default().fg(Color::DarkGray),
+                        ),
                     ]),
                     Line::from(""),
-                    Line::from(Span::styled("Vim Mode:", Style::default().fg(Color::Yellow))),
+                    Line::from(Span::styled(
+                        "Vim Mode:",
+                        Style::default().fg(Color::Yellow),
+                    )),
                     Line::from(vec![
                         Span::styled("  /vim        ", Style::default().fg(Color::Magenta)),
                         Span::raw("Toggle vim keybindings"),
@@ -5718,27 +6503,36 @@ impl App {
             }
             HelpTab::Commands => {
                 // Build command list items
-                let items: Vec<ListItem> = SLASH_COMMANDS.iter().enumerate().map(|(idx, (cmd, desc))| {
-                    let is_selected = idx == self.help_commands_selected;
+                let items: Vec<ListItem> = SLASH_COMMANDS
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, (cmd, desc))| {
+                        let is_selected = idx == self.help_commands_selected;
 
-                    let line = if is_selected {
-                        Line::from(vec![
-                            Span::styled(">  ", Style::default().fg(Color::Green)),
-                            Span::styled(*cmd, Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
-                            Span::raw("  "),
-                            Span::styled(*desc, Style::default().fg(Color::White)),
-                        ])
-                    } else {
-                        Line::from(vec![
-                            Span::raw("   "),
-                            Span::styled(*cmd, Style::default().fg(Color::Blue)),
-                            Span::raw("  "),
-                            Span::styled(*desc, Style::default().fg(Color::DarkGray)),
-                        ])
-                    };
+                        let line = if is_selected {
+                            Line::from(vec![
+                                Span::styled(">  ", Style::default().fg(Color::Green)),
+                                Span::styled(
+                                    *cmd,
+                                    Style::default()
+                                        .fg(Color::Blue)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw("  "),
+                                Span::styled(*desc, Style::default().fg(Color::White)),
+                            ])
+                        } else {
+                            Line::from(vec![
+                                Span::raw("   "),
+                                Span::styled(*cmd, Style::default().fg(Color::Blue)),
+                                Span::raw("  "),
+                                Span::styled(*desc, Style::default().fg(Color::DarkGray)),
+                            ])
+                        };
 
-                    ListItem::new(line)
-                }).collect();
+                        ListItem::new(line)
+                    })
+                    .collect();
 
                 let list = List::new(items);
                 frame.render_widget(list, content_area);
@@ -5746,12 +6540,21 @@ impl App {
             HelpTab::CustomCommands => {
                 let content = vec![
                     Line::from(""),
-                    Line::from(Span::styled("No custom commands found.", Style::default().fg(Color::DarkGray))),
+                    Line::from(Span::styled(
+                        "No custom commands found.",
+                        Style::default().fg(Color::DarkGray),
+                    )),
                     Line::from(""),
                     Line::from(Span::raw("Custom commands can be added in:")),
-                    Line::from(Span::styled("  ~/.config/.nite/commands/", Style::default().fg(Color::Blue))),
+                    Line::from(Span::styled(
+                        "  ~/.config/.nite/commands/",
+                        Style::default().fg(Color::Blue),
+                    )),
                     Line::from(""),
-                    Line::from(Span::styled("For more information, visit the documentation.", Style::default().fg(Color::DarkGray))),
+                    Line::from(Span::styled(
+                        "For more information, visit the documentation.",
+                        Style::default().fg(Color::DarkGray),
+                    )),
                 ];
                 let para = Paragraph::new(content).wrap(Wrap { trim: false });
                 frame.render_widget(para, content_area);
@@ -5782,7 +6585,12 @@ impl App {
             .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(Style::default().fg(Color::Green))
             .title(" Saved Conversations ")
-            .title_bottom(Line::from(" ↑/↓ to select · Enter to restore · d to delete · f to fork · Esc to close ").centered());
+            .title_bottom(
+                Line::from(
+                    " ↑/↓ to select · Enter to restore · d to delete · f to fork · Esc to close ",
+                )
+                .centered(),
+            );
 
         let inner = block.inner(resume_area);
         frame.render_widget(block, resume_area);
@@ -5791,7 +6599,10 @@ impl App {
             // No conversations found
             let content = vec![
                 Line::from(""),
-                Line::from(Span::styled("No saved conversations found.", Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(
+                    "No saved conversations found.",
+                    Style::default().fg(Color::DarkGray),
+                )),
                 Line::from(""),
                 Line::from(Span::raw("Use /save to save your current conversation")),
             ];
@@ -5805,13 +6616,24 @@ impl App {
             frame.render_widget(para, content_area);
         } else {
             // Show conversation count with fork count
-            let fork_count = self.resume_conversations.iter().filter(|c| c.forked_from.is_some()).count();
+            let fork_count = self
+                .resume_conversations
+                .iter()
+                .filter(|c| c.forked_from.is_some())
+                .count();
             let count_text = if fork_count > 0 {
-                format!(" {} saved conversations ({} forks)", self.resume_conversations.len(), fork_count)
+                format!(
+                    " {} saved conversations ({} forks)",
+                    self.resume_conversations.len(),
+                    fork_count
+                )
             } else {
                 format!(" {} saved conversations", self.resume_conversations.len())
             };
-            let count_line = Line::from(Span::styled(count_text, Style::default().fg(Color::DarkGray)));
+            let count_line = Line::from(Span::styled(
+                count_text,
+                Style::default().fg(Color::DarkGray),
+            ));
             let count_para = Paragraph::new(count_line);
             let count_area = ratatui::layout::Rect {
                 x: inner.x,
@@ -5835,59 +6657,66 @@ impl App {
             };
 
             // Slice conversations to show only the visible window
-            let visible_end = (scroll_offset + max_visible_items).min(self.resume_conversations.len());
+            let visible_end =
+                (scroll_offset + max_visible_items).min(self.resume_conversations.len());
             let visible_conversations = &self.resume_conversations[scroll_offset..visible_end];
 
             // Render list of conversations with > indicator and fork symbol
-            let items: Vec<ListItem> = visible_conversations.iter().enumerate().map(|(local_idx, conv)| {
-                let actual_idx = scroll_offset + local_idx;
-                let is_selected = actual_idx == self.resume_selected;
-                let is_fork = conv.forked_from.is_some();
+            let items: Vec<ListItem> = visible_conversations
+                .iter()
+                .enumerate()
+                .map(|(local_idx, conv)| {
+                    let actual_idx = scroll_offset + local_idx;
+                    let is_selected = actual_idx == self.resume_selected;
+                    let is_fork = conv.forked_from.is_some();
 
-                // Title line (preview) with > indicator and fork symbol
-                // Layout: "> " (selected) or "  " (unselected) then "⎇ " for forks - no extra offset
-                let title_line = if is_selected {
-                    if is_fork {
-                        Line::from(vec![
-                            Span::styled("> ⎇ ", Style::default().fg(Color::Green)),
-                            Span::styled(&conv.preview, Style::default().fg(Color::Green)),
-                        ])
+                    // Title line (preview) with > indicator and fork symbol
+                    // Layout: "> " (selected) or "  " (unselected) then "⎇ " for forks - no extra offset
+                    let title_line = if is_selected {
+                        if is_fork {
+                            Line::from(vec![
+                                Span::styled("> ⎇ ", Style::default().fg(Color::Green)),
+                                Span::styled(&conv.preview, Style::default().fg(Color::Green)),
+                            ])
+                        } else {
+                            Line::from(vec![
+                                Span::styled("> ", Style::default().fg(Color::Green)),
+                                Span::styled(&conv.preview, Style::default().fg(Color::Green)),
+                            ])
+                        }
                     } else {
-                        Line::from(vec![
-                            Span::styled("> ", Style::default().fg(Color::Green)),
-                            Span::styled(&conv.preview, Style::default().fg(Color::Green)),
-                        ])
-                    }
-                } else {
-                    if is_fork {
-                        Line::from(vec![
-                            Span::raw("  ⎇ "),
-                            Span::styled(&conv.preview, Style::default().fg(Color::White)),
-                        ])
-                    } else {
-                        Line::from(vec![
-                            Span::raw("  "),
-                            Span::styled(&conv.preview, Style::default().fg(Color::White)),
-                        ])
-                    }
-                };
+                        if is_fork {
+                            Line::from(vec![
+                                Span::raw("  ⎇ "),
+                                Span::styled(&conv.preview, Style::default().fg(Color::White)),
+                            ])
+                        } else {
+                            Line::from(vec![
+                                Span::raw("  "),
+                                Span::styled(&conv.preview, Style::default().fg(Color::White)),
+                            ])
+                        }
+                    };
 
-                // Metadata line at bottom (uses static time string)
-                let msg_count = format!("{} msgs", conv.message_count);
-                let branch_str = conv.git_branch.as_ref()
-                    .map(|b| format!(" • {}", b))
-                    .unwrap_or_default();
+                    // Metadata line at bottom (uses static time string)
+                    let msg_count = format!("{} msgs", conv.message_count);
+                    let branch_str = conv
+                        .git_branch
+                        .as_ref()
+                        .map(|b| format!(" • {}", b))
+                        .unwrap_or_default();
 
-                let metadata_line = Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        format!("{} • {}{}", conv.time_ago_str, msg_count, branch_str),
-                        Style::default().fg(Color::DarkGray)
-                    ),
-                ]);
+                    let metadata_line = Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            format!("{} • {}{}", conv.time_ago_str, msg_count, branch_str),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]);
 
-                ListItem::new(vec![title_line, metadata_line])
-            }).collect();
+                    ListItem::new(vec![title_line, metadata_line])
+                })
+                .collect();
 
             let list_area = ratatui::layout::Rect {
                 x: inner.x,
@@ -5910,7 +6739,9 @@ impl App {
             .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(Style::default().fg(Color::Yellow))
             .title(" Rewind Conversation ")
-            .title_bottom(Line::from(" ↑/↓ to select · Enter to restore · Esc to close ").centered());
+            .title_bottom(
+                Line::from(" ↑/↓ to select · Enter to restore · Esc to close ").centered(),
+            );
 
         let inner = block.inner(rewind_area);
         frame.render_widget(block, rewind_area);
@@ -5919,9 +6750,14 @@ impl App {
             // No rewind points found
             let content = vec![
                 Line::from(""),
-                Line::from(Span::styled("No rewind points available.", Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(
+                    "No rewind points available.",
+                    Style::default().fg(Color::DarkGray),
+                )),
                 Line::from(""),
-                Line::from(Span::raw("Rewind points are created automatically as you interact")),
+                Line::from(Span::raw(
+                    "Rewind points are created automatically as you interact",
+                )),
             ];
             let para = Paragraph::new(content);
             let content_area = ratatui::layout::Rect {
@@ -5934,7 +6770,10 @@ impl App {
         } else {
             // Show rewind point count
             let count_text = format!(" {} rewind points", self.rewind_points.len());
-            let count_line = Line::from(Span::styled(count_text, Style::default().fg(Color::DarkGray)));
+            let count_line = Line::from(Span::styled(
+                count_text,
+                Style::default().fg(Color::DarkGray),
+            ));
             let count_para = Paragraph::new(count_line);
             let count_area = ratatui::layout::Rect {
                 x: inner.x,
@@ -5962,73 +6801,83 @@ impl App {
             let visible_points = &self.rewind_points[scroll_offset..visible_end];
 
             // Render list of rewind points
-            let items: Vec<ListItem> = visible_points.iter().enumerate().map(|(local_idx, point)| {
-                let actual_idx = scroll_offset + local_idx;
-                let is_selected = actual_idx == self.rewind_selected;
+            let items: Vec<ListItem> = visible_points
+                .iter()
+                .enumerate()
+                .map(|(local_idx, point)| {
+                    let actual_idx = scroll_offset + local_idx;
+                    let is_selected = actual_idx == self.rewind_selected;
 
-                // Preview line with > indicator
-                let preview_line = if is_selected {
-                    Line::from(vec![
-                        Span::styled("> ", Style::default().fg(Color::Yellow)),
-                        Span::styled(&point.preview, Style::default().fg(Color::Yellow)),
-                    ])
-                } else {
-                    Line::from(vec![
+                    // Preview line with > indicator
+                    let preview_line = if is_selected {
+                        Line::from(vec![
+                            Span::styled("> ", Style::default().fg(Color::Yellow)),
+                            Span::styled(&point.preview, Style::default().fg(Color::Yellow)),
+                        ])
+                    } else {
+                        Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(&point.preview, Style::default().fg(Color::White)),
+                        ])
+                    };
+
+                    // Metadata line (message count, time ago, and file changes)
+                    let elapsed = point.timestamp.elapsed().unwrap_or(Duration::from_secs(0));
+                    let time_ago = if elapsed.as_secs() < 60 {
+                        format!("{}s ago", elapsed.as_secs())
+                    } else if elapsed.as_secs() < 3600 {
+                        format!("{}m ago", elapsed.as_secs() / 60)
+                    } else if elapsed.as_secs() < 86400 {
+                        format!("{}h ago", elapsed.as_secs() / 3600)
+                    } else {
+                        format!("{}d ago", elapsed.as_secs() / 86400)
+                    };
+
+                    // Calculate total insertions and deletions
+                    let total_insertions: usize =
+                        point.file_changes.iter().map(|fc| fc.insertions).sum();
+                    let total_deletions: usize =
+                        point.file_changes.iter().map(|fc| fc.deletions).sum();
+                    let files_count = point.file_changes.len();
+
+                    let mut metadata_parts = vec![
                         Span::raw("  "),
-                        Span::styled(&point.preview, Style::default().fg(Color::White)),
-                    ])
-                };
+                        Span::styled(
+                            format!("{} msgs • {}", point.message_count, time_ago),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ];
 
-                // Metadata line (message count, time ago, and file changes)
-                let elapsed = point.timestamp.elapsed().unwrap_or(Duration::from_secs(0));
-                let time_ago = if elapsed.as_secs() < 60 {
-                    format!("{}s ago", elapsed.as_secs())
-                } else if elapsed.as_secs() < 3600 {
-                    format!("{}m ago", elapsed.as_secs() / 60)
-                } else if elapsed.as_secs() < 86400 {
-                    format!("{}h ago", elapsed.as_secs() / 3600)
-                } else {
-                    format!("{}d ago", elapsed.as_secs() / 86400)
-                };
-
-                // Calculate total insertions and deletions
-                let total_insertions: usize = point.file_changes.iter().map(|fc| fc.insertions).sum();
-                let total_deletions: usize = point.file_changes.iter().map(|fc| fc.deletions).sum();
-                let files_count = point.file_changes.len();
-
-                let mut metadata_parts = vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        format!("{} msgs • {}", point.message_count, time_ago),
-                        Style::default().fg(Color::DarkGray)
-                    ),
-                ];
-
-                // Add file changes if any
-                if files_count > 0 {
-                    metadata_parts.push(Span::styled(
-                        format!(" • {} file{}", files_count, if files_count == 1 { "" } else { "s" }),
-                        Style::default().fg(Color::DarkGray)
-                    ));
-
-                    if total_insertions > 0 {
+                    // Add file changes if any
+                    if files_count > 0 {
                         metadata_parts.push(Span::styled(
-                            format!(" +{}", total_insertions),
-                            Style::default().fg(Color::Green)
+                            format!(
+                                " • {} file{}",
+                                files_count,
+                                if files_count == 1 { "" } else { "s" }
+                            ),
+                            Style::default().fg(Color::DarkGray),
                         ));
-                    }
-                    if total_deletions > 0 {
-                        metadata_parts.push(Span::styled(
-                            format!(" -{}", total_deletions),
-                            Style::default().fg(Color::Red)
-                        ));
-                    }
-                }
 
-                let metadata_line = Line::from(metadata_parts);
+                        if total_insertions > 0 {
+                            metadata_parts.push(Span::styled(
+                                format!(" +{}", total_insertions),
+                                Style::default().fg(Color::Green),
+                            ));
+                        }
+                        if total_deletions > 0 {
+                            metadata_parts.push(Span::styled(
+                                format!(" -{}", total_deletions),
+                                Style::default().fg(Color::Red),
+                            ));
+                        }
+                    }
 
-                ListItem::new(vec![preview_line, metadata_line])
-            }).collect();
+                    let metadata_line = Line::from(metadata_parts);
+
+                    ListItem::new(vec![preview_line, metadata_line])
+                })
+                .collect();
 
             let list_area = ratatui::layout::Rect {
                 x: inner.x,
@@ -6060,14 +6909,9 @@ impl App {
             frame.render_widget(outer_block, area);
 
             // Runtime and command area
-            let runtime_line = Line::from(vec![
-                Span::raw("runtime: "),
-                Span::raw(runtime_str),
-            ]);
-            let command_line = Line::from(vec![
-                Span::raw("command: "),
-                Span::raw(command.as_str()),
-            ]);
+            let runtime_line = Line::from(vec![Span::raw("runtime: "), Span::raw(runtime_str)]);
+            let command_line =
+                Line::from(vec![Span::raw("command: "), Span::raw(command.as_str())]);
 
             let header_para = Paragraph::new(vec![runtime_line, command_line]);
             let header_area = ratatui::layout::Rect {
@@ -6108,22 +6952,24 @@ impl App {
             let total_lines = lines.len();
 
             // Show last 10 lines in Gray
-            let mut all_lines: Vec<Line> = lines.iter()
+            let mut all_lines: Vec<Line> = lines
+                .iter()
                 .map(|line| Line::from(Span::styled(*line, Style::default().fg(Color::Gray))))
                 .collect();
 
             // Always add the "...Showing 10 lines" text in DarkGray italic
             all_lines.push(Line::from(Span::styled(
                 format!("...Showing {} lines", total_lines),
-                Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::ITALIC)
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(ratatui::style::Modifier::ITALIC),
             )));
 
             let output_para = Paragraph::new(all_lines).wrap(Wrap { trim: false });
             frame.render_widget(output_para, output_inner);
 
             // Bottom instructions
-            let bottom_line = Line::from(" Press Esc/Enter/Space to close · k to kill ")
-                .centered();
+            let bottom_line = Line::from(" Press Esc/Enter/Space to close · k to kill ").centered();
             let bottom_area = ratatui::layout::Rect {
                 x: area.x,
                 y: area.y + area.height - 1,
@@ -6134,7 +6980,15 @@ impl App {
         }
     }
 
-    fn render_status_bar(&self, frame: &mut Frame, status_area: ratatui::layout::Rect, mode: Mode, cursor_row: usize, cursor_col: usize, scroll_offset: usize) {
+    fn render_status_bar(
+        &self,
+        frame: &mut Frame,
+        status_area: ratatui::layout::Rect,
+        mode: Mode,
+        cursor_row: usize,
+        cursor_col: usize,
+        scroll_offset: usize,
+    ) {
         let directory_width = self.status_left.width() as u16;
         // Create center text based on mode
         let center_text = match mode {
@@ -6149,23 +7003,23 @@ impl App {
                 vec![
                     Span::styled(
                         format!("{} - Cursor: ({}, {}) ", mode_name, cursor_col, cursor_row),
-                        Style::default().fg(mode_color)
+                        Style::default().fg(mode_color),
                     ),
                     Span::styled(
                         format!("Scroll: {}", scroll_offset),
-                        Style::default().fg(Color::DarkGray)
+                        Style::default().fg(Color::DarkGray),
                     ),
                 ]
-            },
+            }
             Mode::Command => {
                 vec![
                     Span::styled("CMD MODE ", Style::default().fg(Color::Green)),
                     Span::styled(
                         format!("Scroll: {}", scroll_offset),
-                        Style::default().fg(Color::DarkGray)
+                        Style::default().fg(Color::DarkGray),
                     ),
                 ]
-            },
+            }
             Mode::Normal => {
                 if self.sandbox_enabled {
                     vec![
@@ -6200,7 +7054,9 @@ impl App {
         let [_, left_area, _, center_area, _, right_area, _] = horizontal.areas(status_area);
 
         // Compute status_left with current vim mode if enabled
-        let status_left = self.compute_status_left().unwrap_or_else(|_| self.status_left.clone());
+        let status_left = self
+            .compute_status_left()
+            .unwrap_or_else(|_| self.status_left.clone());
 
         let directory = Paragraph::new(status_left).left_aligned();
         frame.render_widget(directory, left_area);
@@ -6212,17 +7068,15 @@ impl App {
     }
     fn render_session_window_with_agent_ui(&mut self, frame: &mut Frame) {
         // Split screen: top 49% for session list, bottom 51% for bordered box containing Agent UI
-        let layout = Layout::vertical([
-            Constraint::Percentage(49),
-            Constraint::Percentage(51),
-        ]);
+        let layout = Layout::vertical([Constraint::Percentage(49), Constraint::Percentage(51)]);
         let [sessions_area, input_box_area] = layout.areas(frame.area());
 
         // Render sessions list in top area
-        let session_items = session_manager::SessionManager::create_session_list_items_with_selection(
-            &self.session_manager.sessions,
-            self.session_manager.selected_index
-        );
+        let session_items =
+            session_manager::SessionManager::create_session_list_items_with_selection(
+                &self.session_manager.sessions,
+                self.session_manager.selected_index,
+            );
         let sessions_list = ratatui::widgets::List::new(session_items)
             .block(Block::default().borders(ratatui::widgets::Borders::NONE));
         frame.render_widget(sessions_list, sessions_area);
@@ -6243,7 +7097,11 @@ impl App {
         self.draw_internal(frame, None);
     }
 
-    fn draw_internal(&mut self, frame: &mut Frame, constrained_area: Option<ratatui::layout::Rect>) {
+    fn draw_internal(
+        &mut self,
+        frame: &mut Frame,
+        constrained_area: Option<ratatui::layout::Rect>,
+    ) {
         // If in SessionWindow mode (and not called recursively), render session window
         if self.mode == Mode::SessionWindow && constrained_area.is_none() {
             // SessionManager will render itself and call back to render Agent UI in its bottom box
@@ -6362,7 +7220,7 @@ impl App {
                 let mut constraints_vec = vec![
                     Constraint::Length(self.title_lines.len() as u16),
                     Constraint::Length(1), // One character gap
-                    Constraint::Min(1), // Messages area (includes tips)
+                    Constraint::Min(1),    // Messages area (includes tips)
                 ];
 
                 if queue_choice_height > 0 {
@@ -6424,17 +7282,12 @@ impl App {
                 .enumerate()
                 .map(|(i, line)| {
                     let visible_chars = self.visible_chars[i];
-                    let spans: Vec<Span> = line
-                        .spans
-                        .iter()
-                        .take(visible_chars)
-                        .cloned()
-                        .collect();
+                    let spans: Vec<Span> = line.spans.iter().take(visible_chars).cloned().collect();
                     Line::from(spans)
                 })
                 .collect();
-            let title = Paragraph::new(Text::from(title_text))
-                .style(Style::default().fg(Color::White));
+            let title =
+                Paragraph::new(Text::from(title_text)).style(Style::default().fg(Color::White));
             frame.render_widget(title, areas[0]);
         }
         if self.phase == Phase::Tips && areas.len() > 2 {
@@ -6444,8 +7297,7 @@ impl App {
 
             // Render tips in areas[2]
             let tips = self.render_tips();
-            let tips_paragraph = Paragraph::new(tips)
-                .style(Style::default().fg(Color::Gray));
+            let tips_paragraph = Paragraph::new(tips).style(Style::default().fg(Color::Gray));
             frame.render_widget(tips_paragraph, areas[2]);
         }
         // Render gap between ASCII art and messages for Input phase
@@ -6511,7 +7363,8 @@ impl App {
         } else {
             None
         };
-        let background_tasks_area_idx = if self.show_background_tasks || self.viewing_task.is_some() {
+        let background_tasks_area_idx = if self.show_background_tasks || self.viewing_task.is_some()
+        {
             let i = idx;
             idx += 1;
             Some(i)
@@ -6556,7 +7409,9 @@ impl App {
         let min_areas = idx + 1; // +1 for status bar
 
         // Collect status info for status bar
-        let (mode, cursor_row, cursor_col, scroll_offset) = if self.phase == Phase::Input && areas.len() >= min_areas {
+        let (mode, cursor_row, cursor_col, scroll_offset) = if self.phase == Phase::Input
+            && areas.len() >= min_areas
+        {
             if self.mode == Mode::Normal || self.mode == Mode::SessionWindow {
                 (Mode::Normal, 0, 0, 0)
             } else {
@@ -6579,18 +7434,28 @@ impl App {
                 let message_types = self.get_message_types();
                 for (idx, message) in messages.iter().enumerate() {
                     let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
-                    message_lines.extend(self.render_message_with_max_width(message, max_width, None, is_agent).lines);
+                    message_lines.extend(
+                        self.render_message_with_max_width(message, max_width, None, is_agent)
+                            .lines,
+                    );
                 }
 
                 // Render generation stats after the last message (if available)
-                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) = self.get_generation_stats() {
+                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) =
+                    self.get_generation_stats()
+                {
                     // Only render stats if stop_reason is not "tool_calls" (tool calls render separately)
                     if stop_reason != "tool_calls" {
                         let stats_text = format!(
                             " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
                             tok_per_sec, token_count, time_to_first_token, stop_reason
                         );
-                        message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::ITALIC))));
+                        message_lines.push(Line::from(Span::styled(
+                            stats_text,
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(ratatui::style::Modifier::ITALIC),
+                        )));
                     }
                 }
 
@@ -6609,7 +7474,14 @@ impl App {
         } else {
             (Mode::Normal, 0, 0, 0)
         };
-        self.render_status_bar(frame, status_area, mode, cursor_row, cursor_col, scroll_offset);
+        self.render_status_bar(
+            frame,
+            status_area,
+            mode,
+            cursor_row,
+            cursor_col,
+            scroll_offset,
+        );
         if self.phase == Phase::Input && areas.len() >= min_areas {
             let messages_area = areas[messages_area_idx];
             let input_area = areas[input_area_idx];
@@ -6626,142 +7498,152 @@ impl App {
                 let message_types = self.get_message_types();
                 for (idx, message) in messages.iter().enumerate() {
                     let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
-                    message_lines.extend(self.render_message_with_max_width(message, max_width, None, is_agent).lines);
+                    message_lines.extend(
+                        self.render_message_with_max_width(message, max_width, None, is_agent)
+                            .lines,
+                    );
                 }
 
                 // Render generation stats after the last message (if available)
-                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) = self.get_generation_stats() {
+                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) =
+                    self.get_generation_stats()
+                {
                     // Only render stats if stop_reason is not "tool_calls" (tool calls render separately)
                     if stop_reason != "tool_calls" {
                         let stats_text = format!(
                             " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
                             tok_per_sec, token_count, time_to_first_token, stop_reason
                         );
-                        message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::ITALIC))));
+                        message_lines.push(Line::from(Span::styled(
+                            stats_text,
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(ratatui::style::Modifier::ITALIC),
+                        )));
                     }
                 }
 
                 let total_lines = message_lines.len();
                 let visible_lines = messages_area.height as usize;
                 let scroll_offset = total_lines.saturating_sub(visible_lines);
-                let messages_widget = Paragraph::new(Text::from(message_lines))
-                    .scroll((scroll_offset as u16, 0));
+                let messages_widget =
+                    Paragraph::new(Text::from(message_lines)).scroll((scroll_offset as u16, 0));
                 frame.render_widget(messages_widget, messages_area);
 
                 // Render input mode (both vim and normal use the same rendering)
                 {
                     // Render normal input mode
                     let prompt_spans: Vec<Span> = vec![
-                    Span::raw(" "),
-                    Span::styled(">", Style::default().fg(Color::Magenta)),
-                    Span::raw(" "),
-                ];
-                let prompt_width: u16 = prompt_spans.iter().map(|s| s.width() as u16).sum();
-                let indent = " ";
-                let indent_width: u16 = indent.width() as u16;
-                let max_width: u16 = input_area.width.saturating_sub(4);
-                let is_placeholder = !self.input_modified && self.input.is_empty();
-                let content_str = if is_placeholder {
-                    "Type your message or @/ to give suggestions for what tools to use."
-                } else {
-                    self.input.as_str()
-                };
-                let content_style = if is_placeholder {
-                    Style::default().fg(Color::DarkGray)
-                } else {
-                    Style::default()
-                };
-                let prompt_str = " > ";
-                let displayed_text: String = format!("{}{}", prompt_str, content_str);
-                let prompt_char_count = prompt_str.chars().count();
-                let cursor_index = if is_placeholder {
-                    prompt_char_count
-                } else {
-                    prompt_char_count + self.character_index
-                };
-                let mut row: u16 = 0;
-                let mut col: u16 = 0;
-                let mut char_idx: usize = 0;
-                let mut cursor_row: u16 = 0;
-                let mut cursor_col: u16 = 0;
-                for c in displayed_text.chars() {
-                    if char_idx == cursor_index {
+                        Span::raw(" "),
+                        Span::styled(">", Style::default().fg(Color::Magenta)),
+                        Span::raw(" "),
+                    ];
+                    let prompt_width: u16 = prompt_spans.iter().map(|s| s.width() as u16).sum();
+                    let indent = " ";
+                    let indent_width: u16 = indent.width() as u16;
+                    let max_width: u16 = input_area.width.saturating_sub(4);
+                    let is_placeholder = !self.input_modified && self.input.is_empty();
+                    let content_str = if is_placeholder {
+                        "Type your message or @/ to give suggestions for what tools to use."
+                    } else {
+                        self.input.as_str()
+                    };
+                    let content_style = if is_placeholder {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        Style::default()
+                    };
+                    let prompt_str = " > ";
+                    let displayed_text: String = format!("{}{}", prompt_str, content_str);
+                    let prompt_char_count = prompt_str.chars().count();
+                    let cursor_index = if is_placeholder {
+                        prompt_char_count
+                    } else {
+                        prompt_char_count + self.character_index
+                    };
+                    let mut row: u16 = 0;
+                    let mut col: u16 = 0;
+                    let mut char_idx: usize = 0;
+                    let mut cursor_row: u16 = 0;
+                    let mut cursor_col: u16 = 0;
+                    for c in displayed_text.chars() {
+                        if char_idx == cursor_index {
+                            cursor_row = row;
+                            cursor_col = col;
+                        }
+
+                        // Handle newlines explicitly - advance to next row
+                        if c == '\n' {
+                            row += 1;
+                            col = indent_width;
+                            char_idx += 1;
+                            continue;
+                        }
+
+                        let cw = UnicodeWidthChar::width(c).unwrap_or(1) as u16;
+                        if col + cw > max_width {
+                            row += 1;
+                            col = indent_width;
+                        }
+                        col += cw;
+                        char_idx += 1;
+                    }
+                    if char_idx == cursor_index && char_idx == displayed_text.chars().count() {
                         cursor_row = row;
                         cursor_col = col;
                     }
-
-                    // Handle newlines explicitly - advance to next row
-                    if c == '\n' {
-                        row += 1;
-                        col = indent_width;
-                        char_idx += 1;
-                        continue;
-                    }
-
-                    let cw = UnicodeWidthChar::width(c).unwrap_or(1) as u16;
-                    if col + cw > max_width {
-                        row += 1;
-                        col = indent_width;
-                    }
-                    col += cw;
-                    char_idx += 1;
-                }
-                if char_idx == cursor_index && char_idx == displayed_text.chars().count() {
-                    cursor_row = row;
-                    cursor_col = col;
-                }
-                let mut lines: Vec<Line> = vec![];
-                let mut current_line: Vec<Span> = prompt_spans.clone();
-                let mut current_width: u16 = prompt_width;
-                let mut current_buf: String = String::new();
-                for c in content_str.chars() {
-                    // Handle newlines explicitly - create actual line break
-                    if c == '\n' {
-                        if !current_buf.is_empty() {
-                            current_line.push(Span::styled(current_buf, content_style));
-                            current_buf = String::new();
+                    let mut lines: Vec<Line> = vec![];
+                    let mut current_line: Vec<Span> = prompt_spans.clone();
+                    let mut current_width: u16 = prompt_width;
+                    let mut current_buf: String = String::new();
+                    for c in content_str.chars() {
+                        // Handle newlines explicitly - create actual line break
+                        if c == '\n' {
+                            if !current_buf.is_empty() {
+                                current_line.push(Span::styled(current_buf, content_style));
+                                current_buf = String::new();
+                            }
+                            lines.push(Line::from(current_line));
+                            current_line = vec![Span::raw(indent)];
+                            current_width = indent_width;
+                            continue;
                         }
-                        lines.push(Line::from(current_line));
-                        current_line = vec![Span::raw(indent)];
-                        current_width = indent_width;
-                        continue;
-                    }
 
-                    let cw = UnicodeWidthChar::width(c).unwrap_or(1) as u16;
-                    let would_overflow = current_width + cw > max_width;
-                    if would_overflow {
-                        if !current_buf.is_empty() {
-                            current_line.push(Span::styled(current_buf, content_style));
-                            current_buf = String::new();
+                        let cw = UnicodeWidthChar::width(c).unwrap_or(1) as u16;
+                        let would_overflow = current_width + cw > max_width;
+                        if would_overflow {
+                            if !current_buf.is_empty() {
+                                current_line.push(Span::styled(current_buf, content_style));
+                                current_buf = String::new();
+                            }
+                            lines.push(Line::from(current_line));
+                            current_line = vec![Span::raw(indent)];
+                            current_width = indent_width;
                         }
-                        lines.push(Line::from(current_line));
-                        current_line = vec![Span::raw(indent)];
-                        current_width = indent_width;
+                        current_buf.push(c);
+                        current_width += cw;
                     }
-                    current_buf.push(c);
-                    current_width += cw;
-                }
-                if !current_buf.is_empty() {
-                    current_line.push(Span::styled(current_buf, content_style));
-                }
-                if !current_line.is_empty() {
-                    lines.push(Line::from(current_line));
-                }
-                let total_lines = lines.len() as u16;
-                let max_content_height = 4u16;
-                let scroll_y = if total_lines > max_content_height {
-                    cursor_row.saturating_sub(max_content_height - 1)
-                } else {
-                    0
-                };
-                let input = Paragraph::new(Text::from(lines))
-                    .scroll((scroll_y, 0))
-                    .block(
-                        Block::bordered()
-                            .border_type(BorderType::Rounded)
-                            .border_style(Style::default().fg(self.get_mode_border_color())),
-                    );
-                frame.render_widget(input, input_area);
+                    if !current_buf.is_empty() {
+                        current_line.push(Span::styled(current_buf, content_style));
+                    }
+                    if !current_line.is_empty() {
+                        lines.push(Line::from(current_line));
+                    }
+                    let total_lines = lines.len() as u16;
+                    let max_content_height = 4u16;
+                    let scroll_y = if total_lines > max_content_height {
+                        cursor_row.saturating_sub(max_content_height - 1)
+                    } else {
+                        0
+                    };
+                    let input = Paragraph::new(Text::from(lines))
+                        .scroll((scroll_y, 0))
+                        .block(
+                            Block::bordered()
+                                .border_type(BorderType::Rounded)
+                                .border_style(Style::default().fg(self.get_mode_border_color())),
+                        );
+                    frame.render_widget(input, input_area);
 
                     // Always show cursor in input area (Normal mode)
                     let visible_cursor_row = cursor_row.saturating_sub(scroll_y);
@@ -6773,7 +7655,9 @@ impl App {
             } else {
                 // Update the viewport size for Ctrl+d/Ctrl+u to work properly
                 // Use at least 10 rows to ensure half-page scrolling works
-                self.editor.state.set_viewport_rows((messages_area.height as usize).max(10));
+                self.editor
+                    .state
+                    .set_viewport_rows((messages_area.height as usize).max(10));
 
                 // Use terminal width minus 4 for wrapping to match visual display
                 // Account for: 1 space margin + bullet + space
@@ -6790,7 +7674,9 @@ impl App {
                 // rich_editor will handle expanding placeholders to match visual rendering
                 let mut messages_with_stats = messages.to_vec();
                 let mut message_types_with_stats = message_types.clone();
-                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) = self.get_generation_stats() {
+                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) =
+                    self.get_generation_stats()
+                {
                     // Only add stats if stop_reason is not "tool_calls" (tool calls render separately)
                     if stop_reason != "tool_calls" {
                         let stats_text = format!(
@@ -6804,15 +7690,31 @@ impl App {
 
                 // Create editor content with context for expanding thinking animation
                 let thinking_context = ThinkingContext {
-                    snowflake_frame: self.thinking_snowflake_frames[self.get_thinking_loader_frame()],
+                    snowflake_frame: self.thinking_snowflake_frames
+                        [self.get_thinking_loader_frame()],
                     current_summary: self.get_thinking_current_summary().clone(),
                     current_word: self.get_thinking_current_word().to_string(),
                     elapsed_secs: self.get_thinking_elapsed_secs(),
                     token_count: self.get_thinking_token_count(),
                 };
 
-                let rich_content = create_rich_content_from_messages(&messages_with_stats, &message_types_with_stats, TIPS, self.visible_tips, MESSAGE_BORDER_SET, wrap_width, &thinking_context);
-                let plain_content = rich_editor::create_plain_content_for_editor(&messages_with_stats, &message_types_with_stats, TIPS, self.visible_tips, wrap_width, &thinking_context);
+                let rich_content = create_rich_content_from_messages(
+                    &messages_with_stats,
+                    &message_types_with_stats,
+                    TIPS,
+                    self.visible_tips,
+                    MESSAGE_BORDER_SET,
+                    wrap_width,
+                    &thinking_context,
+                );
+                let plain_content = rich_editor::create_plain_content_for_editor(
+                    &messages_with_stats,
+                    &message_types_with_stats,
+                    TIPS,
+                    self.visible_tips,
+                    wrap_width,
+                    &thinking_context,
+                );
 
                 // Preserve ALL state before regenerating content (this fixes search, clipboard, text objects, etc.)
                 let old_cursor_row = self.editor.state.cursor.row;
@@ -6839,8 +7741,14 @@ impl App {
                     // Restore ALL state (cursor, mode, selection, search, view, clipboard, undo/redo) - clamped to valid range
                     let max_row = self.editor.state.lines.len().saturating_sub(1);
                     self.editor.state.cursor.row = old_cursor_row.min(max_row);
-                    if let Some(line_len) = self.editor.state.lines.len_col(self.editor.state.cursor.row) {
-                        self.editor.state.cursor.col = old_cursor_col.min(line_len.saturating_sub(1).max(0));
+                    if let Some(line_len) = self
+                        .editor
+                        .state
+                        .lines
+                        .len_col(self.editor.state.cursor.row)
+                    {
+                        self.editor.state.cursor.col =
+                            old_cursor_col.min(line_len.saturating_sub(1).max(0));
                     }
                     self.editor.state.set_desired_col(old_desired_col);
                     self.editor.state.mode = old_mode;
@@ -6869,18 +7777,28 @@ impl App {
                 let messages = self.get_messages();
                 for (idx, message) in messages.iter().enumerate() {
                     let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
-                    message_lines.extend(self.render_message_with_max_width(message, wrap_width, None, is_agent).lines);
+                    message_lines.extend(
+                        self.render_message_with_max_width(message, wrap_width, None, is_agent)
+                            .lines,
+                    );
                 }
 
                 // Render generation stats after the last message (if available)
-                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) = self.get_generation_stats() {
+                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) =
+                    self.get_generation_stats()
+                {
                     // Only render stats if stop_reason is not "tool_calls" (tool calls render separately)
                     if stop_reason != "tool_calls" {
                         let stats_text = format!(
                             " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
                             tok_per_sec, token_count, time_to_first_token, stop_reason
                         );
-                        message_lines.push(Line::from(Span::styled(stats_text, Style::default().fg(Color::DarkGray).add_modifier(ratatui::style::Modifier::ITALIC))));
+                        message_lines.push(Line::from(Span::styled(
+                            stats_text,
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(ratatui::style::Modifier::ITALIC),
+                        )));
                     }
                 }
 
@@ -6895,7 +7813,9 @@ impl App {
                     0
                 } else {
                     // First time entering or cursor way out of view - calculate proper scroll
-                    if cursor_row >= current_scroll + visible_lines || current_scroll == 0 && cursor_row > visible_lines {
+                    if cursor_row >= current_scroll + visible_lines
+                        || current_scroll == 0 && cursor_row > visible_lines
+                    {
                         // Show last page: scroll so cursor is at bottom
                         total_lines.saturating_sub(visible_lines)
                     }
@@ -6916,18 +7836,23 @@ impl App {
                     let pattern_len = self.editor.state.search_pattern_len();
                     let selected_match_index = self.editor.state.search_selected_index();
                     let cursor_pos = self.editor.state.cursor;
-                    for (match_idx, &match_pos) in self.editor.state.search_matches().iter().enumerate() {
+                    for (match_idx, &match_pos) in
+                        self.editor.state.search_matches().iter().enumerate()
+                    {
                         let row = match_pos.row;
                         let col = match_pos.col;
                         // Only render if visible in viewport
-                        if row >= scroll_offset && row < scroll_offset + visible_lines && row < message_lines.len() {
+                        if row >= scroll_offset
+                            && row < scroll_offset + visible_lines
+                            && row < message_lines.len()
+                        {
                             let visible_row = row - scroll_offset;
                             let y = messages_area.y + visible_row as u16;
                             let line = &message_lines[row];
                             // Determine if cursor is within this match
-                            let cursor_in_match = cursor_pos.row == row &&
-                                                  cursor_pos.col >= col &&
-                                                  cursor_pos.col < col + pattern_len;
+                            let cursor_in_match = cursor_pos.row == row
+                                && cursor_pos.col >= col
+                                && cursor_pos.col < col + pattern_len;
                             // Only highlight match under cursor as Magenta, all others as Cyan
                             let highlight_color = if cursor_in_match {
                                 Color::Magenta // Match under cursor
@@ -6940,10 +7865,17 @@ impl App {
                             for span in &line.spans {
                                 let span_chars: Vec<char> = span.content.chars().collect();
                                 for _ch in span_chars.iter() {
-                                    if char_idx >= col && char_idx < col + pattern_len && x < messages_area.right() {
+                                    if char_idx >= col
+                                        && char_idx < col + pattern_len
+                                        && x < messages_area.right()
+                                    {
                                         let cell = frame.buffer_mut().cell_mut((x, y));
                                         if let Some(cell) = cell {
-                                            cell.set_style(Style::default().bg(highlight_color).fg(Color::Black));
+                                            cell.set_style(
+                                                Style::default()
+                                                    .bg(highlight_color)
+                                                    .fg(Color::Black),
+                                            );
                                         }
                                     }
                                     x += 1;
@@ -6959,15 +7891,19 @@ impl App {
                         let is_line_mode = selection.line_mode;
                         let sel_start = selection.start();
                         let sel_end = selection.end();
-                        let (start, end) = if sel_start.row < sel_end.row ||
-                                               (sel_start.row == sel_end.row && sel_start.col <= sel_end.col) {
+                        let (start, end) = if sel_start.row < sel_end.row
+                            || (sel_start.row == sel_end.row && sel_start.col <= sel_end.col)
+                        {
                             (sel_start, sel_end)
                         } else {
                             (sel_end, sel_start)
                         };
                         // Highlight selected lines
                         for row in start.row..=end.row {
-                            if row >= scroll_offset && row < scroll_offset + visible_lines && row < message_lines.len() {
+                            if row >= scroll_offset
+                                && row < scroll_offset + visible_lines
+                                && row < message_lines.len()
+                            {
                                 let visible_row = row - scroll_offset;
                                 let y = messages_area.y + visible_row as u16;
                                 let line = &message_lines[row];
@@ -6989,22 +7925,31 @@ impl App {
                                 let mut x = messages_area.x;
                                 let mut char_idx = 0;
                                 // Check if line is empty
-                                let line_is_empty = line.spans.is_empty() ||
-                                                   line.spans.iter().all(|s| s.content.is_empty());
+                                let line_is_empty = line.spans.is_empty()
+                                    || line.spans.iter().all(|s| s.content.is_empty());
                                 if line_is_empty && start_col == 0 {
                                     // For empty lines, render one character width selection
                                     let cell = frame.buffer_mut().cell_mut((x, y));
                                     if let Some(cell) = cell {
-                                        cell.set_style(Style::default().bg(Color::Yellow).fg(Color::Black));
+                                        cell.set_style(
+                                            Style::default().bg(Color::Yellow).fg(Color::Black),
+                                        );
                                     }
                                 } else {
                                     for span in &line.spans {
                                         let span_chars: Vec<char> = span.content.chars().collect();
                                         for (_i, _ch) in span_chars.iter().enumerate() {
-                                            if char_idx >= start_col && char_idx <= end_col && x < messages_area.right() {
+                                            if char_idx >= start_col
+                                                && char_idx <= end_col
+                                                && x < messages_area.right()
+                                            {
                                                 let cell = frame.buffer_mut().cell_mut((x, y));
                                                 if let Some(cell) = cell {
-                                                    cell.set_style(Style::default().bg(Color::Yellow).fg(Color::Black));
+                                                    cell.set_style(
+                                                        Style::default()
+                                                            .bg(Color::Yellow)
+                                                            .fg(Color::Black),
+                                                    );
                                                 }
                                             }
                                             x += 1;
@@ -7024,8 +7969,9 @@ impl App {
                         let sel_end = flash_selection.end;
                         let is_line_mode = flash_selection.line_mode;
 
-                        let (start, end) = if sel_start.row < sel_end.row ||
-                                               (sel_start.row == sel_end.row && sel_start.col <= sel_end.col) {
+                        let (start, end) = if sel_start.row < sel_end.row
+                            || (sel_start.row == sel_end.row && sel_start.col <= sel_end.col)
+                        {
                             (sel_start, sel_end)
                         } else {
                             (sel_end, sel_start)
@@ -7033,7 +7979,10 @@ impl App {
 
                         // Highlight flashed lines with cyan
                         for row in start.row..=end.row {
-                            if row >= scroll_offset && row < scroll_offset + visible_lines && row < message_lines.len() {
+                            if row >= scroll_offset
+                                && row < scroll_offset + visible_lines
+                                && row < message_lines.len()
+                            {
                                 let visible_row = row - scroll_offset;
                                 let y = messages_area.y + visible_row as u16;
                                 let line = &message_lines[row];
@@ -7054,21 +8003,30 @@ impl App {
                                 let mut x = messages_area.x;
                                 let mut char_idx = 0;
 
-                                let line_is_empty = line.spans.is_empty() ||
-                                                   line.spans.iter().all(|s| s.content.is_empty());
+                                let line_is_empty = line.spans.is_empty()
+                                    || line.spans.iter().all(|s| s.content.is_empty());
                                 if line_is_empty && start_col == 0 {
                                     let cell = frame.buffer_mut().cell_mut((x, y));
                                     if let Some(cell) = cell {
-                                        cell.set_style(Style::default().bg(Color::Cyan).fg(Color::Black));
+                                        cell.set_style(
+                                            Style::default().bg(Color::Cyan).fg(Color::Black),
+                                        );
                                     }
                                 } else {
                                     for span in &line.spans {
                                         let span_chars: Vec<char> = span.content.chars().collect();
                                         for _ch in span_chars.iter() {
-                                            if char_idx >= start_col && char_idx <= end_col && x < messages_area.right() {
+                                            if char_idx >= start_col
+                                                && char_idx <= end_col
+                                                && x < messages_area.right()
+                                            {
                                                 let cell = frame.buffer_mut().cell_mut((x, y));
                                                 if let Some(cell) = cell {
-                                                    cell.set_style(Style::default().bg(Color::Cyan).fg(Color::Black));
+                                                    cell.set_style(
+                                                        Style::default()
+                                                            .bg(Color::Cyan)
+                                                            .fg(Color::Black),
+                                                    );
                                                 }
                                             }
                                             x += 1;
@@ -7082,8 +8040,12 @@ impl App {
                 }
                 // Render cursor if it's visible in the viewport
                 // In Navigation mode, always show cursor (frozen state), otherwise only show if not thinking
-                let should_show_cursor = self.nav_snapshot.is_some() || (!self.agent_processing && !self.is_thinking);
-                if should_show_cursor && cursor_row >= scroll_offset && cursor_row < scroll_offset + visible_lines {
+                let should_show_cursor =
+                    self.nav_snapshot.is_some() || (!self.agent_processing && !self.is_thinking);
+                if should_show_cursor
+                    && cursor_row >= scroll_offset
+                    && cursor_row < scroll_offset + visible_lines
+                {
                     let visible_row = cursor_row - scroll_offset;
                     let cursor_y = messages_area.y + visible_row as u16;
                     // Calculate cursor x position based on the line content
@@ -7092,8 +8054,8 @@ impl App {
                         let mut x_pos = 0;
                         let mut char_count = 0;
                         // Check if line is empty
-                        let line_is_empty = line.spans.is_empty() ||
-                                           line.spans.iter().all(|s| s.content.is_empty());
+                        let line_is_empty = line.spans.is_empty()
+                            || line.spans.iter().all(|s| s.content.is_empty());
                         if line_is_empty && cursor_col == 0 {
                             // For empty lines at column 0, render cursor at the start
                             x_pos = 0;
@@ -7104,7 +8066,8 @@ impl App {
                                 if char_count + span_chars.len() > cursor_col {
                                     // Cursor is in this span
                                     let chars_into_span = cursor_col - char_count;
-                                    let text_before_cursor: String = span_chars.iter().take(chars_into_span).collect();
+                                    let text_before_cursor: String =
+                                        span_chars.iter().take(chars_into_span).collect();
                                     x_pos += text_before_cursor.width();
                                     break;
                                 } else {
@@ -7127,12 +8090,11 @@ impl App {
                 self.nav_scroll_offset = scroll_offset;
                 // Render mode widget
                 let mode_content = self.get_mode_content();
-                let mode_widget = Paragraph::new(mode_content)
-                    .block(
-                        Block::bordered()
-                            .border_type(BorderType::Rounded)
-                            .border_style(Style::default().fg(self.get_mode_border_color())),
-                    );
+                let mode_widget = Paragraph::new(mode_content).block(
+                    Block::bordered()
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(self.get_mode_border_color())),
+                );
                 frame.render_widget(mode_widget, input_area);
             }
 
@@ -7141,14 +8103,16 @@ impl App {
 
             // Check if we have active search results (in either Navigation or Search mode)
             if (self.mode == Mode::Navigation || self.mode == Mode::Search)
-                && !self.editor.state.search_matches().is_empty() {
+                && !self.editor.state.search_matches().is_empty()
+            {
                 let num_results = self.editor.state.search_matches().len();
                 let current_match_idx = self.editor.state.search_selected_index();
                 let cursor_pos = self.editor.state.cursor;
                 let current_line = cursor_pos.row + 1; // Convert to 1-indexed
                 let total_lines = self.editor.state.lines.len();
 
-                let search_info = format!("{} results [{}/{}]", num_results, current_line, total_lines);
+                let search_info =
+                    format!("{} results [{}/{}]", num_results, current_line, total_lines);
                 let total_width = search_info.len() as u16;
                 let start_x = input_area.x + input_area.width.saturating_sub(total_width + 1);
 
@@ -7250,7 +8214,10 @@ impl App {
                 let infobar_text = if !self.queued_messages.is_empty() {
                     let count = self.queued_messages.len();
                     let plural = if count == 1 { "message" } else { "messages" };
-                    format!("{} {} in queue • ↑ to edit • Ctrl+C to cancel", count, plural)
+                    format!(
+                        "{} {} in queue • ↑ to edit • Ctrl+C to cancel",
+                        count, plural
+                    )
                 } else if self.ctrl_c_pressed.is_some() {
                     "Press Ctrl+C again to quit".to_string()
                 } else {
@@ -7258,7 +8225,7 @@ impl App {
                 };
                 let infobar_widget = Paragraph::new(Line::from(Span::styled(
                     infobar_text,
-                    Style::default().fg(Color::Rgb(172, 172, 212))
+                    Style::default().fg(Color::Rgb(172, 172, 212)),
                 )));
                 frame.render_widget(infobar_widget, infobar_area);
             }

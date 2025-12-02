@@ -1,0 +1,29 @@
+[package]
+name = "mistralrs-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+axum.workspace = true
+tokio.workspace = true
+mistralrs-server-api = { path = "../crates/mistralrs-server-api" }
+mistralrs-server-core = { path = "../crates/mistralrs-server-core" }
+mistralrs-server-config = { path = "../crates/mistralrs-server-config" }
+mistralrs-server-scheduler = { path = "../crates/mistralrs-server-scheduler" }
+color-eyre.workspace = true
+
+[features]
+default = []
+mock-manager = ["mistralrs-server-core/mock-manager", "mistralrs-server-api/mock-manager"]
+gpu = ["mistralrs-server-core/gpu"]
+cuda = ["mistralrs-server-core/cuda"]
+metal = ["mistralrs-server-core/metal"]
+flash-attn = ["mistralrs-server-core/flash-attn"]
+accelerate = ["mistralrs-server-core/accelerate"]
+mkl = ["mistralrs-server-core/mkl"]
+nccl = ["mistralrs-server-core/nccl"]
