@@ -6,10 +6,10 @@ use tokio::{net::TcpListener, runtime::Builder, signal, sync::RwLock};
 use tracing::info;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use mistralrs_server_api::{build_router, AppState, AuthState, HttpMetrics, ManagerFactory};
+use mistralrs_server_api::{build_router, AppState, AuthState, HttpMetrics, ManagerFactory, SchedulerFactory};
 use mistralrs_server_config::{load_from_path, ConfigManager, ConfigSource, ServerConfig};
 use mistralrs_server_core::{
-    DynModelManager, LoadModelRequest, MistralModelManager, ModelScheduler, RuntimeAdapters,
+    DynModelManager, LoadModelRequest, MistralModelManager, RuntimeAdapters,
 };
 use mistralrs_server_scheduler::LruScheduler;
 
@@ -58,7 +58,12 @@ async fn run(args: Args) -> Result<()> {
     init_tracing(&config.logging.level);
 
     let metrics = HttpMetrics::new()?;
-    let scheduler = Arc::new(LruScheduler::new(config.scheduler.max_loaded_models));
+    
+    let scheduler_factory: SchedulerFactory = Arc::new(|config| {
+        Arc::new(LruScheduler::new(config.scheduler.max_loaded_models))
+    });
+    
+    let scheduler = (scheduler_factory)(&config);
     scheduler.register_metrics(metrics.registry())?;
 
     let factory = create_factory(args.mock_manager);
@@ -69,8 +74,9 @@ async fn run(args: Args) -> Result<()> {
     let state = AppState {
         manager: Arc::new(RwLock::new(manager)),
         factory,
+        scheduler_factory,
         config: config_manager.clone(),
-        scheduler: scheduler.clone(),
+        scheduler: Arc::new(RwLock::new(scheduler)),
         model_metrics: metrics.model_metrics(),
         metrics: metrics.clone(),
         auth: auth_state,

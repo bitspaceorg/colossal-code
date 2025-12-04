@@ -47,6 +47,34 @@ pub struct OpenAIMessage {
 }
 
 #[derive(Serialize)]
+pub struct OpenAIChatCompletionChunk {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<OpenAIChatChunkChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+}
+
+#[derive(Serialize)]
+pub struct OpenAIChatChunkChoice {
+    pub index: usize,
+    pub delta: OpenAIChatChunkDelta,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct OpenAIChatChunkDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Serialize)]
 pub struct OpenAICompletionResponse {
     pub id: String,
     pub object: String,
@@ -62,6 +90,25 @@ pub struct OpenAICompletionChoice {
     pub index: usize,
     pub logprobs: Option<serde_json::Value>,
     pub finish_reason: String,
+}
+
+#[derive(Serialize)]
+pub struct OpenAICompletionChunk {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<OpenAICompletionChunkChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+}
+
+#[derive(Serialize)]
+pub struct OpenAICompletionChunkChoice {
+    pub text: String,
+    pub index: usize,
+    pub logprobs: Option<serde_json::Value>,
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -124,13 +171,32 @@ pub async fn handle_chat_completions(
         let stream_response = stream.map(move |result| {
             match result {
                 Ok(EngineResponse::Chunk(chunk)) => {
-                    match serde_json::to_string(&chunk) {
+                     let response = OpenAIChatCompletionChunk {
+                        id: chunk.id,
+                        object: "chat.completion.chunk".to_string(),
+                        created: chunk.created as u64,
+                        model: chunk.model,
+                        choices: chunk.choices.into_iter().map(|c| OpenAIChatChunkChoice {
+                            index: c.index,
+                            delta: OpenAIChatChunkDelta {
+                                role: Some(c.delta.role),
+                                content: c.delta.content,
+                                tool_calls: c.delta.tool_calls.map(|tc| vec![serde_json::to_value(tc).unwrap()]),
+                            },
+                            finish_reason: c.finish_reason,
+                        }).collect(),
+                        usage: None,
+                    };
+                    match serde_json::to_string(&response) {
                         Ok(json) => Ok::<Event, Infallible>(Event::default().data(json)),
-                        Err(_) => Ok::<Event, Infallible>(Event::default().event("error").data("serialization_error")),
+                        Err(_) => Ok::<Event, Infallible>(Event::default().data("{\"error\":\"serialization_error\"}")),
                     }
                 }
-                Ok(EngineResponse::Done(_)) => {
-                    Ok::<Event, Infallible>(Event::default().data("[DONE]"))
+                Ok(EngineResponse::Done(_done)) => {
+                     // Optional: emit usage in a final chunk if compatible clients expect it
+                     // For now, we just emit DONE to signal end of stream.
+                     // Some specs say we can send a chunk with usage and no choices before DONE.
+                     Ok::<Event, Infallible>(Event::default().data("[DONE]"))
                 }
                 Ok(EngineResponse::ModelError(msg, _)) => {
                      let err = json!({
@@ -155,7 +221,7 @@ pub async fn handle_chat_completions(
                     Ok::<Event, Infallible>(Event::default().data(err.to_string()))
                 }
                 Ok(_) => Ok::<Event, Infallible>(Event::default()),
-                Err(_) => Ok::<Event, Infallible>(Event::default().event("error").data("stream_error")),
+                Err(_) => Ok::<Event, Infallible>(Event::default().data("{\"error\":\"stream_error\"}")),
             }
         });
 
@@ -229,9 +295,22 @@ pub async fn handle_completions(
         let stream_response = stream.map(move |result| {
             match result {
                 Ok(EngineResponse::CompletionChunk(chunk)) => {
-                    match serde_json::to_string(&chunk) {
+                    let response = OpenAICompletionChunk {
+                        id: chunk.id,
+                        object: "text_completion".to_string(),
+                        created: chunk.created as u64,
+                        model: chunk.model,
+                        choices: chunk.choices.into_iter().map(|c| OpenAICompletionChunkChoice {
+                            text: c.text,
+                            index: c.index,
+                            logprobs: c.logprobs.map(|l| serde_json::to_value(l).unwrap()),
+                            finish_reason: c.finish_reason,
+                        }).collect(),
+                        usage: None,
+                    };
+                    match serde_json::to_string(&response) {
                         Ok(json) => Ok::<Event, Infallible>(Event::default().data(json)),
-                        Err(_) => Ok::<Event, Infallible>(Event::default().event("error").data("serialization_error")),
+                        Err(_) => Ok::<Event, Infallible>(Event::default().data("{\"error\":\"serialization_error\"}")),
                     }
                 }
                 Ok(EngineResponse::CompletionDone(_)) => {
@@ -249,7 +328,7 @@ pub async fn handle_completions(
                     Ok::<Event, Infallible>(Event::default().data(err.to_string()))
                 }
                  Ok(_) => Ok::<Event, Infallible>(Event::default()),
-                 Err(_) => Ok::<Event, Infallible>(Event::default().event("error").data("stream_error")),
+                 Err(_) => Ok::<Event, Infallible>(Event::default().data("{\"error\":\"stream_error\"}")),
             }
         });
         record_success(&state, endpoint, "POST", StatusCode::OK);

@@ -16,4 +16,5 @@ tokio.workspace = true
 num_cpus.workspace = true
 humantime-serde.workspace = true
 mistralrs-core.workspace = true
+home = "0.5"
 upstream-mistralrs-server-core = { package = "mistralrs-server-core", path = "../../../../external/mistral.rs/mistralrs-server-core" }

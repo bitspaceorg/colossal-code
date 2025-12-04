@@ -46,13 +46,15 @@ pub type ManagerFactory = Arc<
         + Send
         + Sync,
 >;
+pub type SchedulerFactory = Arc<dyn Fn(&ServerConfig) -> Arc<dyn ModelScheduler> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct AppState {
     pub manager: Arc<RwLock<DynModelManager>>,
     pub factory: ManagerFactory,
+    pub scheduler_factory: SchedulerFactory,
     pub config: ConfigManager,
-    pub scheduler: Arc<dyn ModelScheduler>,
+    pub scheduler: Arc<RwLock<Arc<dyn ModelScheduler>>>,
     pub model_metrics: Arc<ModelMetrics>,
     pub metrics: HttpMetrics,
     pub auth: AuthState,
@@ -193,6 +195,11 @@ impl From<ModelManagerError> for ApiError {
             ModelManagerError::Scheduler(msg) => {
                 ApiError::new(StatusCode::BAD_REQUEST, "scheduler", msg)
             }
+            ModelManagerError::ServiceUnavailable => ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service_unavailable",
+                "global request limit reached",
+            ),
             ModelManagerError::Other(msg) => {
                 ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "error", msg)
             }
@@ -830,13 +837,27 @@ async fn handle_embeddings(
     Ok(envelope(Some(resp), request_id))
 }
 
+#[derive(Debug, Deserialize)]
+struct PaginationQuery {
+    #[serde(default)]
+    page: usize,
+    #[serde(default = "default_page_size")]
+    page_size: usize,
+}
+
+fn default_page_size() -> usize {
+    100
+}
+
 async fn handle_tags(
     State(state): State<AppState>,
+    Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<ModelRecord>>>, ApiError> {
     let endpoint = "tags";
     let manager = state.manager.read().await.clone();
+    let offset = pagination.page * pagination.page_size;
     let resp = manager
-        .list_models()
+        .list_models(pagination.page_size, offset)
         .await
         .map_err(|err| map_manager_error(&state, endpoint, "GET", err))?;
     let request_id = Uuid::new_v4().to_string();
@@ -851,7 +872,7 @@ async fn handle_show(
     let endpoint = "show";
     let manager = state.manager.read().await.clone();
     let models = manager
-        .list_models()
+        .list_models(usize::MAX, 0)
         .await
         .map_err(|err| map_manager_error(&state, endpoint, "GET", err))?;
     let metadata = match models
@@ -1006,7 +1027,7 @@ async fn handle_health(
     let endpoint = "healthz";
     let manager = state.manager.read().await.clone();
     let models = manager
-        .list_models()
+        .list_models(usize::MAX, 0)
         .await
         .map_err(|err| map_manager_error(&state, endpoint, "GET", err))?;
     let status = json!({
@@ -1049,7 +1070,9 @@ async fn handle_reload_config(
         api_error
     })?;
 
-    let new_manager = (state.factory)(&new_config, state.scheduler.clone(), &state.metrics)
+    let new_scheduler = (state.scheduler_factory)(&new_config);
+    
+    let new_manager = (state.factory)(&new_config, new_scheduler.clone(), &state.metrics)
         .await
         .map_err(|err| {
             let api_error =
@@ -1060,6 +1083,7 @@ async fn handle_reload_config(
             api_error
         })?;
 
+    *state.scheduler.write().await = new_scheduler;
     *state.manager.write().await = new_manager;
 
     record_success(&state, endpoint, "POST", StatusCode::ACCEPTED);
@@ -1079,7 +1103,7 @@ async fn handle_admin_evict(
     let candidates = if let Some(models) = payload.models {
         models
     } else {
-        state.scheduler.advise_evict().await
+        state.scheduler.read().await.advise_evict().await
     };
 
     let mut unloaded = Vec::new();
@@ -1121,6 +1145,7 @@ mod tests {
             .unwrap();
         let cfg_snapshot = config.get().await;
         let metrics = HttpMetrics::new().unwrap();
+        let scheduler_factory: SchedulerFactory = Arc::new(|_| Arc::new(NoopScheduler));
         let state = AppState {
             manager: Arc::new(RwLock::new(manager)),
             factory: Arc::new(|_, _, _| {
@@ -1135,8 +1160,9 @@ mod tests {
                 ));
                 Box::pin(async move { Ok(manager) })
             }),
+            scheduler_factory,
             config,
-            scheduler: Arc::new(NoopScheduler),
+            scheduler: Arc::new(RwLock::new(Arc::new(NoopScheduler))),
             model_metrics: metrics.model_metrics(),
             metrics,
             auth: AuthState::from_section(&cfg_snapshot.auth),
@@ -1191,11 +1217,13 @@ mod tests {
             Box::pin(fut)
         });
 
+        let scheduler_factory: SchedulerFactory = Arc::new(|_| Arc::new(NoopScheduler));
         let state = AppState {
             manager: Arc::new(RwLock::new(initial_manager)),
             factory,
+            scheduler_factory,
             config,
-            scheduler: Arc::new(NoopScheduler),
+            scheduler: Arc::new(RwLock::new(Arc::new(NoopScheduler))),
             model_metrics: metrics.model_metrics(),
             metrics,
             auth: AuthState::from_section(&cfg_snapshot.auth),

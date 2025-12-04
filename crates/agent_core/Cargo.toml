@@ -23,7 +23,9 @@ globset = "0.4.16"
 chrono = "0.4.41"
 regex = "1.11.2"
 strum_macros = "0.27.2"
-reqwest = { version = "0.12.23", features = ["blocking", "json"] }
+reqwest = { version = "0.12.23", features = ["blocking", "json", "stream"] }
+eventsource-stream = "0.2"
+futures-util = "0.3"
 strum = { version = "0.27.2", features = ["derive"] }
 sessionizer = { path = "../sessionizer" }
 shlex = "1.1"

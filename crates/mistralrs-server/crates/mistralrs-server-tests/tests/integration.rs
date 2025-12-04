@@ -28,6 +28,7 @@ async fn build_app(config: ServerConfig) -> Router {
             keep_alive_default: std::time::Duration::from_secs(5),
             max_loaded_models: 2,
             max_parallel_requests_per_model: 2,
+            max_total_concurrent_requests: 100,
         },
         Arc::new(NoopScheduler),
         SystemClock,

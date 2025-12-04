@@ -61,6 +61,9 @@ pub struct SchedulerSection {
     /// Eviction strategy identifier (`lru`). Environment: `MISTRALRS__SCHEDULER__EVICTION_STRATEGY`.
     #[serde(default = "default_eviction_strategy")]
     pub eviction_strategy: String,
+    /// Absolute path to the base directory for model files. Defaults to `$HOME/.config/nite/models`. Environment: `MISTRALRS__SCHEDULER__MODEL_BASE_DIR`.
+    #[serde(default = "default_model_base_dir")]
+    pub model_base_dir: Option<PathBuf>,
     /// Absolute GPU memory to reserve for paged attention. Environment: `MISTRALRS__SCHEDULER__PAGED_ATTN_GPU_MEM`.
     #[serde(default)]
     pub paged_attn_gpu_mem: Option<usize>,
@@ -317,6 +320,7 @@ impl Default for SchedulerSection {
             search_bert_model: None,
             mcp_client: None,
             token_source: None,
+            model_base_dir: default_model_base_dir(),
         }
     }
 }
@@ -378,6 +382,10 @@ fn default_log_level() -> String {
 
 fn default_log_format() -> String {
     "json".to_string()
+}
+
+fn default_model_base_dir() -> Option<PathBuf> {
+    home::home_dir().map(|path| path.join(".config").join("nite").join("models"))
 }
 
 /// Async configuration handle that supports reloads and environment overrides.
@@ -674,6 +682,7 @@ pub struct MistralBuilderConfig {
     pub mcp_client: Option<String>,
     pub default_model_id: String,
     pub models: Vec<ModelBuilderParams>,
+    pub model_base_dir: Option<PathBuf>,
 }
 
 /// Derived configuration for a single model builder invocation.
@@ -709,6 +718,7 @@ pub struct ModelBuilderParams {
     pub context_length: Option<usize>,
     pub gpu_ids: Option<Vec<i32>>,
     pub max_parallel_requests: Option<usize>,
+    pub model_base_dir: Option<PathBuf>,
 }
 
 impl ModelBuilderParams {
@@ -736,30 +746,37 @@ impl ModelBuilderParams {
     fn build_model_selected(&self) -> Result<ModelSelected> {
         match parse_model_source(&self.source)? {
             ModelSource::Toml(path) => Ok(ModelSelected::Toml { file: path }),
-            ModelSource::Run(model_id) => Ok(ModelSelected::Run {
-                model_id,
-                tokenizer_json: self.tokenizer_json.clone(),
-                dtype: parse_dtype(self.dtype.as_deref())?,
-                topology: None,
-                organization: None,
-                write_uqff: None,
-                from_uqff: None,
-                imatrix: None,
-                calibration_file: None,
-                max_edge: None,
-                max_seq_len: self
-                    .context_length
-                    .unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN),
-                max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
-                max_num_images: None,
-                max_image_length: None,
-                hf_cache_path: self.hf_cache_path.as_ref().map(|value| PathBuf::from(value)),
-                matformer_config_path: self
-                    .matformer_config_path
-                    .as_ref()
-                    .map(|value| PathBuf::from(value)),
-                matformer_slice_name: self.matformer_slice_name.clone(),
-            }),
+            ModelSource::Run(model_id) => {
+                let hf_cache = self.hf_cache_path.clone().or_else(|| {
+                    self.model_base_dir
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned())
+                });
+                Ok(ModelSelected::Run {
+                    model_id,
+                    tokenizer_json: self.tokenizer_json.clone(),
+                    dtype: parse_dtype(self.dtype.as_deref())?,
+                    topology: None,
+                    organization: None,
+                    write_uqff: None,
+                    from_uqff: None,
+                    imatrix: None,
+                    calibration_file: None,
+                    max_edge: None,
+                    max_seq_len: self
+                        .context_length
+                        .unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN),
+                    max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
+                    max_num_images: None,
+                    max_image_length: None,
+                    hf_cache_path: hf_cache.map(|value| PathBuf::from(value)),
+                    matformer_config_path: self
+                        .matformer_config_path
+                        .as_ref()
+                        .map(|value| PathBuf::from(value)),
+                    matformer_slice_name: self.matformer_slice_name.clone(),
+                })
+            }
         }
     }
 }
@@ -1033,6 +1050,7 @@ impl TryFrom<&ServerConfig> for MistralBuilderConfig {
                 context_length: cfg.context_length,
                 gpu_ids: cfg.effective_gpu_ids(),
                 max_parallel_requests: cfg.max_parallel_requests,
+                model_base_dir: value.scheduler.model_base_dir.clone(),
             };
             if let Some(ids) = params.gpu_ids.as_ref() {
                 validate_gpu_ids(name, ids)?;
@@ -1054,6 +1072,7 @@ impl TryFrom<&ServerConfig> for MistralBuilderConfig {
             mcp_client: value.scheduler.mcp_client.clone(),
             default_model_id,
             models,
+            model_base_dir: value.scheduler.model_base_dir.clone(),
         })
     }
 }

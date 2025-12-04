@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
-    sync::Arc,
+    sync::{Arc, atomic::{AtomicUsize, Ordering}},
     time::{Duration, Instant},
 };
 
@@ -11,7 +11,7 @@ use parking_lot::RwLock;
 use prometheus::{IntCounter, IntGauge, Opts, Registry};
 use tracing::info;
 
-use mistralrs_server_core::{ModelMetadata, ModelScheduler};
+use mistralrs_server_core::{ModelMetadata, ModelScheduler, ModelManagerError};
 
 #[derive(Clone)]
 struct SchedulerMetrics {
@@ -77,6 +77,7 @@ pub struct LruScheduler {
     pinned: Arc<DashSet<String>>,
     keep_alive_fn: Arc<RwLock<Arc<KeepAliveFn>>>,
     metrics: SchedulerMetrics,
+    max_vram_bytes: Arc<AtomicUsize>,
 }
 
 type KeepAliveFn = dyn Fn(&str) -> Option<Instant> + Send + Sync;
@@ -102,6 +103,7 @@ impl LruScheduler {
             pinned: Arc::new(DashSet::new()),
             keep_alive_fn: Arc::new(RwLock::new(Arc::new(|_| None))),
             metrics: SchedulerMetrics::new(),
+            max_vram_bytes: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -230,6 +232,34 @@ impl ModelScheduler for LruScheduler {
         lookup: Arc<dyn Fn(&str) -> Option<Instant> + Send + Sync>,
     ) {
         *self.keep_alive_fn.write() = lookup;
+    }
+
+    fn set_max_vram_bytes(&self, bytes: usize) {
+        self.max_vram_bytes.store(bytes, Ordering::SeqCst);
+    }
+
+    fn can_load_model(&self, model_name: &str, estimated_size_bytes: u64) -> Result<(), ModelManagerError> {
+        let max_vram = self.max_vram_bytes.load(Ordering::SeqCst);
+        if max_vram == 0 {
+            // No VRAM limit configured, allow.
+            return Ok(());
+        }
+        let current_vram_usage = self.inner.read().total_size;
+        let potential_new_usage = current_vram_usage.saturating_add(estimated_size_bytes);
+
+        if potential_new_usage > max_vram as u64 {
+            return Err(ModelManagerError::Scheduler(format!(
+                "insufficient VRAM to load model {model_name}. Current usage: {}MB, Model size: {}MB, Max: {}MB",
+                current_vram_usage / 1024 / 1024,
+                estimated_size_bytes / 1024 / 1024,
+                max_vram / 1024 / 1024
+            )));
+        }
+        Ok(())
+    }
+
+    fn register_metrics(&self, registry: &Registry) -> Result<()> {
+        self.metrics.register(registry)
     }
 }
 

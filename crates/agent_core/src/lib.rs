@@ -15,6 +15,8 @@ use colossal_linux_sandbox::tools::execute_tools_with_sandbox;
 use once_cell::sync::OnceCell;
 
 pub mod config;
+mod llm_backend;
+pub use llm_backend::{LLMBackend, LocalBackend, HttpBackend};
 pub mod tools;
 pub mod web_search;
 pub mod thinking_summarizer;
@@ -570,6 +572,21 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
 pub use config::{initialize_config, read_system_prompt, get_default_niterules};
 pub use tools::{get_all_tools, generate_tools_section};
 
+/// Configuration for selecting which LLM backend to use
+#[derive(Debug, Clone)]
+pub enum BackendConfig {
+    /// Use a local GGUF model
+    Local {
+        model_path: String,
+        model_files: Vec<String>,
+    },
+    /// Use an HTTP backend (OpenAI-compatible API)
+    Http {
+        base_url: String,
+        api_key: String,
+    },
+}
+
 /// Message type for communication between TUI and agent
 #[derive(Debug, Clone)]
 pub enum AgentMessage {
@@ -612,9 +629,7 @@ pub enum AgentMessage {
 /// Agent instance that can be used from the TUI
 #[derive(Clone)]
 pub struct Agent {
-    model: Arc<Mutex<Option<Arc<Model>>>>,
-    model_path: String,
-    model_files: Arc<Mutex<Vec<String>>>,
+    backend: Arc<Box<dyn LLMBackend>>,
     system_prompt: Arc<Mutex<String>>,
     tools: Arc<Mutex<Vec<Tool>>>,
     thinking_summarizer: Arc<Mutex<thinking_summarizer::ThinkingSummarizer>>,
@@ -668,20 +683,37 @@ impl Agent {
         model_config::ModelConfig::load_or_detect("", model_filename)
     }
 
-    /// Create a new agent instance
-    pub fn new(
-        model_path: String,
-        model_files: Vec<String>,
+    /// Create a new agent instance with a specific backend configuration
+    pub fn new_with_backend(
+        backend_config: BackendConfig,
         system_prompt: String,
         tools: Vec<Tool>,
         tokenizer: Tokenizer,
         safety_config: safety_config::SafetyConfig,
     ) -> Self {
+        // Create backend based on config
+        let backend: Arc<Box<dyn LLMBackend>> = match &backend_config {
+            BackendConfig::Local { model_path, model_files } => {
+                Arc::new(Box::new(LocalBackend::new(model_path.clone(), model_files.clone())))
+            }
+            BackendConfig::Http { base_url, api_key } => {
+                Arc::new(Box::new(HttpBackend::new(base_url.clone(), api_key.clone())))
+            }
+        };
+
         // Load thinking configuration from model.yaml or detect from filename
-        let (has_thinking_capability, thinking_tags) = if !model_files.is_empty() {
-            Self::load_thinking_config(&model_path, &model_files[0])
-        } else {
-            (false, model_config::ThinkingTags::default())
+        let (has_thinking_capability, thinking_tags) = match &backend_config {
+            BackendConfig::Local { model_path, model_files } => {
+                if !model_files.is_empty() {
+                    Self::load_thinking_config(model_path, &model_files[0])
+                } else {
+                    (false, model_config::ThinkingTags::default())
+                }
+            }
+            BackendConfig::Http { .. } => {
+                // HTTP backends typically don't expose thinking tags
+                (false, model_config::ThinkingTags::default())
+            }
         };
 
         // Create thinking summarizer with configured summary interval
@@ -690,9 +722,7 @@ impl Agent {
         );
 
         Self {
-            model: Arc::new(Mutex::new(None)),
-            model_path,
-            model_files: Arc::new(Mutex::new(model_files)),
+            backend,
             system_prompt: Arc::new(Mutex::new(system_prompt)),
             tools: Arc::new(Mutex::new(tools)),
             thinking_summarizer: Arc::new(Mutex::new(summarizer)),
@@ -703,6 +733,24 @@ impl Agent {
             thinking_tags: Arc::new(Mutex::new(thinking_tags)),
             safety_config: Arc::new(Mutex::new(safety_config)),
         }
+    }
+
+    /// Create a new agent instance (legacy method, uses Local backend)
+    pub fn new(
+        model_path: String,
+        model_files: Vec<String>,
+        system_prompt: String,
+        tools: Vec<Tool>,
+        tokenizer: Tokenizer,
+        safety_config: safety_config::SafetyConfig,
+    ) -> Self {
+        Self::new_with_backend(
+            BackendConfig::Local { model_path, model_files },
+            system_prompt,
+            tools,
+            tokenizer,
+            safety_config,
+        )
     }
 
     /// Create a new agent with default configuration
@@ -822,104 +870,20 @@ impl Agent {
         Ok(Self::new(model_path, model_files, system_prompt, tools, tokenizer, safety_config))
     }
 
-    /// Get or initialize the model (lazy loading)
+    /// Get the model from backend (if supported)
     pub async fn get_model(&self) -> Result<Arc<Model>> {
-        let mut model_guard = self.model.lock().await;
-
-        if model_guard.is_none() {
-            // Redirect stdout/stderr to /dev/null during model loading to suppress progress bars
-            #[cfg(unix)]
-            {
-                use std::os::unix::io::AsRawFd;
-                use std::fs::OpenOptions;
-
-                // Save original stdout and stderr
-                let stdout_fd = std::io::stdout().as_raw_fd();
-                let stderr_fd = std::io::stderr().as_raw_fd();
-                let saved_stdout = unsafe { libc::dup(stdout_fd) };
-                let saved_stderr = unsafe { libc::dup(stderr_fd) };
-
-                // Open /dev/null
-                let devnull = OpenOptions::new()
-                    .write(true)
-                    .open("/dev/null")
-                    .ok();
-
-                if let Some(devnull) = devnull {
-                    let devnull_fd = devnull.as_raw_fd();
-
-                    // Redirect stdout and stderr to /dev/null
-                    unsafe {
-                        libc::dup2(devnull_fd, stdout_fd);
-                        libc::dup2(devnull_fd, stderr_fd);
-                    }
-
-                    // Load the model
-                    let model_files = self.model_files.lock().await.clone();
-                    let model = GgufModelBuilder::new(
-                        self.model_path.clone(),
-                        model_files,
-                    )
-                    .build()
-                    .await?;
-
-                    // Restore stdout and stderr
-                    unsafe {
-                        libc::dup2(saved_stdout, stdout_fd);
-                        libc::dup2(saved_stderr, stderr_fd);
-                        libc::close(saved_stdout);
-                        libc::close(saved_stderr);
-                    }
-
-                    *model_guard = Some(Arc::new(model));
-                } else {
-                    // Fallback if /dev/null can't be opened
-                    let model_files = self.model_files.lock().await.clone();
-                    let model = GgufModelBuilder::new(
-                        self.model_path.clone(),
-                        model_files,
-                    )
-                    .build()
-                    .await?;
-
-                    *model_guard = Some(Arc::new(model));
-                }
-            }
-
-            #[cfg(not(unix))]
-            {
-                // On non-Unix systems, just load normally
-                let model_files = self.model_files.lock().await.clone();
-                let model = GgufModelBuilder::new(
-                    self.model_path.clone(),
-                    model_files,
-                )
-                .build()
-                .await?;
-
-                *model_guard = Some(Arc::new(model));
-            }
-        }
-
-        Ok(model_guard.as_ref().unwrap().clone())
+        self.backend.get_model().await
     }
 
     /// Reload the model with a new model file
     /// This clears the cached model and updates the model_files to use the new file
     /// The model will be lazy-loaded on the next get_model() call
     pub async fn reload_model(&self, new_model_filename: String) -> Result<()> {
-        // Clear the cached model
-        let mut model_guard = self.model.lock().await;
-        *model_guard = None;
-        drop(model_guard);
+        self.backend.reload_model(new_model_filename.clone()).await?;
 
-        // Update the model files
-        let mut model_files_guard = self.model_files.lock().await;
-        *model_files_guard = vec![new_model_filename.clone()];
-        drop(model_files_guard);
 
         // Reload thinking configuration for the new model
-        let (has_thinking, tags) = Self::load_thinking_config(&self.model_path, &new_model_filename);
+        let (has_thinking, tags) = Self::load_thinking_config("/home/wise/.config/.nite/models", &new_model_filename);
 
         // Update thinking capability
         let mut has_thinking_guard = self.has_thinking_capability.lock().await;
@@ -1182,15 +1146,13 @@ impl Agent {
         request_builder: RequestBuilder,
         tx: mpsc::UnboundedSender<AgentMessage>,
     ) -> Result<()> {
-        // Get the model (will be loaded only once on first call)
-        let model = self.get_model().await?;
 
         let mut current_request_builder = request_builder;
         let mut has_more_tool_calls = true;
         let mut final_accumulated_content = String::new();
 
         while has_more_tool_calls {
-            let mut stream = model.stream_chat_request(current_request_builder.clone()).await?;
+            let mut stream = self.backend.stream_chat_request(current_request_builder.clone()).await?;
             let mut accumulated_tool_calls: Vec<ToolCallResponse> = Vec::new();
             let mut accumulated_content = String::new();
             has_more_tool_calls = false;

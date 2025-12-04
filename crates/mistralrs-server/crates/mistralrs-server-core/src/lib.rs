@@ -6,7 +6,10 @@ use std::{
         Arc,
     },
     time::{Duration, Instant, SystemTime},
+    fs,
 };
+use std::path::PathBuf;
+use walkdir::WalkDir;
 
 use candle_core::Device;
 
@@ -437,6 +440,8 @@ pub enum ModelManagerError {
     MaxParallel(String),
     #[error("scheduler rejected model load: {0}")]
     Scheduler(String),
+    #[error("global concurrent request limit reached")]
+    ServiceUnavailable,
     #[error("{0}")]
     Other(String),
 }
@@ -458,7 +463,11 @@ pub trait ModelManager: Send + Sync {
     ) -> Result<EmbeddingResponse, ModelManagerError>;
     async fn load_model(&self, req: LoadModelRequest) -> Result<ModelMetadata, ModelManagerError>;
     async fn unload_model(&self, model: &str) -> Result<(), ModelManagerError>;
-    async fn list_models(&self) -> Result<Vec<ModelRecord>, ModelManagerError>;
+    async fn list_models(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<ModelRecord>, ModelManagerError>;
     async fn active_models(&self) -> Result<Vec<ActiveModel>, ModelManagerError>;
     async fn job_status(&self, id: Uuid) -> Result<JobStatus, ModelManagerError>;
     async fn logs(
@@ -480,6 +489,11 @@ pub trait ModelScheduler: Send + Sync {
         _lookup: Arc<dyn Fn(&str) -> Option<Instant> + Send + Sync>,
     ) {
     }
+    fn can_load_model(&self, model_name: &str, estimated_size_bytes: u64) -> Result<(), ModelManagerError>;
+    fn set_max_vram_bytes(&self, bytes: usize);
+    fn register_metrics(&self, _registry: &prometheus::Registry) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -493,6 +507,10 @@ impl ModelScheduler for NoopScheduler {
         vec![]
     }
     async fn register_activity(&self, _model: &str) {}
+    fn can_load_model(&self, _model_name: &str, _estimated_size_bytes: u64) -> Result<(), ModelManagerError> {
+        Ok(())
+    }
+    fn set_max_vram_bytes(&self, _bytes: usize) {}
 }
 
 #[derive(Clone)]
@@ -500,6 +518,8 @@ pub struct ManagerConfig {
     pub keep_alive_default: Duration,
     pub max_loaded_models: usize,
     pub max_parallel_requests_per_model: usize,
+    pub max_total_concurrent_requests: usize,
+    pub paged_attn_gpu_mem: Option<usize>,
 }
 
 impl From<&ServerConfig> for ManagerConfig {
@@ -508,6 +528,8 @@ impl From<&ServerConfig> for ManagerConfig {
             keep_alive_default: value.scheduler.keep_alive_default,
             max_loaded_models: value.scheduler.max_loaded_models,
             max_parallel_requests_per_model: value.scheduler.max_parallel_requests_per_model,
+            max_total_concurrent_requests: value.server.max_total_concurrent_requests,
+            paged_attn_gpu_mem: value.scheduler.paged_attn_gpu_mem,
         }
     }
 }
@@ -546,6 +568,7 @@ impl ActiveRequestGuard {
         total: Arc<AtomicU64>,
         metrics: Arc<ModelMetrics>,
         limit: usize,
+        global_limit: usize,
     ) -> Result<Self, ModelManagerError> {
         let prev = counter
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
@@ -556,8 +579,22 @@ impl ActiveRequestGuard {
                 }
             })
             .map_err(|_| ModelManagerError::MaxParallel(model.clone()))?;
+        
+        let total_res = total.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            if (current as usize) >= global_limit {
+                None
+            } else {
+                Some(current + 1)
+            }
+        });
+
+        if total_res.is_err() {
+            counter.fetch_sub(1, Ordering::SeqCst);
+            return Err(ModelManagerError::ServiceUnavailable);
+        }
+
         let active = prev + 1;
-        let total_now = total.fetch_add(1, Ordering::SeqCst) + 1;
+        let total_now = total_res.unwrap() + 1;
         metrics.track_active(&model, active as i64);
         metrics.set_total_active(total_now as i64);
         Ok(Self {
@@ -695,6 +732,7 @@ impl MistralModelManager {
         };
         manager.register_keep_alive_callback();
         manager.register_existing_models();
+        manager.scheduler.set_max_vram_bytes(manager.manager_cfg.paged_attn_gpu_mem.unwrap_or(0));
         Ok(manager)
     }
 
@@ -772,13 +810,17 @@ impl MistralModelManager {
             .get(model)
             .map(|entry| entry.clone())
             .ok_or_else(|| ModelManagerError::NotFound(model.to_string()))?;
+        
         let limit = self.parallel_limit(model);
+        let global_limit = self.manager_cfg.max_total_concurrent_requests;
+
         ActiveRequestGuard::try_new(
             model.to_string(),
             counter,
             Arc::clone(&self.total_active),
             self.metrics.clone(),
             limit,
+            global_limit,
         )
     }
 
@@ -1032,6 +1074,38 @@ impl MistralModelManager {
     fn pull_job_id(model: &str, source: &str) -> Uuid {
         let key = format!("{model}:{source}");
         Uuid::new_v5(&Uuid::NAMESPACE_OID, key.as_bytes())
+    }
+
+    fn calculate_model_disk_size(params: &ModelBuilderParams) -> Option<u64> {
+        let model_dir: PathBuf;
+
+        if let Some(_repo_id) = params.source.strip_prefix("hf://") {
+            // TODO: Implement proper HF cache path resolution
+            return None;
+        } else {
+            // Assume params.source is a local path
+            let candidate_path = PathBuf::from(&params.source);
+            if candidate_path.is_absolute() {
+                model_dir = candidate_path;
+            } else {
+                model_dir = params.model_base_dir.as_ref()?.join(&params.source);
+            }
+        }
+
+        if !model_dir.exists() {
+            return None;
+        }
+
+        let mut total_size = 0;
+        for entry in WalkDir::new(&model_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_file() {
+                total_size += entry.metadata().ok()?.len();
+            }
+        }
+        Some(total_size)
     }
 
     fn spawn_pull_job(&self, id: Uuid, model: String, source: String, immediate: bool) {
@@ -1426,6 +1500,12 @@ impl ModelManager for MistralModelManager {
             .get(&req.model)
             .cloned()
             .ok_or_else(|| ModelManagerError::NotFound(req.model.clone()))?;
+        
+        let estimated_size = Self::calculate_model_disk_size(&params).unwrap_or(0);
+        self.scheduler
+            .can_load_model(&req.model, estimated_size)
+            .map_err(|e| e)?;
+        
         if self
             .models
             .get(&req.model)
@@ -1470,15 +1550,21 @@ impl ModelManager for MistralModelManager {
         self.unload_model_internal(model, false, "manual").await
     }
 
-    async fn list_models(&self) -> Result<Vec<ModelRecord>, ModelManagerError> {
-        Ok(self
+    async fn list_models(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<ModelRecord>, ModelManagerError> {
+        let models: Vec<ModelRecord> = self
             .models
             .iter()
             .map(|entry| ModelRecord {
                 metadata: entry.metadata.clone(),
                 last_accessed: entry.last_accessed,
             })
-            .collect())
+            .collect();
+
+        Ok(models.into_iter().skip(offset).take(limit).collect())
     }
 
     async fn active_models(&self) -> Result<Vec<ActiveModel>, ModelManagerError> {
@@ -1676,6 +1762,7 @@ mod tests {
             keep_alive_default: Duration::from_secs(30),
             max_loaded_models: 2,
             max_parallel_requests_per_model: 4,
+            max_total_concurrent_requests: 100,
         }
     }
 
@@ -1711,6 +1798,7 @@ mod tests {
             context_length: None,
             gpu_ids: None,
             max_parallel_requests: None,
+            model_base_dir: None,
         }
     }
 
@@ -1736,6 +1824,7 @@ mod tests {
                 .map(|p| p.model_id.clone())
                 .unwrap_or_else(|| "".into()),
             models: params,
+            model_base_dir: None,
         }
     }
 
@@ -2449,11 +2538,17 @@ where
         }
     }
 
-    async fn list_models(&self) -> Result<Vec<ModelRecord>, ModelManagerError> {
+    async fn list_models(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<ModelRecord>, ModelManagerError> {
         let state = self.state.read();
         Ok(state
             .models
             .values()
+            .skip(offset)
+            .take(limit)
             .map(|entry| ModelRecord {
                 metadata: entry.metadata.clone(),
                 last_accessed: entry.last_accessed,
@@ -2726,6 +2821,7 @@ mod tests {
                 keep_alive_default: Duration::from_millis(10),
                 max_loaded_models: 2,
                 max_parallel_requests_per_model: 1,
+                max_total_concurrent_requests: 100,
             },
             Arc::new(TestScheduler),
             clock,
@@ -2746,7 +2842,7 @@ mod tests {
             .unwrap();
         clock.advance(Duration::from_secs(1));
         manager.prune_expired();
-        assert!(manager.list_models().await.unwrap().is_empty());
+        assert!(manager.list_models(usize::MAX, 0).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2810,7 +2906,7 @@ mod tests {
             .await
             .unwrap();
         let record = manager
-            .list_models()
+            .list_models(usize::MAX, 0)
             .await
             .unwrap()
             .into_iter()

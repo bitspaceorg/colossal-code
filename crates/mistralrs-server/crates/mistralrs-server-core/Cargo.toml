@@ -30,6 +30,7 @@ futures.workspace = true
 indexmap = { version = "2", features = ["serde"] }
 either = "1"
 humantime = "2"
+walkdir = "2"
 
 [features]
 default = []

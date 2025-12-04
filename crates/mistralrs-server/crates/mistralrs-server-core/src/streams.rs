@@ -127,6 +127,20 @@ impl Stream for CompletionStreamWrapper {
         match Pin::new(&mut mut_self.rx).poll_recv(cx) {
             Poll::Ready(Some(response)) => {
                 match &response {
+                    EngineResponse::CompletionChunk(chunk) => {
+                        // Count streaming tokens from chunk content
+                        if let Some(instr) = mut_self.instrumentation.as_ref() {
+                            let token_count: u32 = chunk.choices.iter()
+                                .map(|choice| {
+                                    // Rough estimate: 1 token per ~4 characters
+                                    (choice.text.len() / 4).max(1) as u32
+                                })
+                                .sum();
+                            if token_count > 0 {
+                                instr.metrics.add_stream_tokens(&instr.model, token_count);
+                            }
+                        }
+                    }
                     EngineResponse::CompletionDone(done) => {
                         if let Some(instr) = mut_self.instrumentation.as_ref() {
                             instr.record_completion(done);
@@ -199,6 +213,22 @@ impl Stream for ChatStreamWrapper {
         match Pin::new(&mut mut_self.rx).poll_recv(cx) {
             Poll::Ready(Some(response)) => {
                 match &response {
+                    EngineResponse::Chunk(chunk) => {
+                        // Count streaming tokens from chunk content
+                        if let Some(instr) = mut_self.instrumentation.as_ref() {
+                            let token_count: u32 = chunk.choices.iter()
+                                .map(|choice| {
+                                    // Rough estimate: 1 token per ~4 characters
+                                    choice.delta.content.as_ref()
+                                        .map(|text| (text.len() / 4).max(1) as u32)
+                                        .unwrap_or(0)
+                                })
+                                .sum();
+                            if token_count > 0 {
+                                instr.metrics.add_stream_tokens(&instr.model, token_count);
+                            }
+                        }
+                    }
                     EngineResponse::Done(done) => {
                         if let Some(instr) = mut_self.instrumentation.as_ref() {
                             instr.record_chat(done);
