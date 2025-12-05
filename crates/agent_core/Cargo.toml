@@ -10,11 +10,13 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1.0"
 tokio = { version = "1.0", features = ["full"] }
+tokio-stream = "0.1"
 futures = "0.3.31"
+async-trait = "0.1"
 libc = "0.2"
-mistralrs = { path = "../../external/mistral.rs/mistralrs", features = ["cuda", "cudnn", "flash-attn"] }
-mistralrs-core = { path = "../../external/mistral.rs/mistralrs-core", features = ["cuda", "cudnn", "flash-attn"] }
-cudarc = { git = "https://github.com/coreylowman/cudarc", rev = "d2c412731524531b7507777fa45496ff667fe718", features = ["cuda-13000"] }
+mistralrs = { path = "../../external/mistral.rs/mistralrs" }
+mistralrs-core = { path = "../../external/mistral.rs/mistralrs-core" }
+# cudarc = { git = "https://github.com/coreylowman/cudarc", rev = "d2c412731524531b7507777fa45496ff667fe718", features = ["cuda-13000"] }
 serde_json = "1.0.143"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_yaml = "0.9"
@@ -24,7 +26,6 @@ chrono = "0.4.41"
 regex = "1.11.2"
 strum_macros = "0.27.2"
 reqwest = { version = "0.12.23", features = ["blocking", "json", "stream"] }
-eventsource-stream = "0.2"
 futures-util = "0.3"
 strum = { version = "0.27.2", features = ["derive"] }
 sessionizer = { path = "../sessionizer" }
@@ -37,6 +38,17 @@ rayon = "1.10"
 tokenizers = { version = "0.21", features = ["http"] }
 dirs = "5.0"
 toml = "0.8"
+uuid = { version = "1.10", features = ["v4"] }
 
-[patch.crates-io]
-cudarc = { git = "https://github.com/coreylowman/cudarc", rev = "d2c412731524531b7507777fa45496ff667fe718" }
+[features]
+default = []
+cuda = ["mistralrs/cuda", "mistralrs-core/cuda"]
+flash-attn = [
+    "cuda",
+    "mistralrs/flash-attn",
+    "mistralrs-core/flash-attn",
+]
+cudnn = ["cuda", "mistralrs/cudnn", "mistralrs-core/cudnn"]
+
+# [patch.crates-io]
+# cudarc = { git = "https://github.com/coreylowman/cudarc", rev = "d2c412731524531b7507777fa45496ff667fe718" }

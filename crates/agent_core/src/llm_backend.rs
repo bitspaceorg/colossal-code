@@ -1,24 +1,25 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use futures::stream::StreamExt;
-use eventsource_stream::Eventsource;
-use futures::stream::TryStreamExt;
+use futures::stream::{self, Stream as FuturesStream};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use mistralrs::{
-    ChatCompletionChunkResponse, Device, DeviceMapSetting, GgufModelBuilder, LoaderBuilder,
-    Model, RequestBuilder, Response, TokenSource,
+    ChatCompletionChunkResponse, ChatCompletionResponse, Choice, ChunkChoice, Delta, GgufModelBuilder,
+    Model, RequestBuilder, Response, ResponseMessage, Usage,
 };
 use reqwest::Client;
-use serde_json::Value;
+use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 #[async_trait]
 pub trait LLMBackend: Send + Sync {
     async fn stream_chat_request(
         &self,
         request: RequestBuilder,
-    ) -> Result<Box<dyn futures::Stream<Item = Response> + Unpin + Send>>;
+    ) -> Result<Box<dyn FuturesStream<Item = Response> + Unpin + Send>>;
     
     async fn load_model(&self) -> Result<()>;
     
@@ -48,7 +49,7 @@ impl LLMBackend for LocalBackend {
     async fn stream_chat_request(
         &self,
         request: RequestBuilder,
-    ) -> Result<Box<dyn futures::Stream<Item = Response> + Unpin + Send>> {
+    ) -> Result<Box<dyn FuturesStream<Item = Response> + Unpin + Send>> {
         let model_guard = self.model.lock().await;
         let model = model_guard
             .as_ref()
@@ -56,12 +57,22 @@ impl LLMBackend for LocalBackend {
             .clone();
         drop(model_guard);
 
-        let stream = model.stream_chat_request(request).await?;
-        Ok(Box::new(stream))
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            if let Ok(mut stream) = model.stream_chat_request(request).await {
+                while let Some(response) = stream.next().await {
+                    if tx.send(response).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Box::new(UnboundedReceiverStream::new(rx)))
     }
 
     async fn get_model(&self) -> Result<Arc<Model>> {
-         let mut model_guard = self.model.lock().await;
+         let model_guard = self.model.lock().await;
          if let Some(m) = model_guard.as_ref() {
              return Ok(m.clone());
          }
@@ -105,14 +116,40 @@ pub struct HttpBackend {
     client: Client,
     base_url: String,
     api_key: String,
+    model: Mutex<String>,
+    completions_path: String,
+    requires_model_load: bool,
 }
 
 impl HttpBackend {
-    pub fn new(base_url: String, api_key: String) -> Self {
+    pub fn new(
+        base_url: String,
+        api_key: String,
+        model: String,
+        completions_path: String,
+        requires_model_load: bool,
+    ) -> Self {
+        let base_url = base_url.trim_end_matches('/').to_string();
+        let completions_path = if completions_path.starts_with('/') {
+            completions_path
+        } else {
+            format!("/{}", completions_path)
+        };
         Self {
             client: Client::new(),
-            base_url: base_url.trim_end_matches("/").to_string(),
+            base_url,
             api_key,
+            model: Mutex::new(model),
+            completions_path,
+            requires_model_load,
+        }
+    }
+
+    fn auth_header(&self) -> Option<String> {
+        if self.api_key.trim().is_empty() {
+            None
+        } else {
+            Some(format!("Bearer {}", self.api_key))
         }
     }
 }
@@ -122,69 +159,241 @@ impl LLMBackend for HttpBackend {
     async fn stream_chat_request(
         &self,
         request: RequestBuilder,
-    ) -> Result<Box<dyn futures::Stream<Item = Response> + Unpin + Send>> {
+    ) -> Result<Box<dyn FuturesStream<Item = Response> + Unpin + Send>> {
         let messages = request.messages();
-        
-        // Convert messages to OpenAI format
+        let model = {
+            let guard = self.model.lock().await;
+            guard.clone()
+        };
+
         let mut openai_messages = Vec::new();
         for msg in messages {
-             let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
-             let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
-             openai_messages.push(serde_json::json!({
-                 "role": role,
-                 "content": content
-             }));
+            match serde_json::to_value(msg) {
+                Ok(value) => openai_messages.push(value),
+                Err(_) => openai_messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": ""
+                })),
+            }
         }
 
         let payload = serde_json::json!({
-            "model": "gpt-3.5-turbo", // Placeholder
+            "model": model,
             "messages": openai_messages,
-            "stream": true,
+            "stream": false,
         });
 
-        let response = self.client
-            .post(format!("{}/v1/chat/completions", self.base_url))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&payload)
-            .send()
-            .await?;
+        let mut request = self
+            .client
+            .post(format!(
+                "{}/{}",
+                self.base_url,
+                self.completions_path.trim_start_matches('/')
+            ))
+            .json(&payload);
+
+        if let Some(header) = self.auth_header() {
+            request = request.header("Authorization", header);
+        }
+
+        let response = request.send().await?;
 
         if !response.status().is_success() {
-            let error_text = response.text().await?;
+            let error_text = response.text().await.unwrap_or_default();
             return Err(anyhow::anyhow!("API Error: {}", error_text));
         }
-        
-        let stream = response.bytes_stream().eventsource();
-        let mapped_stream = stream
-            .map_err(|e| anyhow::anyhow!("Stream error: {}", e))
-            .filter_map(|result| async move {
-                match result {
-                    Ok(event) => {
-                        if event.data == "[DONE]" {
-                            None
-                        } else {
-                            match serde_json::from_str::<ChatCompletionChunkResponse>(&event.data) {
-                                Ok(chunk) => Some(Ok(Response::Chunk(chunk))),
-                                Err(e) => Some(Err(anyhow::anyhow!("JSON parse error: {}", e))),
-                            }
-                        }
-                    }
-                    Err(e) => Some(Err(e)),
-                }
+
+        let chat_response: OpenAiChatResponse = response.json().await?;
+        let id = chat_response
+            .id
+            .clone()
+            .unwrap_or_else(|| format!("nite-http-{}", Uuid::new_v4()));
+        let model_name = chat_response
+            .model
+            .clone()
+            .unwrap_or_else(|| model.clone());
+        let created = chat_response.created.unwrap_or_else(|| current_timestamp());
+        let system_fingerprint = chat_response
+            .system_fingerprint
+            .clone()
+            .unwrap_or_default();
+        let content = chat_response
+            .choices
+            .get(0)
+            .map(|choice| choice.message.content.clone())
+            .unwrap_or_default();
+        let role = chat_response
+            .choices
+            .get(0)
+            .and_then(|choice| choice.message.role.clone())
+            .unwrap_or_else(|| "assistant".to_string());
+        let finish_reason = chat_response
+            .choices
+            .get(0)
+            .and_then(|choice| choice.finish_reason.clone())
+            .unwrap_or_else(|| "stop".to_string());
+
+        let chunk_choice = ChunkChoice {
+            finish_reason: Some(finish_reason.clone()),
+            index: 0,
+            delta: Delta {
+                content: Some(content.clone()),
+                role: role.clone(),
+                tool_calls: None,
+            },
+            logprobs: None,
+        };
+
+        let chunk = ChatCompletionChunkResponse {
+            id: id.clone(),
+            choices: vec![chunk_choice],
+            created: created as u128,
+            model: model_name.clone(),
+            system_fingerprint: system_fingerprint.clone(),
+            object: chat_response
+                .object
+                .clone()
+                .unwrap_or_else(|| "chat.completion.chunk".to_string()),
+            usage: None,
+        };
+
+        let usage = chat_response
+            .usage
+            .clone()
+            .map(|usage| Usage {
+                completion_tokens: usage.completion_tokens.unwrap_or_else(|| estimate_tokens(&content)),
+                prompt_tokens: usage.prompt_tokens.unwrap_or(0),
+                total_tokens: usage.total_tokens.unwrap_or_else(|| estimate_tokens(&content)),
+                avg_tok_per_sec: 0.0,
+                avg_prompt_tok_per_sec: 0.0,
+                avg_compl_tok_per_sec: 0.0,
+                total_time_sec: 0.0,
+                total_prompt_time_sec: 0.0,
+                total_completion_time_sec: 0.0,
+            })
+            .unwrap_or_else(|| Usage {
+                completion_tokens: estimate_tokens(&content),
+                prompt_tokens: 0,
+                total_tokens: estimate_tokens(&content),
+                avg_tok_per_sec: 0.0,
+                avg_prompt_tok_per_sec: 0.0,
+                avg_compl_tok_per_sec: 0.0,
+                total_time_sec: 0.0,
+                total_prompt_time_sec: 0.0,
+                total_completion_time_sec: 0.0,
             });
 
-        Ok(Box::new(mapped_stream))
+        let response_choice = Choice {
+            finish_reason,
+            index: 0,
+            message: ResponseMessage {
+                content: Some(content.clone()),
+                role,
+                tool_calls: None,
+            },
+            logprobs: None,
+        };
+
+        let done = ChatCompletionResponse {
+            id,
+            choices: vec![response_choice],
+            created,
+            model: model_name,
+            system_fingerprint,
+            object: chat_response
+                .object
+                .unwrap_or_else(|| "chat.completion".to_string()),
+            usage,
+        };
+
+        let response_stream = stream::iter(vec![Response::Chunk(chunk), Response::Done(done)]);
+        Ok(Box::new(response_stream))
     }
 
     async fn load_model(&self) -> Result<()> {
+        if !self.requires_model_load {
+            return Ok(());
+        }
+
+        let model = {
+            let guard = self.model.lock().await;
+            guard.clone()
+        };
+
+        let mut request = self
+            .client
+            .post(format!("{}/api/load", self.base_url))
+            .json(&serde_json::json!({
+                "model": model,
+                "keep_alive": serde_json::Value::Null,
+                "pinned": false,
+            }));
+
+        if let Some(header) = self.auth_header() {
+            request = request.header("Authorization", header);
+        }
+
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "HTTP backend failed to load model: {}",
+                error_text
+            ));
+        }
         Ok(())
     }
 
-    async fn reload_model(&self, _model_filename: String) -> Result<()> {
+    async fn reload_model(&self, model_identifier: String) -> Result<()> {
+        let mut guard = self.model.lock().await;
+        *guard = model_identifier;
         Ok(())
     }
     
     async fn get_model(&self) -> Result<Arc<Model>> {
         Err(anyhow::anyhow!("Direct model access not supported in HttpBackend"))
     }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct OpenAiUsage {
+    completion_tokens: Option<usize>,
+    prompt_tokens: Option<usize>,
+    total_tokens: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChatMessage {
+    content: String,
+    role: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChatChoice {
+    message: OpenAiChatMessage,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChatResponse {
+    id: Option<String>,
+    model: Option<String>,
+    created: Option<u64>,
+    system_fingerprint: Option<String>,
+    object: Option<String>,
+    choices: Vec<OpenAiChatChoice>,
+    usage: Option<OpenAiUsage>,
+}
+
+fn estimate_tokens(text: &str) -> usize {
+    text.split_whitespace().count().max(1)
+}
+
+fn current_timestamp() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }

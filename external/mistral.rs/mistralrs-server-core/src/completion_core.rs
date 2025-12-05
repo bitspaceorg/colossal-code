@@ -3,16 +3,16 @@
 use std::error::Error;
 
 use anyhow::Result;
-use axum::response::Sse;
+use axum::response::Response;
 use mistralrs_core::{DrySamplingParams, MistralRs, StopTokens as InternalStopTokens};
 
 use crate::{openai::StopTokens, types::SharedMistralRsState, util::sanitize_error_message};
 
 /// Generic responder enum for different completion types.
 #[derive(Debug)]
-pub enum BaseCompletionResponder<R, S> {
+pub enum BaseCompletionResponder<R> {
     /// Server-Sent Events streaming response
-    Sse(Sse<S>),
+    Sse(Response),
     /// Complete JSON response for non-streaming requests
     Json(R),
     /// Model error with partial response data
@@ -24,10 +24,10 @@ pub enum BaseCompletionResponder<R, S> {
 }
 
 /// Generic function to handle completion errors and logging them.
-pub(crate) fn handle_completion_error<R, S>(
+pub(crate) fn handle_completion_error<R>(
     state: SharedMistralRsState,
     e: Box<dyn std::error::Error + Send + Sync + 'static>,
-) -> BaseCompletionResponder<R, S> {
+) -> BaseCompletionResponder<R> {
     // Log the full error internally
     let full_error = anyhow::Error::msg(e.to_string());
     MistralRs::maybe_log_error(state, &*full_error);

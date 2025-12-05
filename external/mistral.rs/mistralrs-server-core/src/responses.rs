@@ -7,12 +7,12 @@ use axum::{
     extract::{Json, Path, State},
     http::{self, StatusCode},
     response::{
-        sse::{Event, KeepAlive, KeepAliveStream},
-        IntoResponse, Sse,
+        sse::{Event, KeepAlive},
+        IntoResponse, Response as AxumResponse, Sse,
     },
 };
 use either::Either;
-use mistralrs_core::{ChatCompletionResponse, MistralRs, Request, Response};
+use mistralrs_core::{ChatCompletionResponse, MistralRs, Request, Response as CoreResponse};
 use serde_json::Value;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
@@ -39,8 +39,6 @@ use crate::{
 pub type ResponsesStreamer =
     BaseStreamer<ResponsesChunk, OnChunkCallback<ResponsesChunk>, OnDoneCallback<ResponsesChunk>>;
 
-pub type ResponsesSseStream = KeepAliveStream<ResponsesStreamer>;
-
 impl futures::Stream for ResponsesStreamer {
     type Item = Result<Event, axum::Error>;
 
@@ -64,7 +62,7 @@ impl futures::Stream for ResponsesStreamer {
 
         match self.rx.poll_recv(cx) {
             Poll::Ready(Some(resp)) => match resp {
-                Response::ModelError(msg, _) => {
+                CoreResponse::ModelError(msg, _) => {
                     MistralRs::maybe_log_error(
                         self.state.clone(),
                         &ModelErrorMessage(msg.to_string()),
@@ -72,16 +70,16 @@ impl futures::Stream for ResponsesStreamer {
                     self.done_state = DoneState::SendingDone;
                     Poll::Ready(Some(Ok(Event::default().data(msg))))
                 }
-                Response::ValidationError(e) => Poll::Ready(Some(Ok(
+                CoreResponse::ValidationError(e) => Poll::Ready(Some(Ok(
                     Event::default().data(sanitize_error_message(e.as_ref()))
                 ))),
-                Response::InternalError(e) => {
+                CoreResponse::InternalError(e) => {
                     MistralRs::maybe_log_error(self.state.clone(), &*e);
                     Poll::Ready(Some(Ok(
                         Event::default().data(sanitize_error_message(e.as_ref()))
                     )))
                 }
-                Response::Chunk(chat_chunk) => {
+                CoreResponse::Chunk(chat_chunk) => {
                     // Convert ChatCompletionChunkResponse to ResponsesChunk
                     let mut delta_outputs = vec![];
 
@@ -168,15 +166,15 @@ impl futures::Stream for ResponsesStreamer {
 }
 
 /// Response responder types
-pub type ResponsesResponder = BaseCompletionResponder<ResponsesObject, ResponsesSseStream>;
+pub type ResponsesResponder = BaseCompletionResponder<ResponsesObject>;
 
 type JsonModelError = BaseJsonModelError<ResponsesObject>;
 impl ErrorToResponse for JsonModelError {}
 
 impl IntoResponse for ResponsesResponder {
-    fn into_response(self) -> axum::response::Response {
+    fn into_response(self) -> AxumResponse {
         match self {
-            ResponsesResponder::Sse(s) => s.into_response(),
+            ResponsesResponder::Sse(resp) => resp,
             ResponsesResponder::Json(s) => Json(s).into_response(),
             ResponsesResponder::InternalError(e) => {
                 JsonError::new(sanitize_error_message(e.as_ref()))
@@ -274,7 +272,7 @@ fn chat_response_to_responses_object(
 async fn parse_responses_request(
     oairequest: ResponsesCreateRequest,
     state: SharedMistralRsState,
-    tx: Sender<Response>,
+    tx: Sender<CoreResponse>,
 ) -> Result<(Request, bool, Option<Vec<Message>>)> {
     if oairequest.instructions.is_some() {
         return Err(anyhow::anyhow!(
@@ -459,7 +457,7 @@ pub async fn create_response(
     } else {
         // Non-streaming response
         match rx.recv().await {
-            Some(Response::Done(chat_resp)) => {
+            Some(CoreResponse::Done(chat_resp)) => {
                 let response_obj =
                     chat_response_to_responses_object(&chat_resp, request_id.clone(), metadata);
 
@@ -487,7 +485,7 @@ pub async fn create_response(
 
                 ResponsesResponder::Json(response_obj)
             }
-            Some(Response::ModelError(msg, partial_resp)) => {
+            Some(CoreResponse::ModelError(msg, partial_resp)) => {
                 let mut response_obj =
                     chat_response_to_responses_object(&partial_resp, request_id.clone(), metadata);
                 response_obj.error = Some(ResponsesError {
@@ -518,8 +516,8 @@ pub async fn create_response(
                 }
                 ResponsesResponder::ModelError(msg.to_string(), response_obj)
             }
-            Some(Response::ValidationError(e)) => ResponsesResponder::ValidationError(e),
-            Some(Response::InternalError(e)) => ResponsesResponder::InternalError(e),
+            Some(CoreResponse::ValidationError(e)) => ResponsesResponder::ValidationError(e),
+            Some(CoreResponse::InternalError(e)) => ResponsesResponder::InternalError(e),
             _ => ResponsesResponder::InternalError(
                 anyhow::anyhow!("Unexpected response type").into(),
             ),
@@ -599,7 +597,7 @@ fn handle_error(
 fn create_streamer(
     streamer: ResponsesStreamer,
     on_done: Option<OnDoneCallback<ResponsesChunk>>,
-) -> Sse<ResponsesSseStream> {
+) -> AxumResponse {
     let keep_alive_interval = get_keep_alive_interval();
 
     let streamer_with_callback = ResponsesStreamer {
@@ -609,4 +607,5 @@ fn create_streamer(
 
     Sse::new(streamer_with_callback)
         .keep_alive(KeepAlive::new().interval(Duration::from_millis(keep_alive_interval)))
+        .into_response()
 }

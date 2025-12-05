@@ -1,7 +1,8 @@
 use anyhow::Result;
+use futures::StreamExt;
 use mistralrs::{
-    ChatCompletionChunkResponse, Delta, GgufModelBuilder, RequestBuilder, Response,
-    TextMessageRole, Tool, ToolCallResponse, ToolChoice, Model,
+    ChatCompletionChunkResponse, Delta, Model, RequestBuilder, Response,
+    TextMessageRole, Tool, ToolCallResponse, ToolChoice,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -580,11 +581,21 @@ pub enum BackendConfig {
         model_path: String,
         model_files: Vec<String>,
     },
-    /// Use an HTTP backend (OpenAI-compatible API)
+    /// Use a remote HTTP backend (OpenAI-compatible API)
     Http {
         base_url: String,
         api_key: String,
+        model: String,
+        completions_path: String,
+        requires_model_load: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    Local,
+    Http,
+    ExternalHttp,
 }
 
 /// Message type for communication between TUI and agent
@@ -630,6 +641,7 @@ pub enum AgentMessage {
 #[derive(Clone)]
 pub struct Agent {
     backend: Arc<Box<dyn LLMBackend>>,
+    backend_kind: BackendKind,
     system_prompt: Arc<Mutex<String>>,
     tools: Arc<Mutex<Vec<Tool>>>,
     thinking_summarizer: Arc<Mutex<thinking_summarizer::ThinkingSummarizer>>,
@@ -651,7 +663,7 @@ impl Agent {
     /// Load model configuration and detect thinking capability
     /// Tries to load model.yaml from ~/.config/.nite/models/<model_name>/model.yaml
     /// Falls back to filename-based detection if config doesn't exist
-    fn load_thinking_config(model_path: &str, model_filename: &str) -> (bool, model_config::ThinkingTags) {
+    fn load_thinking_config(_model_path: &str, model_filename: &str) -> (bool, model_config::ThinkingTags) {
         // Extract base model name from filename for config lookup
         // E.g., "Qwen3-4B-Q8_0.gguf" -> try "qwen3-4b", "Qwen3-4B-Q8_0", etc.
         let filename_stem = std::path::Path::new(model_filename)
@@ -692,27 +704,54 @@ impl Agent {
         safety_config: safety_config::SafetyConfig,
     ) -> Self {
         // Create backend based on config
-        let backend: Arc<Box<dyn LLMBackend>> = match &backend_config {
+        let (backend, backend_kind, has_thinking_capability, thinking_tags): (
+            Arc<Box<dyn LLMBackend>>,
+            BackendKind,
+            bool,
+            model_config::ThinkingTags,
+        ) = match backend_config {
             BackendConfig::Local { model_path, model_files } => {
-                Arc::new(Box::new(LocalBackend::new(model_path.clone(), model_files.clone())))
-            }
-            BackendConfig::Http { base_url, api_key } => {
-                Arc::new(Box::new(HttpBackend::new(base_url.clone(), api_key.clone())))
-            }
-        };
-
-        // Load thinking configuration from model.yaml or detect from filename
-        let (has_thinking_capability, thinking_tags) = match &backend_config {
-            BackendConfig::Local { model_path, model_files } => {
-                if !model_files.is_empty() {
-                    Self::load_thinking_config(model_path, &model_files[0])
+                let backend: Arc<Box<dyn LLMBackend>> = Arc::new(
+                    Box::new(LocalBackend::new(model_path.clone(), model_files.clone())) as Box<dyn LLMBackend>
+                );
+                let (has_thinking_capability, thinking_tags) = if !model_files.is_empty() {
+                    Self::load_thinking_config(&model_path, &model_files[0])
                 } else {
                     (false, model_config::ThinkingTags::default())
-                }
+                };
+                (
+                    backend,
+                    BackendKind::Local,
+                    has_thinking_capability,
+                    thinking_tags,
+                )
             }
-            BackendConfig::Http { .. } => {
-                // HTTP backends typically don't expose thinking tags
-                (false, model_config::ThinkingTags::default())
+            BackendConfig::Http {
+                base_url,
+                api_key,
+                model,
+                completions_path,
+                requires_model_load,
+            } => {
+                let backend: Arc<Box<dyn LLMBackend>> = Arc::new(
+                    Box::new(HttpBackend::new(
+                        base_url,
+                        api_key,
+                        model,
+                        completions_path,
+                        requires_model_load,
+                    )) as Box<dyn LLMBackend>
+                );
+                (
+                    backend,
+                    if requires_model_load {
+                        BackendKind::Http
+                    } else {
+                        BackendKind::ExternalHttp
+                    },
+                    false,
+                    model_config::ThinkingTags::default(),
+                )
             }
         };
 
@@ -723,6 +762,7 @@ impl Agent {
 
         Self {
             backend,
+            backend_kind,
             system_prompt: Arc::new(Mutex::new(system_prompt)),
             tools: Arc::new(Mutex::new(tools)),
             thinking_summarizer: Arc::new(Mutex::new(summarizer)),
@@ -813,7 +853,8 @@ impl Agent {
         }
 
         let model_path = "/home/wise/.config/.nite/models".to_string();
-        let model_files = vec![model_filename.unwrap_or_else(|| "Qwen_Qwen3-4B-Thinking-2507-Q8_0.gguf".to_string())];
+        let selected_model = model_filename
+            .unwrap_or_else(|| "Qwen_Qwen3-4B-Thinking-2507-Q8_0.gguf".to_string());
 
         // Load tokenizer from HuggingFace (Qwen2.5 tokenizer)
         // Suppress output during loading
@@ -867,7 +908,56 @@ impl Agent {
         let tokenizer = Tokenizer::from_pretrained("Qwen/Qwen2.5-0.5B", None)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
-        Ok(Self::new(model_path, model_files, system_prompt, tools, tokenizer, safety_config))
+        let backend_mode = std::env::var("NITE_BACKEND_MODE").unwrap_or_else(|_| "http".to_string());
+        let backend_mode = backend_mode.to_lowercase();
+
+        let backend_config = match backend_mode.as_str() {
+            "local" => BackendConfig::Local {
+                model_path,
+                model_files: vec![selected_model],
+            },
+            "external" => {
+                let base_url = std::env::var("NITE_HTTP_BASE_URL")
+                    .unwrap_or_else(|_| "https://api.openai.com".to_string());
+                let api_key = std::env::var("NITE_HTTP_API_KEY").unwrap_or_default();
+                let completions_path = std::env::var("NITE_HTTP_COMPLETIONS_PATH")
+                    .unwrap_or_else(|_| "/v1/chat/completions".to_string());
+                BackendConfig::Http {
+                    base_url,
+                    api_key,
+                    model: selected_model,
+                    completions_path,
+                    requires_model_load: false,
+                }
+            }
+            _ => {
+                let base_url = std::env::var("NITE_HTTP_BASE_URL")
+                    .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
+                let api_key = std::env::var("NITE_HTTP_API_KEY").unwrap_or_default();
+                let completions_path = std::env::var("NITE_HTTP_COMPLETIONS_PATH")
+                    .unwrap_or_else(|_| "/v1/chat/completions".to_string());
+                BackendConfig::Http {
+                    base_url,
+                    api_key,
+                    model: selected_model,
+                    completions_path,
+                    requires_model_load: true,
+                }
+            }
+        };
+
+        Ok(Self::new_with_backend(
+            backend_config,
+            system_prompt,
+            tools,
+            tokenizer,
+            safety_config,
+        ))
+    }
+
+    /// Ensure backend has loaded the active model
+    pub async fn initialize_backend(&self) -> Result<()> {
+        self.backend.load_model().await
     }
 
     /// Get the model from backend (if supported)
@@ -881,24 +971,37 @@ impl Agent {
     pub async fn reload_model(&self, new_model_filename: String) -> Result<()> {
         self.backend.reload_model(new_model_filename.clone()).await?;
 
+        if self.backend_kind == BackendKind::Local {
+            let (has_thinking, tags) =
+                Self::load_thinking_config("/home/wise/.config/.nite/models", &new_model_filename);
 
-        // Reload thinking configuration for the new model
-        let (has_thinking, tags) = Self::load_thinking_config("/home/wise/.config/.nite/models", &new_model_filename);
+            let mut has_thinking_guard = self.has_thinking_capability.lock().await;
+            *has_thinking_guard = has_thinking;
+            drop(has_thinking_guard);
 
-        // Update thinking capability
-        let mut has_thinking_guard = self.has_thinking_capability.lock().await;
-        *has_thinking_guard = has_thinking;
-        drop(has_thinking_guard);
+            let mut tags_guard = self.thinking_tags.lock().await;
+            *tags_guard = tags.clone();
+            drop(tags_guard);
 
-        // Update thinking tags
-        let mut tags_guard = self.thinking_tags.lock().await;
-        *tags_guard = tags.clone();
-        drop(tags_guard);
+            let mut summarizer_guard = self.thinking_summarizer.lock().await;
+            *summarizer_guard =
+                thinking_summarizer::ThinkingSummarizer::with_threshold(tags.summary_interval);
+            drop(summarizer_guard);
+        } else {
+            let mut has_thinking_guard = self.has_thinking_capability.lock().await;
+            *has_thinking_guard = false;
+            drop(has_thinking_guard);
 
-        // Update summarizer threshold
-        let mut summarizer_guard = self.thinking_summarizer.lock().await;
-        *summarizer_guard = thinking_summarizer::ThinkingSummarizer::with_threshold(tags.summary_interval);
-        drop(summarizer_guard);
+            let mut tags_guard = self.thinking_tags.lock().await;
+            *tags_guard = model_config::ThinkingTags::default();
+            drop(tags_guard);
+
+            let summary_interval = model_config::ThinkingTags::default().summary_interval;
+            let mut summarizer_guard = self.thinking_summarizer.lock().await;
+            *summarizer_guard =
+                thinking_summarizer::ThinkingSummarizer::with_threshold(summary_interval);
+            drop(summarizer_guard);
+        }
 
         Ok(())
     }
@@ -1149,7 +1252,7 @@ impl Agent {
 
         let mut current_request_builder = request_builder;
         let mut has_more_tool_calls = true;
-        let mut final_accumulated_content = String::new();
+        let mut _final_accumulated_content = String::new();
 
         while has_more_tool_calls {
             let mut stream = self.backend.stream_chat_request(current_request_builder.clone()).await?;
@@ -1480,7 +1583,7 @@ impl Agent {
 
             // Store the accumulated content for final logging
             if accumulated_tool_calls.is_empty() {
-                final_accumulated_content = accumulated_content.clone();
+                _final_accumulated_content = accumulated_content.clone();
             }
 
             if !accumulated_tool_calls.is_empty() {

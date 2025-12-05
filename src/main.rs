@@ -1284,6 +1284,59 @@ impl App {
         // Load model selection from config
         let current_model = Self::load_model_setting();
 
+        // Configure backend mode (HTTP by default)
+        let backend_setting = Self::load_config_value("backend")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "http".to_string());
+        let backend_mode = backend_setting.to_lowercase();
+
+        let base_url = Self::load_config_value("http-base-url")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let api_key = Self::load_config_value("http-api-key")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+        let completions_path = Self::load_config_value("http-completions-path")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "/v1/chat/completions".to_string());
+
+        match backend_mode.as_str() {
+            "local" => unsafe {
+                std::env::set_var("NITE_BACKEND_MODE", "local");
+                std::env::remove_var("NITE_HTTP_BASE_URL");
+                std::env::remove_var("NITE_HTTP_API_KEY");
+                std::env::remove_var("NITE_HTTP_COMPLETIONS_PATH");
+            },
+            "external" => unsafe {
+                std::env::set_var("NITE_BACKEND_MODE", "external");
+                std::env::set_var(
+                    "NITE_HTTP_BASE_URL",
+                    base_url.unwrap_or_else(|| "https://api.openai.com".to_string()),
+                );
+                std::env::set_var("NITE_HTTP_COMPLETIONS_PATH", &completions_path);
+                if api_key.is_empty() {
+                    std::env::remove_var("NITE_HTTP_API_KEY");
+                } else {
+                    std::env::set_var("NITE_HTTP_API_KEY", api_key);
+                }
+            },
+            _ => unsafe {
+                std::env::set_var("NITE_BACKEND_MODE", "http");
+                std::env::set_var(
+                    "NITE_HTTP_BASE_URL",
+                    base_url.unwrap_or_else(|| "http://127.0.0.1:8080".to_string()),
+                );
+                std::env::set_var("NITE_HTTP_COMPLETIONS_PATH", &completions_path);
+                if api_key.is_empty() {
+                    std::env::remove_var("NITE_HTTP_API_KEY");
+                } else {
+                    std::env::set_var("NITE_HTTP_API_KEY", api_key);
+                }
+            },
+        }
+
         // Enable sandbox by default (SAFE_MODE environment variable)
         unsafe {
             std::env::set_var("SAFE_MODE", "1");
@@ -1294,11 +1347,11 @@ impl App {
             .await
             .map_err(|e| color_eyre::eyre::eyre!("Failed to initialize agent: {}", e))?;
 
-        // Load model synchronously
+        // Warm up backend/model synchronously so UI doesn't block later
         let _ = agent
-            .get_model()
+            .initialize_backend()
             .await
-            .map_err(|e| color_eyre::eyre::eyre!("Failed to load model: {}", e))?;
+            .map_err(|e| color_eyre::eyre::eyre!("Failed to load backend: {}", e))?;
 
         let agent_arc = Arc::new(agent);
 
@@ -1337,19 +1390,17 @@ impl App {
                             let tx_clone = output_tx_clone.clone();
                             tokio::task::spawn_local(async move {
                                 match agent_clone.reload_model(model_filename).await {
-                                    Ok(_) => {
-                                        // Pre-load the model
-                                        match agent_clone.get_model().await {
-                                            Ok(_) => {
-                                                let _ = tx_clone.send(AgentMessage::ModelLoaded);
-                                            }
-                                            Err(e) => {
-                                                let _ = tx_clone.send(AgentMessage::Error(
-                                                    format!("Failed to load model: {}", e),
-                                                ));
-                                            }
+                                    Ok(_) => match agent_clone.initialize_backend().await {
+                                        Ok(_) => {
+                                            let _ = tx_clone.send(AgentMessage::ModelLoaded);
                                         }
-                                    }
+                                        Err(e) => {
+                                            let _ = tx_clone.send(AgentMessage::Error(format!(
+                                                "Failed to load model: {}",
+                                                e
+                                            )));
+                                        }
+                                    },
                                     Err(e) => {
                                         let _ = tx_clone.send(AgentMessage::Error(format!(
                                             "Failed to reload model: {}",

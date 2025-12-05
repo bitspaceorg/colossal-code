@@ -386,6 +386,7 @@ async fn text_interactive_mode(
                 Response::ImageGeneration(_) => unreachable!(),
                 Response::Speech { .. } => unreachable!(),
                 Response::Raw { .. } => unreachable!(),
+                Response::Embedding(_) => unreachable!(),
             }
         }
 
@@ -691,6 +692,7 @@ async fn vision_interactive_mode(
                 Response::ImageGeneration(_) => unreachable!(),
                 Response::Speech { .. } => unreachable!(),
                 Response::Raw { .. } => unreachable!(),
+                Response::Embedding(_) => unreachable!(),
             }
         }
 

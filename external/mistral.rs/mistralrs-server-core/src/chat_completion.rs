@@ -7,8 +7,8 @@ use axum::{
     extract::{Json, State},
     http::{self},
     response::{
-        sse::{Event, KeepAlive, KeepAliveStream},
-        IntoResponse, Sse,
+        sse::{Event, KeepAlive},
+        IntoResponse, Response as AxumResponse, Sse,
     },
 };
 use either::Either;
@@ -16,7 +16,7 @@ use indexmap::IndexMap;
 use itertools::Itertools;
 use mistralrs_core::{
     ChatCompletionChunkResponse, ChatCompletionResponse, Constraint, MistralRs, NormalRequest,
-    Request, RequestMessage, Response, SamplingParams,
+    Request, RequestMessage, Response as CoreResponse, SamplingParams,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -85,8 +85,6 @@ pub type ChatCompletionStreamer = BaseStreamer<
     ChatCompletionOnDoneCallback,
 >;
 
-pub type ChatCompletionSseStream = KeepAliveStream<ChatCompletionStreamer>;
-
 impl futures::Stream for ChatCompletionStreamer {
     type Item = Result<Event, axum::Error>;
 
@@ -119,7 +117,7 @@ impl futures::Stream for ChatCompletionStreamer {
 
         match self.rx.poll_recv(cx) {
             Poll::Ready(Some(resp)) => match resp {
-                Response::ModelError(msg, _) => {
+                CoreResponse::ModelError(msg, _) => {
                     MistralRs::maybe_log_error(
                         self.state.clone(),
                         &ModelErrorMessage(msg.to_string()),
@@ -128,16 +126,16 @@ impl futures::Stream for ChatCompletionStreamer {
                     self.done_state = DoneState::SendingDone;
                     Poll::Ready(Some(Ok(Event::default().data(msg))))
                 }
-                Response::ValidationError(e) => Poll::Ready(Some(Ok(
+                CoreResponse::ValidationError(e) => Poll::Ready(Some(Ok(
                     Event::default().data(sanitize_error_message(e.as_ref()))
                 ))),
-                Response::InternalError(e) => {
+                CoreResponse::InternalError(e) => {
                     MistralRs::maybe_log_error(self.state.clone(), &*e);
                     Poll::Ready(Some(Ok(
                         Event::default().data(sanitize_error_message(e.as_ref()))
                     )))
                 }
-                Response::Chunk(mut response) => {
+                CoreResponse::Chunk(mut response) => {
                     if response.choices.iter().all(|x| x.finish_reason.is_some()) {
                         self.done_state = DoneState::SendingDone;
                     }
@@ -154,14 +152,14 @@ impl futures::Stream for ChatCompletionStreamer {
 
                     Poll::Ready(Some(Event::default().json_data(response)))
                 }
-                Response::Done(_) => unreachable!(),
-                Response::CompletionDone(_) => unreachable!(),
-                Response::CompletionModelError(_, _) => unreachable!(),
-                Response::CompletionChunk(_) => unreachable!(),
-                Response::ImageGeneration(_) => unreachable!(),
-                Response::Speech { .. } => unreachable!(),
-                Response::Raw { .. } => unreachable!(),
-                Response::Embedding(_) => unreachable!(),
+                CoreResponse::Done(_) => unreachable!(),
+                CoreResponse::CompletionDone(_) => unreachable!(),
+                CoreResponse::CompletionModelError(_, _) => unreachable!(),
+                CoreResponse::CompletionChunk(_) => unreachable!(),
+                CoreResponse::ImageGeneration(_) => unreachable!(),
+                CoreResponse::Speech { .. } => unreachable!(),
+                CoreResponse::Raw { .. } => unreachable!(),
+                CoreResponse::Embedding(_) => unreachable!(),
             },
             Poll::Pending | Poll::Ready(None) => Poll::Pending,
         }
@@ -169,17 +167,16 @@ impl futures::Stream for ChatCompletionStreamer {
 }
 
 /// Represents different types of chat completion responses.
-pub type ChatCompletionResponder =
-    BaseCompletionResponder<ChatCompletionResponse, ChatCompletionSseStream>;
+pub type ChatCompletionResponder = BaseCompletionResponder<ChatCompletionResponse>;
 
 type JsonModelError = BaseJsonModelError<ChatCompletionResponse>;
 impl ErrorToResponse for JsonModelError {}
 
 impl IntoResponse for ChatCompletionResponder {
     /// Converts the chat completion responder into an HTTP response.
-    fn into_response(self) -> axum::response::Response {
+    fn into_response(self) -> AxumResponse {
         match self {
-            ChatCompletionResponder::Sse(s) => s.into_response(),
+            ChatCompletionResponder::Sse(resp) => resp,
             ChatCompletionResponder::Json(s) => Json(s).into_response(),
             ChatCompletionResponder::InternalError(e) => {
                 JsonError::new(sanitize_error_message(e.as_ref()))
@@ -204,7 +201,7 @@ impl IntoResponse for ChatCompletionResponder {
 pub async fn parse_request(
     oairequest: ChatCompletionRequest,
     state: SharedMistralRsState,
-    tx: Sender<Response>,
+    tx: Sender<CoreResponse>,
 ) -> Result<(Request, bool)> {
     let repr = serde_json::to_string(&oairequest).expect("Serialization of request failed.");
     MistralRs::maybe_log_request(state.clone(), repr);
@@ -542,50 +539,54 @@ pub fn handle_error(
 
 /// Creates a SSE streamer for chat completions with optional callbacks.
 pub fn create_streamer(
-    rx: Receiver<Response>,
+    rx: Receiver<CoreResponse>,
     state: SharedMistralRsState,
     on_chunk: Option<ChatCompletionOnChunkCallback>,
     on_done: Option<ChatCompletionOnDoneCallback>,
-) -> Sse<ChatCompletionSseStream> {
+) -> AxumResponse {
     let streamer = base_create_streamer(rx, state, on_chunk, on_done);
     let keep_alive_interval = get_keep_alive_interval();
 
     Sse::new(streamer)
         .keep_alive(KeepAlive::new().interval(Duration::from_millis(keep_alive_interval)))
+        .into_response()
 }
 
 /// Process non-streaming chat completion responses.
 pub async fn process_non_streaming_response(
-    rx: &mut Receiver<Response>,
+    rx: &mut Receiver<CoreResponse>,
     state: SharedMistralRsState,
 ) -> ChatCompletionResponder {
     base_process_non_streaming_response(rx, state, match_responses, handle_error).await
 }
 
 /// Matches and processes different types of model responses into appropriate chat completion responses.
-pub fn match_responses(state: SharedMistralRsState, response: Response) -> ChatCompletionResponder {
+pub fn match_responses(
+    state: SharedMistralRsState,
+    response: CoreResponse,
+) -> ChatCompletionResponder {
     match response {
-        Response::InternalError(e) => {
+        CoreResponse::InternalError(e) => {
             MistralRs::maybe_log_error(state, &*e);
             ChatCompletionResponder::InternalError(e)
         }
-        Response::ModelError(msg, response) => {
+        CoreResponse::ModelError(msg, response) => {
             MistralRs::maybe_log_error(state.clone(), &ModelErrorMessage(msg.to_string()));
             MistralRs::maybe_log_response(state, &response);
             ChatCompletionResponder::ModelError(msg, response)
         }
-        Response::ValidationError(e) => ChatCompletionResponder::ValidationError(e),
-        Response::Done(response) => {
+        CoreResponse::ValidationError(e) => ChatCompletionResponder::ValidationError(e),
+        CoreResponse::Done(response) => {
             MistralRs::maybe_log_response(state, &response);
             ChatCompletionResponder::Json(response)
         }
-        Response::Chunk(_) => unreachable!(),
-        Response::CompletionDone(_) => unreachable!(),
-        Response::CompletionModelError(_, _) => unreachable!(),
-        Response::CompletionChunk(_) => unreachable!(),
-        Response::ImageGeneration(_) => unreachable!(),
-        Response::Speech { .. } => unreachable!(),
-        Response::Raw { .. } => unreachable!(),
-        Response::Embedding(_) => unreachable!(),
+        CoreResponse::Chunk(_) => unreachable!(),
+        CoreResponse::CompletionDone(_) => unreachable!(),
+        CoreResponse::CompletionModelError(_, _) => unreachable!(),
+        CoreResponse::CompletionChunk(_) => unreachable!(),
+        CoreResponse::ImageGeneration(_) => unreachable!(),
+        CoreResponse::Speech { .. } => unreachable!(),
+        CoreResponse::Raw { .. } => unreachable!(),
+        CoreResponse::Embedding(_) => unreachable!(),
     }
 }

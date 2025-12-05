@@ -27,3 +27,6 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 
 [features]
 syntax-highlighting = ["edtui/syntax-highlighting"]
+cuda = ["agent_core/cuda"]
+flash-attn = ["cuda", "agent_core/flash-attn"]
+cudnn = ["cuda", "agent_core/cudnn"]
