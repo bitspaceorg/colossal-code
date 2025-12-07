@@ -1,9 +1,9 @@
+use anyhow::{Context, Result};
 /// Model configuration based on LMStudio's model.yaml format
 /// Supports detection of thinking/reasoning models and custom tag configuration
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use std::fs;
-use anyhow::{Result, Context};
+use std::path::{Path, PathBuf};
 
 /// Main model configuration structure following LMStudio's model.yaml format
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,10 +171,13 @@ impl ModelConfig {
 
     /// Get the path to a model's configuration directory
     pub fn get_config_path(model_name: &str) -> Result<PathBuf> {
-        let home = dirs::home_dir()
-            .context("Failed to get home directory")?;
+        let home = dirs::home_dir().context("Failed to get home directory")?;
 
-        let config_dir = home.join(".config").join(".nite").join("models").join(model_name);
+        let config_dir = home
+            .join(".config")
+            .join(".nite")
+            .join("models")
+            .join(model_name);
         let config_file = config_dir.join("model.yaml");
 
         Ok(config_file)
@@ -202,7 +205,11 @@ impl ModelConfig {
         }
 
         // Check tags
-        if self.tags.iter().any(|t| t.contains("thinking") || t.contains("reasoning")) {
+        if self
+            .tags
+            .iter()
+            .any(|t| t.contains("thinking") || t.contains("reasoning"))
+        {
             return true;
         }
 
@@ -286,8 +293,7 @@ pub fn save_model_config(model_name: &str, config: &ModelConfig) -> Result<()> {
             .with_context(|| format!("Failed to create config directory {:?}", parent))?;
     }
 
-    let yaml = serde_yaml::to_string(config)
-        .context("Failed to serialize model config to YAML")?;
+    let yaml = serde_yaml::to_string(config).context("Failed to serialize model config to YAML")?;
 
     fs::write(&config_file, yaml)
         .with_context(|| format!("Failed to write model config to {:?}", config_file))?;
@@ -344,7 +350,9 @@ thinkingTags:
     #[test]
     fn test_filename_detection() {
         assert!(ModelConfig::detect_from_filename("qwen-thinking-7b.gguf"));
-        assert!(ModelConfig::detect_from_filename("deepseek-reasoning-v2.gguf"));
+        assert!(ModelConfig::detect_from_filename(
+            "deepseek-reasoning-v2.gguf"
+        ));
         assert!(!ModelConfig::detect_from_filename("llama-3-8b.gguf"));
     }
 }

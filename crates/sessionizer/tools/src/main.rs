@@ -1,13 +1,13 @@
+use chrono::{DateTime, Local};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use regex::Regex;
+use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use chrono::{DateTime, Local};
-use globset::{Glob, GlobSet, GlobSetBuilder};
-use serde::{Serialize, Deserialize};
 use strum_macros::Display;
 use walkdir::WalkDir;
-use reqwest::blocking::Client;
 
 #[derive(Debug, Serialize)]
 struct FileEntry {
@@ -207,12 +207,10 @@ fn get_files_recursive(
             }
         }
     }
-    let include_set = include_builder
-        .build()
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to build include globset: {}", e);
-            GlobSet::empty()
-        });
+    let include_set = include_builder.build().unwrap_or_else(|e| {
+        eprintln!("Failed to build include globset: {}", e);
+        GlobSet::empty()
+    });
 
     let mut exclude_builder = GlobSetBuilder::new();
     if let Some(patterns) = exclude_patterns {
@@ -224,12 +222,10 @@ fn get_files_recursive(
             }
         }
     }
-    let exclude_set = exclude_builder
-        .build()
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to build exclude globset: {}", e);
-            GlobSet::empty()
-        });
+    let exclude_set = exclude_builder.build().unwrap_or_else(|e| {
+        eprintln!("Failed to build exclude globset: {}", e);
+        GlobSet::empty()
+    });
 
     let has_include_patterns = include_patterns.map_or(false, |patterns| !patterns.is_empty());
 
@@ -267,16 +263,8 @@ fn get_files_recursive(
             let meta = entry.metadata();
 
             let (e_type, length, modified) = match meta {
-                Ok(m) if m.is_dir() => (
-                    EntryType::Directory,
-                    0,
-                    get_mod_string(m.modified()),
-                ),
-                Ok(m) => (
-                    EntryType::File,
-                    m.len(),
-                    get_mod_string(m.modified()),
-                ),
+                Ok(m) if m.is_dir() => (EntryType::Directory, 0, get_mod_string(m.modified())),
+                Ok(m) => (EntryType::File, m.len(), get_mod_string(m.modified())),
                 Err(_) => (EntryType::File, 0, "".to_string()),
             };
 
@@ -461,7 +449,9 @@ fn edit_file(target_file: &Path, old_string: &str, new_string: &str) -> EditResu
             return EditResult {
                 path: target_file.display().to_string(),
                 status: EditStatus::Failure,
-                message: Some("File does not exist (use empty old_string to create new file)".to_string()),
+                message: Some(
+                    "File does not exist (use empty old_string to create new file)".to_string(),
+                ),
             };
         }
     } else {
@@ -481,7 +471,7 @@ fn edit_file(target_file: &Path, old_string: &str, new_string: &str) -> EditResu
                     path: target_file.display().to_string(),
                     status: EditStatus::Failure,
                     message: Some(format!("Failed to read file: {}", e)),
-                }
+                };
             }
         };
 
@@ -489,16 +479,26 @@ fn edit_file(target_file: &Path, old_string: &str, new_string: &str) -> EditResu
         let new_content = if old_string.is_empty() {
             format!("{}{}", content, new_string)
         } else {
-            // Check if old_string exists in the file
-            if !content.contains(old_string) {
+            let occurrences = content.match_indices(old_string).count();
+            if occurrences == 0 {
                 return EditResult {
                     path: target_file.display().to_string(),
                     status: EditStatus::Failure,
                     message: Some("old_string not found in file".to_string()),
                 };
             }
+            if occurrences > 1 {
+                return EditResult {
+                    path: target_file.display().to_string(),
+                    status: EditStatus::Failure,
+                    message: Some(
+                        "more than one occurrence of old_string; provide unique context"
+                            .to_string(),
+                    ),
+                };
+            }
 
-            // Replace old_string with new_string (only first occurrence)
+            // Replace old_string with new_string (only occurrence)
             content.replacen(old_string, new_string, 1)
         };
 
@@ -563,7 +563,9 @@ fn main() {
 
         "get_files_recursive" => {
             if args.len() < 3 {
-                eprintln!("Usage: tools get_files_recursive <path> [limit] [include_patterns...] [--exclude exclude_patterns...]");
+                eprintln!(
+                    "Usage: tools get_files_recursive <path> [limit] [include_patterns...] [--exclude exclude_patterns...]"
+                );
                 std::process::exit(1);
             }
             let path = PathBuf::from(&args[2]);
@@ -610,7 +612,9 @@ fn main() {
 
         "search_files_with_regex" => {
             if args.len() < 4 {
-                eprintln!("Usage: tools search_files_with_regex <path> <regex_pattern> [limit] [case_sensitive]");
+                eprintln!(
+                    "Usage: tools search_files_with_regex <path> <regex_pattern> [limit] [case_sensitive]"
+                );
                 std::process::exit(1);
             }
             let path = PathBuf::from(&args[2]);
@@ -622,8 +626,13 @@ fn main() {
                 Ok(results) => println!("{}", serde_yaml::to_string(&results).unwrap()),
                 Err(e) => {
                     #[derive(Serialize)]
-                    struct ErrorResponse { error: String }
-                    eprintln!("{}", serde_yaml::to_string(&ErrorResponse { error: e }).unwrap());
+                    struct ErrorResponse {
+                        error: String,
+                    }
+                    eprintln!(
+                        "{}",
+                        serde_yaml::to_string(&ErrorResponse { error: e }).unwrap()
+                    );
                     std::process::exit(1);
                 }
             }
@@ -652,8 +661,16 @@ fn main() {
                 Ok(hits) => println!("{}", serde_yaml::to_string(&hits).unwrap()),
                 Err(e) => {
                     #[derive(Serialize)]
-                    struct ErrorResponse { error: String }
-                    eprintln!("{}", serde_yaml::to_string(&ErrorResponse { error: e.to_string() }).unwrap());
+                    struct ErrorResponse {
+                        error: String,
+                    }
+                    eprintln!(
+                        "{}",
+                        serde_yaml::to_string(&ErrorResponse {
+                            error: e.to_string()
+                        })
+                        .unwrap()
+                    );
                     std::process::exit(1);
                 }
             }
@@ -661,7 +678,9 @@ fn main() {
 
         _ => {
             eprintln!("Unknown command: {}", command);
-            eprintln!("Available commands: get_files, get_files_recursive, read_file, edit_file, delete_path, delete_many, search_files_with_regex, semantic_search");
+            eprintln!(
+                "Available commands: get_files, get_files_recursive, read_file, edit_file, delete_path, delete_many, search_files_with_regex, semantic_search"
+            );
             std::process::exit(1);
         }
     }

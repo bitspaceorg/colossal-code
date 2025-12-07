@@ -21,18 +21,16 @@ use crate::hash_id::hash_id_exists;
 
 /// Clean shell output by removing prompts and command echoes
 fn clean_shell_output(output: &str, command: &str) -> String {
-    // First, remove ANSI escape codes
-    let ansi_regex = regex::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\][^\x1b]*\x1b\\|\x1bk[^\x1b]*\x1b\\").unwrap();
-    let without_ansi = ansi_regex.replace_all(output, "");
+    // Normalize line endings (convert \r\n and \r to \n)
+    let normalized = output.replace("\r\n", "\n").replace("\r", "\n");
 
-    // Also remove other control characters except newlines
-    let control_regex = regex::Regex::new(r"[\x00-\x08\x0B-\x1F\x7F]").unwrap();
-    let clean_text = control_regex.replace_all(&without_ansi, "");
+    // Use battle-tested library to strip ALL ANSI escape sequences
+    let without_ansi = strip_ansi_escapes::strip_str(&normalized);
 
     // Remove any lines containing the command marker pattern
     // This handles the echoed command line that includes __CMD_DONE___
     let marker_regex = regex::Regex::new(r".*__CMD_DONE_.*").unwrap();
-    let without_markers = marker_regex.replace_all(&clean_text, "");
+    let without_markers = marker_regex.replace_all(&without_ansi, "");
 
     let lines: Vec<&str> = without_markers.lines().collect();
     let mut cleaned_lines = Vec::new();
@@ -421,7 +419,14 @@ impl SessionManager {
             }
             let stdout = String::from_utf8_lossy(&truncate_output(stdout_buf, cap_bytes).text).to_string();
             let stderr = String::from_utf8_lossy(&truncate_output(stderr_buf, cap_bytes).text).to_string();
-            let aggregated_output = String::from_utf8_lossy(&truncate_output(aggregated_buf, cap_bytes).text).to_string();
+            let aggregated_output_raw = String::from_utf8_lossy(&truncate_output(aggregated_buf, cap_bytes).text).to_string();
+
+            // Clean ANSI escape codes and control characters from output
+            let command_str = params.command.join(" ");
+            let aggregated_output = clean_shell_output(&aggregated_output_raw, &command_str);
+            let stdout_cleaned = clean_shell_output(&stdout, &command_str);
+            let stderr_cleaned = clean_shell_output(&stderr, &command_str);
+
             let exit_status = match exit_code {
                 Some(code) => ExitStatus::Completed { code },
                 None => {
@@ -436,8 +441,8 @@ impl SessionManager {
             Ok(ExecCommandOutput {
                 duration: Instant::now().duration_since(start_time),
                 exit_status,
-                stdout,
-                stderr,
+                stdout: stdout_cleaned,
+                stderr: stderr_cleaned,
                 aggregated_output,
                 log_file: None,
             })

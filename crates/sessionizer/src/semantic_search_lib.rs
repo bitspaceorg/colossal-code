@@ -1,17 +1,17 @@
+use futures::stream::{self, StreamExt};
+use glob::glob;
+use qdrant_client::qdrant::{
+    PointStruct, SearchParamsBuilder, SearchPointsBuilder, UpsertPointsBuilder,
+};
+use qdrant_client::{Payload, Qdrant};
 use rayon::prelude::*;
+use reqwest;
+use serde::Serialize;
+use serde_json;
 use std::fs;
 use std::str;
 use std::sync::{Arc, RwLock};
 use walkdir::{DirEntry, WalkDir};
-use qdrant_client::qdrant::{
-    PointStruct, UpsertPointsBuilder, SearchPointsBuilder, SearchParamsBuilder,
-};
-use qdrant_client::{Payload, Qdrant};
-use reqwest;
-use serde_json;
-use serde::Serialize;
-use futures::stream::{self, StreamExt};
-use glob::glob;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct IngestStatus {
@@ -32,7 +32,9 @@ impl IngestStatus {
     }
 }
 
-pub async fn parse_response_to_vec(response: reqwest::Response) -> Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn parse_response_to_vec(
+    response: reqwest::Response,
+) -> Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
     let text = response.text().await?;
     if let Ok(vecvec) = serde_json::from_str::<Vec<Vec<f32>>>(&text) {
         if let Some(inner) = vecvec.into_iter().next() {
@@ -55,7 +57,9 @@ pub async fn parse_response_to_vec(response: reqwest::Response) -> Result<Vec<f3
     Ok(floats)
 }
 
-pub async fn call(message: &str) -> Result<reqwest::Response, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn call(
+    message: &str,
+) -> Result<reqwest::Response, Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::new();
     let json_payload = serde_json::json!({ "inputs": message });
     let res = client
@@ -101,7 +105,7 @@ fn expand_globs(patterns: &[String]) -> Vec<String> {
                 }
             }
             Err(e) => {
-                eprintln!("Invalid glob pattern {}: {}", pattern, e);
+                // eprintln!("Invalid glob pattern {}: {}", pattern, e);
             }
         }
     }
@@ -113,7 +117,7 @@ fn expand_globs(patterns: &[String]) -> Vec<String> {
 pub fn calculate_change_range(old_content: &str, new_content: &str) -> Option<(u64, u64)> {
     let old_bytes = old_content.as_bytes();
     let new_bytes = new_content.as_bytes();
-    
+
     // Find the first differing byte
     let mut start_diff = 0;
     while start_diff < old_bytes.len() && start_diff < new_bytes.len() {
@@ -122,16 +126,16 @@ pub fn calculate_change_range(old_content: &str, new_content: &str) -> Option<(u
         }
         start_diff += 1;
     }
-    
+
     // If files are identical, no change
     if start_diff == old_bytes.len() && start_diff == new_bytes.len() {
         return None;
     }
-    
+
     // Find the last differing byte
     let mut end_diff_old = old_bytes.len();
     let mut end_diff_new = new_bytes.len();
-    
+
     while end_diff_old > start_diff && end_diff_new > start_diff {
         end_diff_old -= 1;
         end_diff_new -= 1;
@@ -141,17 +145,17 @@ pub fn calculate_change_range(old_content: &str, new_content: &str) -> Option<(u
             break;
         }
     }
-    
+
     // Handle case where one string is prefix of another
     if end_diff_old == start_diff || end_diff_new == start_diff {
         end_diff_old = old_bytes.len();
         end_diff_new = new_bytes.len();
     }
-    
+
     // Return the range of the change
     let start_byte = start_diff as u64;
     let end_byte = std::cmp::max(end_diff_old, end_diff_new) as u64;
-    
+
     Some((start_byte, end_byte))
 }
 
@@ -167,10 +171,7 @@ pub async fn find_affected_chunks(
 ) -> Result<Vec<Payload>, Box<dyn std::error::Error + Send + Sync>> {
     // Create a filter to match points for this file
     let filter = qdrant_client::qdrant::Filter::must([
-        qdrant_client::qdrant::Condition::matches(
-            "file_name",
-            file_name.to_string(),
-        ),
+        qdrant_client::qdrant::Condition::matches("file_name", file_name.to_string()),
         // Find chunks that overlap with the changed range
         // A chunk is affected if:
         // 1. It starts before the end of our change AND
@@ -197,7 +198,7 @@ pub async fn find_affected_chunks(
             SearchPointsBuilder::new(collection_name, vec![0.0; 768], 100) // dummy vector
                 .filter(filter)
                 .with_payload(true)
-                .limit(100)
+                .limit(100),
         )
         .await?;
 
@@ -220,9 +221,7 @@ pub async fn index_codebase(
         .into_iter()
         .filter_entry(|e| !is_ignored(e))
         .filter_map(Result::ok)
-        .filter(|e| {
-            e.file_type().is_file() && chunker::ChunkerFactory::is_supported(e.path())
-        })
+        .filter(|e| e.file_type().is_file() && chunker::ChunkerFactory::is_supported(e.path()))
         .collect();
 
     // Process files sequentially to ensure sandbox restrictions apply
@@ -230,7 +229,7 @@ pub async fn index_codebase(
     // would bypass Landlock sandbox restrictions. The current thread is sandboxed, but
     // Rayon workers are not.
     let all_chunks: Vec<Chunk> = files
-        .iter()  // Sequential instead of par_iter()
+        .iter() // Sequential instead of par_iter()
         .filter_map(|entry| {
             let path = entry.path();
             match fs::read(path) {
@@ -239,7 +238,7 @@ pub async fn index_codebase(
                         match chunker::chunk_file(path.to_str().unwrap()) {
                             Ok(chunks) => Some(chunks),
                             Err(e) => {
-                                eprintln!("Failed to chunk file {}: {}", path.display(), e);
+                                // eprintln!("Failed to chunk file {}: {}", path.display(), e);
                                 None
                             }
                         }
@@ -248,7 +247,7 @@ pub async fn index_codebase(
                     }
                 }
                 Err(e) => {
-                    eprintln!("Failed to read file {}: {}", path.display(), e);
+                    // eprintln!("Failed to read file {}: {}", path.display(), e);
                     None
                 }
             }
@@ -289,7 +288,7 @@ pub async fn index_codebase(
                 Some(PointStruct::new(i as u64, embedding, payload))
             }
         })
-        .buffer_unordered(64)  // Increased from 32 to 64 for better parallelism on the network-bound embedding generation
+        .buffer_unordered(64) // Increased from 32 to 64 for better parallelism on the network-bound embedding generation
         .filter_map(|p| async move { p })
         .collect()
         .await;
@@ -347,21 +346,20 @@ pub async fn update_affected_chunks(
     end_byte: u64,
     new_content: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("Updating affected chunks for file: {} in range {}-{}", file_name, start_byte, end_byte);
-    
+    println!(
+        "Updating affected chunks for file: {} in range {}-{}",
+        file_name, start_byte, end_byte
+    );
+
     // 1. Find affected chunks in Qdrant
-    let affected_chunks = find_affected_chunks(
-        client,
-        collection_name,
-        file_name,
-        start_byte,
-        end_byte
-    ).await?;
-    
+    let affected_chunks =
+        find_affected_chunks(client, collection_name, file_name, start_byte, end_byte).await?;
+
     println!("Found {} affected chunks", affected_chunks.len());
-    
+
     // 2. Extract point IDs of affected chunks for deletion
-    let point_ids: Vec<qdrant_client::qdrant::PointId> = affected_chunks.iter()
+    let point_ids: Vec<qdrant_client::qdrant::PointId> = affected_chunks
+        .iter()
         .filter_map(|payload| {
             // Try to extract point_id from the payload using serde_json
             match serde_json::to_value(payload) {
@@ -369,7 +367,9 @@ pub async fn update_affected_chunks(
                     if let Some(point_id_value) = json_value.get("point_id") {
                         if let Some(point_id_str) = point_id_value.as_str() {
                             // Convert string point ID to PointId
-                            Some(qdrant_client::qdrant::PointId::from(point_id_str.to_string()))
+                            Some(qdrant_client::qdrant::PointId::from(
+                                point_id_str.to_string(),
+                            ))
                         } else {
                             None
                         }
@@ -377,15 +377,15 @@ pub async fn update_affected_chunks(
                         None
                     }
                 }
-                Err(_) => None
+                Err(_) => None,
             }
         })
         .collect();
-    
+
     // 3. Delete the affected chunks
     if !point_ids.is_empty() {
         println!("Deleting {} affected chunks", point_ids.len());
-        
+
         // Delete the specific affected points by their IDs
         let delete_points = qdrant_client::qdrant::DeletePointsBuilder::new(collection_name)
             .points(point_ids)
@@ -393,13 +393,13 @@ pub async fn update_affected_chunks(
             .build();
         let _ = client.delete_points(delete_points).await;
     }
-    
+
     // 4. Re-parse the entire file and re-chunk it
     // This ensures we get proper Tree-sitter chunks with correct boundaries
     let new_chunks = match chunker::chunk_file(file_name) {
         Ok(chunks) => chunks,
         Err(e) => {
-            eprintln!("Failed to re-chunk file {}: {}", file_name, e);
+            // eprintln!("Failed to re-chunk file {}: {}", file_name, e);
             return Err(format!("Chunking error: {}", e).into());
         }
     };
@@ -422,20 +422,14 @@ pub async fn update_affected_chunks(
                 .try_into()
                 .unwrap_or_default();
 
-                let point = qdrant_client::qdrant::PointStruct::new(
-                    point_id,
-                    embedding,
-                    payload,
-                );
+                let point = qdrant_client::qdrant::PointStruct::new(point_id, embedding, payload);
 
                 // Add the new point to Qdrant
                 let _ = client
-                    .upsert_points(
-                        qdrant_client::qdrant::UpsertPointsBuilder::new(
-                            collection_name,
-                            vec![point],
-                        )
-                    )
+                    .upsert_points(qdrant_client::qdrant::UpsertPointsBuilder::new(
+                        collection_name,
+                        vec![point],
+                    ))
                     .await;
             }
         }

@@ -1,28 +1,28 @@
 use anyhow::Result;
+use colossal_linux_sandbox::protocol::SandboxPolicy;
+use colossal_linux_sandbox::tools::execute_tools_with_sandbox;
+use colossal_linux_sandbox::types::{ExitStatus, SessionId};
 use futures::StreamExt;
 use mistralrs::{
-    ChatCompletionChunkResponse, Delta, Model, RequestBuilder, Response,
-    TextMessageRole, Tool, ToolCallResponse, ToolChoice,
+    ChatCompletionChunkResponse, Delta, Model, RequestBuilder, Response, TextMessageRole, Tool,
+    ToolCallResponse, ToolChoice,
 };
+use once_cell::sync::OnceCell;
+use serde::Serialize;
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{mpsc, Mutex};
-use serde_json::{json, Value};
-use serde::Serialize;
 use tokenizers::Tokenizer;
-use colossal_linux_sandbox::protocol::SandboxPolicy;
-use colossal_linux_sandbox::types::{ExitStatus, SessionId};
-use colossal_linux_sandbox::tools::execute_tools_with_sandbox;
-use once_cell::sync::OnceCell;
+use tokio::sync::{Mutex, mpsc};
 
 pub mod config;
 mod llm_backend;
-pub use llm_backend::{LLMBackend, LocalBackend, HttpBackend};
-pub mod tools;
-pub mod web_search;
-pub mod thinking_summarizer;
+pub use llm_backend::{HttpBackend, LLMBackend, LocalBackend};
 pub mod model_config;
 pub mod safety_config;
+pub mod thinking_summarizer;
+pub mod tools;
+pub mod web_search;
 
 // Global state for persistent shell session
 struct GlobalState {
@@ -82,16 +82,14 @@ async fn execute_tool_binary(args: Vec<String>, sandbox_policy: &SandboxPolicy) 
 async fn ensure_global_state_initialized() {
     if GLOBAL_STATE.get().is_none() {
         let shell = colossal_linux_sandbox::shell::default_user_shell().await;
-        let workspace_path = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let workspace_path =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-        let mut writable_roots = vec![
-            colossal_linux_sandbox::protocol::WritableRoot {
-                root: workspace_path.clone(),
-                recursive: true,
-                read_only_subpaths: vec![],
-            },
-        ];
+        let mut writable_roots = vec![colossal_linux_sandbox::protocol::WritableRoot {
+            root: workspace_path.clone(),
+            recursive: true,
+            read_only_subpaths: vec![],
+        }];
 
         if let Some(parent) = workspace_path.parent() {
             writable_roots.push(colossal_linux_sandbox::protocol::WritableRoot {
@@ -149,7 +147,8 @@ async fn ensure_global_state_initialized() {
 pub async fn add_writable_root(path: std::path::PathBuf) -> Result<()> {
     ensure_global_state_initialized().await;
 
-    let state = GLOBAL_STATE.get()
+    let state = GLOBAL_STATE
+        .get()
         .ok_or_else(|| anyhow::anyhow!("Global state not initialized"))?;
 
     let mut policy_lock = state.sandbox_policy.lock().await;
@@ -177,7 +176,10 @@ pub async fn add_writable_root(path: std::path::PathBuf) -> Result<()> {
     }
 }
 
-async fn get_or_create_shell_session() -> Result<(Arc<colossal_linux_sandbox::manager::SessionManager>, colossal_linux_sandbox::types::SessionId)> {
+async fn get_or_create_shell_session() -> Result<(
+    Arc<colossal_linux_sandbox::manager::SessionManager>,
+    colossal_linux_sandbox::types::SessionId,
+)> {
     ensure_global_state_initialized().await;
 
     let state = GLOBAL_STATE.get().unwrap();
@@ -188,29 +190,35 @@ async fn get_or_create_shell_session() -> Result<(Arc<colossal_linux_sandbox::ma
     // 1. No session exists yet, OR
     // 2. Current session has a background process running
     if session_id_lock.is_none() || *has_background {
-        let workspace_path = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let workspace_path =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
         let shared_state = Arc::new(colossal_linux_sandbox::session::SharedSessionState::new(
-            workspace_path.clone()
+            workspace_path.clone(),
         ));
 
         let sandbox_policy = state.sandbox_policy.lock().await.clone();
-        let session_id = state.manager.create_persistent_shell_session(
-            state.shell.path().to_string_lossy().to_string(),
-            false,
-            sandbox_policy,
-            shared_state,
-            None,
-        ).await?;
+        let session_id = state
+            .manager
+            .create_persistent_shell_session(
+                state.shell.path().to_string_lossy().to_string(),
+                false,
+                sandbox_policy,
+                shared_state,
+                None,
+            )
+            .await?;
 
-        let _ = state.manager.exec_command_in_shell_session(
-            session_id.clone(),
-            format!("cd {}", workspace_path.display()),
-            Some(5000),
-            1000,
-            None, // No approval needed for initial cd
-        ).await;
+        let _ = state
+            .manager
+            .exec_command_in_shell_session(
+                session_id.clone(),
+                format!("cd {}", workspace_path.display()),
+                Some(5000),
+                1000,
+                None, // No approval needed for initial cd
+            )
+            .await;
 
         *session_id_lock = Some(session_id.clone());
     }
@@ -218,7 +226,10 @@ async fn get_or_create_shell_session() -> Result<(Arc<colossal_linux_sandbox::ma
     Ok((state.manager.clone(), session_id_lock.clone().unwrap()))
 }
 
-async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSender<AgentMessage>) -> Result<String> {
+async fn execute_tool_call(
+    tool_call: &ToolCallResponse,
+    tx: mpsc::UnboundedSender<AgentMessage>,
+) -> Result<String> {
     ensure_global_state_initialized().await;
 
     let name = &tool_call.function.name;
@@ -228,7 +239,10 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
         "exec_command" => {
             let state = GLOBAL_STATE.get().unwrap();
             let command = arguments["command"].as_str().unwrap_or("");
-            let is_background = arguments.get("is_background").and_then(|v| v.as_bool()).unwrap_or(false);
+            let is_background = arguments
+                .get("is_background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
             // Get or create shell session (will create new one if current has background process)
             let (manager, session_id) = get_or_create_shell_session().await?;
@@ -239,7 +253,7 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
             } else {
                 colossal_linux_sandbox::safety::AskForApproval::Never
             };
-            
+
             let mut current_approval = Some(safety_mode);
 
             loop {
@@ -248,20 +262,23 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
                     let mut has_background = state.session_has_background_process.lock().await;
                     *has_background = true;
                     drop(has_background); // Release lock
-    
+
                     // Create log file for background output
                     let log_file_path = format!("/tmp/shell_{}.log", session_id.as_str());
-    
+
                     // Run command in background with output redirected to log file
                     // Strip trailing & if present since we'll add it with redirection
                     let command_clean = command.trim_end().trim_end_matches('&').trim_end();
                     let bg_command = format!("{} > {} 2>&1 &", command_clean, log_file_path);
-                    
-                    match manager.send_input_to_shell_session(
-                        session_id.clone(),
-                        bg_command,
-                        current_approval,
-                    ).await {
+
+                    match manager
+                        .send_input_to_shell_session(
+                            session_id.clone(),
+                            bg_command,
+                            current_approval,
+                        )
+                        .await
+                    {
                         Ok(_) => {
                             let exec_result = serde_json::json!({
                                 "command": command,
@@ -271,91 +288,112 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
                                 "message": format!("Command started in background. Session ID: {}. Log file: {}", session_id.as_str(), log_file_path)
                             });
                             return Ok(serde_yaml::to_string(&exec_result)?);
-                        },
+                        }
                         Err(e) => {
                             if let colossal_linux_sandbox::error::ColossalErr::Sandbox(
-                                colossal_linux_sandbox::error::SandboxErr::Denied(_, reason, _)
-                            ) = &e {
+                                colossal_linux_sandbox::error::SandboxErr::Denied(_, reason, _),
+                            ) = &e
+                            {
                                 if reason == "User approval required" {
                                     // Send request to UI
-                                    let (approval_tx, approval_rx) = tokio::sync::oneshot::channel();
+                                    let (approval_tx, approval_rx) =
+                                        tokio::sync::oneshot::channel();
                                     {
                                         let state = GLOBAL_STATE.get().unwrap();
                                         let mut guard = state.pending_approval.lock().await;
                                         *guard = Some(approval_tx);
                                     }
-                                    
-                                    let request_msg = format!("Allow background command: {}", command);
+
+                                    let request_msg =
+                                        format!("Allow background command: {}", command);
                                     let _ = tx.send(AgentMessage::RequestApproval(request_msg));
-                                    
+
                                     // Wait for response
                                     match approval_rx.await {
                                         Ok(true) => {
                                             // Approved, retry with Never (force approve)
                                             current_approval = Some(colossal_linux_sandbox::safety::AskForApproval::Never);
-                                            
+
                                             // Reset background flag since we failed to start
-                                            let mut has_background = state.session_has_background_process.lock().await;
+                                            let mut has_background =
+                                                state.session_has_background_process.lock().await;
                                             *has_background = false;
                                             continue;
                                         }
                                         Ok(false) => {
                                             // Reset background flag since we failed to start
-                                            let mut has_background = state.session_has_background_process.lock().await;
+                                            let mut has_background =
+                                                state.session_has_background_process.lock().await;
                                             *has_background = false;
-                                            
+
                                             return Ok(serde_yaml::to_string(&json!({
                                                 "status": "Failure",
                                                 "command": command,
                                                 "message": "Command denied by user"
                                             }))?);
                                         }
-                                        Err(_) => return Err(anyhow::anyhow!("Approval channel closed")),
+                                        Err(_) => {
+                                            return Err(anyhow::anyhow!("Approval channel closed"));
+                                        }
                                     }
                                 }
                             }
-                            
+
                             // Reset background flag on other errors
-                            let mut has_background = state.session_has_background_process.lock().await;
+                            let mut has_background =
+                                state.session_has_background_process.lock().await;
                             *has_background = false;
                             return Err(e.into());
                         }
                     }
                 } else {
                     // Foreground command - wait for completion
-                    match manager.exec_command_in_shell_session(
-                        session_id.clone(),
-                        command.to_string(),
-                        Some(5000),
-                        1000,
-                        current_approval,
-                    ).await {
+                    match manager
+                        .exec_command_in_shell_session(
+                            session_id.clone(),
+                            command.to_string(),
+                            Some(5000),
+                            1000,
+                            current_approval,
+                        )
+                        .await
+                    {
                         Ok(result) => {
                             let is_success = matches!(result.exit_status, ExitStatus::Completed { code } if code == 0);
                             let exec_result = ExecCommandResult {
                                 command: command.to_string(),
-                                status: if is_success { "Success".to_string() } else { "Failure".to_string() },
+                                status: if is_success {
+                                    "Success".to_string()
+                                } else {
+                                    "Failure".to_string()
+                                },
                                 cmd_out: result.aggregated_output,
-                                message: if is_success { None } else { Some(format!("{:?}", result.exit_status)) },
+                                message: if is_success {
+                                    None
+                                } else {
+                                    Some(format!("{:?}", result.exit_status))
+                                },
                             };
                             return Ok(serde_yaml::to_string(&exec_result)?);
-                        },
+                        }
                         Err(e) => {
                             if let colossal_linux_sandbox::error::ColossalErr::Sandbox(
-                                colossal_linux_sandbox::error::SandboxErr::Denied(_, reason, _)
-                            ) = &e {
+                                colossal_linux_sandbox::error::SandboxErr::Denied(_, reason, _),
+                            ) = &e
+                            {
                                 if reason == "User approval required" {
                                     // Send request to UI
-                                    let (approval_tx, approval_rx) = tokio::sync::oneshot::channel();
+                                    let (approval_tx, approval_rx) =
+                                        tokio::sync::oneshot::channel();
                                     {
                                         let state = GLOBAL_STATE.get().unwrap();
                                         let mut guard = state.pending_approval.lock().await;
                                         *guard = Some(approval_tx);
                                     }
-                                    
+
                                     let request_msg = format!("Allow command: {}", command);
                                     let _ = tx.send(AgentMessage::RequestApproval(request_msg));
-                                    
+
                                     // Wait for response
                                     match approval_rx.await {
                                         Ok(true) => {
@@ -370,7 +408,9 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
                                                 "message": "Command denied by user"
                                             }))?);
                                         }
-                                        Err(_) => return Err(anyhow::anyhow!("Approval channel closed")),
+                                        Err(_) => {
+                                            return Err(anyhow::anyhow!("Approval channel closed"));
+                                        }
                                     }
                                 }
                             }
@@ -379,7 +419,7 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
                     }
                 }
             }
-        },
+        }
         "read_output" => {
             let state = GLOBAL_STATE.get().unwrap();
             let session_id_str = arguments["session_id"].as_str().unwrap_or("");
@@ -393,7 +433,7 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
                         "output": output
                     });
                     Ok(serde_yaml::to_string(&result)?)
-                },
+                }
                 Err(e) => {
                     let result = serde_json::json!({
                         "status": "Failure",
@@ -403,8 +443,15 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
                     Ok(serde_yaml::to_string(&result)?)
                 }
             }
-        },
-        "read_file" | "delete_path" | "delete_many" | "get_files" | "get_files_recursive" | "search_files_with_regex" | "edit_file" | "semantic_search" => {
+        }
+        "read_file"
+        | "delete_path"
+        | "delete_many"
+        | "get_files"
+        | "get_files_recursive"
+        | "search_files_with_regex"
+        | "edit_file"
+        | "semantic_search" => {
             let state = GLOBAL_STATE.get().unwrap();
             let mut args = vec![name.to_string()];
 
@@ -412,22 +459,27 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
             match name.as_str() {
                 "read_file" => {
                     let path = arguments["path"].as_str().unwrap_or("");
-                    let should_read_entire = arguments["should_read_entire_file"].as_bool().unwrap_or(true);
+                    let should_read_entire = arguments["should_read_entire_file"]
+                        .as_bool()
+                        .unwrap_or(true);
                     args.push(path.to_string());
                     if should_read_entire {
                         args.push("entire".to_string());
                     }
-                },
+                }
                 "delete_path" => {
                     let path = arguments["path"].as_str().unwrap_or("");
                     args.push(path.to_string());
-                },
+                }
                 "get_files" => {
                     let path = arguments["path"].as_str().unwrap_or(".");
-                    let limit = arguments["limit"].as_u64().map(|l| l.to_string()).unwrap_or_else(|| "100".to_string());
+                    let limit = arguments["limit"]
+                        .as_u64()
+                        .map(|l| l.to_string())
+                        .unwrap_or_else(|| "100".to_string());
                     args.push(path.to_string());
                     args.push(limit);
-                },
+                }
                 "get_files_recursive" => {
                     let path = arguments["path"].as_str().unwrap_or(".");
                     args.push(path.to_string());
@@ -438,7 +490,9 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
                     }
 
                     // Add include patterns if provided
-                    if let Some(patterns) = arguments.get("include_patterns").and_then(|v| v.as_array()) {
+                    if let Some(patterns) =
+                        arguments.get("include_patterns").and_then(|v| v.as_array())
+                    {
                         for pattern in patterns {
                             if let Some(p) = pattern.as_str() {
                                 args.push(p.to_string());
@@ -447,7 +501,9 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
                     }
 
                     // Add exclude patterns with --exclude flag if provided
-                    if let Some(patterns) = arguments.get("exclude_patterns").and_then(|v| v.as_array()) {
+                    if let Some(patterns) =
+                        arguments.get("exclude_patterns").and_then(|v| v.as_array())
+                    {
                         if !patterns.is_empty() {
                             args.push("--exclude".to_string());
                             for pattern in patterns {
@@ -457,7 +513,7 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
                             }
                         }
                     }
-                },
+                }
                 "edit_file" => {
                     let path = arguments["path"].as_str().unwrap_or("");
                     let old_string = arguments["old_string"].as_str().unwrap_or("");
@@ -465,31 +521,38 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
                     args.push(path.to_string());
                     args.push(old_string.to_string());
                     args.push(new_string.to_string());
-                },
+                }
                 "semantic_search" => {
                     let query = arguments["query"].as_str().unwrap_or("");
                     args.push(query.to_string());
-                },
+                }
                 _ => {}
             }
 
             let sandbox_policy = state.sandbox_policy.lock().await.clone();
             let output = execute_tool_binary(args, &sandbox_policy).await?;
-            
+
             // Parse the JSON output and convert to YAML format for consistency
             let json_value: Value = serde_json::from_str(&output).unwrap_or_else(|_| {
                 // If parsing fails, create a default error response
                 json!({"error": format!("Failed to parse tool output: {}", output)})
             });
-            
+
             Ok(serde_yaml::to_string(&json_value)?)
-        },
+        }
         "web_search" => {
             let query = arguments["query"].as_str().unwrap_or("");
-            let limit = arguments.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let limit = arguments
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
             let site = arguments.get("site").and_then(|v| {
                 if v.is_array() {
-                    v.as_array().map(|arr| arr.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
+                    v.as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                 } else {
                     v.as_str().map(|s| vec![s.to_string()])
                 }
@@ -511,7 +574,7 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
                         error: None,
                     };
                     Ok(serde_yaml::to_string(&search_result)?)
-                },
+                }
                 Err(e) => {
                     let search_result = WebSearchResult {
                         status: "Failure".to_string(),
@@ -520,12 +583,13 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
                         error: Some(format!("Web search failed: {}", e)),
                     };
                     Ok(serde_yaml::to_string(&search_result)?)
-                },
+                }
             }
-        },
+        }
         "html_to_text" => {
             let url = arguments["url"].as_str().unwrap_or("");
-            let max_content_length = arguments.get("max_content_length")
+            let max_content_length = arguments
+                .get("max_content_length")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
 
@@ -544,7 +608,7 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
                         error: None,
                     };
                     Ok(serde_yaml::to_string(&html_result)?)
-                },
+                }
                 Err(e) => {
                     let html_result = HtmlToTextResult {
                         status: "Failure".to_string(),
@@ -553,9 +617,9 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
                         error: Some(format!("HTML extraction failed: {}", e)),
                     };
                     Ok(serde_yaml::to_string(&html_result)?)
-                },
+                }
             }
-        },
+        }
         "todo_write" => {
             // Return the todos array as JSON for the main app to save
             let todos = &arguments["todos"];
@@ -564,14 +628,14 @@ async fn execute_tool_call(tool_call: &ToolCallResponse, tx: mpsc::UnboundedSend
                 "todos": todos
             });
             Ok(serde_json::to_string(&result)?)
-        },
-        _ => Ok(format!("Tool '{}' executed (not fully implemented)", name))
+        }
+        _ => Ok(format!("Tool '{}' executed (not fully implemented)", name)),
     }
 }
 
 // Re-export commonly used types
-pub use config::{initialize_config, read_system_prompt, get_default_niterules};
-pub use tools::{get_all_tools, generate_tools_section};
+pub use config::{get_default_niterules, initialize_config, read_system_prompt};
+pub use tools::{generate_tools_section, get_all_tools};
 
 /// Configuration for selecting which LLM backend to use
 #[derive(Debug, Clone)]
@@ -663,7 +727,10 @@ impl Agent {
     /// Load model configuration and detect thinking capability
     /// Tries to load model.yaml from ~/.config/.nite/models/<model_name>/model.yaml
     /// Falls back to filename-based detection if config doesn't exist
-    fn load_thinking_config(_model_path: &str, model_filename: &str) -> (bool, model_config::ThinkingTags) {
+    fn load_thinking_config(
+        _model_path: &str,
+        model_filename: &str,
+    ) -> (bool, model_config::ThinkingTags) {
         // Extract base model name from filename for config lookup
         // E.g., "Qwen3-4B-Q8_0.gguf" -> try "qwen3-4b", "Qwen3-4B-Q8_0", etc.
         let filename_stem = std::path::Path::new(model_filename)
@@ -673,19 +740,21 @@ impl Agent {
 
         // Try multiple name variations to find the config
         let name_variants = vec![
-            filename_stem.to_lowercase(),  // "qwen3-4b-q8_0"
-            filename_stem.to_string(),      // "Qwen3-4B-Q8_0"
+            filename_stem.to_lowercase(), // "qwen3-4b-q8_0"
+            filename_stem.to_string(),    // "Qwen3-4B-Q8_0"
             // Strip quantization suffixes
-            filename_stem.to_lowercase()
+            filename_stem
+                .to_lowercase()
                 .split('-')
                 .take_while(|s| !s.starts_with('q') || s.len() > 2)
                 .collect::<Vec<_>>()
-                .join("-"),  // "qwen3-4b"
+                .join("-"), // "qwen3-4b"
         ];
 
         // Try each variant and return the first one that has thinking capability
         for variant in &name_variants {
-            let (has_thinking, tags) = model_config::ModelConfig::load_or_detect(variant, model_filename);
+            let (has_thinking, tags) =
+                model_config::ModelConfig::load_or_detect(variant, model_filename);
             if has_thinking {
                 return (has_thinking, tags);
             }
@@ -710,10 +779,15 @@ impl Agent {
             bool,
             model_config::ThinkingTags,
         ) = match backend_config {
-            BackendConfig::Local { model_path, model_files } => {
-                let backend: Arc<Box<dyn LLMBackend>> = Arc::new(
-                    Box::new(LocalBackend::new(model_path.clone(), model_files.clone())) as Box<dyn LLMBackend>
-                );
+            BackendConfig::Local {
+                model_path,
+                model_files,
+            } => {
+                let backend: Arc<Box<dyn LLMBackend>> = Arc::new(Box::new(LocalBackend::new(
+                    model_path.clone(),
+                    model_files.clone(),
+                ))
+                    as Box<dyn LLMBackend>);
                 let (has_thinking_capability, thinking_tags) = if !model_files.is_empty() {
                     Self::load_thinking_config(&model_path, &model_files[0])
                 } else {
@@ -733,15 +807,14 @@ impl Agent {
                 completions_path,
                 requires_model_load,
             } => {
-                let backend: Arc<Box<dyn LLMBackend>> = Arc::new(
-                    Box::new(HttpBackend::new(
-                        base_url,
-                        api_key,
-                        model,
-                        completions_path,
-                        requires_model_load,
-                    )) as Box<dyn LLMBackend>
-                );
+                let backend: Arc<Box<dyn LLMBackend>> = Arc::new(Box::new(HttpBackend::new(
+                    base_url,
+                    api_key,
+                    model,
+                    completions_path,
+                    requires_model_load,
+                ))
+                    as Box<dyn LLMBackend>);
                 (
                     backend,
                     if requires_model_load {
@@ -756,9 +829,8 @@ impl Agent {
         };
 
         // Create thinking summarizer with configured summary interval
-        let summarizer = thinking_summarizer::ThinkingSummarizer::with_threshold(
-            thinking_tags.summary_interval
-        );
+        let summarizer =
+            thinking_summarizer::ThinkingSummarizer::with_threshold(thinking_tags.summary_interval);
 
         Self {
             backend,
@@ -785,7 +857,10 @@ impl Agent {
         safety_config: safety_config::SafetyConfig,
     ) -> Self {
         Self::new_with_backend(
-            BackendConfig::Local { model_path, model_files },
+            BackendConfig::Local {
+                model_path,
+                model_files,
+            },
             system_prompt,
             tools,
             tokenizer,
@@ -801,8 +876,8 @@ impl Agent {
     /// Create a new agent with a specific model (or default if None)
     pub async fn new_with_model(model_filename: Option<String>) -> Result<Self> {
         // Initialize config
-        if let Err(e) = initialize_config() {
-            eprintln!("Warning: Failed to initialize config: {}", e);
+        if let Err(_e) = initialize_config() {
+            // eprintln!("Warning: Failed to initialize config: {}", e);
         }
 
         // Get runtime user info
@@ -811,9 +886,14 @@ impl Agent {
             std::fs::read_to_string("/etc/os-release")
                 .ok()
                 .and_then(|content| {
-                    content.lines()
+                    content
+                        .lines()
                         .find(|line| line.starts_with("PRETTY_NAME="))
-                        .map(|line| line.trim_start_matches("PRETTY_NAME=").trim_matches('"').to_string())
+                        .map(|line| {
+                            line.trim_start_matches("PRETTY_NAME=")
+                                .trim_matches('"')
+                                .to_string()
+                        })
                 })
                 .unwrap_or_else(|| "Linux".to_string())
         } else {
@@ -835,11 +915,10 @@ impl Agent {
         let tools_section = generate_tools_section(&tools);
 
         // Read system prompt
-        let system_prompt_template = read_system_prompt()
-            .unwrap_or_else(|e| {
-                eprintln!("Warning: Failed to read .niterules, using default: {}", e);
-                get_default_niterules()
-            });
+        let system_prompt_template = read_system_prompt().unwrap_or_else(|_e| {
+            // eprintln!("Warning: Failed to read .niterules, using default: {}", e);
+            get_default_niterules()
+        });
 
         // Replace placeholders
         let mut system_prompt = system_prompt_template
@@ -853,15 +932,15 @@ impl Agent {
         }
 
         let model_path = "/home/wise/.config/.nite/models".to_string();
-        let selected_model = model_filename
-            .unwrap_or_else(|| "Qwen_Qwen3-4B-Thinking-2507-Q8_0.gguf".to_string());
+        let selected_model =
+            model_filename.unwrap_or_else(|| "Qwen_Qwen3-4B-Thinking-2507-Q8_0.gguf".to_string());
 
         // Load tokenizer from HuggingFace (Qwen2.5 tokenizer)
         // Suppress output during loading
         #[cfg(unix)]
         let tokenizer = {
-            use std::os::unix::io::AsRawFd;
             use std::fs::OpenOptions;
+            use std::os::unix::io::AsRawFd;
 
             // Save original stdout and stderr
             let stdout_fd = std::io::stdout().as_raw_fd();
@@ -870,10 +949,7 @@ impl Agent {
             let saved_stderr = unsafe { libc::dup(stderr_fd) };
 
             // Open /dev/null
-            let devnull = OpenOptions::new()
-                .write(true)
-                .open("/dev/null")
-                .ok();
+            let devnull = OpenOptions::new().write(true).open("/dev/null").ok();
 
             let result = if let Some(devnull) = devnull {
                 let devnull_fd = devnull.as_raw_fd();
@@ -905,10 +981,13 @@ impl Agent {
         };
 
         #[cfg(not(unix))]
-        let tokenizer = Tokenizer::from_pretrained("Qwen/Qwen2.5-0.5B", None)
-            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+        let tokenizer = Tokenizer::from_pretrained("Qwen/Qwen2.5-0.5B", None).map_err(|e| {
+            // eprintln!("Warning: Failed to read .niterules, using default: {}", e);
+            anyhow::anyhow!("Failed to load tokenizer: {}", e)
+        })?;
 
-        let backend_mode = std::env::var("NITE_BACKEND_MODE").unwrap_or_else(|_| "http".to_string());
+        let backend_mode =
+            std::env::var("NITE_BACKEND_MODE").unwrap_or_else(|_| "http".to_string());
         let backend_mode = backend_mode.to_lowercase();
 
         let backend_config = match backend_mode.as_str() {
@@ -969,7 +1048,9 @@ impl Agent {
     /// This clears the cached model and updates the model_files to use the new file
     /// The model will be lazy-loaded on the next get_model() call
     pub async fn reload_model(&self, new_model_filename: String) -> Result<()> {
-        self.backend.reload_model(new_model_filename.clone()).await?;
+        self.backend
+            .reload_model(new_model_filename.clone())
+            .await?;
 
         if self.backend_kind == BackendKind::Local {
             let (has_thinking, tags) =
@@ -1042,7 +1123,10 @@ impl Agent {
     }
 
     /// Update the safety configuration and refresh tools based on the new mode
-    pub async fn update_safety_config(&self, new_safety_config: safety_config::SafetyConfig) -> Result<()> {
+    pub async fn update_safety_config(
+        &self,
+        new_safety_config: safety_config::SafetyConfig,
+    ) -> Result<()> {
         // Clone the safety config to use in multiple places
         let safety_config_for_update = new_safety_config.clone();
 
@@ -1072,9 +1156,14 @@ impl Agent {
             std::fs::read_to_string("/etc/os-release")
                 .ok()
                 .and_then(|content| {
-                    content.lines()
+                    content
+                        .lines()
                         .find(|line| line.starts_with("PRETTY_NAME="))
-                        .map(|line| line.trim_start_matches("PRETTY_NAME=").trim_matches('"').to_string())
+                        .map(|line| {
+                            line.trim_start_matches("PRETTY_NAME=")
+                                .trim_matches('"')
+                                .to_string()
+                        })
                 })
                 .unwrap_or_else(|| "Linux".to_string())
         } else {
@@ -1086,11 +1175,10 @@ impl Agent {
             .to_string();
 
         // Read system prompt and apply new tools section
-        let system_prompt_template = read_system_prompt()
-            .unwrap_or_else(|e| {
-                eprintln!("Warning: Failed to read .niterules, using default: {}", e);
-                get_default_niterules()
-            });
+        let system_prompt_template = read_system_prompt().unwrap_or_else(|_e| {
+            // eprintln!("Warning: Failed to read .niterules, using default: {}", e);
+            get_default_niterules()
+        });
 
         // Update the system prompt with new tools
         let mut updated_system_prompt = system_prompt_template
@@ -1150,7 +1238,7 @@ impl Agent {
         for message in messages {
             if let (Some(role_str), Some(content_str)) = (
                 message.get("role").and_then(|r| r.as_str()),
-                message.get("content").and_then(|c| c.as_str())
+                message.get("content").and_then(|c| c.as_str()),
             ) {
                 let role = match role_str {
                     "system" => TextMessageRole::System,
@@ -1209,10 +1297,7 @@ impl Agent {
 
         let request_builder = if let Some(existing_conversation) = conversation_guard.take() {
             // Continue existing conversation
-            existing_conversation.add_message(
-                TextMessageRole::User,
-                &user_message,
-            )
+            existing_conversation.add_message(TextMessageRole::User, &user_message)
         } else {
             // Start new conversation with system prompt
             let system_prompt_content = {
@@ -1249,13 +1334,15 @@ impl Agent {
         request_builder: RequestBuilder,
         tx: mpsc::UnboundedSender<AgentMessage>,
     ) -> Result<()> {
-
         let mut current_request_builder = request_builder;
         let mut has_more_tool_calls = true;
         let mut _final_accumulated_content = String::new();
 
         while has_more_tool_calls {
-            let mut stream = self.backend.stream_chat_request(current_request_builder.clone()).await?;
+            let mut stream = self
+                .backend
+                .stream_chat_request(current_request_builder.clone())
+                .await?;
             let mut accumulated_tool_calls: Vec<ToolCallResponse> = Vec::new();
             let mut accumulated_content = String::new();
             has_more_tool_calls = false;
@@ -1275,14 +1362,20 @@ impl Agent {
                                 let mut summarizer_guard = self.thinking_summarizer.lock().await;
                                 summarizer_guard.add_thinking_chunk(&thinking_buffer).await;
                                 summarizer_guard.flush().await;
-                                for (summary, token_count, chunk_count) in summarizer_guard.get_new_summaries() {
-                                    let _ = tx.send(AgentMessage::ThinkingSummary(format!("{}|{}|{}", summary, token_count, chunk_count)));
+                                for (summary, token_count, chunk_count) in
+                                    summarizer_guard.get_new_summaries()
+                                {
+                                    let _ = tx.send(AgentMessage::ThinkingSummary(format!(
+                                        "{}|{}|{}",
+                                        summary, token_count, chunk_count
+                                    )));
                                 }
                             }
 
                             // Send any accumulated content as partial response
                             if !accumulated_content.is_empty() && !in_thinking {
-                                let _ = tx.send(AgentMessage::AgentResponse(accumulated_content.clone()));
+                                let _ = tx
+                                    .send(AgentMessage::AgentResponse(accumulated_content.clone()));
                             }
 
                             // Send Done to finalize
@@ -1320,7 +1413,8 @@ impl Agent {
                                 let token_count = usage_stats.completion_tokens;
                                 let time_to_first_token = usage_stats.total_prompt_time_sec;
                                 // Try to get finish_reason from the choice
-                                let stop_reason = choices.first()
+                                let stop_reason = choices
+                                    .first()
                                     .and_then(|c| c.finish_reason.as_ref())
                                     .map(|s| s.clone())
                                     .unwrap_or_else(|| "unknown".to_string());
@@ -1329,7 +1423,7 @@ impl Agent {
                                     tok_per_sec,
                                     token_count,
                                     time_to_first_token,
-                                    stop_reason
+                                    stop_reason,
                                 ));
                             }
                         }
@@ -1347,78 +1441,112 @@ impl Agent {
                                     }
 
                                     // Determine if we should process thinking tags
-                                    let has_thinking_capability = *self.has_thinking_capability.lock().await;
-                                    
+                                    let has_thinking_capability =
+                                        *self.has_thinking_capability.lock().await;
+
                                     // Get configured opening tag
                                     let thinking_tags_guard = self.thinking_tags.lock().await;
                                     let open_tag = thinking_tags_guard.open_tag.clone();
                                     drop(thinking_tags_guard); // Release lock immediately
-                                    
+
                                     let has_think_tag = content.contains(open_tag.as_str());
-                                    
+
                                     // Process thinking if capability exists OR we are in thinking mode OR we see the tag
                                     if has_thinking_capability || in_thinking || has_think_tag {
                                         if !in_thinking && has_think_tag {
                                             in_thinking = true;
                                             // DO NOT add to accumulated_content - thinking should be hidden from output
                                             // Extract everything after the thinking tag into thinking buffer
-                                            if let Some(think_idx) = content.find(open_tag.as_str()) {
+                                            if let Some(think_idx) = content.find(open_tag.as_str())
+                                            {
                                                 let tag_len = open_tag.len();
-                                                let after_think_tag = &content[think_idx + tag_len..];
+                                                let after_think_tag =
+                                                    &content[think_idx + tag_len..];
                                                 thinking_buffer.push_str(after_think_tag);
                                             }
                                         } else if in_thinking {
                                             // DO NOT add to accumulated_content - thinking should be hidden from output
                                             thinking_buffer.push_str(content);
-    
+
                                             // Check if we've hit the end of thinking section
                                             // Use configured closing tag
-                                            let thinking_tags_guard = self.thinking_tags.lock().await;
+                                            let thinking_tags_guard =
+                                                self.thinking_tags.lock().await;
                                             let close_tag = thinking_tags_guard.close_tag.clone();
                                             drop(thinking_tags_guard); // Release lock immediately
-                                            
-                                            let end_tag_result = thinking_buffer.find(close_tag.as_str())
+
+                                            let end_tag_result = thinking_buffer
+                                                .find(close_tag.as_str())
                                                 .map(|idx| (idx, close_tag.len()));
-    
+
                                             if let Some((end_idx, end_tag_len)) = end_tag_result {
                                                 // Found end of thinking - switch to normal output mode
                                                 in_thinking = false;
-    
+
                                                 // Send the remaining thinking content before the tag (streaming)
                                                 let final_thinking = &thinking_buffer[..end_idx];
                                                 if !final_thinking.is_empty() {
-                                                    let token_count = self.count_tokens(final_thinking);
-                                                    let _ = tx.send(AgentMessage::ThinkingContent(final_thinking.to_string(), token_count));
+                                                    let token_count =
+                                                        self.count_tokens(final_thinking);
+                                                    let _ = tx.send(AgentMessage::ThinkingContent(
+                                                        final_thinking.to_string(),
+                                                        token_count,
+                                                    ));
                                                     check_cancel!();
-    
+
                                                     // Add to summarizer and check for new summaries
-                                                    let mut summarizer_guard = self.thinking_summarizer.lock().await;
-                                                    summarizer_guard.add_thinking_chunk(final_thinking).await;
+                                                    let mut summarizer_guard =
+                                                        self.thinking_summarizer.lock().await;
+                                                    summarizer_guard
+                                                        .add_thinking_chunk(final_thinking)
+                                                        .await;
                                                     // Send only new summaries with token count and chunk count embedded
-                                                    for (summary, token_count, chunk_count) in summarizer_guard.get_new_summaries() {
-                                                        let _ = tx.send(AgentMessage::ThinkingSummary(format!("{}|{}|{}", summary, token_count, chunk_count)));
+                                                    for (summary, token_count, chunk_count) in
+                                                        summarizer_guard.get_new_summaries()
+                                                    {
+                                                        let _ = tx.send(
+                                                            AgentMessage::ThinkingSummary(format!(
+                                                                "{}|{}|{}",
+                                                                summary, token_count, chunk_count
+                                                            )),
+                                                        );
                                                         check_cancel!();
                                                     }
                                                 }
-    
+
                                                 // At end, force flush to handle any residual <50 tokens
-                                                let mut summarizer_guard = self.thinking_summarizer.lock().await;
+                                                let mut summarizer_guard =
+                                                    self.thinking_summarizer.lock().await;
                                                 summarizer_guard.flush().await;
                                                 // Send new summaries from flush
-                                                for (summary, token_count, chunk_count) in summarizer_guard.get_new_summaries() {
-                                                    let _ = tx.send(AgentMessage::ThinkingSummary(format!("{}|{}|{}", summary, token_count, chunk_count)));
+                                                for (summary, token_count, chunk_count) in
+                                                    summarizer_guard.get_new_summaries()
+                                                {
+                                                    let _ = tx.send(AgentMessage::ThinkingSummary(
+                                                        format!(
+                                                            "{}|{}|{}",
+                                                            summary, token_count, chunk_count
+                                                        ),
+                                                    ));
                                                     check_cancel!();
                                                 }
                                                 // Send completion signal with residual token count (should be 0 after flush)
-                                                let residual_tokens = summarizer_guard.get_residual_token_count();
+                                                let residual_tokens =
+                                                    summarizer_guard.get_residual_token_count();
                                                 if residual_tokens > 0 {
-                                                    let _ = tx.send(AgentMessage::ThinkingComplete(residual_tokens));
+                                                    let _ =
+                                                        tx.send(AgentMessage::ThinkingComplete(
+                                                            residual_tokens,
+                                                        ));
                                                 }
-    
+
                                                 // Send any content after closing tag as normal response
-                                                let after_think = &thinking_buffer[end_idx + end_tag_len..];
+                                                let after_think =
+                                                    &thinking_buffer[end_idx + end_tag_len..];
                                                 if !after_think.is_empty() {
-                                                    let _ = tx.send(AgentMessage::AgentResponse(after_think.to_string()));
+                                                    let _ = tx.send(AgentMessage::AgentResponse(
+                                                        after_think.to_string(),
+                                                    ));
                                                 }
                                                 thinking_buffer.clear();
                                             } else {
@@ -1428,58 +1556,97 @@ impl Agent {
                                                 if char_count > 11 {
                                                     // Send (char_count - 11) chars, but check cancellation every 100 chars
                                                     let send_char_count = char_count - 11;
-                                                    if let Some((byte_idx, _)) = thinking_buffer.char_indices().nth(send_char_count) {
+                                                    if let Some((byte_idx, _)) = thinking_buffer
+                                                        .char_indices()
+                                                        .nth(send_char_count)
+                                                    {
                                                         let to_send = &thinking_buffer[..byte_idx];
-    
+
                                                         // Break into 100-char chunks for frequent cancellation checks
                                                         let mut remaining = to_send;
                                                         while !remaining.is_empty() {
                                                             // Check cancellation before processing each chunk
                                                             check_cancel!();
-    
+
                                                             // Take up to 100 chars
-                                                            let chunk_chars = remaining.chars().take(100).count();
-                                                            if let Some((chunk_byte_end, _)) = remaining.char_indices().nth(chunk_chars) {
-                                                                let chunk = &remaining[..chunk_byte_end];
-                                                                let token_count = self.count_tokens(chunk);
-                                                                let _ = tx.send(AgentMessage::ThinkingContent(chunk.to_string(), token_count));
-                                                                remaining = &remaining[chunk_byte_end..];
+                                                            let chunk_chars =
+                                                                remaining.chars().take(100).count();
+                                                            if let Some((chunk_byte_end, _)) =
+                                                                remaining
+                                                                    .char_indices()
+                                                                    .nth(chunk_chars)
+                                                            {
+                                                                let chunk =
+                                                                    &remaining[..chunk_byte_end];
+                                                                let token_count =
+                                                                    self.count_tokens(chunk);
+                                                                let _ = tx.send(
+                                                                    AgentMessage::ThinkingContent(
+                                                                        chunk.to_string(),
+                                                                        token_count,
+                                                                    ),
+                                                                );
+                                                                remaining =
+                                                                    &remaining[chunk_byte_end..];
                                                             } else {
                                                                 // Last chunk
-                                                                let token_count = self.count_tokens(remaining);
-                                                                let _ = tx.send(AgentMessage::ThinkingContent(remaining.to_string(), token_count));
+                                                                let token_count =
+                                                                    self.count_tokens(remaining);
+                                                                let _ = tx.send(
+                                                                    AgentMessage::ThinkingContent(
+                                                                        remaining.to_string(),
+                                                                        token_count,
+                                                                    ),
+                                                                );
                                                                 break;
                                                             }
-    
+
                                                             // Check cancellation after sending each chunk
                                                             check_cancel!();
                                                         }
-    
+
                                                         // Add to summarizer as we stream
-                                                        let mut summarizer_guard = self.thinking_summarizer.lock().await;
-                                                        summarizer_guard.add_thinking_chunk(to_send).await;
+                                                        let mut summarizer_guard =
+                                                            self.thinking_summarizer.lock().await;
+                                                        summarizer_guard
+                                                            .add_thinking_chunk(to_send)
+                                                            .await;
                                                         // Send only new summaries with token count and chunk count embedded
-                                                        for (summary, token_count, chunk_count) in summarizer_guard.get_new_summaries() {
-                                                            let _ = tx.send(AgentMessage::ThinkingSummary(format!("{}|{}|{}", summary, token_count, chunk_count)));
+                                                        for (summary, token_count, chunk_count) in
+                                                            summarizer_guard.get_new_summaries()
+                                                        {
+                                                            let _ = tx.send(
+                                                                AgentMessage::ThinkingSummary(
+                                                                    format!(
+                                                                        "{}|{}|{}",
+                                                                        summary,
+                                                                        token_count,
+                                                                        chunk_count
+                                                                    ),
+                                                                ),
+                                                            );
                                                             // Check cancellation after each summary
                                                             check_cancel!();
                                                         }
-    
-                                                        thinking_buffer = thinking_buffer[byte_idx..].to_string();
+
+                                                        thinking_buffer =
+                                                            thinking_buffer[byte_idx..].to_string();
                                                     }
                                                 }
                                             }
                                         } else {
                                             // Not in thinking section - send content directly to UI
                                             accumulated_content.push_str(content);
-                                            let _ = tx.send(AgentMessage::AgentResponse(content.clone()));
+                                            let _ = tx
+                                                .send(AgentMessage::AgentResponse(content.clone()));
                                             // Check cancellation after sending response content
                                             check_cancel!();
                                         }
                                     } else {
                                         // No thinking capability and no thinking tag detected - stream content normally
                                         accumulated_content.push_str(content);
-                                        let _ = tx.send(AgentMessage::AgentResponse(content.clone()));
+                                        let _ =
+                                            tx.send(AgentMessage::AgentResponse(content.clone()));
                                         // Check cancellation after sending response content
                                         check_cancel!();
                                     }
@@ -1492,24 +1659,37 @@ impl Agent {
                                     if in_thinking && !thinking_buffer.is_empty() {
                                         // Send remaining thinking content
                                         let token_count = self.count_tokens(&thinking_buffer);
-                                        let _ = tx.send(AgentMessage::ThinkingContent(thinking_buffer.clone(), token_count));
+                                        let _ = tx.send(AgentMessage::ThinkingContent(
+                                            thinking_buffer.clone(),
+                                            token_count,
+                                        ));
 
                                         // Add to summarizer
-                                        let mut summarizer_guard = self.thinking_summarizer.lock().await;
+                                        let mut summarizer_guard =
+                                            self.thinking_summarizer.lock().await;
                                         summarizer_guard.add_thinking_chunk(&thinking_buffer).await;
 
                                         // Force flush for residual
                                         summarizer_guard.flush().await;
 
                                         // Send new summaries
-                                        for (summary, token_count, chunk_count) in summarizer_guard.get_new_summaries() {
-                                            let _ = tx.send(AgentMessage::ThinkingSummary(format!("{}|{}|{}", summary, token_count, chunk_count)));
+                                        for (summary, token_count, chunk_count) in
+                                            summarizer_guard.get_new_summaries()
+                                        {
+                                            let _ =
+                                                tx.send(AgentMessage::ThinkingSummary(format!(
+                                                    "{}|{}|{}",
+                                                    summary, token_count, chunk_count
+                                                )));
                                         }
 
                                         // Send completion if residual >0 (though flush should handle)
-                                        let residual_tokens = summarizer_guard.get_residual_token_count();
+                                        let residual_tokens =
+                                            summarizer_guard.get_residual_token_count();
                                         if residual_tokens > 0 {
-                                            let _ = tx.send(AgentMessage::ThinkingComplete(residual_tokens));
+                                            let _ = tx.send(AgentMessage::ThinkingComplete(
+                                                residual_tokens,
+                                            ));
                                         }
 
                                         thinking_buffer.clear();
@@ -1520,7 +1700,7 @@ impl Agent {
                                     for tool_call in tool_calls {
                                         let _ = tx.send(AgentMessage::ToolCallStarted(
                                             tool_call.function.name.clone(),
-                                            tool_call.function.arguments.clone()
+                                            tool_call.function.arguments.clone(),
                                         ));
                                     }
                                 }
@@ -1534,7 +1714,9 @@ impl Agent {
                             let tok_per_sec = response.usage.avg_compl_tok_per_sec;
                             let token_count = response.usage.completion_tokens;
                             let time_to_first_token = response.usage.total_prompt_time_sec;
-                            let stop_reason = response.choices.first()
+                            let stop_reason = response
+                                .choices
+                                .first()
                                 .map(|c| c.finish_reason.clone())
                                 .unwrap_or_else(|| "unknown".to_string());
 
@@ -1543,7 +1725,7 @@ impl Agent {
                                 tok_per_sec,
                                 token_count,
                                 time_to_first_token,
-                                stop_reason
+                                stop_reason,
                             ));
                         }
                         break;
@@ -1567,13 +1749,19 @@ impl Agent {
             // After stream ends, if still in thinking (no </think> found), flush residual
             if in_thinking && !thinking_buffer.is_empty() {
                 let token_count = self.count_tokens(&thinking_buffer);
-                let _ = tx.send(AgentMessage::ThinkingContent(thinking_buffer.clone(), token_count));
+                let _ = tx.send(AgentMessage::ThinkingContent(
+                    thinking_buffer.clone(),
+                    token_count,
+                ));
 
                 let mut summarizer_guard = self.thinking_summarizer.lock().await;
                 summarizer_guard.add_thinking_chunk(&thinking_buffer).await;
                 summarizer_guard.flush().await;
                 for (summary, token_count, chunk_count) in summarizer_guard.get_new_summaries() {
-                    let _ = tx.send(AgentMessage::ThinkingSummary(format!("{}|{}|{}", summary, token_count, chunk_count)));
+                    let _ = tx.send(AgentMessage::ThinkingSummary(format!(
+                        "{}|{}|{}",
+                        summary, token_count, chunk_count
+                    )));
                 }
                 let residual_tokens = summarizer_guard.get_residual_token_count();
                 if residual_tokens > 0 {
@@ -1594,25 +1782,43 @@ impl Agent {
                         Ok(result) => {
                             let _ = tx.send(AgentMessage::ToolCallCompleted(
                                 tool_call.function.name.clone(),
-                                result.clone()
+                                result.clone(),
                             ));
 
                             // Check if this was a background exec_command and extract session info
                             if tool_call.function.name == "exec_command" {
-                                if let Ok(parsed) = serde_yaml::from_str::<serde_json::Value>(&result) {
-                                    if let Some(status) = parsed.get("status").and_then(|v| v.as_str()) {
+                                if let Ok(parsed) =
+                                    serde_yaml::from_str::<serde_json::Value>(&result)
+                                {
+                                    if let Some(status) =
+                                        parsed.get("status").and_then(|v| v.as_str())
+                                    {
                                         if status == "Background" {
-                                            let session_id = parsed.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                            let command = parsed.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                            let log_file = parsed.get("log_file").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                            let _ = tx.send(AgentMessage::BackgroundTaskStarted(session_id, command, log_file));
+                                            let session_id = parsed
+                                                .get("session_id")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("")
+                                                .to_string();
+                                            let command = parsed
+                                                .get("command")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("")
+                                                .to_string();
+                                            let log_file = parsed
+                                                .get("log_file")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("")
+                                                .to_string();
+                                            let _ = tx.send(AgentMessage::BackgroundTaskStarted(
+                                                session_id, command, log_file,
+                                            ));
                                         }
                                     }
                                 }
                             }
 
                             result
-                        },
+                        }
                         Err(e) => {
                             #[derive(Serialize)]
                             struct ToolError {
@@ -1625,8 +1831,10 @@ impl Agent {
                                 tool: tool_call.function.name.clone(),
                                 status: "failed".to_string(),
                             };
-                            let error_msg = serde_yaml::to_string(&error_obj).unwrap_or_else(|_| "error: Failed to serialize error".to_string());
-                            let _ = tx.send(AgentMessage::Error(format!("Tool call failed: {}", e)));
+                            let error_msg = serde_yaml::to_string(&error_obj)
+                                .unwrap_or_else(|_| "error: Failed to serialize error".to_string());
+                            let _ =
+                                tx.send(AgentMessage::Error(format!("Tool call failed: {}", e)));
                             error_msg
                         }
                     };
@@ -1671,17 +1879,19 @@ pub async fn kill_shell_session(session_id: String) -> Result<()> {
     // First, try to kill all background jobs in the shell
     // This will kill the background processes before terminating the shell
     let kill_jobs_cmd = "kill $(jobs -p) 2>/dev/null || true";
-    let _ = state.manager.send_input_to_shell_session(
-        session_id_obj.clone(),
-        kill_jobs_cmd.to_string(),
-        None,
-    ).await;
+    let _ = state
+        .manager
+        .send_input_to_shell_session(session_id_obj.clone(), kill_jobs_cmd.to_string(), None)
+        .await;
 
     // Give it a moment to kill the jobs
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Terminate the session
-    state.manager.terminate_session(session_id_obj.clone()).await?;
+    state
+        .manager
+        .terminate_session(session_id_obj.clone())
+        .await?;
 
     // If this was the current shell session, clear it
     let mut session_id_lock = state.shell_session_id.lock().await;

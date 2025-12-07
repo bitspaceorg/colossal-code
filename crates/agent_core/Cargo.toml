@@ -39,6 +39,8 @@ tokenizers = { version = "0.21", features = ["http"] }
 dirs = "5.0"
 toml = "0.8"
 uuid = { version = "1.10", features = ["v4"] }
+either = "1.15.0"
+indexmap = "2.12.1"
 
 [features]
 default = []

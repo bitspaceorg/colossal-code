@@ -244,6 +244,13 @@ pub enum MessageType {
     Agent,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgentConnector {
+    None,
+    Continue,
+    End,
+}
+
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 enum MessageState {
     Sent,        // Normal sent message
@@ -498,6 +505,7 @@ struct App {
     thinking_last_tick: Instant,
     thinking_start_time: Option<Instant>, // Track when thinking started for elapsed time display
     thinking_token_count: usize,          // Real-time count of thinking tokens generated
+    limit_thinking_to_first_token: bool,
     // Generation statistics (only for latest response)
     generation_stats: Option<(f32, usize, f32, String)>, // (tok_per_sec, token_count, time_to_first_token, stop_reason)
     // Command history
@@ -1297,10 +1305,14 @@ impl App {
         let api_key = Self::load_config_value("http-api-key")
             .map(|v| v.trim().to_string())
             .unwrap_or_default();
-        let completions_path = Self::load_config_value("http-completions-path")
+        let completions_path_config = Self::load_config_value("http-completions-path")
             .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| "/v1/chat/completions".to_string());
+            .filter(|v| !v.is_empty());
+        let google_user_project = Self::load_config_value("google-user-project")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+
+        let limit_thinking_to_first_token = backend_mode == "external";
 
         match backend_mode.as_str() {
             "local" => unsafe {
@@ -1315,7 +1327,12 @@ impl App {
                     "NITE_HTTP_BASE_URL",
                     base_url.unwrap_or_else(|| "https://api.openai.com".to_string()),
                 );
-                std::env::set_var("NITE_HTTP_COMPLETIONS_PATH", &completions_path);
+                std::env::set_var(
+                    "NITE_HTTP_COMPLETIONS_PATH",
+                    completions_path_config
+                        .clone()
+                        .unwrap_or_else(|| "chat/completions".to_string()),
+                );
                 if api_key.is_empty() {
                     std::env::remove_var("NITE_HTTP_API_KEY");
                 } else {
@@ -1328,7 +1345,12 @@ impl App {
                     "NITE_HTTP_BASE_URL",
                     base_url.unwrap_or_else(|| "http://127.0.0.1:8080".to_string()),
                 );
-                std::env::set_var("NITE_HTTP_COMPLETIONS_PATH", &completions_path);
+                std::env::set_var(
+                    "NITE_HTTP_COMPLETIONS_PATH",
+                    completions_path_config
+                        .clone()
+                        .unwrap_or_else(|| "/v1/chat/completions".to_string()),
+                );
                 if api_key.is_empty() {
                     std::env::remove_var("NITE_HTTP_API_KEY");
                 } else {
@@ -1337,10 +1359,20 @@ impl App {
             },
         }
 
-        // Enable sandbox by default (SAFE_MODE environment variable)
-        unsafe {
-            std::env::set_var("SAFE_MODE", "1");
+        if let Some(project) = google_user_project {
+            unsafe {
+                std::env::set_var("NITE_GOOGLE_USER_PROJECT", project);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("NITE_GOOGLE_USER_PROJECT");
+            }
         }
+
+        // Sandbox disabled by default - can be toggled with Ctrl+X in settings
+        // unsafe {
+        //     std::env::set_var("SAFE_MODE", "1");
+        // }
 
         // Initialize agent with the selected model
         let agent = Agent::new_with_model(current_model.clone())
@@ -1370,7 +1402,15 @@ impl App {
                             let agent = agent_clone.clone();
                             let tx = output_tx_clone.clone();
                             tokio::task::spawn_local(async move {
-                                let _ = agent.process_message(user_message, tx).await;
+                                if let Err(e) =
+                                    agent.process_message(user_message, tx.clone()).await
+                                {
+                                    let _ = tx.send(AgentMessage::Error(format!(
+                                        "Agent failed to process request: {}",
+                                        e
+                                    )));
+                                    let _ = tx.send(AgentMessage::Done);
+                                }
                             });
                         }
                         AgentMessage::Cancel => {
@@ -1606,6 +1646,7 @@ impl App {
             thinking_last_tick: Instant::now(),
             thinking_start_time: None,
             thinking_token_count: 0,
+            limit_thinking_to_first_token,
             generation_stats: None,
             command_history,
             history_index: None,
@@ -1629,7 +1670,7 @@ impl App {
             autocomplete_suggestions: Vec::new(),
             autocomplete_selected_index: 0,
             thinking_raw_content: String::new(),
-            sandbox_enabled: true, // Default to sandbox enabled for safety
+            sandbox_enabled: false, // Default to sandbox disabled (no restrictions)
             vim_mode_enabled: Self::load_vim_mode_setting(),
             vim_input_editor: RichEditor::new(),
             show_background_tasks: false,
@@ -1900,7 +1941,10 @@ impl App {
                         .get(&serde_yaml::Value::String("message".to_string()))
                         .and_then(|v| v.as_str())
                     {
-                        return format!("Error: {}", msg);
+                        // Skip YAML artifacts
+                        if !msg.is_empty() && msg != "|+" && msg != "|-" && msg != "|" {
+                            return format!("Error: {}", msg);
+                        }
                     }
                     return "Failed".to_string();
                 }
@@ -1908,10 +1952,32 @@ impl App {
         }
 
         // Fallback: try to extract first meaningful line
+        let mut skip_yaml_keys = true;
         for line in result_yaml.lines() {
             let trimmed = line.trim();
-            if !trimmed.is_empty() && !trimmed.starts_with("status:") && !trimmed.starts_with("---")
+
+            // Skip empty lines
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // Skip YAML document markers and field names
+            if trimmed.starts_with("---")
+                || trimmed.starts_with("status:")
+                || trimmed.starts_with("path:")
+                || trimmed.starts_with("message:")
             {
+                continue;
+            }
+
+            // Skip YAML multiline string indicators
+            if trimmed == "|+" || trimmed == "|-" || trimmed == "|" || trimmed == ">" {
+                skip_yaml_keys = false; // Next non-empty line is the actual content
+                continue;
+            }
+
+            // Return first meaningful content line
+            if !skip_yaml_keys {
                 if trimmed.len() > 60 {
                     return format!("{}...", &trimmed[..57]);
                 }
@@ -2892,7 +2958,7 @@ impl App {
         if cmd_lower == "/clear" {
             // Save conversation before clearing
             if let Err(e) = self.save_conversation().await {
-                eprintln!("[ERROR] Failed to save conversation before /clear: {}", e);
+                // eprintln!("[ERROR] Failed to save conversation before /clear: {}", e);
             }
 
             // Reset conversation tracking AFTER save (start fresh next time)
@@ -3395,7 +3461,7 @@ impl App {
                         // Add the root in an async context
                         tokio::spawn(async move {
                             if let Err(e) = agent_core::add_writable_root(path).await {
-                                eprintln!("Failed to add writable root: {}", e);
+                                // eprintln!("Failed to add writable root: {}", e);
                             }
                         });
 
@@ -3484,7 +3550,7 @@ impl App {
 
                 // Ensure conversation ID exists (generate if this is the first message)
                 if let Err(e) = self.ensure_conversation_id() {
-                    eprintln!("[ERROR] Failed to generate conversation ID: {}", e);
+                    // eprintln!("[ERROR] Failed to generate conversation ID: {}", e);
                 }
 
                 // Clear generation stats from previous message when new message is added to UI
@@ -3562,6 +3628,9 @@ impl App {
 
                     match msg {
                         AgentMessage::ThinkingContent(thinking, token_count) => {
+                            if self.limit_thinking_to_first_token && self.agent_response_started {
+                                continue;
+                            }
                             // Add or maintain thinking animation placeholder
                             let should_add_thinking = if let Some(last_msg) = self.messages.last() {
                                 // Only add if last message is not already a thinking animation
@@ -3587,6 +3656,9 @@ impl App {
                             self.thinking_token_count += token_count;
                         }
                         AgentMessage::ThinkingSummary(summary) => {
+                            if self.limit_thinking_to_first_token {
+                                continue;
+                            }
                             // Parse summary format: "text|token_count|chunk_count"
                             let (summary_text, token_count, chunk_count) =
                                 if let Some(last_pipe) = summary.rfind('|') {
@@ -3607,7 +3679,7 @@ impl App {
                                 };
 
                             // If we have a current summary, move it to a static tree line
-                            if let Some((old_summary, old_tokens, old_chunks)) =
+                            if let Some((old_summary, _old_tokens, _old_chunks)) =
                                 self.thinking_current_summary.take()
                             {
                                 // Remove the thinking animation temporarily
@@ -3618,8 +3690,8 @@ impl App {
                                     }
                                 }
                                 // Add old summary as static tree line with token count and chunk count
-                                // self.messages.push(format!("├── {} ({}rt {}ct)", old_summary, old_tokens, old_chunks));
-                                self.messages.push(format!("├── {}", old_summary));
+                                self.messages
+                                    .push(Self::format_thinking_tree_line(old_summary, false));
                                 self.message_types.push(MessageType::Agent);
                                 // Re-add thinking animation at bottom
                                 self.messages.push("[THINKING_ANIMATION]".to_string());
@@ -3649,7 +3721,8 @@ impl App {
                             if let Some((final_summary, _token_count, _chunk_count)) =
                                 self.thinking_current_summary.take()
                             {
-                                self.messages.push(format!("├── {}", final_summary));
+                                self.messages
+                                    .push(Self::format_thinking_tree_line(final_summary, true));
                                 self.message_types.push(MessageType::Agent);
                             }
                             self.is_thinking = false;
@@ -3694,7 +3767,8 @@ impl App {
                             if let Some((current_summary, _token_count, _chunk_count)) =
                                 self.thinking_current_summary.take()
                             {
-                                self.messages.push(format!("├── {}", current_summary));
+                                self.messages
+                                    .push(Self::format_thinking_tree_line(current_summary, false));
                                 self.message_types.push(MessageType::Agent);
                             }
 
@@ -3890,7 +3964,8 @@ impl App {
                             if let Some((final_summary, _token_count, _chunk_count)) =
                                 self.thinking_current_summary.take()
                             {
-                                self.messages.push(format!("├── {}", final_summary));
+                                self.messages
+                                    .push(Self::format_thinking_tree_line(final_summary, true));
                                 self.message_types.push(MessageType::Agent);
                             }
                             self.agent_processing = false;
@@ -3975,7 +4050,7 @@ impl App {
             // Save pending todos if any (after rx borrow is dropped)
             if let Some(todos) = pending_todos {
                 if let Err(e) = self.save_todos(&todos) {
-                    eprintln!("[ERROR] Failed to save todos: {}", e);
+                    // eprintln!("[ERROR] Failed to save todos: {}", e);
                 }
             }
 
@@ -4110,7 +4185,7 @@ impl App {
             if self.save_pending {
                 self.save_pending = false;
                 if let Err(e) = self.save_conversation().await {
-                    eprintln!("[ERROR] Failed to save conversation: {}", e);
+                    // eprintln!("[ERROR] Failed to save conversation: {}", e);
                 }
             }
 
@@ -4555,7 +4630,10 @@ impl App {
                                             }
                                         }
                                         // Add current summary as static tree line
-                                        self.messages.push(format!("├── {}", current_summary));
+                                        self.messages.push(Self::format_thinking_tree_line(
+                                            current_summary,
+                                            true,
+                                        ));
                                         self.message_types.push(MessageType::Agent);
                                         self.message_states.push(MessageState::Sent);
                                     } else {
@@ -5270,7 +5348,7 @@ impl App {
         // Save conversation on exit if pending (for Ctrl+C exits)
         if self.save_pending {
             if let Err(e) = self.save_conversation().await {
-                eprintln!("[ERROR] Failed to save conversation on exit: {}", e);
+                // eprintln!("[ERROR] Failed to save conversation on exit: {}", e);
             }
         }
 
@@ -5321,11 +5399,26 @@ impl App {
         lines
     }
 
-    fn render_agent_message_with_bullet(&self, message: &str, max_width: usize) -> Text<'static> {
-        // Check if this is a thinking summary (tree line starting with ├──)
-        if message.starts_with("├── ") {
+    fn format_thinking_tree_line(summary: String, is_final: bool) -> String {
+        let prefix = if is_final { "└──" } else { "├──" };
+        format!("{} {}", prefix, summary)
+    }
+
+    fn connector_prefix(_connector: AgentConnector, _is_first_line: bool) -> Span<'static> {
+        // Removed connector prefix border - no visual tree structure
+        Span::raw("")
+    }
+
+    fn render_agent_message_with_bullet(
+        &self,
+        message: &str,
+        max_width: usize,
+        connector: AgentConnector,
+    ) -> Text<'static> {
+        // Check if this is a thinking summary (tree line starting with ├── or └──)
+        if message.starts_with("├── ") || message.starts_with("└── ") {
             return Text::from(vec![Line::from(vec![
-                Span::raw(" "), // 1 space left margin
+                Self::connector_prefix(connector, true),
                 Span::styled(message.to_string(), Style::default().fg(Color::DarkGray)),
             ])]);
         }
@@ -5350,18 +5443,18 @@ impl App {
         // Content lines with white bullet on first line, NO BORDERS
         for (idx, line) in markdown_lines.iter().enumerate() {
             if idx == 0 {
-                // First line: 1 space left margin + white bullet
+                // First line: connector prefix + white bullet
                 let mut spans = vec![
-                    Span::raw(" "), // 1 space left margin (matching thinking animation)
+                    Self::connector_prefix(connector, true),
                     Span::styled("● ", Style::default().fg(Color::White)),
                 ];
                 // Add the spans from the markdown line
                 spans.extend(line.spans.iter().cloned());
                 lines.push(Line::from(spans));
             } else {
-                // Subsequent lines: 1 space left margin + 2 spaces to align with text after bullet
+                // Subsequent lines: connector prefix + spaces to align with text after bullet
                 let mut spans = vec![
-                    Span::raw(" "),  // 1 space left margin
+                    Self::connector_prefix(connector, false),
                     Span::raw("  "), // 2 spaces to align with text after "● "
                 ];
                 // Add the spans from the markdown line
@@ -5385,6 +5478,39 @@ impl App {
             .as_ref()
             .map(|s| &s.message_types)
             .unwrap_or(&self.message_types)
+    }
+    fn agent_connector_for_index(
+        &self,
+        message_types: &[MessageType],
+        idx: usize,
+    ) -> AgentConnector {
+        if !matches!(message_types.get(idx), Some(MessageType::Agent)) {
+            return AgentConnector::None;
+        }
+
+        // Ensure there is a preceding user message to anchor the tree
+        let mut has_prev_user = false;
+        for prev in (0..idx).rev() {
+            match message_types[prev] {
+                MessageType::User => {
+                    has_prev_user = true;
+                    break;
+                }
+                MessageType::Agent => continue,
+            }
+        }
+        if !has_prev_user {
+            return AgentConnector::None;
+        }
+
+        for next in idx + 1..message_types.len() {
+            match message_types[next] {
+                MessageType::Agent => return AgentConnector::Continue,
+                MessageType::User => return AgentConnector::End,
+            }
+        }
+
+        AgentConnector::End
     }
     fn get_thinking_loader_frame(&self) -> usize {
         self.nav_snapshot
@@ -5462,6 +5588,7 @@ impl App {
         max_width: usize,
         highlight_pos: Option<usize>,
         is_agent: bool,
+        connector: AgentConnector,
     ) -> Text<'static> {
         // Check for interrupt marker - render with RED circle and RED text
         if message == "● Interrupted" {
@@ -5483,7 +5610,7 @@ impl App {
                 .to_string();
             let mut lines = Vec::new();
             lines.push(Line::from(vec![
-                Span::raw(" "),                                        // Left margin
+                Self::connector_prefix(connector, true),
                 Span::styled("● ", Style::default().fg(Color::Green)), // Green circle for command
                 Span::styled(content, Style::default().fg(Color::Green)),
             ]));
@@ -5497,7 +5624,7 @@ impl App {
             let mut lines = Vec::new();
             // Add left margin + extra space to align with text after bullet
             lines.push(Line::from(vec![
-                Span::raw(" "),  // Left margin
+                Self::connector_prefix(connector, true),
                 Span::raw("  "), // Two spaces to align with "Interrupted" (after "● ")
                 Span::styled(
                     message.trim_start().to_string(),
@@ -5509,7 +5636,7 @@ impl App {
 
         // If this is a plain agent response (not a special marker), render with white bullet
         if is_agent && !message.starts_with('[') {
-            return self.render_agent_message_with_bullet(message, max_width);
+            return self.render_agent_message_with_bullet(message, max_width, connector);
         }
         // Check if this is a thinking animation placeholder
         if message == "[THINKING_ANIMATION]" {
@@ -5537,7 +5664,7 @@ impl App {
 
             // Build the line with one space padding on the left, then snowflake, then text
             let mut spans = Vec::new();
-            spans.push(Span::raw(" ")); // One character to the left
+            spans.push(Self::connector_prefix(connector, true));
             spans.push(Span::styled(
                 current_frame,
                 Style::default().fg(Color::Rgb(255, 165, 0)),
@@ -5585,31 +5712,45 @@ impl App {
                 let tool_name = parts[0].to_string();
                 let args = parts[1].to_string();
                 let result = parts[2].to_string();
+                let trimmed = result.trim().to_ascii_lowercase();
+                let success = !(trimmed.starts_with("error") || trimmed == "failed");
+                let bullet_color = if success { Color::Green } else { Color::Red };
 
                 let mut lines = Vec::new();
 
-                // First line: 1 space left margin + ● ToolName(args)
+                // First line: connector prefix + ● ToolName(args)
                 let mut line1_spans = Vec::new();
-                line1_spans.push(Span::raw(" ")); // 1 space left margin (matching thinking animation)
-                line1_spans.push(Span::styled("● ", Style::default().fg(Color::Blue)));
+                line1_spans.push(Self::connector_prefix(connector, true));
+                line1_spans.push(Span::styled("● ", Style::default().fg(bullet_color)));
                 line1_spans.push(Span::styled(tool_name, Style::default().fg(Color::Cyan)));
                 line1_spans.push(Span::raw("("));
                 line1_spans.push(Span::styled(args, Style::default().fg(Color::Yellow)));
                 line1_spans.push(Span::raw(")"));
                 lines.push(Line::from(line1_spans));
 
-                // Second line: 1 space left margin + │ ⎿ Result
-                let mut line2_spans = Vec::new();
-                line2_spans.push(Span::raw(" ")); // 1 space left margin
-                line2_spans.push(Span::styled("│ ⎿  ", Style::default().fg(Color::DarkGray)));
-                // Color errors red, everything else green
-                let result_color = if result.starts_with("Error:") || result == "Failed" {
-                    Color::Red
-                } else {
-                    Color::Green
-                };
-                line2_spans.push(Span::styled(result, Style::default().fg(result_color)));
-                lines.push(Line::from(line2_spans));
+                // Show result lines with tree connector
+                let result_color = if success { Color::Green } else { Color::Red };
+                let mut result_iter = result.lines();
+                if let Some(first_line) = result_iter.next() {
+                    let mut line2_spans = Vec::new();
+                    line2_spans.push(Self::connector_prefix(connector, false));
+                    line2_spans.push(Span::styled("  ⎿  ", Style::default().fg(Color::DarkGray)));
+                    line2_spans.push(Span::styled(
+                        first_line.to_string(),
+                        Style::default().fg(result_color),
+                    ));
+                    lines.push(Line::from(line2_spans));
+                }
+                for extra_line in result_iter {
+                    let mut extra_spans = Vec::new();
+                    extra_spans.push(Self::connector_prefix(connector, false));
+                    extra_spans.push(Span::styled("     ", Style::default().fg(Color::DarkGray)));
+                    extra_spans.push(Span::styled(
+                        extra_line.to_string(),
+                        Style::default().fg(result_color),
+                    ));
+                    lines.push(Line::from(extra_spans));
+                }
 
                 return Text::from(lines);
             }
@@ -5627,9 +5768,9 @@ impl App {
 
                 let mut lines = Vec::new();
 
-                // Single line: 1 space margin + ● ToolName(args)
+                // Single line: connector prefix + ● ToolName(args)
                 let mut line_spans = Vec::new();
-                line_spans.push(Span::raw(" ".to_string())); // 1 space left margin
+                line_spans.push(Self::connector_prefix(connector, true));
                 line_spans.push(Span::styled(
                     "● ".to_string(),
                     Style::default().fg(Color::Blue),
@@ -5777,65 +5918,49 @@ impl App {
                         spans.push(Span::styled(line_string, style));
                     }
 
-                    spans.push(Span::raw(padding));
+                    spans.push(Span::raw(padding.clone()));
                     spans.push(Span::styled(
                         MESSAGE_BORDER_SET.vertical_right,
                         border_style,
                     ));
                     lines.push(Line::from(spans));
-                } else {
-                    // Normal line without highlight (within highlight branch but different line)
-                    let mut spans = vec![
-                        Span::styled(MESSAGE_BORDER_SET.vertical_left, border_style),
-                        Span::raw(prefix),
-                    ];
-
-                    // For user messages, preserve markdown styling; for errors, apply error style
-                    if is_user_message {
-                        spans.extend(line.spans.iter().cloned());
-                    } else {
-                        spans.push(Span::styled(line.to_string(), content_style));
-                    }
-
-                    spans.push(Span::raw(padding));
-                    spans.push(Span::styled(
-                        MESSAGE_BORDER_SET.vertical_right,
-                        border_style,
-                    ));
-                    lines.push(Line::from(spans));
+                    continue;
                 }
-            } else {
-                // No highlight, render normally
-                let mut spans = vec![
-                    Span::styled(MESSAGE_BORDER_SET.vertical_left, border_style),
-                    Span::raw(prefix),
-                ];
-
-                // For user messages, preserve markdown styling; for errors, apply error style
-                if is_user_message {
-                    // Extend with existing markdown spans
-                    spans.extend(line.spans.iter().cloned());
-                } else {
-                    // Apply content_style to the plain text
-                    spans.push(Span::styled(line.to_string(), content_style));
-                }
-
-                spans.push(Span::raw(padding));
-                spans.push(Span::styled(
-                    MESSAGE_BORDER_SET.vertical_right,
-                    border_style,
-                ));
-                lines.push(Line::from(spans));
             }
+
+            // No highlight on this line - use existing spans
+            let mut spans = Vec::new();
+            spans.push(Span::styled(MESSAGE_BORDER_SET.vertical_left, border_style));
+            spans.push(Span::raw(prefix));
+
+            // Use markdown spans for user messages, plain style for errors
+            if is_user_message {
+                spans.extend(line.spans.iter().cloned());
+            } else {
+                spans.push(Span::styled(line.to_string(), content_style));
+            }
+
+            spans.push(Span::raw(padding));
+            spans.push(Span::styled(
+                MESSAGE_BORDER_SET.vertical_right,
+                border_style,
+            ));
+            lines.push(Line::from(spans));
         }
-        let horizontal = MESSAGE_BORDER_SET
-            .horizontal_bottom
-            .repeat(max_line_width + 4);
-        lines.push(Line::from(vec![
+
+        // Bottom border
+        let bottom_border = Line::from(vec![
             Span::styled(MESSAGE_BORDER_SET.bottom_left, border_style),
-            Span::styled(horizontal, border_style),
+            Span::styled(
+                MESSAGE_BORDER_SET
+                    .horizontal_bottom
+                    .repeat(max_line_width + 4),
+                border_style,
+            ),
             Span::styled(MESSAGE_BORDER_SET.bottom_right, border_style),
-        ]));
+        ]);
+        lines.push(bottom_border);
+
         Text::from(lines)
     }
 
@@ -6100,15 +6225,7 @@ impl App {
     }
 
     fn render_todos_panel(&self, frame: &mut Frame, todos_area: ratatui::layout::Rect) {
-        use ratatui::widgets::{Block, Borders, List, ListItem};
-
-        // Create block with title
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Magenta))
-            .title(" Todos ")
-            .title_bottom(Line::from(" Esc to close ").centered());
+        use ratatui::widgets::Paragraph;
 
         // Load todos
         let todos = match self.load_todos() {
@@ -6116,77 +6233,131 @@ impl App {
             Err(_) => Vec::new(),
         };
 
-        let todo_count_text = if todos.is_empty() {
-            " No active todos".to_string()
-        } else {
-            format!(" {} todos", todos.len())
-        };
+        // Helper function to get symbol based on status
+        fn get_todo_symbol(status: &str) -> &str {
+            match status {
+                "pending" => "□",     // U+25A1 - White Square
+                "in_progress" => "○", // U+25CB - White Circle
+                "completed" => "○",   // U+25CB - White Circle
+                _ => "•",             // Fallback
+            }
+        }
 
-        // Build list items with hierarchical structure
-        let items: Vec<ListItem> = {
-            let mut result = Vec::new();
-            fn build_items(todos: &[TodoItem], indent: usize, items: &mut Vec<ListItem>) {
-                for todo in todos {
-                    let status_icon = match todo.status.as_str() {
-                        "completed" => "✓",
-                        "in_progress" => "→",
-                        "pending" => "○",
-                        _ => "·",
-                    };
+        // Helper function to get color based on status
+        fn get_todo_color(status: &str) -> Color {
+            match status {
+                "pending" => Color::DarkGray,
+                "in_progress" => Color::Cyan,
+                "completed" => Color::DarkGray,
+                _ => Color::White,
+            }
+        }
 
-                    let indent_str = "  ".repeat(indent);
-                    let line = Line::from(vec![
-                        Span::raw(indent_str),
-                        Span::styled(
-                            format!("[{}] ", status_icon),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                        Span::styled(todo.content.clone(), Style::default().fg(Color::White)),
-                    ]);
+        // Helper function to format text with strikethrough for completed tasks
+        fn format_todo_text(text: &str, status: &str) -> String {
+            match status {
+                "completed" => format!("\x1b[9m{}\x1b[29m", text), // ANSI strikethrough
+                _ => text.to_string(),
+            }
+        }
 
-                    items.push(ListItem::new(line));
+        // Build todo lines recursively
+        let mut lines: Vec<Line> = Vec::new();
 
-                    // Recursively add children
-                    if !todo.children.is_empty() {
-                        build_items(&todo.children, indent + 1, items);
-                    }
+        fn build_todo_lines(todos: &[TodoItem], indent: usize, lines: &mut Vec<Line>) {
+            for todo in todos {
+                let symbol = get_todo_symbol(&todo.status);
+                let color = get_todo_color(&todo.status);
+                let text = format_todo_text(&todo.content, &todo.status);
+                let indent_str = "  ".repeat(indent);
+
+                // Build the line with border, symbol, and text
+                let line = Line::from(vec![
+                    Span::raw("│ "),
+                    Span::raw(indent_str),
+                    Span::styled(format!("{} ", symbol), Style::default().fg(color)),
+                    Span::styled(text, Style::default().fg(color)),
+                    Span::raw(" │"),
+                ]);
+
+                lines.push(line);
+
+                // Recursively add children with increased indentation
+                if !todo.children.is_empty() {
+                    build_todo_lines(&todo.children, indent + 1, lines);
                 }
             }
-            build_items(&todos, 0, &mut result);
-            result
-        };
+        }
 
-        // Create inner area for content
-        let inner = block.inner(todos_area);
+        // Count total todos (including nested)
+        fn count_todos(todos: &[TodoItem]) -> usize {
+            let mut count = todos.len();
+            for todo in todos {
+                count += count_todos(&todo.children);
+            }
+            count
+        }
 
-        // Render block first
-        frame.render_widget(block, todos_area);
+        let todo_count = count_todos(&todos);
 
-        // Render todo count with dark gray color
-        let count_line = Line::from(Span::styled(
-            todo_count_text,
-            Style::default().fg(Color::DarkGray),
-        ));
-        let count_para = ratatui::widgets::Paragraph::new(count_line);
-        let count_area = ratatui::layout::Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: 1,
-        };
-        frame.render_widget(count_para, count_area);
+        // Build the custom border
+        let mut all_lines: Vec<Line> = Vec::new();
 
-        // Empty line after count
-        let list_area = ratatui::layout::Rect {
-            x: inner.x,
-            y: inner.y + 2,
-            width: inner.width,
-            height: inner.height.saturating_sub(2),
-        };
+        // Top border with title
+        let title = format!(" Tasks ({}) ", todo_count);
+        let title_len = title.len();
+        let available_width = todos_area.width as usize;
+        let border_width = available_width.saturating_sub(2);
+        let remaining = border_width.saturating_sub(title_len);
+        let left_dash = remaining / 2;
+        let right_dash = remaining - left_dash;
 
-        // Render list
-        let list = List::new(items);
-        frame.render_widget(list, list_area);
+        let top_border = Line::from(vec![
+            Span::raw("┌"),
+            Span::raw("─".repeat(left_dash)),
+            Span::styled(title, Style::default().fg(Color::Magenta)),
+            Span::raw("─".repeat(right_dash)),
+            Span::raw("┐"),
+        ]);
+        all_lines.push(top_border);
+
+        // Add todo content or empty message
+        if todos.is_empty() {
+            let empty_msg = "No tasks yet";
+            let padding = border_width.saturating_sub(empty_msg.len() + 2);
+            let empty_line = Line::from(vec![
+                Span::raw("│ "),
+                Span::styled(empty_msg, Style::default().fg(Color::DarkGray)),
+                Span::raw(" ".repeat(padding)),
+                Span::raw(" │"),
+            ]);
+            all_lines.push(empty_line);
+        } else {
+            build_todo_lines(&todos, 0, &mut lines);
+            all_lines.extend(lines);
+        }
+
+        // Bottom border
+        let bottom_border = Line::from(vec![
+            Span::raw("└"),
+            Span::raw("─".repeat(border_width)),
+            Span::raw("┘"),
+        ]);
+        all_lines.push(bottom_border);
+
+        // Add close instruction
+        all_lines.push(Line::from(""));
+        all_lines.push(
+            Line::from(Span::styled(
+                " Esc to close ",
+                Style::default().fg(Color::DarkGray),
+            ))
+            .centered(),
+        );
+
+        // Render the paragraph
+        let para = Paragraph::new(all_lines);
+        frame.render_widget(para, todos_area);
     }
 
     fn render_model_selection_panel(&self, frame: &mut Frame, model_area: ratatui::layout::Rect) {
@@ -7485,9 +7656,12 @@ impl App {
                 let message_types = self.get_message_types();
                 for (idx, message) in messages.iter().enumerate() {
                     let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
+                    let connector = self.agent_connector_for_index(message_types, idx);
                     message_lines.extend(
-                        self.render_message_with_max_width(message, max_width, None, is_agent)
-                            .lines,
+                        self.render_message_with_max_width(
+                            message, max_width, None, is_agent, connector,
+                        )
+                        .lines,
                     );
                 }
 
@@ -7549,9 +7723,12 @@ impl App {
                 let message_types = self.get_message_types();
                 for (idx, message) in messages.iter().enumerate() {
                     let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
+                    let connector = self.agent_connector_for_index(message_types, idx);
                     message_lines.extend(
-                        self.render_message_with_max_width(message, max_width, None, is_agent)
-                            .lines,
+                        self.render_message_with_max_width(
+                            message, max_width, None, is_agent, connector,
+                        )
+                        .lines,
                     );
                 }
 
@@ -7719,12 +7896,12 @@ impl App {
                 // Both rich and plain content must use the same wrap width for line counts to match
                 // Use snapshot messages if in nav mode, otherwise use live messages
                 let messages = self.get_messages();
-                let message_types = self.get_message_types().clone();
+                let message_types_vec = self.get_message_types().clone();
 
                 // Pass messages directly to rich_editor along with context needed for expansion
                 // rich_editor will handle expanding placeholders to match visual rendering
                 let mut messages_with_stats = messages.to_vec();
-                let mut message_types_with_stats = message_types.clone();
+                let mut message_types_with_stats = message_types_vec.clone();
                 if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) =
                     self.get_generation_stats()
                 {
@@ -7827,10 +8004,13 @@ impl App {
                 // Use original messages for proper styling, but ensure line count matches editor
                 let messages = self.get_messages();
                 for (idx, message) in messages.iter().enumerate() {
-                    let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
+                    let is_agent = matches!(message_types_vec.get(idx), Some(MessageType::Agent));
+                    let connector = self.agent_connector_for_index(&message_types_vec, idx);
                     message_lines.extend(
-                        self.render_message_with_max_width(message, wrap_width, None, is_agent)
-                            .lines,
+                        self.render_message_with_max_width(
+                            message, wrap_width, None, is_agent, connector,
+                        )
+                        .lines,
                     );
                 }
 

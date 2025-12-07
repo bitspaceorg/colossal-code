@@ -482,7 +482,8 @@ pub fn generate_tools_section(tools: &[Tool]) -> String {
             "description": tool.function.description.as_ref().unwrap_or(&"".to_string()),
             "name": tool.function.name,
             "parameters": tool.function.parameters.as_ref().unwrap_or(&HashMap::new())
-        })).unwrap_or_default();
+        }))
+        .unwrap_or_default();
 
         sections.push(format!("<function>{}</function>", tool_json));
     }

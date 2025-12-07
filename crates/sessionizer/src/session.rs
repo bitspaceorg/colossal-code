@@ -498,7 +498,7 @@ impl SemanticSearchSession {
                     }
                 }
                 Err(e) => {
-                    eprintln!("File watcher error: {:?}", e);
+                    // eprintln!("File watcher error: {:?}", e);
                 }
             }
         }, notify::Config::default()) {
@@ -511,7 +511,7 @@ impl SemanticSearchSession {
                 Some(watcher)
             }
             Err(e) => {
-                eprintln!("Failed to create file watcher: {:?}", e);
+                // eprintln!("Failed to create file watcher: {:?}", e);
                 None
             }
         };
@@ -529,7 +529,7 @@ impl SemanticSearchSession {
                 // Apply sandbox to this file watcher task
                 #[cfg(target_os = "linux")]
                 if let Err(e) = crate::landlock::apply_sandbox_policy_to_current_thread(&sandbox_policy_clone, &cwd_clone) {
-                    eprintln!("Failed to apply sandbox to file watcher task: {}", e);
+                    // eprintln!("Failed to apply sandbox to file watcher task: {}", e);
                     return;
                 }
 
@@ -573,7 +573,7 @@ impl SemanticSearchSession {
 
     /// Update the current working directory
     pub fn update_cwd(&mut self, new_cwd: PathBuf) {
-        eprintln!("Updating semantic search working directory from {:?} to {:?}", self.cwd, new_cwd);
+        // eprintln!("Updating semantic search working directory from {:?} to {:?}", self.cwd, new_cwd);
 
         let old_cwd = self.cwd.clone();
         self.cwd = new_cwd.clone();
@@ -583,16 +583,16 @@ impl SemanticSearchSession {
             if let Ok(mut watcher_guard) = watcher.lock() {
                 // Unwatch the old directory
                 if let Err(e) = watcher_guard.unwatch(&old_cwd) {
-                    eprintln!("  - Failed to unwatch old directory {}: {}", old_cwd.display(), e);
+                    // eprintln!("  - Failed to unwatch old directory {}: {}", old_cwd.display(), e);
                 } else {
-                    eprintln!("  - Unwatched old directory: {}", old_cwd.display());
+                    // eprintln!("  - Unwatched old directory: {}", old_cwd.display());
                 }
 
                 // Watch the new directory
                 if let Err(e) = watcher_guard.watch(&new_cwd, notify::RecursiveMode::Recursive) {
-                    eprintln!("  - Failed to watch new directory {}: {}", new_cwd.display(), e);
+                    // eprintln!("  - Failed to watch new directory {}: {}", new_cwd.display(), e);
                 } else {
-                    eprintln!("  - Now watching new directory: {}", new_cwd.display());
+                    // eprintln!("  - Now watching new directory: {}", new_cwd.display());
                 }
             }
         }
@@ -609,7 +609,7 @@ impl SemanticSearchSession {
         // A full reindex would require spawning a new background task similar
         // to what's done in manager.rs create_semantic_search_session()
 
-        eprintln!("Working directory updated successfully");
+        // eprintln!("Working directory updated successfully");
     }
 
     /// Get the indexing status
@@ -653,9 +653,9 @@ impl SemanticSearchSession {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
                 if let Err(e) = client.delete_collection(&collection_name).await {
-                    eprintln!("  - Failed to delete Qdrant collection '{}': {}", collection_name, e);
+                    // eprintln!("  - Failed to delete Qdrant collection '{}': {}", collection_name, e);
                 } else {
-                    eprintln!("  - Deleted Qdrant collection '{}'", collection_name);
+                    // eprintln!("  - Deleted Qdrant collection '{}'", collection_name);
                 }
             });
         });
@@ -744,7 +744,7 @@ impl SemanticSearchSession {
         let content = match std::fs::read_to_string(path) {
             Ok(content) => content,
             Err(e) => {
-                eprintln!("Failed to read file {}: {}", path.display(), e);
+                // eprintln!("Failed to read file {}: {}", path.display(), e);
                 return;
             }
         };
@@ -759,7 +759,7 @@ impl SemanticSearchSession {
         let chunks = match chunker::chunk_file(path.to_str().unwrap()) {
             Ok(chunks) => chunks,
             Err(e) => {
-                eprintln!("Failed to chunk file {}: {}", path.display(), e);
+                // eprintln!("Failed to chunk file {}: {}", path.display(), e);
                 return;
             }
         };
@@ -814,7 +814,7 @@ impl SemanticSearchSession {
         let new_content = match std::fs::read_to_string(path) {
             Ok(content) => content,
             Err(e) => {
-                eprintln!("Failed to read file {}: {}", path.display(), e);
+                // eprintln!("Failed to read file {}: {}", path.display(), e);
                 return;
             }
         };
@@ -843,7 +843,7 @@ impl SemanticSearchSession {
                 end_byte,
                 &new_content[start_byte as usize..std::cmp::min(end_byte as usize, new_content.len())]
             ).await.is_err() {
-                eprintln!("Failed to update affected chunks, falling back to full reindex");
+                // eprintln!("Failed to update affected chunks, falling back to full reindex");
                 // Fall back to full reindexing
                 Self::remove_file_from_index_static(client, collection_name, file_content_cache, path).await;
                 Self::index_file_static(client, collection_name, file_content_cache, path).await;
@@ -1006,8 +1006,8 @@ pub async fn create_sandboxed_exec_session(
                     std::thread::sleep(std::time::Duration::from_millis(5));
                     continue;
                 }
-                Err(e) => {
-                    eprintln!("error reading from pty: {}", e);
+                Err(_e) => {
+                    // PTY read error - exit loop
                     break;
                 }
             }
@@ -1170,8 +1170,8 @@ pub async fn create_persistent_shell_session(
                     std::thread::sleep(std::time::Duration::from_millis(5));
                     continue;
                 }
-                Err(e) => {
-                    eprintln!("error reading from pty: {}", e);
+                Err(_e) => {
+                    // PTY read error - exit loop
                     break;
                 }
             }

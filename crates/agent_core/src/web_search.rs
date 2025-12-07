@@ -27,7 +27,7 @@ pub fn web_search(params: &SearchFunctionParameters) -> Result<Vec<SearchResult>
 
     // Build the query with site filters if specified
     let mut query = params.query.clone();
-    
+
     // Add site filters if specified (multiple sites with OR logic)
     if let Some(ref sites) = params.site {
         if !sites.is_empty() {
@@ -102,7 +102,11 @@ pub fn web_search(params: &SearchFunctionParameters) -> Result<Vec<SearchResult>
                     let full_text = html2text::from_read(html.as_bytes(), 80);
                     // Truncate content to max_content_length
                     if full_text.len() > max_content_length {
-                        full_text.chars().take(max_content_length).collect::<String>() + "..."
+                        full_text
+                            .chars()
+                            .take(max_content_length)
+                            .collect::<String>()
+                            + "..."
                     } else {
                         full_text
                     }
@@ -139,7 +143,7 @@ pub fn html_to_text(params: &ExtractUrlParameters) -> Result<ExtractResult> {
 
     let app_version = env!("CARGO_PKG_VERSION");
     let user_agent = format!("tool-agent/{app_version} ({OS}; {ARCH}; {FAMILY})");
-    
+
     let max_content_length = params.max_content_length.unwrap_or(10000);
 
     let content = match client
@@ -156,11 +160,15 @@ pub fn html_to_text(params: &ExtractUrlParameters) -> Result<ExtractResult> {
                         let full_text = html2text::from_read(html.as_bytes(), 80);
                         // Truncate content to max_content_length
                         if full_text.len() > max_content_length {
-                            full_text.chars().take(max_content_length).collect::<String>() + "..."
+                            full_text
+                                .chars()
+                                .take(max_content_length)
+                                .collect::<String>()
+                                + "..."
                         } else {
                             full_text
                         }
-                    },
+                    }
                     Err(e) => format!("ERROR: Failed to read response text: {}", e),
                 }
             }

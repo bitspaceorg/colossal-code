@@ -1,6 +1,6 @@
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
-use once_cell::sync::Lazy;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Message {
@@ -40,11 +40,11 @@ static SMOLLM_TOKENIZER: Lazy<Option<Tokenizer>> = Lazy::new(|| {
 pub struct ThinkingSummarizer {
     buffer: String,
     token_count: usize,
-    chunk_count: usize,  // Track actual chunk count separately
-    summaries: Vec<(String, usize, usize)>,  // (summary, real_token_count, chunk_count)
-    last_sent_count: usize,  // Track how many summaries we've already sent
+    chunk_count: usize,                     // Track actual chunk count separately
+    summaries: Vec<(String, usize, usize)>, // (summary, real_token_count, chunk_count)
+    last_sent_count: usize,                 // Track how many summaries we've already sent
     client: reqwest::Client,
-    token_threshold: usize,  // Configurable threshold for summary generation
+    token_threshold: usize, // Configurable threshold for summary generation
 }
 
 impl ThinkingSummarizer {
@@ -66,7 +66,7 @@ impl ThinkingSummarizer {
 
     pub async fn add_thinking_chunk(&mut self, chunk: &str) {
         self.buffer.push_str(chunk);
-        self.chunk_count += 1;  // Each stream chunk = 1 chunk
+        self.chunk_count += 1; // Each stream chunk = 1 chunk
 
         // Count real tokens using SmolLM2 tokenizer
         if let Some(tokenizer) = SMOLLM_TOKENIZER.as_ref() {
@@ -80,7 +80,8 @@ impl ThinkingSummarizer {
 
         if self.token_count >= self.token_threshold {
             if let Ok(summary) = self.summarize_buffer().await {
-                self.summaries.push((summary, self.token_count, self.chunk_count));
+                self.summaries
+                    .push((summary, self.token_count, self.chunk_count));
             }
             self.buffer.clear();
             self.token_count = 0;
@@ -91,7 +92,8 @@ impl ThinkingSummarizer {
     pub async fn flush(&mut self) {
         if !self.buffer.is_empty() && self.token_count > 0 {
             if let Ok(summary) = self.summarize_buffer().await {
-                self.summaries.push((summary, self.token_count, self.chunk_count));
+                self.summaries
+                    .push((summary, self.token_count, self.chunk_count));
             }
             self.buffer.clear();
             self.token_count = 0;
@@ -102,7 +104,7 @@ impl ThinkingSummarizer {
     async fn summarize_buffer(&self) -> Result<String, Box<dyn std::error::Error>> {
         // Match the Python system prompt more closely
         let system_prompt = "You are SmolLM, a compact and helpful model. You convert a reasoning trace into a concise summary.";
-  
+
         let request_body = ChatRequestBody {
             model: "reasoning-summarizer:v0".to_string(),
             messages: vec![
@@ -115,13 +117,14 @@ impl ThinkingSummarizer {
                     content: self.buffer.clone(),
                 },
             ],
-            temperature: Some(0.7),        // ✓ Correct
-            top_p: Some(0.9),              // Changed from 0.90 to 0.9 (same value, just matching)
-            max_tokens: Some(30),          // Changed from 16 to 30 to match max_new_tokens
-            frequency_penalty: None,       // Remove this - Python doesn't use it
+            temperature: Some(0.7),  // ✓ Correct
+            top_p: Some(0.9),        // Changed from 0.90 to 0.9 (same value, just matching)
+            max_tokens: Some(30),    // Changed from 16 to 30 to match max_new_tokens
+            frequency_penalty: None, // Remove this - Python doesn't use it
         };
 
-        let response = self.client
+        let response = self
+            .client
             .post("http://localhost:11434/v1/chat/completions")
             .header("Authorization", "Bearer ollama")
             .header("Content-Type", "application/json")
@@ -154,13 +157,16 @@ impl ThinkingSummarizer {
     pub fn get_tree_lines(&self) -> Vec<String> {
         self.summaries
             .iter()
-            .map(|(s, real_tokens, chunk_count)| format!("├── {} ({}rt {}ct)", s, real_tokens, chunk_count))
+            .map(|(s, real_tokens, chunk_count)| {
+                format!("├── {} ({}rt {}ct)", s, real_tokens, chunk_count)
+            })
             .collect()
     }
 
     // Get only new summaries that haven't been sent yet
     pub fn get_new_summaries(&mut self) -> Vec<(String, usize, usize)> {
-        let new_summaries: Vec<(String, usize, usize)> = self.summaries
+        let new_summaries: Vec<(String, usize, usize)> = self
+            .summaries
             .iter()
             .skip(self.last_sent_count)
             .map(|(s, tokens, chunks)| (s.clone(), *tokens, *chunks))
@@ -180,7 +186,6 @@ impl ThinkingSummarizer {
     pub fn get_residual_token_count(&self) -> usize {
         self.token_count
     }
-
 }
 
 impl Default for ThinkingSummarizer {
