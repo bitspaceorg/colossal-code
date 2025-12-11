@@ -300,6 +300,9 @@ pub struct ChatRequest {
     /// Structured output schema for JSON responses.
     #[serde(default)]
     pub structured_output: Option<StructuredOutputSchema>,
+    /// Optional flag to enable reasoning/thinking outputs when supported.
+    #[serde(default)]
+    pub enable_thinking: Option<bool>,
 }
 
 /// Response payload for chat completions.

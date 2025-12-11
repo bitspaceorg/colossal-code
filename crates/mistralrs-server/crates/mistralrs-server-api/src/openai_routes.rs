@@ -7,12 +7,12 @@ use axum::{
     response::{sse::Event, sse::KeepAlive, sse::Sse, IntoResponse, Response},
     Json,
 };
+use futures::{stream, StreamExt};
 use mistralrs_server_core::{
     ChatRequest, EmbeddingRequest, EngineResponse, GenerateRequest, Usage,
 };
 use serde::Serialize;
 use serde_json::json;
-use tokio_stream::StreamExt;
 use uuid::Uuid;
 
 use crate::{map_manager_error, record_success, AppState, RequestContext};
@@ -168,8 +168,9 @@ pub async fn handle_chat_completions(
             .await
             .map_err(|err| map_manager_error(&state, endpoint, "POST", err).into_response())?;
 
-        let stream_response = stream.map(move |result| {
-            match result {
+        // Use flat_map so Done can emit multiple events (content chunk + [DONE])
+        let stream_response = stream.flat_map(move |result| {
+            let events: Vec<Result<Event, Infallible>> = match result {
                 Ok(EngineResponse::Chunk(chunk)) => {
                      let response = OpenAIChatCompletionChunk {
                         id: chunk.id,
@@ -188,15 +189,50 @@ pub async fn handle_chat_completions(
                         usage: None,
                     };
                     match serde_json::to_string(&response) {
-                        Ok(json) => Ok::<Event, Infallible>(Event::default().data(json)),
-                        Err(_) => Ok::<Event, Infallible>(Event::default().data("{\"error\":\"serialization_error\"}")),
+                        Ok(json) => vec![Ok(Event::default().data(json))],
+                        Err(_) => vec![Ok(Event::default().data("{\"error\":\"serialization_error\"}"))],
                     }
                 }
-                Ok(EngineResponse::Done(_done)) => {
-                     // Optional: emit usage in a final chunk if compatible clients expect it
-                     // For now, we just emit DONE to signal end of stream.
-                     // Some specs say we can send a chunk with usage and no choices before DONE.
-                     Ok::<Event, Infallible>(Event::default().data("[DONE]"))
+                Ok(EngineResponse::Done(done)) => {
+                     // Emit any content from the Done response as a final chunk, then [DONE]
+                     // This handles models that don't stream token-by-token
+                     let mut events = Vec::new();
+
+                     // Check if there's content in the Done response
+                     if let Some(choice) = done.choices.first() {
+                         if let Some(content) = &choice.message.content {
+                             if !content.is_empty() {
+                                 let final_chunk = OpenAIChatCompletionChunk {
+                                     id: done.id.clone(),
+                                     object: "chat.completion.chunk".to_string(),
+                                     created: done.created,
+                                     model: done.model.clone(),
+                                     choices: vec![OpenAIChatChunkChoice {
+                                         index: 0,
+                                         delta: OpenAIChatChunkDelta {
+                                             role: Some(choice.message.role.clone()),
+                                             content: Some(content.clone()),
+                                             tool_calls: choice.message.tool_calls.as_ref().map(|tc| {
+                                                 vec![serde_json::to_value(tc).unwrap_or_default()]
+                                             }),
+                                         },
+                                         finish_reason: Some(choice.finish_reason.clone()),
+                                     }],
+                                     usage: Some(mistralrs_server_core::Usage {
+                                         prompt_tokens: done.usage.prompt_tokens as u32,
+                                         completion_tokens: done.usage.completion_tokens as u32,
+                                         total_tokens: done.usage.total_tokens as u32,
+                                     }),
+                                 };
+                                 if let Ok(json) = serde_json::to_string(&final_chunk) {
+                                     events.push(Ok(Event::default().data(json)));
+                                 }
+                             }
+                         }
+                     }
+
+                     events.push(Ok(Event::default().data("[DONE]")));
+                     events
                 }
                 Ok(EngineResponse::ModelError(msg, _)) => {
                      let err = json!({
@@ -207,7 +243,7 @@ pub async fn handle_chat_completions(
                             "code": null
                         }
                     });
-                    Ok::<Event, Infallible>(Event::default().data(err.to_string()))
+                    vec![Ok(Event::default().data(err.to_string()))]
                 }
                 Ok(EngineResponse::InternalError(err)) => {
                      let err = json!({
@@ -218,15 +254,16 @@ pub async fn handle_chat_completions(
                             "code": null
                         }
                     });
-                    Ok::<Event, Infallible>(Event::default().data(err.to_string()))
+                    vec![Ok(Event::default().data(err.to_string()))]
                 }
-                Ok(_) => Ok::<Event, Infallible>(Event::default()),
-                Err(_) => Ok::<Event, Infallible>(Event::default().data("{\"error\":\"stream_error\"}")),
-            }
+                Ok(_) => vec![Ok(Event::default())],
+                Err(_) => vec![Ok(Event::default().data("{\"error\":\"stream_error\"}"))],
+            };
+            stream::iter(events)
         });
 
         record_success(&state, endpoint, "POST", StatusCode::OK);
-        
+
         let keep_alive = KeepAlive::new().interval(std::time::Duration::from_secs(10));
         return Ok(Sse::new(stream_response).keep_alive(keep_alive).into_response());
     }
@@ -292,8 +329,9 @@ pub async fn handle_completions(
             .await
             .map_err(|err| map_manager_error(&state, endpoint, "POST", err).into_response())?;
 
-        let stream_response = stream.map(move |result| {
-            match result {
+        // Use flat_map so CompletionDone can emit multiple events (content chunk + [DONE])
+        let stream_response = stream.flat_map(move |result| {
+            let events: Vec<Result<Event, Infallible>> = match result {
                 Ok(EngineResponse::CompletionChunk(chunk)) => {
                     let response = OpenAICompletionChunk {
                         id: chunk.id,
@@ -309,12 +347,41 @@ pub async fn handle_completions(
                         usage: None,
                     };
                     match serde_json::to_string(&response) {
-                        Ok(json) => Ok::<Event, Infallible>(Event::default().data(json)),
-                        Err(_) => Ok::<Event, Infallible>(Event::default().data("{\"error\":\"serialization_error\"}")),
+                        Ok(json) => vec![Ok(Event::default().data(json))],
+                        Err(_) => vec![Ok(Event::default().data("{\"error\":\"serialization_error\"}"))],
                     }
                 }
-                Ok(EngineResponse::CompletionDone(_)) => {
-                    Ok::<Event, Infallible>(Event::default().data("[DONE]"))
+                Ok(EngineResponse::CompletionDone(done)) => {
+                    // Emit any content from the Done response as a final chunk, then [DONE]
+                    let mut events = Vec::new();
+
+                    if let Some(choice) = done.choices.first() {
+                        if !choice.text.is_empty() {
+                            let final_chunk = OpenAICompletionChunk {
+                                id: done.id.clone(),
+                                object: "text_completion".to_string(),
+                                created: done.created,
+                                model: done.model.clone(),
+                                choices: vec![OpenAICompletionChunkChoice {
+                                    text: choice.text.clone(),
+                                    index: 0,
+                                    logprobs: None,
+                                    finish_reason: Some(choice.finish_reason.clone()),
+                                }],
+                                usage: Some(mistralrs_server_core::Usage {
+                                    prompt_tokens: done.usage.prompt_tokens as u32,
+                                    completion_tokens: done.usage.completion_tokens as u32,
+                                    total_tokens: done.usage.total_tokens as u32,
+                                }),
+                            };
+                            if let Ok(json) = serde_json::to_string(&final_chunk) {
+                                events.push(Ok(Event::default().data(json)));
+                            }
+                        }
+                    }
+
+                    events.push(Ok(Event::default().data("[DONE]")));
+                    events
                 }
                  Ok(EngineResponse::CompletionModelError(msg, _)) => {
                      let err = json!({
@@ -325,11 +392,12 @@ pub async fn handle_completions(
                             "code": null
                         }
                     });
-                    Ok::<Event, Infallible>(Event::default().data(err.to_string()))
+                    vec![Ok(Event::default().data(err.to_string()))]
                 }
-                 Ok(_) => Ok::<Event, Infallible>(Event::default()),
-                 Err(_) => Ok::<Event, Infallible>(Event::default().data("{\"error\":\"stream_error\"}")),
-            }
+                 Ok(_) => vec![Ok(Event::default())],
+                 Err(_) => vec![Ok(Event::default().data("{\"error\":\"stream_error\"}"))],
+            };
+            stream::iter(events)
         });
         record_success(&state, endpoint, "POST", StatusCode::OK);
         let keep_alive = KeepAlive::new().interval(std::time::Duration::from_secs(10));

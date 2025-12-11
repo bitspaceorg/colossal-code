@@ -3138,6 +3138,7 @@ dependencies = [
  "async-trait",
  "axum 0.7.9",
  "dashmap",
+ "futures",
  "mistralrs-server-config",
  "mistralrs-server-core 0.1.0",
  "prometheus",

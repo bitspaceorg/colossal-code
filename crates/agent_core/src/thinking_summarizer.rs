@@ -1,5 +1,7 @@
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::{error::TryRecvError, unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::task;
 use tokenizers::Tokenizer;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -45,6 +47,9 @@ pub struct ThinkingSummarizer {
     last_sent_count: usize,                 // Track how many summaries we've already sent
     client: reqwest::Client,
     token_threshold: usize, // Configurable threshold for summary generation
+    summary_tx: UnboundedSender<Option<(String, usize, usize)>>,
+    summary_rx: UnboundedReceiver<Option<(String, usize, usize)>>,
+    pending_jobs: usize,
 }
 
 impl ThinkingSummarizer {
@@ -53,6 +58,7 @@ impl ThinkingSummarizer {
     }
 
     pub fn with_threshold(token_threshold: usize) -> Self {
+        let (summary_tx, summary_rx) = unbounded_channel();
         Self {
             buffer: String::new(),
             token_count: 0,
@@ -61,10 +67,14 @@ impl ThinkingSummarizer {
             last_sent_count: 0,
             client: reqwest::Client::new(),
             token_threshold,
+            summary_tx,
+            summary_rx,
+            pending_jobs: 0,
         }
     }
 
     pub async fn add_thinking_chunk(&mut self, chunk: &str) {
+        self.drain_ready_summaries();
         self.buffer.push_str(chunk);
         self.chunk_count += 1; // Each stream chunk = 1 chunk
 
@@ -79,29 +89,87 @@ impl ThinkingSummarizer {
         }
 
         if self.token_count >= self.token_threshold {
-            if let Ok(summary) = self.summarize_buffer().await {
-                self.summaries
-                    .push((summary, self.token_count, self.chunk_count));
-            }
-            self.buffer.clear();
-            self.token_count = 0;
-            self.chunk_count = 0;
+            self.spawn_summary_job();
         }
     }
 
     pub async fn flush(&mut self) {
+        self.drain_ready_summaries();
         if !self.buffer.is_empty() && self.token_count > 0 {
-            if let Ok(summary) = self.summarize_buffer().await {
-                self.summaries
-                    .push((summary, self.token_count, self.chunk_count));
+            self.spawn_summary_job();
+        }
+        self.wait_for_all_summaries().await;
+    }
+
+    fn spawn_summary_job(&mut self) {
+        if self.buffer.is_empty() || self.token_count == 0 {
+            return;
+        }
+
+        let text = self.buffer.clone();
+        let token_count = self.token_count;
+        let chunk_count = self.chunk_count;
+        let tx = self.summary_tx.clone();
+        let client = self.client.clone();
+
+        task::spawn(async move {
+            match Self::summarize_buffer(client, text).await {
+                Ok(summary) => {
+                    let _ = tx.send(Some((summary, token_count, chunk_count)));
+                }
+                Err(err) => {
+                    eprintln!("Failed to summarize thinking chunk: {}", err);
+                    let _ = tx.send(None);
+                }
             }
-            self.buffer.clear();
-            self.token_count = 0;
-            self.chunk_count = 0;
+        });
+
+        self.pending_jobs += 1;
+        self.buffer.clear();
+        self.token_count = 0;
+        self.chunk_count = 0;
+    }
+
+    fn drain_ready_summaries(&mut self) {
+        loop {
+            match self.summary_rx.try_recv() {
+                Ok(Some(summary)) => {
+                    self.pending_jobs = self.pending_jobs.saturating_sub(1);
+                    self.summaries.push(summary);
+                }
+                Ok(None) => {
+                    self.pending_jobs = self.pending_jobs.saturating_sub(1);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.pending_jobs = 0;
+                    break;
+                }
+            }
         }
     }
 
-    async fn summarize_buffer(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn wait_for_all_summaries(&mut self) {
+        while self.pending_jobs > 0 {
+            match self.summary_rx.recv().await {
+                Some(Some(summary)) => {
+                    self.pending_jobs -= 1;
+                    self.summaries.push(summary);
+                }
+                Some(None) => {
+                    self.pending_jobs -= 1;
+                }
+                None => {
+                    self.pending_jobs = 0;
+                }
+            }
+        }
+    }
+
+    async fn summarize_buffer(
+        client: reqwest::Client,
+        buffer: String,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // Match the Python system prompt more closely
         let system_prompt = "You are SmolLM, a compact and helpful model. You convert a reasoning trace into a concise summary.";
 
@@ -114,7 +182,7 @@ impl ThinkingSummarizer {
                 },
                 Message {
                     role: "user".to_string(),
-                    content: self.buffer.clone(),
+                    content: buffer,
                 },
             ],
             temperature: Some(0.7),  // ✓ Correct
@@ -123,8 +191,8 @@ impl ThinkingSummarizer {
             frequency_penalty: None, // Remove this - Python doesn't use it
         };
 
-        let response = self
-            .client
+        let response = client
+            // .post("http://localhost:8080/v1/chat/completions")
             .post("http://localhost:11434/v1/chat/completions")
             .header("Authorization", "Bearer ollama")
             .header("Content-Type", "application/json")
@@ -165,6 +233,7 @@ impl ThinkingSummarizer {
 
     // Get only new summaries that haven't been sent yet
     pub fn get_new_summaries(&mut self) -> Vec<(String, usize, usize)> {
+        self.drain_ready_summaries();
         let new_summaries: Vec<(String, usize, usize)> = self
             .summaries
             .iter()
@@ -181,6 +250,10 @@ impl ThinkingSummarizer {
         self.chunk_count = 0;
         self.summaries.clear();
         self.last_sent_count = 0;
+        self.pending_jobs = 0;
+        let (summary_tx, summary_rx) = unbounded_channel();
+        self.summary_tx = summary_tx;
+        self.summary_rx = summary_rx;
     }
 
     pub fn get_residual_token_count(&self) -> usize {

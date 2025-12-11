@@ -177,10 +177,14 @@ pub fn create_rich_content_from_messages(
 
         // Handle thinking animation
         if message == "[THINKING_ANIMATION]" {
-            let text_with_dots = if let Some((summary, _token_count, _chunk_count)) =
+            let text_with_dots = if let Some((summary, token_count, chunk_count)) =
                 &thinking_context.current_summary
             {
-                format!("{}...", summary)
+                if *token_count > 0 {
+                    format!("{} ({}rt {}ct)...", summary, token_count, chunk_count)
+                } else {
+                    format!("{}...", summary)
+                }
             } else {
                 format!("{}...", thinking_context.current_word)
             };
@@ -397,10 +401,14 @@ pub fn create_plain_content_for_editor(
 
         // Handle thinking animation
         if message == "[THINKING_ANIMATION]" {
-            let text_with_dots = if let Some((summary, _token_count, _chunk_count)) =
+            let text_with_dots = if let Some((summary, token_count, chunk_count)) =
                 &thinking_context.current_summary
             {
-                format!("{}...", summary)
+                if *token_count > 0 {
+                    format!("{} ({}rt {}ct)...", summary, token_count, chunk_count)
+                } else {
+                    format!("{}...", summary)
+                }
             } else {
                 format!("{}...", thinking_context.current_word)
             };

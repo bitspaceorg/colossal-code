@@ -12,10 +12,11 @@ use mistralrs::{
     GgufModelBuilder, Model, RequestBuilder, RequestLike, Response, ResponseMessage, Usage,
 };
 use mistralrs_core::{CalledFunction, MessageContent, ToolCallResponse, ToolCallType, ToolChoice};
-use reqwest::{Client, header::CONTENT_TYPE};
+use reqwest::{Client, Url, header::CONTENT_TYPE};
+use once_cell::sync::OnceCell;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{net::IpAddr, sync::Arc};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -127,6 +128,30 @@ pub struct HttpBackend {
     model: Mutex<String>,
     completions_path: String,
     requires_model_load: bool,
+    supports_thinking_param: bool,
+}
+
+fn http_debug_enabled() -> bool {
+    static FLAG: OnceCell<bool> = OnceCell::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("NITE_DEBUG_HTTP")
+            .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+    })
+}
+
+fn http_debug_log(message: impl AsRef<str>) {
+    if http_debug_enabled() {
+        eprintln!("[NITE HTTP] {}", message.as_ref());
+    }
+}
+
+fn preview_chunk(text: &str) -> String {
+    let mut preview: String = text.chars().take(80).collect();
+    if text.chars().count() > 80 {
+        preview.push_str("…");
+    }
+    preview
 }
 
 impl HttpBackend {
@@ -138,6 +163,7 @@ impl HttpBackend {
         requires_model_load: bool,
     ) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
+        let supports_thinking_param = Self::should_send_thinking_param(&base_url);
         let completions_path = if completions_path.starts_with('/') {
             completions_path
         } else {
@@ -150,7 +176,105 @@ impl HttpBackend {
             model: Mutex::new(model),
             completions_path,
             requires_model_load,
+            supports_thinking_param,
         }
+    }
+
+    fn should_send_thinking_param(base_url: &str) -> bool {
+        if let Some(flag) = Self::env_bool("NITE_HTTP_ENABLE_THINKING") {
+            return flag;
+        }
+
+        if let Some((host, port)) = Self::extract_host_parts(base_url) {
+            if Self::host_is_local_network(&host) || Self::host_matches_allowlist(&host, port) {
+                return true;
+            }
+        } else if Self::host_matches_allowlist(base_url, None) {
+            return true;
+        }
+
+        let lowered = base_url.to_lowercase();
+        lowered.contains("127.0.0.1") || lowered.contains("localhost")
+    }
+
+    fn env_bool(var: &str) -> Option<bool> {
+        std::env::var(var).ok().and_then(|value| match value.trim().to_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+    }
+
+    fn extract_host_parts(base_url: &str) -> Option<(String, Option<u16>)> {
+        let parsed = Url::parse(base_url)
+            .or_else(|_| Url::parse(&format!("http://{}", base_url)))
+            .ok()?;
+        let host = parsed.host_str()?.to_string();
+        let port = parsed.port();
+        Some((host, port))
+    }
+
+    fn host_matches_allowlist(host: &str, port: Option<u16>) -> bool {
+        let Ok(entries) = std::env::var("NITE_HTTP_ENABLE_THINKING_HOSTS") else {
+            return false;
+        };
+
+        let host_lower = host.to_lowercase();
+        let host_with_port = port.map(|value| format!("{}:{}", host, value));
+        let host_with_port_lower =
+            host_with_port.as_ref().map(|value| value.to_lowercase());
+
+        for entry in entries.split(',').map(|value| value.trim()).filter(|v| !v.is_empty()) {
+            let entry_lower = entry.to_lowercase();
+            if entry_lower == host_lower {
+                return true;
+            }
+            if let Some(host_port) = &host_with_port_lower {
+                if entry_lower == *host_port {
+                    return true;
+                }
+            }
+            if host_lower.ends_with(&entry_lower) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn host_is_local_network(host: &str) -> bool {
+        if host.eq_ignore_ascii_case("localhost")
+            || host.eq_ignore_ascii_case("host.docker.internal")
+            || host.eq_ignore_ascii_case("0.0.0.0")
+        {
+            return true;
+        }
+
+        if !host.contains('.') && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return true;
+        }
+
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return match ip {
+                IpAddr::V4(v4) => {
+                    if v4.is_loopback() {
+                        return true;
+                    }
+                    let octets = v4.octets();
+                    matches!(
+                        octets,
+                        [10, _, _, _]
+                            | [127, _, _, _]
+                            | [192, 168, _, _]
+                            | [169, 254, _, _]
+                    ) || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+                        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                }
+                IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local(),
+            };
+        }
+
+        host.ends_with(".local") || host.ends_with(".lan")
     }
 
     fn auth_header(&self) -> Option<String> {
@@ -299,6 +423,7 @@ impl LLMBackend for HttpBackend {
         request: RequestBuilder,
     ) -> Result<Box<dyn FuturesStream<Item = Response> + Unpin + Send>> {
         let mut request_builder = request;
+        let enable_thinking = request_builder.is_thinking_enabled();
         let model_name = {
             let guard = self.model.lock().await;
             guard.clone()
@@ -312,6 +437,12 @@ impl LLMBackend for HttpBackend {
             "messages": openai_messages,
             "stream": true,
         });
+
+        if self.supports_thinking_param {
+            if let Some(enable_thinking) = enable_thinking {
+                payload["enable_thinking"] = json!(enable_thinking);
+            }
+        }
 
         if let Some((tools, tool_choice)) = tools_payload {
             let is_google_api = self.is_google_api();
@@ -372,6 +503,12 @@ impl LLMBackend for HttpBackend {
             }
         }
 
+        http_debug_log(format!(
+            "Dispatching HTTP request to {}{} with payload {}",
+            self.base_url,
+            self.completions_path,
+            payload
+        ));
         let mut request = self
             .client
             .post(format!(
@@ -899,6 +1036,7 @@ async fn process_sse_stream(
             }
 
             if trimmed == "[DONE]" {
+                http_debug_log("SSE stream received [DONE]");
                 send_final_done(
                     &tx,
                     response_id.clone(),
@@ -918,6 +1056,7 @@ async fn process_sse_stream(
             let parsed: OpenAiStreamResponse = match serde_json::from_str(&data) {
                 Ok(value) => value,
                 Err(err) => {
+                    http_debug_log(format!("Failed to parse SSE chunk: {}", err));
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
                         if let Some(error) = value.get("error") {
                             return Err(anyhow::anyhow!("Remote error: {}", error));
@@ -926,6 +1065,11 @@ async fn process_sse_stream(
                     return Err(anyhow::anyhow!("Failed to parse stream chunk: {}", err));
                 }
             };
+
+            http_debug_log(format!(
+                "Parsed SSE chunk with {} choice(s)",
+                parsed.choices.len()
+            ));
 
             if response_id.is_none() {
                 response_id = parsed.id.clone();
@@ -990,13 +1134,24 @@ async fn process_sse_stream(
                 if let Some(content_value) = content {
                     let text = content_value.to_text();
                     if !text.is_empty() {
+                        http_debug_log(format!(
+                            "delta content len={} preview=\"{}\"",
+                            text.chars().count(),
+                            preview_chunk(&text)
+                        ));
                         accumulated_content.push_str(&text);
                         delta_content = Some(text);
                     }
+                } else {
+                    http_debug_log("delta content missing".to_string());
                 }
 
                 let mut delta_tool_calls = Vec::new();
                 if let Some(tool_call_vec) = tool_calls {
+                    http_debug_log(format!(
+                        "delta includes {} tool call(s)",
+                        tool_call_vec.len()
+                    ));
                     delta_tool_calls = update_streaming_tool_calls(tool_call_vec, &mut tool_state);
                 }
 

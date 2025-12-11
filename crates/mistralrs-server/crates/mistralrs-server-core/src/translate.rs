@@ -118,7 +118,7 @@ pub async fn build_chat_request(
     let request_message = if image_urls.is_empty() {
         RequestMessage::Chat {
             messages,
-            enable_thinking: None,
+            enable_thinking: req.enable_thinking,
         }
     } else {
         let mut images = Vec::with_capacity(image_urls.len());
@@ -132,7 +132,7 @@ pub async fn build_chat_request(
             messages,
             images,
             audios: Vec::new(),
-            enable_thinking: None,
+            enable_thinking: req.enable_thinking,
         }
     };
 

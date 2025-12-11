@@ -91,6 +91,7 @@ impl TextMessages {
         self.enable_thinking = Some(enable_thinking);
         self
     }
+
 }
 
 impl RequestLike for TextMessages {
@@ -260,6 +261,11 @@ impl VisionMessages {
     pub fn enable_thinking(mut self, enable_thinking: bool) -> Self {
         self.enable_thinking = Some(enable_thinking);
         self
+    }
+
+    /// Returns whether thinking mode is enabled for this request.
+    pub fn is_thinking_enabled(&self) -> Option<bool> {
+        self.enable_thinking
     }
 }
 
@@ -656,6 +662,11 @@ impl RequestBuilder {
     pub fn enable_thinking(mut self, enable_thinking: bool) -> Self {
         self.enable_thinking = Some(enable_thinking);
         self
+    }
+
+    /// Returns whether thinking mode is enabled for this request.
+    pub fn is_thinking_enabled(&self) -> Option<bool> {
+        self.enable_thinking
     }
 }
 

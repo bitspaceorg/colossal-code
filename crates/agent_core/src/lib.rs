@@ -38,6 +38,29 @@ struct GlobalState {
 
 static GLOBAL_STATE: OnceCell<GlobalState> = OnceCell::new();
 
+fn thinking_debug_enabled() -> bool {
+    static FLAG: OnceCell<bool> = OnceCell::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("NITE_DEBUG_THINKING")
+            .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+    })
+}
+
+fn thinking_debug_log(message: impl AsRef<str>) {
+    if thinking_debug_enabled() {
+        eprintln!("[NITE THINK] {}", message.as_ref());
+    }
+}
+
+fn preview_thinking(text: &str) -> String {
+    let mut preview: String = text.chars().take(80).collect();
+    if text.chars().count() > 80 {
+        preview.push_str("…");
+    }
+    preview
+}
+
 #[derive(Serialize)]
 struct ExecCommandResult {
     command: String,
@@ -701,6 +724,44 @@ pub enum AgentMessage {
     ApprovalResponse(bool), // (approved)
 }
 
+enum ThinkingStartDecision {
+    NeedMoreData,
+    Detected { content_start_idx: usize },
+    NotThinking,
+}
+
+fn analyze_thinking_start(buffer: &str, open_tag: &str) -> ThinkingStartDecision {
+    if buffer.trim().is_empty() {
+        return ThinkingStartDecision::NeedMoreData;
+    }
+
+    let first_non_ws_idx = buffer
+        .char_indices()
+        .find(|(_, ch)| !ch.is_whitespace())
+        .map(|(idx, _)| idx);
+
+    let Some(start_idx) = first_non_ws_idx else {
+        return ThinkingStartDecision::NeedMoreData;
+    };
+
+    let trimmed = &buffer[start_idx..];
+    if trimmed.starts_with(open_tag) {
+        return ThinkingStartDecision::Detected {
+            content_start_idx: start_idx + open_tag.len(),
+        };
+    }
+
+    if open_tag.starts_with(trimmed) {
+        ThinkingStartDecision::NeedMoreData
+    } else {
+        ThinkingStartDecision::NotThinking
+    }
+}
+
+fn has_visible_text(value: &str) -> bool {
+    value.chars().any(|c| !c.is_whitespace())
+}
+
 /// Agent instance that can be used from the TUI
 #[derive(Clone)]
 pub struct Agent {
@@ -715,8 +776,6 @@ pub struct Agent {
     tokenizer: Arc<Tokenizer>,
     /// Conversation history (RequestBuilder maintains all messages)
     conversation: Arc<Mutex<Option<RequestBuilder>>>,
-    /// Whether this model has thinking/reasoning capability (mutable for model reload)
-    has_thinking_capability: Arc<Mutex<bool>>,
     /// Thinking tags configuration (opening/closing tags and summary interval)
     thinking_tags: Arc<Mutex<model_config::ThinkingTags>>,
     /// Safety configuration for tool access
@@ -724,44 +783,38 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Load model configuration and detect thinking capability
-    /// Tries to load model.yaml from ~/.config/.nite/models/<model_name>/model.yaml
-    /// Falls back to filename-based detection if config doesn't exist
-    fn load_thinking_config(
+    /// Load thinking tag configuration from disk if available.
+    /// Falls back to default `<think>`/`</think>` tags when no config is present.
+    fn load_thinking_tags(
         _model_path: &str,
         model_filename: &str,
-    ) -> (bool, model_config::ThinkingTags) {
-        // Extract base model name from filename for config lookup
-        // E.g., "Qwen3-4B-Q8_0.gguf" -> try "qwen3-4b", "Qwen3-4B-Q8_0", etc.
+    ) -> model_config::ThinkingTags {
         let filename_stem = std::path::Path::new(model_filename)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or(model_filename);
 
-        // Try multiple name variations to find the config
         let name_variants = vec![
-            filename_stem.to_lowercase(), // "qwen3-4b-q8_0"
-            filename_stem.to_string(),    // "Qwen3-4B-Q8_0"
-            // Strip quantization suffixes
+            filename_stem.to_lowercase(),
+            filename_stem.to_string(),
             filename_stem
                 .to_lowercase()
                 .split('-')
                 .take_while(|s| !s.starts_with('q') || s.len() > 2)
                 .collect::<Vec<_>>()
-                .join("-"), // "qwen3-4b"
+                .join("-"),
         ];
 
-        // Try each variant and return the first one that has thinking capability
         for variant in &name_variants {
             let (has_thinking, tags) =
                 model_config::ModelConfig::load_or_detect(variant, model_filename);
             if has_thinking {
-                return (has_thinking, tags);
+                return tags;
             }
         }
 
-        // All lookups failed to find thinking capability, fall back to filename detection
-        model_config::ModelConfig::load_or_detect("", model_filename)
+        let (_, tags) = model_config::ModelConfig::load_or_detect("", model_filename);
+        tags
     }
 
     /// Create a new agent instance with a specific backend configuration
@@ -773,10 +826,9 @@ impl Agent {
         safety_config: safety_config::SafetyConfig,
     ) -> Self {
         // Create backend based on config
-        let (backend, backend_kind, has_thinking_capability, thinking_tags): (
+        let (backend, backend_kind, thinking_tags): (
             Arc<Box<dyn LLMBackend>>,
             BackendKind,
-            bool,
             model_config::ThinkingTags,
         ) = match backend_config {
             BackendConfig::Local {
@@ -788,15 +840,14 @@ impl Agent {
                     model_files.clone(),
                 ))
                     as Box<dyn LLMBackend>);
-                let (has_thinking_capability, thinking_tags) = if !model_files.is_empty() {
-                    Self::load_thinking_config(&model_path, &model_files[0])
+                let thinking_tags = if !model_files.is_empty() {
+                    Self::load_thinking_tags(&model_path, &model_files[0])
                 } else {
-                    (false, model_config::ThinkingTags::default())
+                    model_config::ThinkingTags::default()
                 };
                 (
                     backend,
                     BackendKind::Local,
-                    has_thinking_capability,
                     thinking_tags,
                 )
             }
@@ -807,6 +858,7 @@ impl Agent {
                 completions_path,
                 requires_model_load,
             } => {
+                let thinking_tags = Self::load_thinking_tags("", &model);
                 let backend: Arc<Box<dyn LLMBackend>> = Arc::new(Box::new(HttpBackend::new(
                     base_url,
                     api_key,
@@ -822,8 +874,7 @@ impl Agent {
                     } else {
                         BackendKind::ExternalHttp
                     },
-                    false,
-                    model_config::ThinkingTags::default(),
+                    thinking_tags,
                 )
             }
         };
@@ -841,7 +892,6 @@ impl Agent {
             cancel_requested: Arc::new(AtomicBool::new(false)),
             tokenizer: Arc::new(tokenizer),
             conversation: Arc::new(Mutex::new(None)),
-            has_thinking_capability: Arc::new(Mutex::new(has_thinking_capability)),
             thinking_tags: Arc::new(Mutex::new(thinking_tags)),
             safety_config: Arc::new(Mutex::new(safety_config)),
         }
@@ -1053,12 +1103,8 @@ impl Agent {
             .await?;
 
         if self.backend_kind == BackendKind::Local {
-            let (has_thinking, tags) =
-                Self::load_thinking_config("/home/wise/.config/.nite/models", &new_model_filename);
-
-            let mut has_thinking_guard = self.has_thinking_capability.lock().await;
-            *has_thinking_guard = has_thinking;
-            drop(has_thinking_guard);
+            let tags =
+                Self::load_thinking_tags("/home/wise/.config/.nite/models", &new_model_filename);
 
             let mut tags_guard = self.thinking_tags.lock().await;
             *tags_guard = tags.clone();
@@ -1069,10 +1115,6 @@ impl Agent {
                 thinking_summarizer::ThinkingSummarizer::with_threshold(tags.summary_interval);
             drop(summarizer_guard);
         } else {
-            let mut has_thinking_guard = self.has_thinking_capability.lock().await;
-            *has_thinking_guard = false;
-            drop(has_thinking_guard);
-
             let mut tags_guard = self.thinking_tags.lock().await;
             *tags_guard = model_config::ThinkingTags::default();
             drop(tags_guard);
@@ -1115,11 +1157,6 @@ impl Agent {
     /// Get the thinking tags configuration
     pub async fn get_thinking_tags(&self) -> model_config::ThinkingTags {
         self.thinking_tags.lock().await.clone()
-    }
-
-    /// Check if this model has thinking capability
-    pub async fn has_thinking_capability(&self) -> bool {
-        *self.has_thinking_capability.lock().await
     }
 
     /// Update the safety configuration and refresh tools based on the new mode
@@ -1227,12 +1264,8 @@ impl Agent {
         };
         let mut request_builder = RequestBuilder::new()
             .set_tools(tools)
-            .set_tool_choice(ToolChoice::Auto);
-
-        // Only enable thinking if model has capability
-        if self.has_thinking_capability().await {
-            request_builder = request_builder.enable_thinking(true);
-        }
+            .set_tool_choice(ToolChoice::Auto)
+            .enable_thinking(true);
 
         // Add each message to the RequestBuilder
         for message in messages {
@@ -1315,12 +1348,8 @@ impl Agent {
                 .add_message(TextMessageRole::System, system_msg)
                 .add_message(TextMessageRole::User, &full_user_msg)
                 .set_tools(tools)
-                .set_tool_choice(ToolChoice::Auto);
-
-            // Only enable thinking if model has capability
-            if self.has_thinking_capability().await {
-                builder = builder.enable_thinking(true);
-            }
+                .set_tool_choice(ToolChoice::Auto)
+                .enable_thinking(true);
 
             builder
         };
@@ -1351,6 +1380,10 @@ impl Agent {
             // Start in non-thinking mode; switch to thinking when <think> is detected
             let mut in_thinking = false;
             let mut thinking_buffer = String::new();
+            let mut allow_thinking_start = true;
+            let mut pending_prefix = String::new();
+            let mut pending_agent_response_prefix = String::new();
+            let mut final_response_started = false;
 
             loop {
                 // Helper macro to check cancellation frequently
@@ -1435,90 +1468,79 @@ impl Agent {
                                     tool_calls: None,
                                     ..
                                 } => {
-                                    // Skip empty content
                                     if content.is_empty() {
                                         continue;
                                     }
 
-                                    // Determine if we should process thinking tags
-                                    let has_thinking_capability =
-                                        *self.has_thinking_capability.lock().await;
-
-                                    // Get configured opening tag
                                     let thinking_tags_guard = self.thinking_tags.lock().await;
                                     let open_tag = thinking_tags_guard.open_tag.clone();
-                                    drop(thinking_tags_guard); // Release lock immediately
+                                    drop(thinking_tags_guard);
 
-                                    let has_think_tag = content.contains(open_tag.as_str());
+                                    let mut chunk_content = content.clone();
+                                    let mut process_as_thinking = in_thinking;
 
-                                    // Process thinking if capability exists OR we are in thinking mode OR we see the tag
-                                    if has_thinking_capability || in_thinking || has_think_tag {
-                                        if !in_thinking && has_think_tag {
-                                            in_thinking = true;
-                                            // DO NOT add to accumulated_content - thinking should be hidden from output
-                                            // Extract everything after the thinking tag into thinking buffer
-                                            if let Some(think_idx) = content.find(open_tag.as_str())
-                                            {
-                                                let tag_len = open_tag.len();
-                                                let after_think_tag =
-                                                    &content[think_idx + tag_len..];
-                                                thinking_buffer.push_str(after_think_tag);
+                                    if allow_thinking_start {
+                                        pending_prefix.push_str(&chunk_content);
+
+                                        match analyze_thinking_start(&pending_prefix, &open_tag) {
+                                            ThinkingStartDecision::NeedMoreData => {
+                                                check_cancel!();
+                                                continue;
                                             }
-                                        } else if in_thinking {
-                                            // DO NOT add to accumulated_content - thinking should be hidden from output
-                                            thinking_buffer.push_str(content);
+                                            ThinkingStartDecision::Detected { content_start_idx } => {
+                                                thinking_debug_log("Detected <think> start in HTTP chunk");
+                                                allow_thinking_start = false;
+                                                in_thinking = true;
+                                                process_as_thinking = true;
+                                                let after_tag = pending_prefix.split_off(content_start_idx);
+                                                pending_prefix.clear();
+                                                chunk_content = after_tag;
+                                            }
+                                            ThinkingStartDecision::NotThinking => {
+                                                thinking_debug_log("Chunk does not start with <think>, treating as visible content");
+                                                allow_thinking_start = false;
+                                                chunk_content = pending_prefix.clone();
+                                                pending_prefix.clear();
+                                            }
+                                        }
+                                    }
 
-                                            // Check if we've hit the end of thinking section
-                                            // Use configured closing tag
-                                            let thinking_tags_guard =
-                                                self.thinking_tags.lock().await;
-                                            let close_tag = thinking_tags_guard.close_tag.clone();
-                                            drop(thinking_tags_guard); // Release lock immediately
+                                    if process_as_thinking {
+                                        if chunk_content.is_empty() {
+                                            continue;
+                                        }
 
-                                            let end_tag_result = thinking_buffer
-                                                .find(close_tag.as_str())
-                                                .map(|idx| (idx, close_tag.len()));
+                                        thinking_buffer.push_str(&chunk_content);
 
-                                            if let Some((end_idx, end_tag_len)) = end_tag_result {
-                                                // Found end of thinking - switch to normal output mode
-                                                in_thinking = false;
+                                        let thinking_tags_guard = self.thinking_tags.lock().await;
+                                        let close_tag = thinking_tags_guard.close_tag.clone();
+                                        drop(thinking_tags_guard);
 
-                                                // Send the remaining thinking content before the tag (streaming)
-                                                let final_thinking = &thinking_buffer[..end_idx];
-                                                if !final_thinking.is_empty() {
-                                                    let token_count =
-                                                        self.count_tokens(final_thinking);
-                                                    let _ = tx.send(AgentMessage::ThinkingContent(
-                                                        final_thinking.to_string(),
-                                                        token_count,
-                                                    ));
-                                                    check_cancel!();
+                                        let end_tag_result = thinking_buffer
+                                            .find(close_tag.as_str())
+                                            .map(|idx| (idx, close_tag.len()));
 
-                                                    // Add to summarizer and check for new summaries
-                                                    let mut summarizer_guard =
-                                                        self.thinking_summarizer.lock().await;
-                                                    summarizer_guard
-                                                        .add_thinking_chunk(final_thinking)
-                                                        .await;
-                                                    // Send only new summaries with token count and chunk count embedded
-                                                    for (summary, token_count, chunk_count) in
-                                                        summarizer_guard.get_new_summaries()
-                                                    {
-                                                        let _ = tx.send(
-                                                            AgentMessage::ThinkingSummary(format!(
-                                                                "{}|{}|{}",
-                                                                summary, token_count, chunk_count
-                                                            )),
-                                                        );
-                                                        check_cancel!();
-                                                    }
-                                                }
+                                        if let Some((end_idx, end_tag_len)) = end_tag_result {
+                                            in_thinking = false;
+                                            thinking_debug_log("Detected </think> closing tag");
 
-                                                // At end, force flush to handle any residual <50 tokens
+                                            let final_thinking = &thinking_buffer[..end_idx];
+                                            if !final_thinking.is_empty() {
+                                                let token_count = self.count_tokens(final_thinking);
+                                                let _ = tx.send(AgentMessage::ThinkingContent(
+                                                    final_thinking.to_string(),
+                                                    token_count,
+                                                ));
+                                                thinking_debug_log(format!(
+                                                    "Sent ThinkingContent (final) tokens={} preview=\"{}\"",
+                                                    token_count,
+                                                    preview_thinking(final_thinking)
+                                                ));
+                                                check_cancel!();
+
                                                 let mut summarizer_guard =
                                                     self.thinking_summarizer.lock().await;
-                                                summarizer_guard.flush().await;
-                                                // Send new summaries from flush
+                                                summarizer_guard.add_thinking_chunk(final_thinking).await;
                                                 for (summary, token_count, chunk_count) in
                                                     summarizer_guard.get_new_summaries()
                                                 {
@@ -1530,124 +1552,141 @@ impl Agent {
                                                     ));
                                                     check_cancel!();
                                                 }
-                                                // Send completion signal with residual token count (should be 0 after flush)
-                                                let residual_tokens =
-                                                    summarizer_guard.get_residual_token_count();
-                                                if residual_tokens > 0 {
-                                                    let _ =
-                                                        tx.send(AgentMessage::ThinkingComplete(
-                                                            residual_tokens,
-                                                        ));
-                                                }
+                                            }
 
-                                                // Send any content after closing tag as normal response
-                                                let after_think =
-                                                    &thinking_buffer[end_idx + end_tag_len..];
-                                                if !after_think.is_empty() {
-                                                    let _ = tx.send(AgentMessage::AgentResponse(
-                                                        after_think.to_string(),
-                                                    ));
-                                                }
-                                                thinking_buffer.clear();
-                                            } else {
-                                                // Still in thinking - stream the chunk immediately
-                                                // But keep last 11 chars in buffer in case "</thinking>" spans chunks
-                                                let char_count = thinking_buffer.chars().count();
-                                                if char_count > 11 {
-                                                    // Send (char_count - 11) chars, but check cancellation every 100 chars
-                                                    let send_char_count = char_count - 11;
-                                                    if let Some((byte_idx, _)) = thinking_buffer
-                                                        .char_indices()
-                                                        .nth(send_char_count)
-                                                    {
-                                                        let to_send = &thinking_buffer[..byte_idx];
+                                            let mut summarizer_guard =
+                                                self.thinking_summarizer.lock().await;
+                                            summarizer_guard.flush().await;
+                                            for (summary, token_count, chunk_count) in
+                                                summarizer_guard.get_new_summaries()
+                                            {
+                                                let _ = tx.send(AgentMessage::ThinkingSummary(
+                                                    format!(
+                                                        "{}|{}|{}",
+                                                        summary, token_count, chunk_count
+                                                    ),
+                                                ));
+                                                check_cancel!();
+                                            }
+                                            let residual_tokens =
+                                                summarizer_guard.get_residual_token_count();
+                                            if residual_tokens > 0 {
+                                                let _ = tx.send(AgentMessage::ThinkingComplete(
+                                                    residual_tokens,
+                                                ));
+                                            }
 
-                                                        // Break into 100-char chunks for frequent cancellation checks
-                                                        let mut remaining = to_send;
-                                                        while !remaining.is_empty() {
-                                                            // Check cancellation before processing each chunk
-                                                            check_cancel!();
-
-                                                            // Take up to 100 chars
-                                                            let chunk_chars =
-                                                                remaining.chars().take(100).count();
-                                                            if let Some((chunk_byte_end, _)) =
-                                                                remaining
-                                                                    .char_indices()
-                                                                    .nth(chunk_chars)
-                                                            {
-                                                                let chunk =
-                                                                    &remaining[..chunk_byte_end];
-                                                                let token_count =
-                                                                    self.count_tokens(chunk);
-                                                                let _ = tx.send(
-                                                                    AgentMessage::ThinkingContent(
-                                                                        chunk.to_string(),
-                                                                        token_count,
-                                                                    ),
-                                                                );
-                                                                remaining =
-                                                                    &remaining[chunk_byte_end..];
-                                                            } else {
-                                                                // Last chunk
-                                                                let token_count =
-                                                                    self.count_tokens(remaining);
-                                                                let _ = tx.send(
-                                                                    AgentMessage::ThinkingContent(
-                                                                        remaining.to_string(),
-                                                                        token_count,
-                                                                    ),
-                                                                );
-                                                                break;
-                                                            }
-
-                                                            // Check cancellation after sending each chunk
-                                                            check_cancel!();
-                                                        }
-
-                                                        // Add to summarizer as we stream
-                                                        let mut summarizer_guard =
-                                                            self.thinking_summarizer.lock().await;
-                                                        summarizer_guard
-                                                            .add_thinking_chunk(to_send)
-                                                            .await;
-                                                        // Send only new summaries with token count and chunk count embedded
-                                                        for (summary, token_count, chunk_count) in
-                                                            summarizer_guard.get_new_summaries()
-                                                        {
-                                                            let _ = tx.send(
-                                                                AgentMessage::ThinkingSummary(
-                                                                    format!(
-                                                                        "{}|{}|{}",
-                                                                        summary,
-                                                                        token_count,
-                                                                        chunk_count
-                                                                    ),
-                                                                ),
-                                                            );
-                                                            // Check cancellation after each summary
-                                                            check_cancel!();
-                                                        }
-
-                                                        thinking_buffer =
-                                                            thinking_buffer[byte_idx..].to_string();
+                                            let after_think =
+                                                &thinking_buffer[end_idx + end_tag_len..];
+                                            if !after_think.is_empty() {
+                                                if has_visible_text(after_think) {
+                                                    let mut outbound = String::new();
+                                                    if !pending_agent_response_prefix.is_empty() {
+                                                        outbound.push_str(
+                                                            &pending_agent_response_prefix,
+                                                        );
+                                                        pending_agent_response_prefix.clear();
                                                     }
+                                                    outbound.push_str(after_think);
+                                                    accumulated_content.push_str(&outbound);
+                                                    let _ = tx.send(AgentMessage::AgentResponse(
+                                                        outbound,
+                                                    ));
+                                                    final_response_started = true;
+                                                } else {
+                                                    pending_agent_response_prefix
+                                                        .push_str(after_think);
                                                 }
                                             }
+                                            thinking_buffer.clear();
                                         } else {
-                                            // Not in thinking section - send content directly to UI
-                                            accumulated_content.push_str(content);
-                                            let _ = tx
-                                                .send(AgentMessage::AgentResponse(content.clone()));
-                                            // Check cancellation after sending response content
-                                            check_cancel!();
+                                            let char_count = thinking_buffer.chars().count();
+                                            if char_count > 11 {
+                                                let send_char_count = char_count - 11;
+                                                if let Some((byte_idx, _)) = thinking_buffer
+                                                    .char_indices()
+                                                    .nth(send_char_count)
+                                                {
+                                                    let to_send = &thinking_buffer[..byte_idx];
+                                                    let mut remaining = to_send;
+                                                    while !remaining.is_empty() {
+                                                        check_cancel!();
+
+                                                        let chunk_chars =
+                                                            remaining.chars().take(100).count();
+                                                        if let Some((chunk_byte_end, _)) =
+                                                            remaining.char_indices().nth(chunk_chars)
+                                                        {
+                                                            let chunk = &remaining[..chunk_byte_end];
+                                                            let token_count = self.count_tokens(chunk);
+                                                            let _ = tx.send(AgentMessage::ThinkingContent(
+                                                                chunk.to_string(),
+                                                                token_count,
+                                                            ));
+                                                            thinking_debug_log(format!(
+                                                                "Sent ThinkingContent (stream) tokens={} preview=\"{}\"",
+                                                                token_count,
+                                                                preview_thinking(chunk)
+                                                            ));
+                                                            remaining = &remaining[chunk_byte_end..];
+                                                        } else {
+                                                            let token_count = self.count_tokens(remaining);
+                                                            let _ = tx.send(AgentMessage::ThinkingContent(
+                                                                remaining.to_string(),
+                                                                token_count,
+                                                            ));
+                                                            thinking_debug_log(format!(
+                                                                "Sent ThinkingContent (final chunk) tokens={} preview=\"{}\"",
+                                                                token_count,
+                                                                preview_thinking(remaining)
+                                                            ));
+                                                            break;
+                                                        }
+
+                                                        check_cancel!();
+                                                    }
+
+                                                    let mut summarizer_guard =
+                                                        self.thinking_summarizer.lock().await;
+                                                    summarizer_guard.add_thinking_chunk(to_send).await;
+                                                    for (summary, token_count, chunk_count) in
+                                                        summarizer_guard.get_new_summaries()
+                                                    {
+                                                        let _ = tx.send(AgentMessage::ThinkingSummary(
+                                                            format!(
+                                                                "{}|{}|{}",
+                                                                summary, token_count, chunk_count
+                                                            ),
+                                                        ));
+                                                        check_cancel!();
+                                                    }
+
+                                                    thinking_buffer = thinking_buffer[byte_idx..].to_string();
+                                                }
+                                            }
                                         }
                                     } else {
-                                        // No thinking capability and no thinking tag detected - stream content normally
-                                        accumulated_content.push_str(content);
-                                        let _ =
-                                            tx.send(AgentMessage::AgentResponse(content.clone()));
-                                        // Check cancellation after sending response content
+                                        let chunk_has_visible = has_visible_text(&chunk_content);
+                                        if !final_response_started && !chunk_has_visible {
+                                            pending_agent_response_prefix
+                                                .push_str(&chunk_content);
+                                            check_cancel!();
+                                            continue;
+                                        }
+
+                                        let mut outbound = String::new();
+                                        if !pending_agent_response_prefix.is_empty() {
+                                            outbound
+                                                .push_str(&pending_agent_response_prefix);
+                                            pending_agent_response_prefix.clear();
+                                        }
+                                        outbound.push_str(&chunk_content);
+                                        accumulated_content.push_str(&outbound);
+                                        let _ = tx.send(AgentMessage::AgentResponse(outbound.clone()));
+                                        if chunk_has_visible {
+                                            final_response_started = true;
+                                        }
+
                                         check_cancel!();
                                     }
                                 }
@@ -1662,6 +1701,11 @@ impl Agent {
                                         let _ = tx.send(AgentMessage::ThinkingContent(
                                             thinking_buffer.clone(),
                                             token_count,
+                                        ));
+                                        thinking_debug_log(format!(
+                                            "Flushing thinking content before tool call tokens={} preview=\"{}\"",
+                                            token_count,
+                                            preview_thinking(&thinking_buffer)
                                         ));
 
                                         // Add to summarizer
@@ -1746,12 +1790,22 @@ impl Agent {
                 }
             }
 
+            if !pending_prefix.is_empty() {
+                accumulated_content.push_str(&pending_prefix);
+                let _ = tx.send(AgentMessage::AgentResponse(pending_prefix.clone()));
+            }
+
             // After stream ends, if still in thinking (no </think> found), flush residual
             if in_thinking && !thinking_buffer.is_empty() {
                 let token_count = self.count_tokens(&thinking_buffer);
                 let _ = tx.send(AgentMessage::ThinkingContent(
                     thinking_buffer.clone(),
                     token_count,
+                ));
+                thinking_debug_log(format!(
+                    "Residual thinking flush tokens={} preview=\"{}\"",
+                    token_count,
+                    preview_thinking(&thinking_buffer)
                 ));
 
                 let mut summarizer_guard = self.thinking_summarizer.lock().await;

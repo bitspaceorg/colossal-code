@@ -434,6 +434,7 @@ struct AppSnapshot {
     message_types: Vec<MessageType>,
     message_states: Vec<MessageState>,
     is_thinking: bool,
+    thinking_indicator_active: bool,
     thinking_elapsed_secs: u64, // Frozen elapsed time in seconds
     thinking_token_count: usize,
     thinking_current_summary: Option<(String, usize, usize)>,
@@ -492,6 +493,7 @@ struct App {
     agent_interrupted: bool, // Flag to block processing agent messages after interrupt
     // Thinking animation state
     is_thinking: bool,
+    thinking_indicator_active: bool,
     agent_response_started: bool, // Track if we're streaming an agent response
     thinking_loader_frame: usize,
     thinking_last_update: Instant,
@@ -1498,6 +1500,7 @@ impl App {
             agent_processing: false,
             agent_interrupted: false,
             is_thinking: false,
+            thinking_indicator_active: false,
             agent_response_started: false,
             thinking_loader_frame: 0,
             thinking_last_update: Instant::now(),
@@ -2038,14 +2041,16 @@ impl App {
 
     fn update_animation(&mut self) {
         // Update thinking loader animation
-        if self.is_thinking && self.thinking_last_update.elapsed() >= Duration::from_millis(100) {
+        if self.is_thinking_animation_active()
+            && self.thinking_last_update.elapsed() >= Duration::from_millis(100)
+        {
             self.thinking_loader_frame =
                 (self.thinking_loader_frame + 1) % self.thinking_snowflake_frames.len();
             self.thinking_last_update = Instant::now();
         }
 
         // Update thinking word and position animation
-        if self.is_thinking {
+        if self.is_thinking_animation_active() {
             // Change word every 4 seconds
             if self.thinking_last_word_change.elapsed() >= Duration::from_secs(4) {
                 use rand::seq::SliceRandom;
@@ -3371,10 +3376,12 @@ impl App {
                                 self.messages.pop();
                                 self.message_types.pop();
                                 self.message_states.pop();
+                                self.thinking_indicator_active = false;
                             }
                         }
 
                         self.is_thinking = false;
+                        self.thinking_indicator_active = false;
                         self.thinking_start_time = None;
                         self.thinking_token_count = 0;
                         self.thinking_current_summary = None;
@@ -3526,7 +3533,7 @@ impl App {
                 if !is_dismiss {
                     self.survey.show_thank_you();
                 }
-            } else if self.agent_processing || self.is_thinking {
+            } else if self.agent_processing || self.thinking_indicator_active {
                 // Agent is currently processing - show queue options popup
                 let user_message = self.input.clone();
 
@@ -3576,6 +3583,7 @@ impl App {
                 self.messages.push("[THINKING_ANIMATION]".to_string());
                 self.message_types.push(MessageType::Agent);
                 self.is_thinking = true;
+                self.thinking_indicator_active = true;
                 self.thinking_start_time = Some(Instant::now());
                 self.thinking_token_count = 0;
 
@@ -3642,6 +3650,7 @@ impl App {
                             if should_add_thinking {
                                 self.messages.push("[THINKING_ANIMATION]".to_string());
                                 self.message_types.push(MessageType::Agent);
+                                self.thinking_indicator_active = true;
                             }
                             self.is_thinking = true;
                             // Don't reset thinking_start_time here - it was already set on submit
@@ -3679,23 +3688,28 @@ impl App {
                                 };
 
                             // If we have a current summary, move it to a static tree line
-                            if let Some((old_summary, _old_tokens, _old_chunks)) =
+                            if let Some((old_summary, old_tokens, old_chunks)) =
                                 self.thinking_current_summary.take()
                             {
-                                // Remove the thinking animation temporarily
-                                if let Some(last_msg) = self.messages.last() {
-                                    if last_msg == "[THINKING_ANIMATION]" {
-                                        self.messages.pop();
-                                        self.message_types.pop();
-                                    }
-                                }
+                                Self::remove_thinking_animation_placeholder(
+                                    &mut self.messages,
+                                    &mut self.message_types,
+                                );
+
                                 // Add old summary as static tree line with token count and chunk count
-                                self.messages
-                                    .push(Self::format_thinking_tree_line(old_summary, false));
+                                self.messages.push(Self::format_thinking_tree_line(
+                                    old_summary,
+                                    old_tokens,
+                                    old_chunks,
+                                    false,
+                                ));
                                 self.message_types.push(MessageType::Agent);
-                                // Re-add thinking animation at bottom
-                                self.messages.push("[THINKING_ANIMATION]".to_string());
-                                self.message_types.push(MessageType::Agent);
+
+                                Self::ensure_thinking_animation_placeholder(
+                                    &mut self.messages,
+                                    &mut self.message_types,
+                                    self.thinking_indicator_active,
+                                );
                             }
                             // Store new summary as current (will show with snowflake)
                             self.thinking_current_summary =
@@ -3710,29 +3724,39 @@ impl App {
                             }
 
                             // IMPORTANT: Remove thinking animation FIRST, unconditionally
-                            if let Some(last_msg) = self.messages.last() {
-                                if last_msg == "[THINKING_ANIMATION]" {
-                                    self.messages.pop();
-                                    self.message_types.pop();
-                                }
-                            }
+                            Self::remove_thinking_animation_placeholder(
+                                &mut self.messages,
+                                &mut self.message_types,
+                            );
 
                             // THEN convert summary to static tree line if it exists
-                            if let Some((final_summary, _token_count, _chunk_count)) =
+                            if let Some((final_summary, token_count, chunk_count)) =
                                 self.thinking_current_summary.take()
                             {
-                                self.messages
-                                    .push(Self::format_thinking_tree_line(final_summary, true));
+                                self.messages.push(Self::format_thinking_tree_line(
+                                    final_summary,
+                                    token_count,
+                                    chunk_count,
+                                    true,
+                                ));
                                 self.message_types.push(MessageType::Agent);
                             }
                             self.is_thinking = false;
-                            self.thinking_start_time = None;
-                            self.thinking_token_count = 0;
                             // Note: Don't clear thinking_raw_content here - it will be used in export
 
                             // Check if we should append to existing message or create new one
+                            // Determine if the last rendered entry is a thinking tree line.
+                            let last_is_thinking_tree = self
+                                .messages
+                                .last()
+                                .map(|msg| msg.starts_with("├── ") || msg.starts_with("└── "))
+                                .unwrap_or(false);
+
                             let should_create_new = if !self.agent_response_started {
                                 // First chunk of agent response - always create new message
+                                true
+                            } else if last_is_thinking_tree {
+                                // When a thinking summary was just rendered, force a fresh bubble
                                 true
                             } else if let Some(last_msg) = self.messages.last() {
                                 // Already started - check if last message is a special marker
@@ -3752,23 +3776,30 @@ impl App {
                                     last_msg.push_str(&text);
                                 }
                             }
+
+                            Self::ensure_thinking_animation_placeholder(
+                                &mut self.messages,
+                                &mut self.message_types,
+                                self.thinking_indicator_active,
+                            );
                         }
                         AgentMessage::ToolCallStarted(tool_name, arguments) => {
-                            // Keep thinking animation running during tool calls
-                            // Don't remove thinking animation - let it continue during tool execution
-                            // if let Some(last_msg) = self.messages.last() {
-                            //     if last_msg == "[THINKING_ANIMATION]" {
-                            //         self.messages.pop();
-                            //         self.message_types.pop();
-                            //     }
-                            // }
+                            // Keep thinking animation visible by moving it below tool call output
+                            Self::remove_thinking_animation_placeholder(
+                                &mut self.messages,
+                                &mut self.message_types,
+                            );
 
                             // Convert summary to static tree line if it exists, but keep the animation running
-                            if let Some((current_summary, _token_count, _chunk_count)) =
+                            if let Some((current_summary, token_count, chunk_count)) =
                                 self.thinking_current_summary.take()
                             {
-                                self.messages
-                                    .push(Self::format_thinking_tree_line(current_summary, false));
+                                self.messages.push(Self::format_thinking_tree_line(
+                                    current_summary,
+                                    token_count,
+                                    chunk_count,
+                                    false,
+                                ));
                                 self.message_types.push(MessageType::Agent);
                             }
 
@@ -3783,6 +3814,13 @@ impl App {
                                 tool_name, formatted_args
                             ));
                             self.message_types.push(MessageType::Agent);
+                            self.thinking_indicator_active = true;
+
+                            Self::ensure_thinking_animation_placeholder(
+                                &mut self.messages,
+                                &mut self.message_types,
+                                self.thinking_indicator_active,
+                            );
 
                             // Keep thinking animation running during tool calls
                             // Don't stop thinking animation - let it continue during tool execution
@@ -3856,21 +3894,10 @@ impl App {
                             }
 
                             // If thinking is active, remove thinking animation temporarily
-                            let was_thinking = if self.is_thinking {
-                                if let Some(last_msg) = self.messages.last() {
-                                    if last_msg == "[THINKING_ANIMATION]" {
-                                        self.messages.pop();
-                                        self.message_types.pop();
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            };
+                            Self::remove_thinking_animation_placeholder(
+                                &mut self.messages,
+                                &mut self.message_types,
+                            );
 
                             // Find and replace the started message with completed
                             for msg in self.messages.iter_mut().rev() {
@@ -3892,33 +3919,29 @@ impl App {
                                 }
                             }
 
-                            // Re-add thinking animation at the bottom if it was there
-                            if was_thinking {
-                                self.messages.push("[THINKING_ANIMATION]".to_string());
-                                self.message_types.push(MessageType::Agent);
-                            }
+                            // Re-add thinking animation at the bottom while tool results stream
+                            self.thinking_indicator_active = true;
+                            Self::ensure_thinking_animation_placeholder(
+                                &mut self.messages,
+                                &mut self.message_types,
+                                self.thinking_indicator_active,
+                            );
                         }
                         AgentMessage::RequestApproval(content) => {
                             self.show_approval_prompt = true;
                             self.approval_prompt_content = content;
                         }
                         AgentMessage::ThinkingComplete(_residual_tokens) => {
-                            // Thinking has ended - handle residual tokens if any
-                            // If residual tokens < 50 and we don't have a current summary,
-                            // they should have already been summarized and sent as ThinkingSummary
-                            // This marker just indicates thinking is complete
+                            // Thinking content has stopped streaming, but keep the indicator
+                            // active so the user still sees progress while tool calls run.
                             self.is_thinking = false;
-                            self.thinking_start_time = None;
-                            self.thinking_token_count = 0;
                         }
                         AgentMessage::Error(err) => {
                             // IMPORTANT: Remove thinking animation FIRST, unconditionally
-                            if let Some(last_msg) = self.messages.last() {
-                                if last_msg == "[THINKING_ANIMATION]" {
-                                    self.messages.pop();
-                                    self.message_types.pop();
-                                }
-                            }
+                            Self::remove_thinking_animation_placeholder(
+                                &mut self.messages,
+                                &mut self.message_types,
+                            );
 
                             // For errors, discard the thinking summary (don't convert to static tree line)
                             self.thinking_current_summary = None;
@@ -3928,6 +3951,7 @@ impl App {
                             self.message_types.push(MessageType::Agent);
                             self.agent_processing = false;
                             self.is_thinking = false;
+                            self.thinking_indicator_active = false;
                             self.thinking_start_time = None;
                             self.thinking_token_count = 0;
                             self.agent_response_started = false;
@@ -3953,23 +3977,26 @@ impl App {
                         }
                         AgentMessage::Done => {
                             // IMPORTANT: Remove thinking animation FIRST, unconditionally
-                            if let Some(last_msg) = self.messages.last() {
-                                if last_msg == "[THINKING_ANIMATION]" {
-                                    self.messages.pop();
-                                    self.message_types.pop();
-                                }
-                            }
+                            Self::remove_thinking_animation_placeholder(
+                                &mut self.messages,
+                                &mut self.message_types,
+                            );
 
                             // THEN convert summary to static tree line if it exists
-                            if let Some((final_summary, _token_count, _chunk_count)) =
+                            if let Some((final_summary, token_count, chunk_count)) =
                                 self.thinking_current_summary.take()
                             {
-                                self.messages
-                                    .push(Self::format_thinking_tree_line(final_summary, true));
+                                self.messages.push(Self::format_thinking_tree_line(
+                                    final_summary,
+                                    token_count,
+                                    chunk_count,
+                                    true,
+                                ));
                                 self.message_types.push(MessageType::Agent);
                             }
                             self.agent_processing = false;
                             self.is_thinking = false;
+                            self.thinking_indicator_active = false;
                             self.thinking_start_time = None;
                             self.thinking_token_count = 0;
                             self.agent_response_started = false;
@@ -4091,6 +4118,7 @@ impl App {
                         self.messages.push("[THINKING_ANIMATION]".to_string());
                         self.message_types.push(MessageType::Agent);
                         self.is_thinking = true;
+                        self.thinking_indicator_active = true;
                         self.thinking_start_time = Some(Instant::now());
                         self.thinking_token_count = 0;
 
@@ -4196,7 +4224,7 @@ impl App {
             let poll_duration = match self.phase {
                 Phase::Ascii | Phase::Tips => Duration::from_millis(30),
                 Phase::Input => {
-                    if self.agent_processing || self.is_thinking {
+                    if self.agent_processing || self.thinking_indicator_active {
                         Duration::from_millis(16) // ~60fps when agent is responding or thinking
                     } else {
                         Duration::from_millis(50) // Responsive but not too aggressive
@@ -4613,10 +4641,10 @@ impl App {
 
                                 // Handle Esc to interrupt agent processing
                                 if key.code == KeyCode::Esc
-                                    && (self.agent_processing || self.is_thinking)
+                                    && (self.agent_processing || self.thinking_indicator_active)
                                 {
                                     // If we have a current thinking summary, convert it to static tree line FIRST
-                                    if let Some((current_summary, _token_count, _chunk_count)) =
+                                    if let Some((current_summary, token_count, chunk_count)) =
                                         self.thinking_current_summary.take()
                                     {
                                         // Remove thinking animation
@@ -4627,11 +4655,14 @@ impl App {
                                                 if !self.message_states.is_empty() {
                                                     self.message_states.pop();
                                                 }
+                                                self.thinking_indicator_active = false;
                                             }
                                         }
                                         // Add current summary as static tree line
                                         self.messages.push(Self::format_thinking_tree_line(
                                             current_summary,
+                                            token_count,
+                                            chunk_count,
                                             true,
                                         ));
                                         self.message_types.push(MessageType::Agent);
@@ -4645,6 +4676,7 @@ impl App {
                                                 if !self.message_states.is_empty() {
                                                     self.message_states.pop();
                                                 }
+                                                self.thinking_indicator_active = false;
                                             }
                                         }
                                     }
@@ -4677,6 +4709,7 @@ impl App {
 
                                     // Reset all thinking state
                                     self.is_thinking = false;
+                                    self.thinking_indicator_active = false;
                                     self.thinking_start_time = None;
                                     self.thinking_token_count = 0;
                                     self.thinking_position = 0;
@@ -4733,6 +4766,7 @@ impl App {
                                         message_types: self.message_types.clone(),
                                         message_states: self.message_states.clone(),
                                         is_thinking: self.is_thinking,
+                                        thinking_indicator_active: self.thinking_indicator_active,
                                         thinking_elapsed_secs: elapsed_secs,
                                         thinking_token_count: self.thinking_token_count,
                                         thinking_current_summary: self
@@ -5399,9 +5433,21 @@ impl App {
         lines
     }
 
-    fn format_thinking_tree_line(summary: String, is_final: bool) -> String {
+    fn format_thinking_tree_line(
+        summary: String,
+        token_count: usize,
+        chunk_count: usize,
+        is_final: bool,
+    ) -> String {
         let prefix = if is_final { "└──" } else { "├──" };
-        format!("{} {}", prefix, summary)
+        if token_count > 0 {
+            format!(
+                "{} {} ({}rt {}ct)",
+                prefix, summary, token_count, chunk_count
+            )
+        } else {
+            format!("{} {}", prefix, summary)
+        }
     }
 
     fn connector_prefix(_connector: AgentConnector, _is_first_line: bool) -> Span<'static> {
@@ -5518,6 +5564,12 @@ impl App {
             .map(|s| s.thinking_loader_frame)
             .unwrap_or(self.thinking_loader_frame)
     }
+    fn is_thinking_animation_active(&self) -> bool {
+        self.nav_snapshot
+            .as_ref()
+            .map(|s| s.thinking_indicator_active)
+            .unwrap_or(self.thinking_indicator_active)
+    }
     fn get_thinking_current_summary(&self) -> &Option<(String, usize, usize)> {
         self.nav_snapshot
             .as_ref()
@@ -5538,16 +5590,16 @@ impl App {
     }
     fn get_thinking_elapsed_secs(&self) -> Option<u64> {
         if let Some(snapshot) = &self.nav_snapshot {
-            // Return frozen elapsed time from snapshot
-            if snapshot.is_thinking {
+            if snapshot.thinking_indicator_active {
                 Some(snapshot.thinking_elapsed_secs)
             } else {
                 None
             }
-        } else {
-            // Return live elapsed time
+        } else if self.thinking_indicator_active {
             self.thinking_start_time
                 .map(|start| start.elapsed().as_secs())
+        } else {
+            None
         }
     }
     fn get_thinking_token_count(&self) -> usize {
@@ -5555,6 +5607,49 @@ impl App {
             .as_ref()
             .map(|s| s.thinking_token_count)
             .unwrap_or(self.thinking_token_count)
+    }
+    /// Remove the thinking animation placeholder from the transcript if it exists.
+    /// Returns true if a placeholder was found and removed.
+    fn remove_thinking_animation_placeholder(
+        messages: &mut Vec<String>,
+        message_types: &mut Vec<MessageType>,
+    ) -> bool {
+        if let Some(idx) = messages
+            .iter()
+            .rposition(|msg| msg == "[THINKING_ANIMATION]")
+        {
+            messages.remove(idx);
+            message_types.remove(idx);
+            return true;
+        }
+        false
+    }
+    /// Append the thinking animation placeholder back to the bottom of the transcript.
+    fn append_thinking_animation_placeholder(
+        messages: &mut Vec<String>,
+        message_types: &mut Vec<MessageType>,
+    ) {
+        messages.push("[THINKING_ANIMATION]".to_string());
+        message_types.push(MessageType::Agent);
+    }
+    /// Ensure the thinking animation placeholder is the last visible entry if the indicator is active.
+    fn ensure_thinking_animation_placeholder(
+        messages: &mut Vec<String>,
+        message_types: &mut Vec<MessageType>,
+        thinking_indicator_active: bool,
+    ) {
+        if !thinking_indicator_active {
+            return;
+        }
+
+        let has_placeholder = messages
+            .last()
+            .map(|msg| msg == "[THINKING_ANIMATION]")
+            .unwrap_or(false);
+
+        if !has_placeholder {
+            Self::append_thinking_animation_placeholder(messages, message_types);
+        }
     }
     fn get_generation_stats(&self) -> &Option<(f32, usize, f32, String)> {
         self.nav_snapshot
@@ -5647,11 +5742,14 @@ impl App {
 
             // Use current summary if available, otherwise use random word (from snapshot if in nav mode)
             // Always add "..." to the end
-            let text_with_dots = if let Some((summary, _token_count, _chunk_count)) =
+            let text_with_dots = if let Some((summary, token_count, chunk_count)) =
                 self.get_thinking_current_summary()
             {
-                // format!("{} ({}rt {}ct)...", summary, token_count, chunk_count)
-                format!("{}...", summary)
+                if *token_count > 0 {
+                    format!("{} ({}rt {}ct)...", summary, token_count, chunk_count)
+                } else {
+                    format!("{}...", summary)
+                }
             } else {
                 format!("{}...", self.get_thinking_current_word())
             };
@@ -8271,8 +8369,8 @@ impl App {
                 }
                 // Render cursor if it's visible in the viewport
                 // In Navigation mode, always show cursor (frozen state), otherwise only show if not thinking
-                let should_show_cursor =
-                    self.nav_snapshot.is_some() || (!self.agent_processing && !self.is_thinking);
+                let should_show_cursor = self.nav_snapshot.is_some()
+                    || (!self.agent_processing && !self.thinking_indicator_active);
                 if should_show_cursor
                     && cursor_row >= scroll_offset
                     && cursor_row < scroll_offset + visible_lines
