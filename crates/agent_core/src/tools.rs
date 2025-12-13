@@ -461,13 +461,20 @@ pub fn get_all_tools() -> Vec<Tool> {
 }
 
 /// Get read-only tools (safe mode - no modifications)
+/// Includes terminal access for git commands, tests, builds, lints
+/// Sandbox will block any write operations from ExecCommand
 pub fn get_readonly_tools() -> Vec<Tool> {
     build_tools(&[
+        ToolName::ExecCommand,
+        ToolName::ReadOutput,
         ToolName::GetFiles,
         ToolName::GetFilesRecursive,
         ToolName::SearchFilesWithRegex,
         ToolName::ReadFile,
         ToolName::SemanticSearch,
+        ToolName::WebSearch,
+        ToolName::HtmlToText,
+        ToolName::TodoWrite,
     ])
 }
 

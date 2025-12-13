@@ -103,8 +103,17 @@ pub fn apply_sandbox_policy(
             // For DangerFullAccess, allow everything (not recommended but possible)
             profile.push_str("(allow default)\n");
         }
+        crate::protocol::SandboxPolicy::ReadOnly => {
+            // Read-only mode: allow reading cwd and system paths, but NO writes
+            profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", cwd.display()));
+            profile.push_str(&format!("(allow file-read-metadata (subpath \"{}\"))\n", cwd.display()));
+            // Deny all writes
+            profile.push_str("(deny file-write*)\n");
+            // Deny network
+            profile.push_str("(deny network*)\n");
+        }
     }
-    
+
     // Add basic system permissions needed for normal operation
     profile.push_str("(allow file-read* (subpath \"/usr\"))\n");
     profile.push_str("(allow file-read* (subpath \"/bin\"))\n");

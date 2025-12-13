@@ -93,6 +93,13 @@ impl From<&SandboxPolicy> for LinuxSandboxPolicy {
                 exclude_tmpdir_env_var: false,
                 exclude_slash_tmp: false,
             },
+            SandboxPolicy::ReadOnly => LinuxSandboxPolicy {
+                mode: "read-only".to_string(),
+                writable_roots: vec![],  // No writable roots in read-only mode
+                network_access: false,   // Restrict network in read-only mode
+                exclude_tmpdir_env_var: true,
+                exclude_slash_tmp: true,
+            },
         }
     }
 }

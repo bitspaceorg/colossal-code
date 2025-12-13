@@ -144,15 +144,30 @@ async fn ensure_global_state_initialized() {
             }
         }
 
-        let sandbox_policy = if std::env::var("SAFE_MODE").is_ok() {
-            SandboxPolicy::WorkspaceWrite {
-                writable_roots,
-                network_access: colossal_linux_sandbox::protocol::NetworkAccess::Enabled,
-                exclude_tmpdir_env_var: false,
-                exclude_slash_tmp: false,
+        // Determine sandbox policy based on safety configuration
+        let safety_config = safety_config::SafetyConfig::load().unwrap_or_default();
+        let sandbox_policy = match safety_config.mode {
+            safety_config::SafetyMode::ReadOnly => {
+                // Read-only mode: NO write access anywhere
+                SandboxPolicy::ReadOnly
             }
-        } else {
-            SandboxPolicy::DangerFullAccess
+            safety_config::SafetyMode::Regular => {
+                // Regular mode: sandbox enabled with write access to workspace
+                if safety_config.sandbox_enabled || std::env::var("SAFE_MODE").is_ok() {
+                    SandboxPolicy::WorkspaceWrite {
+                        writable_roots,
+                        network_access: colossal_linux_sandbox::protocol::NetworkAccess::Enabled,
+                        exclude_tmpdir_env_var: false,
+                        exclude_slash_tmp: false,
+                    }
+                } else {
+                    SandboxPolicy::DangerFullAccess
+                }
+            }
+            safety_config::SafetyMode::Yolo => {
+                // Yolo mode: full access (no sandbox)
+                SandboxPolicy::DangerFullAccess
+            }
         };
 
         let _ = GLOBAL_STATE.set(GlobalState {
@@ -195,6 +210,12 @@ pub async fn add_writable_root(path: std::path::PathBuf) -> Result<()> {
         SandboxPolicy::DangerFullAccess => {
             // Already has full access, no need to add
             Ok(())
+        }
+        SandboxPolicy::ReadOnly => {
+            // Read-only mode: cannot add writable roots
+            Err(anyhow::anyhow!(
+                "Cannot add writable root in read-only mode"
+            ))
         }
     }
 }

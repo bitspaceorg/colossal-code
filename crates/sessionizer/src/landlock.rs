@@ -170,6 +170,85 @@ fn apply_linux_landlock_policy(
             // Don't apply any restrictions
             Ok(())
         }
+        SandboxPolicy::ReadOnly => {
+            // Read-only mode: allow reads to system paths and cwd, but NO writes
+            let abi = ABI::V3;
+
+            let mut ruleset = Ruleset::default()
+                .handle_access(AccessFs::from_all(abi))
+                .map_err(|e| ColossalErr::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("Failed to create Landlock ruleset: {}", e)
+                )))?
+                .create()
+                .map_err(|e| ColossalErr::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("Failed to create Landlock ruleset: {}", e)
+                )))?;
+
+            // Add read-only access to system directories
+            for sys_path in &["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"] {
+                if std::path::Path::new(sys_path).exists() {
+                    ruleset = ruleset.add_rule(landlock::PathBeneath::new(
+                        landlock::PathFd::new(sys_path).map_err(|e| {
+                            ColossalErr::Io(std::io::Error::new(
+                                std::io::ErrorKind::NotFound,
+                                format!("Failed to open {}: {}", sys_path, e)
+                            ))
+                        })?,
+                        AccessFs::from_read(abi),
+                    )).map_err(|e| ColossalErr::Io(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!("Failed to add rule for {}: {}", sys_path, e)
+                    )))?;
+                }
+            }
+
+            // Add read-only access to cwd (workspace)
+            if cwd.exists() {
+                ruleset = ruleset.add_rule(landlock::PathBeneath::new(
+                    landlock::PathFd::new(cwd).map_err(|e| {
+                        ColossalErr::Io(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("Failed to open cwd {}: {}", cwd.display(), e)
+                        ))
+                    })?,
+                    AccessFs::from_read(abi),
+                )).map_err(|e| ColossalErr::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("Failed to add rule for cwd {}: {}", cwd.display(), e)
+                )))?;
+            }
+
+            // Allow access to /dev for /dev/null etc (read/write needed for output)
+            if std::path::Path::new("/dev").exists() {
+                ruleset = ruleset.add_rule(landlock::PathBeneath::new(
+                    landlock::PathFd::new("/dev").map_err(|e| {
+                        ColossalErr::Io(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("Failed to open /dev: {}", e)
+                        ))
+                    })?,
+                    AccessFs::from_all(abi),
+                )).map_err(|e| ColossalErr::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("Failed to add rule for /dev: {}", e)
+                )))?;
+            }
+
+            // Apply restrictions
+            if std::env::var("DISABLE_LANDLOCK").unwrap_or_default() == "1" {
+                eprintln!("[LANDLOCK] ReadOnly sandbox rules configured but NOT activated (DISABLE_LANDLOCK=1)");
+                Ok(())
+            } else {
+                ruleset.restrict_self()
+                    .map_err(|e| ColossalErr::Io(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!("Failed to restrict thread with Landlock (ReadOnly): {}", e)
+                    )))?;
+                Ok(())
+            }
+        }
     }
 }
 
@@ -239,6 +318,15 @@ fn apply_macos_sandbox_policy(
         crate::protocol::SandboxPolicy::DangerFullAccess => {
             // For DangerFullAccess, allow everything (not recommended but possible)
             profile.push_str("(allow default)\n");
+        }
+        crate::protocol::SandboxPolicy::ReadOnly => {
+            // Read-only mode: allow reading cwd and system paths, but NO writes
+            profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", cwd.display()));
+            profile.push_str(&format!("(allow file-read-metadata (subpath \"{}\"))\n", cwd.display()));
+            // Deny all writes
+            profile.push_str("(deny file-write*)\n");
+            // Deny network
+            profile.push_str("(deny network*)\n");
         }
     }
     

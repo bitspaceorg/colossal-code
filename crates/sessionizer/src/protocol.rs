@@ -16,12 +16,16 @@ pub struct WritableRoot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SandboxPolicy {
+    /// Read-only mode: NO write access anywhere, only read access to workspace
+    ReadOnly,
+    /// Workspace write: Can write to workspace and specified roots
     WorkspaceWrite {
         writable_roots: Vec<WritableRoot>,
         network_access: NetworkAccess,
         exclude_tmpdir_env_var: bool,
         exclude_slash_tmp: bool,
     },
+    /// Full access: No sandbox restrictions
     DangerFullAccess,
 }
 
@@ -36,6 +40,7 @@ impl SandboxPolicy {
 
     pub fn has_full_network_access(&self) -> bool {
         match self {
+            SandboxPolicy::ReadOnly => false, // Restrict network in read-only mode
             SandboxPolicy::WorkspaceWrite { network_access, .. } => matches!(network_access, NetworkAccess::Enabled),
             SandboxPolicy::DangerFullAccess => true,
         }
@@ -43,6 +48,10 @@ impl SandboxPolicy {
 
     pub fn get_writable_roots_with_cwd(&self, cwd: &std::path::Path) -> Vec<WritableRoot> {
         match self {
+            SandboxPolicy::ReadOnly => {
+                // No writable roots in read-only mode
+                vec![]
+            }
             SandboxPolicy::WorkspaceWrite {
                 writable_roots,
                 exclude_tmpdir_env_var,
@@ -74,6 +83,25 @@ impl SandboxPolicy {
                 roots
             }
             SandboxPolicy::DangerFullAccess => vec![],
+        }
+    }
+
+    /// Get readable roots for the sandbox (used for read-only mode)
+    pub fn get_readable_roots_with_cwd(&self, cwd: &std::path::Path) -> Vec<PathBuf> {
+        match self {
+            SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. } => {
+                // Read access to workspace and common paths
+                vec![
+                    cwd.to_path_buf(),
+                    PathBuf::from("/usr"),
+                    PathBuf::from("/lib"),
+                    PathBuf::from("/lib64"),
+                    PathBuf::from("/etc"),
+                    PathBuf::from("/bin"),
+                    PathBuf::from("/sbin"),
+                ]
+            }
+            SandboxPolicy::DangerFullAccess => vec![PathBuf::from("/")],
         }
     }
 }

@@ -72,7 +72,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "show help information and available commands"),
     ("/model", "set the ai model for colossal code"),
     ("/resume", "resume a conversation"),
-    ("/review", "review uncommited changes"),
+    ("/review", "review code changes. options: -t <all|committed|uncommitted>, --base <branch>, --base-commit <commit>, --no-tool"),
     (
         "/rewind",
         "restore the code and/or conversation to a previous point",
@@ -375,6 +375,34 @@ struct FileChange {
     deletions: usize,
 }
 
+/// Review type for /review command
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ReviewType {
+    All,        // Both committed and uncommitted changes
+    Committed,  // Only committed changes (compared to base)
+    Uncommitted, // Only uncommitted changes (working tree)
+}
+
+/// Options for /review command
+#[derive(Debug, Clone)]
+struct ReviewOptions {
+    review_type: ReviewType,
+    base_branch: Option<String>,  // --base <branch>
+    base_commit: Option<String>,  // --base-commit <commit>
+    no_tool: bool,                // --no-tool flag
+}
+
+impl Default for ReviewOptions {
+    fn default() -> Self {
+        Self {
+            review_type: ReviewType::All,
+            base_branch: None,
+            base_commit: None,
+            no_tool: false,
+        }
+    }
+}
+
 /// Rewind point capturing conversation state at a specific moment
 #[derive(Debug, Clone)]
 struct RewindPoint {
@@ -526,6 +554,7 @@ struct App {
     sandbox_blocked_path: String, // Path that was blocked by sandbox
     interrupt_pending: Option<String>, // Message waiting to send after cancel completes
     export_pending: bool,         // Flag to trigger export in async context
+    review_pending: Option<ReviewOptions>, // Flag to trigger code review in async context
     save_pending: bool,           // Flag to trigger save conversation in async context
     // Navigation mode snapshot - frozen UI state while nav mode is active
     nav_snapshot: Option<AppSnapshot>,
@@ -1666,6 +1695,7 @@ impl App {
             sandbox_blocked_path: String::new(),
             interrupt_pending: None,
             export_pending: false,
+            review_pending: None,
             save_pending: false,
             nav_snapshot: None,
             session_manager: SessionManager::new(),
@@ -2607,6 +2637,197 @@ impl App {
         }
     }
 
+    /// Execute git commands based on review options and return context
+    async fn execute_review_git_commands(&self, options: &ReviewOptions) -> Result<String> {
+        use tokio::process::Command;
+
+        let mut context = String::new();
+
+        // Get current branch
+        let branch_output = Command::new("git")
+            .args(["branch", "--show-current"])
+            .output()
+            .await?;
+        let current_branch = String::from_utf8_lossy(&branch_output.stdout).trim().to_string();
+        context.push_str(&format!("Current branch: {}\n\n", current_branch));
+
+        // Get git status
+        let status_output = Command::new("git")
+            .args(["status", "--short"])
+            .output()
+            .await?;
+        let status = String::from_utf8_lossy(&status_output.stdout);
+        if !status.is_empty() {
+            context.push_str(&format!("Git status:\n```\n{}```\n\n", status));
+        }
+
+        // Build diff command based on options
+        match options.review_type {
+            ReviewType::All => {
+                // Show both staged and unstaged changes
+                if let Some(ref base) = options.base_branch {
+                    // Compare against base branch
+                    let diff_output = Command::new("git")
+                        .args(["diff", &format!("{}...HEAD", base)])
+                        .output()
+                        .await?;
+                    let diff = String::from_utf8_lossy(&diff_output.stdout);
+                    context.push_str(&format!("Changes compared to '{}':\n```diff\n{}```\n\n", base, diff));
+
+                    // Also show commits
+                    let log_output = Command::new("git")
+                        .args(["log", "--oneline", &format!("{}..HEAD", base)])
+                        .output()
+                        .await?;
+                    let log = String::from_utf8_lossy(&log_output.stdout);
+                    if !log.is_empty() {
+                        context.push_str(&format!("Commits since '{}':\n```\n{}```\n\n", base, log));
+                    }
+                } else if let Some(ref commit) = options.base_commit {
+                    // Compare against specific commit
+                    let diff_output = Command::new("git")
+                        .args(["diff", &format!("{}..HEAD", commit)])
+                        .output()
+                        .await?;
+                    let diff = String::from_utf8_lossy(&diff_output.stdout);
+                    context.push_str(&format!("Changes since commit '{}':\n```diff\n{}```\n\n", commit, diff));
+
+                    // Also show commits
+                    let log_output = Command::new("git")
+                        .args(["log", "--oneline", &format!("{}..HEAD", commit)])
+                        .output()
+                        .await?;
+                    let log = String::from_utf8_lossy(&log_output.stdout);
+                    if !log.is_empty() {
+                        context.push_str(&format!("Commits since '{}':\n```\n{}```\n\n", commit, log));
+                    }
+                } else {
+                    // Default: show all uncommitted changes (staged + unstaged)
+                    let diff_output = Command::new("git")
+                        .args(["diff", "HEAD"])
+                        .output()
+                        .await?;
+                    let diff = String::from_utf8_lossy(&diff_output.stdout);
+                    if !diff.is_empty() {
+                        context.push_str(&format!("Uncommitted changes:\n```diff\n{}```\n\n", diff));
+                    } else {
+                        context.push_str("No uncommitted changes.\n\n");
+                    }
+                }
+            }
+            ReviewType::Committed => {
+                // Show only committed changes
+                if let Some(ref base) = options.base_branch {
+                    let diff_output = Command::new("git")
+                        .args(["diff", &format!("{}...HEAD", base)])
+                        .output()
+                        .await?;
+                    let diff = String::from_utf8_lossy(&diff_output.stdout);
+                    context.push_str(&format!("Committed changes compared to '{}':\n```diff\n{}```\n\n", base, diff));
+
+                    let log_output = Command::new("git")
+                        .args(["log", "--oneline", &format!("{}..HEAD", base)])
+                        .output()
+                        .await?;
+                    let log = String::from_utf8_lossy(&log_output.stdout);
+                    if !log.is_empty() {
+                        context.push_str(&format!("Commits:\n```\n{}```\n\n", log));
+                    }
+                } else if let Some(ref commit) = options.base_commit {
+                    let diff_output = Command::new("git")
+                        .args(["diff", &format!("{}..HEAD", commit)])
+                        .output()
+                        .await?;
+                    let diff = String::from_utf8_lossy(&diff_output.stdout);
+                    context.push_str(&format!("Committed changes since '{}':\n```diff\n{}```\n\n", commit, diff));
+
+                    let log_output = Command::new("git")
+                        .args(["log", "--oneline", &format!("{}..HEAD", commit)])
+                        .output()
+                        .await?;
+                    let log = String::from_utf8_lossy(&log_output.stdout);
+                    if !log.is_empty() {
+                        context.push_str(&format!("Commits:\n```\n{}```\n\n", log));
+                    }
+                } else {
+                    // Default: show recent commits on current branch
+                    let log_output = Command::new("git")
+                        .args(["log", "--oneline", "-10"])
+                        .output()
+                        .await?;
+                    let log = String::from_utf8_lossy(&log_output.stdout);
+                    context.push_str(&format!("Recent commits:\n```\n{}```\n\n", log));
+
+                    // Show diff of last commit
+                    let diff_output = Command::new("git")
+                        .args(["diff", "HEAD~1..HEAD"])
+                        .output()
+                        .await?;
+                    let diff = String::from_utf8_lossy(&diff_output.stdout);
+                    if !diff.is_empty() {
+                        context.push_str(&format!("Last commit diff:\n```diff\n{}```\n\n", diff));
+                    }
+                }
+            }
+            ReviewType::Uncommitted => {
+                // Show only uncommitted changes (staged + unstaged)
+                let diff_output = Command::new("git")
+                    .args(["diff", "HEAD"])
+                    .output()
+                    .await?;
+                let diff = String::from_utf8_lossy(&diff_output.stdout);
+                if !diff.is_empty() {
+                    context.push_str(&format!("Uncommitted changes:\n```diff\n{}```\n\n", diff));
+                } else {
+                    context.push_str("No uncommitted changes.\n\n");
+                }
+
+                // Show staged changes separately
+                let staged_output = Command::new("git")
+                    .args(["diff", "--cached"])
+                    .output()
+                    .await?;
+                let staged = String::from_utf8_lossy(&staged_output.stdout);
+                if !staged.is_empty() {
+                    context.push_str(&format!("Staged changes:\n```diff\n{}```\n\n", staged));
+                }
+            }
+        }
+
+        Ok(context)
+    }
+
+    /// Build review prompt with context and options
+    fn build_review_prompt(&self, options: &ReviewOptions, context: &str) -> String {
+        let mut prompt = String::new();
+
+        // Add review request with context
+        prompt.push_str("Please review the following code changes:\n\n");
+        prompt.push_str(context);
+
+        // Add review instructions based on options
+        prompt.push_str("\n## Review Instructions\n\n");
+        prompt.push_str("Please analyze the changes and provide:\n");
+        prompt.push_str("1. **Summary**: Brief overview of what changed\n");
+        prompt.push_str("2. **Potential Issues**: Bugs, security concerns, performance issues\n");
+        prompt.push_str("3. **Code Quality**: Style, readability, maintainability\n");
+        prompt.push_str("4. **Suggestions**: Improvements or alternative approaches\n");
+
+        if options.no_tool {
+            // Add instruction to not use tools
+            prompt.push_str("\n**IMPORTANT**: Provide your review based solely on the diff shown above. ");
+            prompt.push_str("Do NOT use any tools to explore the codebase further. ");
+            prompt.push_str("Generate your review directly from the provided context.\n");
+        } else {
+            // Allow tool usage for deeper exploration
+            prompt.push_str("\n**Note**: You have access to read-only tools. ");
+            prompt.push_str("Feel free to explore the codebase further if needed to understand the context better. ");
+            prompt.push_str("You can read files, search code, run tests, or execute build commands to verify the changes.\n");
+        }
+
+        prompt
+    }
+
     async fn save_conversation(&mut self) -> Result<()> {
         if self.messages.is_empty() {
             return Ok(());
@@ -3319,6 +3540,80 @@ impl App {
                     _ => {}
                 }
             }
+            return;
+        } else if cmd_lower.starts_with("/review") {
+            // Parse /review command options
+            // Options: -t <all|committed|uncommitted>, --base <branch>, --base-commit <commit>, --no-tool
+            let parts: Vec<&str> = command.split_whitespace().collect();
+            let mut options = ReviewOptions::default();
+
+            let mut i = 1;
+            while i < parts.len() {
+                match parts[i] {
+                    "-t" | "--type" => {
+                        if i + 1 < parts.len() {
+                            match parts[i + 1].to_lowercase().as_str() {
+                                "all" => options.review_type = ReviewType::All,
+                                "committed" => options.review_type = ReviewType::Committed,
+                                "uncommitted" => options.review_type = ReviewType::Uncommitted,
+                                _ => {
+                                    self.messages.push(format!(
+                                        " ⎿ Invalid review type '{}'. Use: all, committed, uncommitted",
+                                        parts[i + 1]
+                                    ));
+                                    self.message_types.push(MessageType::Agent);
+                                    self.message_states.push(MessageState::Sent);
+                                    return;
+                                }
+                            }
+                            i += 2;
+                        } else {
+                            self.messages.push(" ⎿ Missing value for -t/--type".to_string());
+                            self.message_types.push(MessageType::Agent);
+                            self.message_states.push(MessageState::Sent);
+                            return;
+                        }
+                    }
+                    "--base" => {
+                        if i + 1 < parts.len() {
+                            options.base_branch = Some(parts[i + 1].to_string());
+                            i += 2;
+                        } else {
+                            self.messages.push(" ⎿ Missing value for --base".to_string());
+                            self.message_types.push(MessageType::Agent);
+                            self.message_states.push(MessageState::Sent);
+                            return;
+                        }
+                    }
+                    "--base-commit" => {
+                        if i + 1 < parts.len() {
+                            options.base_commit = Some(parts[i + 1].to_string());
+                            i += 2;
+                        } else {
+                            self.messages.push(" ⎿ Missing value for --base-commit".to_string());
+                            self.message_types.push(MessageType::Agent);
+                            self.message_states.push(MessageState::Sent);
+                            return;
+                        }
+                    }
+                    "--no-tool" => {
+                        options.no_tool = true;
+                        i += 1;
+                    }
+                    _ => {
+                        self.messages.push(format!(
+                            " ⎿ Unknown option '{}'. Use: -t <type>, --base <branch>, --base-commit <commit>, --no-tool",
+                            parts[i]
+                        ));
+                        self.message_types.push(MessageType::Agent);
+                        self.message_states.push(MessageState::Sent);
+                        return;
+                    }
+                }
+            }
+
+            // Set pending to trigger async review in event loop
+            self.review_pending = Some(options);
             return;
         } else {
             // Unknown command
@@ -4175,6 +4470,44 @@ impl App {
                         .push("[COMMAND: No conversation history available]".to_string());
                     self.message_types.push(MessageType::Agent);
                     self.message_states.push(MessageState::Sent);
+                }
+            }
+
+            // Handle pending code review
+            if let Some(options) = self.review_pending.take() {
+                // Execute git commands based on options
+                let git_context = self.execute_review_git_commands(&options).await;
+
+                match git_context {
+                    Ok(context) => {
+                        // Build the review prompt
+                        let prompt = self.build_review_prompt(&options, &context);
+
+                        // Add prompt as user message
+                        self.messages.push(format!("/review"));
+                        self.message_types.push(MessageType::User);
+                        self.message_states.push(MessageState::Sent);
+
+                        // Show thinking animation
+                        self.messages.push("[THINKING_ANIMATION]".to_string());
+                        self.message_types.push(MessageType::Agent);
+                        self.is_thinking = true;
+                        self.thinking_indicator_active = true;
+                        self.thinking_start_time = Some(Instant::now());
+                        self.thinking_token_count = 0;
+                        self.thinking_raw_content.clear();
+
+                        // Send to agent
+                        if let Some(tx) = &self.agent_tx {
+                            self.agent_processing = true;
+                            let _ = tx.send(AgentMessage::UserInput(prompt));
+                        }
+                    }
+                    Err(e) => {
+                        self.messages.push(format!(" ⎿ Review failed: {}", e));
+                        self.message_types.push(MessageType::Agent);
+                        self.message_states.push(MessageState::Sent);
+                    }
                 }
             }
 
