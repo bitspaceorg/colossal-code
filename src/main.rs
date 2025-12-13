@@ -4058,10 +4058,19 @@ impl App {
                     self.handle_slash_command();
                 } else {
                     // Add interrupt message
-                    self.messages.push(interrupt_msg.clone());
+                    let user_message = interrupt_msg.clone();
+                    self.messages.push(user_message.clone());
                     self.message_types.push(MessageType::User);
                     self.message_states.push(MessageState::Sent);
-                    self.save_to_history(&interrupt_msg);
+                    self.save_to_history(&user_message);
+
+                    // Show thinking animation immediately
+                    self.messages.push("[THINKING_ANIMATION]".to_string());
+                    self.message_types.push(MessageType::Agent);
+                    self.is_thinking = true;
+                    self.thinking_indicator_active = true;
+                    self.thinking_start_time = Some(Instant::now());
+                    self.thinking_token_count = 0;
 
                     // Clear raw thinking content for new conversation turn
                     self.thinking_raw_content.clear();
@@ -4069,7 +4078,7 @@ impl App {
                     // Send to agent
                     if let Some(tx) = &self.agent_tx {
                         self.agent_processing = true;
-                        let _ = tx.send(AgentMessage::UserInput(interrupt_msg));
+                        let _ = tx.send(AgentMessage::UserInput(user_message));
                     }
                 }
             }
@@ -4103,7 +4112,7 @@ impl App {
                     // Check if queued message is a command
                     if queued_msg.trim().starts_with('/') {
                         // Execute command
-                        self.input = queued_msg.clone();
+                        self.input = queued_msg;
                         self.handle_slash_command();
                     } else {
                         // Regular message - clear generation stats from previous message when new message is added to UI
@@ -5435,19 +5444,12 @@ impl App {
 
     fn format_thinking_tree_line(
         summary: String,
-        token_count: usize,
-        chunk_count: usize,
+        _token_count: usize,
+        _chunk_count: usize,
         is_final: bool,
     ) -> String {
         let prefix = if is_final { "└──" } else { "├──" };
-        if token_count > 0 {
-            format!(
-                "{} {} ({}rt {}ct)",
-                prefix, summary, token_count, chunk_count
-            )
-        } else {
-            format!("{} {}", prefix, summary)
-        }
+        format!("{} {}", prefix, summary)
     }
 
     fn connector_prefix(_connector: AgentConnector, _is_first_line: bool) -> Span<'static> {
@@ -5677,6 +5679,58 @@ impl App {
         }
     }
 
+    fn format_elapsed_time(&self, secs: u64) -> String {
+        const MINUTE: u64 = 60;
+        const HOUR: u64 = 60 * MINUTE;
+        const DAY: u64 = 24 * HOUR;
+        const WEEK: u64 = 7 * DAY;
+        const MONTH: u64 = 30 * DAY;
+        const YEAR: u64 = 365 * DAY;
+
+        const UNITS: &[(u64, &str)] = &[
+            (YEAR, "y"),
+            (MONTH, "mo"),
+            (WEEK, "w"),
+            (DAY, "d"),
+            (HOUR, "h"),
+            (MINUTE, "m"),
+            (1, "s"),
+        ];
+
+        let mut remaining = secs;
+
+        let start_idx = UNITS
+            .iter()
+            .position(|(unit_secs, _)| secs >= *unit_secs)
+            .unwrap_or(UNITS.len() - 1);
+
+        let mut parts = Vec::new();
+        for (idx, (unit_secs, label)) in UNITS.iter().enumerate().skip(start_idx) {
+            let value = if *unit_secs == 1 {
+                remaining
+            } else {
+                remaining / *unit_secs
+            };
+            parts.push(format!("{}{}", value, label));
+            if *unit_secs > 1 {
+                remaining %= *unit_secs;
+            } else {
+                // Seconds is the terminal unit
+                remaining = 0;
+            }
+
+            if parts.len() == 3 {
+                break;
+            }
+        }
+
+        if parts.is_empty() {
+            "0s".to_string()
+        } else {
+            parts.join(" ")
+        }
+    }
+
     fn render_message_with_max_width(
         &self,
         message: &str,
@@ -5742,14 +5796,10 @@ impl App {
 
             // Use current summary if available, otherwise use random word (from snapshot if in nav mode)
             // Always add "..." to the end
-            let text_with_dots = if let Some((summary, token_count, chunk_count)) =
+            let text_with_dots = if let Some((summary, _token_count, _chunk_count)) =
                 self.get_thinking_current_summary()
             {
-                if *token_count > 0 {
-                    format!("{} ({}rt {}ct)...", summary, token_count, chunk_count)
-                } else {
-                    format!("{}...", summary)
-                }
+                format!("{}...", summary)
             } else {
                 format!("{}...", self.get_thinking_current_word())
             };
@@ -5788,8 +5838,8 @@ impl App {
                     String::new()
                 };
 
-                let compact_elapsed = self.format_compact_number(elapsed as usize);
-                let status = format!(" [Esc to interrupt | {}s{}]", compact_elapsed, token_info);
+                let formatted_elapsed = self.format_elapsed_time(elapsed);
+                let status = format!(" [Esc to interrupt | {}{}]", formatted_elapsed, token_info);
                 spans.push(Span::styled(status, Style::default().fg(Color::DarkGray)));
             }
 
