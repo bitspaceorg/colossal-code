@@ -56,10 +56,6 @@ struct TodoItem {
 /// Available slash commands with descriptions for autocomplete
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "clear conversation history and free up context"),
-    (
-        "/compact",
-        "clear conversation history but keep a summary in context. optional: /compact [instructions for summarization]",
-    ),
     ("/exit", "exit the repl"),
     (
         "/export",
@@ -72,7 +68,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "show help information and available commands"),
     ("/model", "set the ai model for colossal code"),
     ("/resume", "resume a conversation"),
-    ("/review", "review code changes. options: -t <all|committed|uncommitted>, --base <branch>, --base-commit <commit>, --no-tool"),
+    (
+        "/review",
+        "review code changes. options: -t <all|committed|uncommitted>, --base <branch>, --base-commit <commit>, --no-tool",
+    ),
     (
         "/rewind",
         "restore the code and/or conversation to a previous point",
@@ -87,9 +86,16 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/stats",
         "show the total token count and duration of the current session",
     ),
+    (
+        "/summarize",
+        "summarize conversation to reduce context. optional: /summarize [custom instructions]",
+    ),
     ("/todos", "list current todo items"),
     ("/vim", "toggle between vim and normal editing modes"),
 ];
+
+const MAX_COMPACTION_HISTORY: usize = 10;
+const SUMMARY_BANNER_PREFIX: &str = "[SUMMARY_BANNER]";
 /// Application phases for startup animation
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
 enum Phase {
@@ -378,8 +384,8 @@ struct FileChange {
 /// Review type for /review command
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ReviewType {
-    All,        // Both committed and uncommitted changes
-    Committed,  // Only committed changes (compared to base)
+    All,         // Both committed and uncommitted changes
+    Committed,   // Only committed changes (compared to base)
     Uncommitted, // Only uncommitted changes (working tree)
 }
 
@@ -387,9 +393,9 @@ enum ReviewType {
 #[derive(Debug, Clone)]
 struct ReviewOptions {
     review_type: ReviewType,
-    base_branch: Option<String>,  // --base <branch>
-    base_commit: Option<String>,  // --base-commit <commit>
-    no_tool: bool,                // --no-tool flag
+    base_branch: Option<String>, // --base <branch>
+    base_commit: Option<String>, // --base-commit <commit>
+    no_tool: bool,               // --no-tool flag
 }
 
 impl Default for ReviewOptions {
@@ -401,6 +407,20 @@ impl Default for ReviewOptions {
             no_tool: false,
         }
     }
+}
+
+/// Options for /summarize command
+#[derive(Debug, Clone)]
+struct CompactOptions {
+    /// Optional custom instructions for summarization
+    custom_instructions: Option<String>,
+}
+
+/// Stored summary result for a compaction request
+#[derive(Debug, Clone)]
+struct CompactionEntry {
+    summary: String,
+    timestamp: SystemTime,
 }
 
 /// Rewind point capturing conversation state at a specific moment
@@ -519,6 +539,7 @@ struct App {
     agent_rx: Option<mpsc::UnboundedReceiver<AgentMessage>>,
     agent_processing: bool,
     agent_interrupted: bool, // Flag to block processing agent messages after interrupt
+    is_compacting: bool,     // Flag indicating we're in compaction mode
     // Thinking animation state
     is_thinking: bool,
     thinking_indicator_active: bool,
@@ -555,7 +576,12 @@ struct App {
     interrupt_pending: Option<String>, // Message waiting to send after cancel completes
     export_pending: bool,         // Flag to trigger export in async context
     review_pending: Option<ReviewOptions>, // Flag to trigger code review in async context
-    save_pending: bool,           // Flag to trigger save conversation in async context
+    compact_pending: Option<CompactOptions>, // Flag to trigger compact in async context
+    last_compacted_summary: Option<String>,
+    compaction_history: Vec<CompactionEntry>,
+    show_summary_history: bool,
+    summary_history_selected: usize,
+    save_pending: bool, // Flag to trigger save conversation in async context
     // Navigation mode snapshot - frozen UI state while nav mode is active
     nav_snapshot: Option<AppSnapshot>,
     // Session manager window
@@ -1528,6 +1554,7 @@ impl App {
             agent_rx: Some(output_rx),
             agent_processing: false,
             agent_interrupted: false,
+            is_compacting: false,
             is_thinking: false,
             thinking_indicator_active: false,
             agent_response_started: false,
@@ -1696,6 +1723,11 @@ impl App {
             interrupt_pending: None,
             export_pending: false,
             review_pending: None,
+            compact_pending: None,
+            last_compacted_summary: None,
+            compaction_history: Vec::new(),
+            show_summary_history: false,
+            summary_history_selected: 0,
             save_pending: false,
             nav_snapshot: None,
             session_manager: SessionManager::new(),
@@ -2648,7 +2680,9 @@ impl App {
             .args(["branch", "--show-current"])
             .output()
             .await?;
-        let current_branch = String::from_utf8_lossy(&branch_output.stdout).trim().to_string();
+        let current_branch = String::from_utf8_lossy(&branch_output.stdout)
+            .trim()
+            .to_string();
         context.push_str(&format!("Current branch: {}\n\n", current_branch));
 
         // Get git status
@@ -2672,7 +2706,10 @@ impl App {
                         .output()
                         .await?;
                     let diff = String::from_utf8_lossy(&diff_output.stdout);
-                    context.push_str(&format!("Changes compared to '{}':\n```diff\n{}```\n\n", base, diff));
+                    context.push_str(&format!(
+                        "Changes compared to '{}':\n```diff\n{}```\n\n",
+                        base, diff
+                    ));
 
                     // Also show commits
                     let log_output = Command::new("git")
@@ -2681,7 +2718,8 @@ impl App {
                         .await?;
                     let log = String::from_utf8_lossy(&log_output.stdout);
                     if !log.is_empty() {
-                        context.push_str(&format!("Commits since '{}':\n```\n{}```\n\n", base, log));
+                        context
+                            .push_str(&format!("Commits since '{}':\n```\n{}```\n\n", base, log));
                     }
                 } else if let Some(ref commit) = options.base_commit {
                     // Compare against specific commit
@@ -2690,7 +2728,10 @@ impl App {
                         .output()
                         .await?;
                     let diff = String::from_utf8_lossy(&diff_output.stdout);
-                    context.push_str(&format!("Changes since commit '{}':\n```diff\n{}```\n\n", commit, diff));
+                    context.push_str(&format!(
+                        "Changes since commit '{}':\n```diff\n{}```\n\n",
+                        commit, diff
+                    ));
 
                     // Also show commits
                     let log_output = Command::new("git")
@@ -2699,17 +2740,16 @@ impl App {
                         .await?;
                     let log = String::from_utf8_lossy(&log_output.stdout);
                     if !log.is_empty() {
-                        context.push_str(&format!("Commits since '{}':\n```\n{}```\n\n", commit, log));
+                        context
+                            .push_str(&format!("Commits since '{}':\n```\n{}```\n\n", commit, log));
                     }
                 } else {
                     // Default: show all uncommitted changes (staged + unstaged)
-                    let diff_output = Command::new("git")
-                        .args(["diff", "HEAD"])
-                        .output()
-                        .await?;
+                    let diff_output = Command::new("git").args(["diff", "HEAD"]).output().await?;
                     let diff = String::from_utf8_lossy(&diff_output.stdout);
                     if !diff.is_empty() {
-                        context.push_str(&format!("Uncommitted changes:\n```diff\n{}```\n\n", diff));
+                        context
+                            .push_str(&format!("Uncommitted changes:\n```diff\n{}```\n\n", diff));
                     } else {
                         context.push_str("No uncommitted changes.\n\n");
                     }
@@ -2723,7 +2763,10 @@ impl App {
                         .output()
                         .await?;
                     let diff = String::from_utf8_lossy(&diff_output.stdout);
-                    context.push_str(&format!("Committed changes compared to '{}':\n```diff\n{}```\n\n", base, diff));
+                    context.push_str(&format!(
+                        "Committed changes compared to '{}':\n```diff\n{}```\n\n",
+                        base, diff
+                    ));
 
                     let log_output = Command::new("git")
                         .args(["log", "--oneline", &format!("{}..HEAD", base)])
@@ -2739,7 +2782,10 @@ impl App {
                         .output()
                         .await?;
                     let diff = String::from_utf8_lossy(&diff_output.stdout);
-                    context.push_str(&format!("Committed changes since '{}':\n```diff\n{}```\n\n", commit, diff));
+                    context.push_str(&format!(
+                        "Committed changes since '{}':\n```diff\n{}```\n\n",
+                        commit, diff
+                    ));
 
                     let log_output = Command::new("git")
                         .args(["log", "--oneline", &format!("{}..HEAD", commit)])
@@ -2771,10 +2817,7 @@ impl App {
             }
             ReviewType::Uncommitted => {
                 // Show only uncommitted changes (staged + unstaged)
-                let diff_output = Command::new("git")
-                    .args(["diff", "HEAD"])
-                    .output()
-                    .await?;
+                let diff_output = Command::new("git").args(["diff", "HEAD"]).output().await?;
                 let diff = String::from_utf8_lossy(&diff_output.stdout);
                 if !diff.is_empty() {
                     context.push_str(&format!("Uncommitted changes:\n```diff\n{}```\n\n", diff));
@@ -2815,7 +2858,9 @@ impl App {
 
         if options.no_tool {
             // Add instruction to not use tools
-            prompt.push_str("\n**IMPORTANT**: Provide your review based solely on the diff shown above. ");
+            prompt.push_str(
+                "\n**IMPORTANT**: Provide your review based solely on the diff shown above. ",
+            );
             prompt.push_str("Do NOT use any tools to explore the codebase further. ");
             prompt.push_str("Generate your review directly from the provided context.\n");
         } else {
@@ -2824,6 +2869,131 @@ impl App {
             prompt.push_str("Feel free to explore the codebase further if needed to understand the context better. ");
             prompt.push_str("You can read files, search code, run tests, or execute build commands to verify the changes.\n");
         }
+
+        prompt
+    }
+
+    /// Build compaction prompt with all conversation context
+    fn build_compact_prompt(&self, options: &CompactOptions) -> String {
+        let mut prompt = String::new();
+
+        prompt.push_str(
+            "You are compacting a coding session so it can be restored later.
+",
+        );
+        prompt.push_str(
+            "Respond using the exact template below so we can present it via /summarize without further editing.
+
+",
+        );
+
+        // Add custom instructions if provided
+        if let Some(ref instructions) = options.custom_instructions {
+            prompt.push_str(&format!(
+                "Custom user instructions (must follow): {}
+
+",
+                instructions
+            ));
+        }
+
+        prompt.push_str(
+            "=== REQUIRED FORMAT ===
+",
+        );
+        prompt.push_str(
+            "This session is being continued from a previous conversation that ran out of context. The conversation is summarized below:
+",
+        );
+        prompt.push_str(
+            "Analysis:
+Let me analyze the conversation chronologically:
+",
+        );
+        prompt.push_str(
+            "1. Chronological recap of major events
+2. Continue numbering for each important event
+",
+        );
+        prompt.push_str(
+            "1. Primary Request and Intent: Explain what the user asked for.
+",
+        );
+        prompt.push_str(
+            "2. Key Technical Concepts: Bullet the important APIs, tools, frameworks, or constraints.
+",
+        );
+        prompt.push_str(
+            "3. Files and Code Sections: Reference files with line hints like `src/main.rs:42`.
+",
+        );
+        prompt.push_str(
+            "4. Errors and Fixes: Describe issues, whether they were fixed, and how.
+",
+        );
+        prompt.push_str(
+            "5. Problem Solving: Outline the debugging/investigation path.
+",
+        );
+        prompt.push_str(
+            "6. All user messages: Enumerate each user ask chronologically.
+",
+        );
+        prompt.push_str(
+            "7. Pending Tasks: List outstanding work items.
+",
+        );
+        prompt.push_str(
+            "8. Current Work: Summarize the repository state when compaction happened.
+",
+        );
+        prompt.push_str(
+            "9. Optional Next Step: Suggest one or two logical next actions.
+",
+        );
+        prompt.push_str(
+            "Keep the headings exactly as written (Analysis, Primary Request and Intent, etc.) so the UI can render them verbatim.
+",
+        );
+        prompt.push_str(
+            "Do NOT call tools or browse files—work only with the conversation log.
+
+",
+        );
+
+        prompt.push_str(
+            "=== CONVERSATION HISTORY ===
+
+",
+        );
+
+        // Add all messages (excluding system messages like [THINKING_ANIMATION])
+        for (msg, msg_type) in self.messages.iter().zip(self.message_types.iter()) {
+            // Skip internal messages
+            if msg.starts_with("[THINKING_ANIMATION]")
+                || msg.starts_with("[COMMAND:")
+                || msg.starts_with(" ⎿")
+            {
+                continue;
+            }
+
+            let role = match msg_type {
+                MessageType::User => "User",
+                MessageType::Agent => "Assistant",
+            };
+
+            prompt.push_str(&format!(
+                "{}: {}
+
+",
+                role, msg
+            ));
+        }
+
+        prompt.push_str(
+            "Return only the formatted summary.
+",
+        );
 
         prompt
     }
@@ -3360,6 +3530,33 @@ impl App {
         } else if cmd_lower == "/export" {
             // Export needs async, so we'll set a flag and handle it in the event loop
             self.export_pending = true;
+        } else if cmd_lower.starts_with("/summarize") {
+            // Parse optional custom instructions after /summarize
+            let custom_instructions = if command.len() > 8 {
+                let rest = command[8..].trim();
+                if !rest.is_empty() {
+                    Some(rest.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Need at least one prior message (besides the command itself)
+            if self.messages.len() <= 1 {
+                self.messages
+                    .push(" ⎿ Nothing to summarize - conversation is empty".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+                return;
+            }
+
+            // Set pending to trigger async compaction
+            self.compact_pending = Some(CompactOptions {
+                custom_instructions,
+            });
+            return;
         } else if cmd_lower == "/help" {
             // Open help panel
             self.show_help = true;
@@ -3568,7 +3765,8 @@ impl App {
                             }
                             i += 2;
                         } else {
-                            self.messages.push(" ⎿ Missing value for -t/--type".to_string());
+                            self.messages
+                                .push(" ⎿ Missing value for -t/--type".to_string());
                             self.message_types.push(MessageType::Agent);
                             self.message_states.push(MessageState::Sent);
                             return;
@@ -3579,7 +3777,8 @@ impl App {
                             options.base_branch = Some(parts[i + 1].to_string());
                             i += 2;
                         } else {
-                            self.messages.push(" ⎿ Missing value for --base".to_string());
+                            self.messages
+                                .push(" ⎿ Missing value for --base".to_string());
                             self.message_types.push(MessageType::Agent);
                             self.message_states.push(MessageState::Sent);
                             return;
@@ -3590,7 +3789,8 @@ impl App {
                             options.base_commit = Some(parts[i + 1].to_string());
                             i += 2;
                         } else {
-                            self.messages.push(" ⎿ Missing value for --base-commit".to_string());
+                            self.messages
+                                .push(" ⎿ Missing value for --base-commit".to_string());
                             self.message_types.push(MessageType::Agent);
                             self.message_states.push(MessageState::Sent);
                             return;
@@ -4296,6 +4496,94 @@ impl App {
                             self.thinking_token_count = 0;
                             self.agent_response_started = false;
 
+                            // Handle compaction completion
+                            if self.is_compacting {
+                                self.is_compacting = false;
+
+                                // Find the summary (last agent message)
+                                let mut summary = String::new();
+                                for (i, (msg, msg_type)) in self
+                                    .messages
+                                    .iter()
+                                    .zip(self.message_types.iter())
+                                    .enumerate()
+                                    .rev()
+                                {
+                                    if matches!(msg_type, MessageType::Agent)
+                                        && !msg.starts_with("[")
+                                        && !msg.starts_with(" ⎿")
+                                        && !msg.starts_with("●")
+                                    {
+                                        summary = msg.clone();
+                                        break;
+                                    }
+                                }
+
+                                // Clear all messages
+                                self.messages.clear();
+                                self.message_types.clear();
+                                self.message_states.clear();
+                                self.message_metadata.clear();
+                                self.message_timestamps.clear();
+
+                                // Clear agent context
+                                if let Some(tx) = &self.agent_tx {
+                                    let _ = tx.send(AgentMessage::ClearContext);
+                                }
+
+                                // Add the summary as the new context
+                                if !summary.is_empty() {
+                                    self.last_compacted_summary = Some(summary.clone());
+
+                                    self.compaction_history.push(CompactionEntry {
+                                        summary,
+                                        timestamp: SystemTime::now(),
+                                    });
+                                    if self.compaction_history.len() > MAX_COMPACTION_HISTORY {
+                                        self.compaction_history.remove(0);
+                                    }
+                                    self.summary_history_selected =
+                                        self.compaction_history.len().saturating_sub(1);
+
+                                    let banner_line = format!(
+                                        "{}Conversation summarized · ctrl+o for history",
+                                        SUMMARY_BANNER_PREFIX
+                                    );
+                                    self.messages.push(banner_line);
+                                    self.message_types.push(MessageType::Agent);
+                                    self.message_states.push(MessageState::Sent);
+                                    self.message_metadata.push(None);
+                                    self.message_timestamps.push(std::time::SystemTime::now());
+
+                                    self.messages.push("/summarize".to_string());
+                                    self.message_types.push(MessageType::User);
+                                    self.message_states.push(MessageState::Sent);
+                                    self.message_metadata.push(None);
+                                    self.message_timestamps.push(std::time::SystemTime::now());
+
+                                    self.messages.push(
+                                        " ⎿ Summarized (ctrl+o to see full summary)".to_string(),
+                                    );
+                                    self.message_types.push(MessageType::Agent);
+                                    self.message_states.push(MessageState::Sent);
+                                    self.message_metadata.push(None);
+                                    self.message_timestamps.push(std::time::SystemTime::now());
+                                } else {
+                                    self.last_compacted_summary = None;
+                                    self.messages.push(
+                                        " ⎿ Summarization completed but no summary was generated."
+                                            .to_string(),
+                                    );
+                                    self.message_types.push(MessageType::Agent);
+                                    self.message_states.push(MessageState::Sent);
+                                    self.message_metadata.push(None);
+                                    self.message_timestamps.push(std::time::SystemTime::now());
+                                }
+
+                                // Skip normal done handling for compaction
+                                continue;
+                            }
+
                             // Check for interrupt pending FIRST
                             if let Some(interrupt_msg) = self.interrupt_pending.take() {
                                 // Mark last message (interrupted one) as Interrupted
@@ -4511,6 +4799,31 @@ impl App {
                 }
             }
 
+            // Handle pending compaction
+            if let Some(options) = self.compact_pending.take() {
+                // Build compaction prompt with all conversation context
+                let prompt = self.build_compact_prompt(&options);
+
+                // Show thinking animation (command already recorded as a user message)
+                self.messages.push("[THINKING_ANIMATION]".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.is_thinking = true;
+                self.thinking_indicator_active = true;
+                self.thinking_start_time = Some(Instant::now());
+                self.thinking_token_count = 0;
+                self.thinking_raw_content.clear();
+
+                // Set compaction flag
+                self.is_compacting = true;
+
+                // Send to agent
+                if let Some(tx) = &self.agent_tx {
+                    self.agent_processing = true;
+                    self.agent_interrupted = false;
+                    let _ = tx.send(AgentMessage::UserInput(prompt));
+                }
+            }
+
             // Handle resume load pending
             if self.resume_load_pending {
                 self.resume_load_pending = false;
@@ -4643,6 +4956,81 @@ impl App {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         match self.mode {
                             Mode::Normal => {
+                                // Summary history panel key handlers
+                                if self.show_summary_history {
+                                    let alt_navigation_toggle =
+                                        key.modifiers.contains(KeyModifiers::ALT)
+                                            && matches!(
+                                                key.code,
+                                                KeyCode::Char('n') | KeyCode::Char('w')
+                                            );
+
+                                    if !alt_navigation_toggle {
+                                        match key.code {
+                                            KeyCode::Esc => {
+                                                self.show_summary_history = false;
+                                                self.messages.push(
+                                                    " ⎿ summary history dismissed".to_string(),
+                                                );
+                                                self.message_types.push(MessageType::Agent);
+                                                self.message_states.push(MessageState::Sent);
+                                                self.message_metadata.push(None);
+                                                self.message_timestamps.push(SystemTime::now());
+                                                continue;
+                                            }
+                                            KeyCode::Char('o') | KeyCode::Char('c')
+                                                if key
+                                                    .modifiers
+                                                    .contains(KeyModifiers::CONTROL) =>
+                                            {
+                                                self.show_summary_history = false;
+                                                self.messages.push(
+                                                    " ⎿ summary history dismissed".to_string(),
+                                                );
+                                                self.message_types.push(MessageType::Agent);
+                                                self.message_states.push(MessageState::Sent);
+                                                self.message_metadata.push(None);
+                                                self.message_timestamps.push(SystemTime::now());
+                                                continue;
+                                            }
+                                            KeyCode::Up => {
+                                                if self.summary_history_selected > 0 {
+                                                    self.summary_history_selected -= 1;
+                                                }
+                                                continue;
+                                            }
+                                            KeyCode::Down => {
+                                                if self.summary_history_selected
+                                                    < self
+                                                        .compaction_history
+                                                        .len()
+                                                        .saturating_sub(1)
+                                                {
+                                                    self.summary_history_selected += 1;
+                                                }
+                                                continue;
+                                            }
+                                            KeyCode::Enter => {
+                                                if let Some(entry) = self
+                                                    .compaction_history
+                                                    .get(self.summary_history_selected)
+                                                {
+                                                    self.messages.push(entry.summary.clone());
+                                                    self.message_types.push(MessageType::Agent);
+                                                    self.message_states.push(MessageState::Sent);
+                                                    self.message_metadata.push(None);
+                                                    self.message_timestamps.push(SystemTime::now());
+                                                }
+                                                continue;
+                                            }
+                                            _ => {
+                                                // Ignore other keys while panel is open
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
+
                                 // Help panel key handlers (highest priority)
                                 if self.show_help {
                                     match key.code {
@@ -4965,6 +5353,27 @@ impl App {
                                     continue;
                                 }
 
+                                // Handle Ctrl+O to toggle summary history panel
+                                if key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && key.code == KeyCode::Char('o')
+                                {
+                                    if self.compaction_history.is_empty() {
+                                        self.messages.push(
+                                            " ⎿ No summary history yet (run /summarize first)"
+                                                .to_string(),
+                                        );
+                                        self.message_types.push(MessageType::Agent);
+                                        self.message_states.push(MessageState::Sent);
+                                        self.message_metadata.push(None);
+                                        self.message_timestamps.push(SystemTime::now());
+                                    } else {
+                                        self.show_summary_history = true;
+                                        self.summary_history_selected =
+                                            self.compaction_history.len().saturating_sub(1);
+                                    }
+                                    continue;
+                                }
+
                                 // Handle Esc in vim mode BEFORE agent interrupt
                                 // If in Insert/Visual mode, exit to Normal mode instead of interrupting
                                 if self.vim_mode_enabled && key.code == KeyCode::Esc {
@@ -5103,10 +5512,27 @@ impl App {
                                             0
                                         };
 
+                                    let (snapshot_messages, snapshot_types, snapshot_states) =
+                                        if self.show_summary_history {
+                                            let overlay_messages =
+                                                self.summary_history_virtual_messages();
+                                            let overlay_types =
+                                                vec![MessageType::Agent; overlay_messages.len()];
+                                            let overlay_states =
+                                                vec![MessageState::Sent; overlay_messages.len()];
+                                            (overlay_messages, overlay_types, overlay_states)
+                                        } else {
+                                            (
+                                                self.messages.clone(),
+                                                self.message_types.clone(),
+                                                self.message_states.clone(),
+                                            )
+                                        };
+
                                     self.nav_snapshot = Some(AppSnapshot {
-                                        messages: self.messages.clone(),
-                                        message_types: self.message_types.clone(),
-                                        message_states: self.message_states.clone(),
+                                        messages: snapshot_messages,
+                                        message_types: snapshot_types,
+                                        message_states: snapshot_states,
                                         is_thinking: self.is_thinking,
                                         thinking_indicator_active: self.thinking_indicator_active,
                                         thinking_elapsed_secs: elapsed_secs,
@@ -5847,6 +6273,96 @@ impl App {
         Text::from(lines)
     }
 
+    fn render_summary_history_lines(&self, max_width: usize) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        for message in self.summary_history_virtual_messages() {
+            let rendered = self.render_message_with_max_width(
+                &message,
+                max_width,
+                None,
+                true,
+                AgentConnector::None,
+            );
+            lines.extend(rendered.lines);
+        }
+        lines
+    }
+
+    fn summary_history_virtual_messages(&self) -> Vec<String> {
+        if self.compaction_history.is_empty() {
+            return vec![" ⎿ No summary history yet (run /summarize first)".to_string()];
+        }
+
+        let clamped_index = self
+            .summary_history_selected
+            .min(self.compaction_history.len().saturating_sub(1));
+        let entry = &self.compaction_history[clamped_index];
+        let mut messages = Vec::new();
+        let summary = if entry.summary.trim().is_empty() {
+            " ⎿ Summary is empty".to_string()
+        } else {
+            entry.summary.clone()
+        };
+        messages.push(summary);
+
+        let banner_line = format!(
+            "{}Conversation summarized · ctrl+o for history",
+            SUMMARY_BANNER_PREFIX
+        );
+        messages.push(banner_line);
+
+        messages
+    }
+
+    fn format_summary_history_time(&self, timestamp: SystemTime) -> String {
+        match SystemTime::now().duration_since(timestamp) {
+            Ok(duration) => {
+                let elapsed = self.format_elapsed_time(duration.as_secs());
+                if elapsed == "0s" {
+                    "just now".to_string()
+                } else {
+                    format!("{} ago", elapsed)
+                }
+            }
+            Err(_) => "just now".to_string(),
+        }
+    }
+
+    fn render_summary_banner(label: Option<&str>, width: usize) -> Text<'static> {
+        let total_width = width.max(4);
+        let mut content = String::new();
+
+        if let Some(text) = label {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                content = "═".repeat(total_width);
+            } else {
+                let text_width = trimmed.chars().count();
+                let padding = total_width.saturating_sub(text_width + 2);
+                let left = padding / 2;
+                let right = padding - left;
+                content.push_str(&"═".repeat(left));
+                content.push(' ');
+                content.push_str(trimmed);
+                content.push(' ');
+                content.push_str(&"═".repeat(right));
+                let rendered_width = content.chars().count();
+                if rendered_width < total_width {
+                    content.push_str(&"═".repeat(total_width - rendered_width));
+                } else if rendered_width > total_width {
+                    content = content.chars().take(total_width).collect();
+                }
+            }
+        } else {
+            content = "═".repeat(total_width);
+        }
+
+        Text::from(vec![Line::from(vec![Span::styled(
+            content,
+            Style::default().fg(Color::DarkGray),
+        )])])
+    }
+
     // Helper to get snapshot or live data
     fn get_messages(&self) -> &Vec<String> {
         self.nav_snapshot
@@ -6081,6 +6597,12 @@ impl App {
             spans.push(Span::styled("Interrupted", Style::default().fg(Color::Red))); // RED text
             lines.push(Line::from(spans));
             return Text::from(lines);
+        }
+
+        if is_agent {
+            if let Some(label) = message.strip_prefix(SUMMARY_BANNER_PREFIX) {
+                return Self::render_summary_banner(Some(label.trim()), max_width + 4);
+            }
         }
 
         // Check for command execution feedback
@@ -8165,6 +8687,10 @@ impl App {
                     }
                 }
 
+                if self.show_summary_history {
+                    message_lines = self.render_summary_history_lines(max_width);
+                }
+
                 let total_lines = message_lines.len();
                 let scroll = if total_lines <= visible_lines {
                     0
@@ -8230,6 +8756,10 @@ impl App {
                                 .add_modifier(ratatui::style::Modifier::ITALIC),
                         )));
                     }
+                }
+
+                if self.show_summary_history {
+                    message_lines = self.render_summary_history_lines(max_width);
                 }
 
                 let total_lines = message_lines.len();
@@ -8381,21 +8911,28 @@ impl App {
 
                 // Pass messages directly to rich_editor along with context needed for expansion
                 // rich_editor will handle expanding placeholders to match visual rendering
-                let mut messages_with_stats = messages.to_vec();
-                let mut message_types_with_stats = message_types_vec.clone();
-                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) =
-                    self.get_generation_stats()
-                {
-                    // Only add stats if stop_reason is not "tool_calls" (tool calls render separately)
-                    if stop_reason != "tool_calls" {
-                        let stats_text = format!(
-                            "{:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
-                            tok_per_sec, token_count, time_to_first_token, stop_reason
-                        );
-                        messages_with_stats.push(stats_text);
-                        message_types_with_stats.push(MessageType::Agent);
+                let (messages_with_stats, message_types_with_stats) = if self.show_summary_history {
+                    let overlay_messages = self.summary_history_virtual_messages();
+                    let overlay_types = vec![MessageType::Agent; overlay_messages.len()];
+                    (overlay_messages, overlay_types)
+                } else {
+                    let mut messages_with_stats = messages.to_vec();
+                    let mut message_types_with_stats = message_types_vec.clone();
+                    if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) =
+                        self.get_generation_stats()
+                    {
+                        // Only add stats if stop_reason is not "tool_calls" (tool calls render separately)
+                        if stop_reason != "tool_calls" {
+                            let stats_text = format!(
+                                "{:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
+                                tok_per_sec, token_count, time_to_first_token, stop_reason
+                            );
+                            messages_with_stats.push(stats_text);
+                            message_types_with_stats.push(MessageType::Agent);
+                        }
                     }
-                }
+                    (messages_with_stats, message_types_with_stats)
+                };
 
                 // Create editor content with context for expanding thinking animation
                 let thinking_context = ThinkingContext {
@@ -8512,6 +9049,10 @@ impl App {
                                 .add_modifier(ratatui::style::Modifier::ITALIC),
                         )));
                     }
+                }
+
+                if self.show_summary_history {
+                    message_lines = self.render_summary_history_lines(wrap_width);
                 }
 
                 // Calculate scroll offset based on edtui's cursor position

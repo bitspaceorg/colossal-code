@@ -16,7 +16,7 @@ use reqwest::{Client, Url, header::CONTENT_TYPE};
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{net::IpAddr, sync::Arc};
+use std::{net::IpAddr, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -307,6 +307,7 @@ impl HttpBackend {
         &self,
         response: reqwest::Response,
         fallback_model: String,
+        request_start: Instant,
     ) -> Result<Box<dyn FuturesStream<Item = Response> + Unpin + Send>> {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
@@ -368,7 +369,22 @@ impl HttpBackend {
             usage: None,
         };
 
-        let usage = usage_from_openai(chat_response.usage.clone(), &content);
+        let mut usage = usage_from_openai(chat_response.usage.clone(), &content);
+        let token_estimate = estimate_tokens(&content);
+        if usage.completion_tokens == 0 {
+            usage.completion_tokens = token_estimate;
+            usage.total_tokens = token_estimate;
+        }
+        let elapsed = request_start.elapsed().as_secs_f32();
+        if usage.avg_compl_tok_per_sec == 0.0 && token_estimate > 0 && elapsed > 0.0 {
+            usage.avg_compl_tok_per_sec =
+                token_estimate as f32 / elapsed.max(0.001);
+            usage.total_completion_time_sec = elapsed;
+            usage.total_time_sec = elapsed;
+        }
+        if usage.total_prompt_time_sec == 0.0 && elapsed > 0.0 {
+            usage.total_prompt_time_sec = elapsed;
+        }
 
         let response_choice = Choice {
             finish_reason,
@@ -401,13 +417,16 @@ impl HttpBackend {
         &self,
         response: reqwest::Response,
         fallback_model: String,
+        request_start: Instant,
     ) -> Result<Box<dyn FuturesStream<Item = Response> + Unpin + Send>> {
         let (tx, rx) = mpsc::unbounded_channel();
 
         tokio::spawn(async move {
             let sender = tx;
             let helper_sender = sender.clone();
-            if let Err(err) = process_sse_stream(response, fallback_model, helper_sender).await {
+            if let Err(err) =
+                process_sse_stream(response, fallback_model, helper_sender, request_start).await
+            {
                 let _ = sender.send(Response::InternalError(err.into()));
             }
         });
@@ -509,6 +528,8 @@ impl LLMBackend for HttpBackend {
             self.completions_path,
             payload
         ));
+        let request_start = Instant::now();
+
         let mut request = self
             .client
             .post(format!(
@@ -543,9 +564,10 @@ impl LLMBackend for HttpBackend {
             .unwrap_or(false);
 
         if is_streaming {
-            self.stream_sse_response(response, model_name.clone()).await
+            self.stream_sse_response(response, model_name.clone(), request_start)
+                .await
         } else {
-            self.stream_json_response(response, model_name.clone())
+            self.stream_json_response(response, model_name.clone(), request_start)
                 .await
         }
     }
@@ -802,6 +824,31 @@ struct StreamingToolCallState {
     arguments: String,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct StreamMetrics {
+    completion_tokens: usize,
+    total_time_sec: f32,
+    time_to_first_token_sec: f32,
+}
+
+impl StreamMetrics {
+    fn from_timing(
+        start: Instant,
+        first_token: Option<Instant>,
+        completion_tokens: usize,
+    ) -> Self {
+        let total_time_sec = start.elapsed().as_secs_f32();
+        let time_to_first_token_sec = first_token
+            .map(|ts| ts.duration_since(start).as_secs_f32())
+            .unwrap_or(0.0);
+        Self {
+            completion_tokens,
+            total_time_sec,
+            time_to_first_token_sec,
+        }
+    }
+}
+
 fn tool_choice_to_value(tool_choice: ToolChoice) -> Value {
     match tool_choice {
         ToolChoice::None => Value::String("none".to_string()),
@@ -967,6 +1014,7 @@ fn send_final_done(
     final_role: &str,
     final_finish_reason: &str,
     fallback_model: &str,
+    metrics: Option<StreamMetrics>,
 ) {
     let finish_reason = if final_finish_reason.is_empty() {
         "stop".to_string()
@@ -987,6 +1035,26 @@ fn send_final_done(
         logprobs: None,
     };
 
+    let mut usage = usage_from_openai(usage, accumulated_content);
+    if let Some(metrics) = metrics {
+        if usage.completion_tokens == 0 && metrics.completion_tokens > 0 {
+            usage.completion_tokens = metrics.completion_tokens;
+            usage.total_tokens = metrics.completion_tokens;
+        }
+        if usage.avg_compl_tok_per_sec == 0.0
+            && metrics.completion_tokens > 0
+            && metrics.total_time_sec > 0.0
+        {
+            usage.avg_compl_tok_per_sec = metrics.completion_tokens as f32
+                / metrics.total_time_sec.max(0.001);
+            usage.total_completion_time_sec = metrics.total_time_sec;
+            usage.total_time_sec = metrics.total_time_sec;
+        }
+        if usage.total_prompt_time_sec == 0.0 && metrics.time_to_first_token_sec > 0.0 {
+            usage.total_prompt_time_sec = metrics.time_to_first_token_sec;
+        }
+    }
+
     let done = ChatCompletionResponse {
         id: response_id.unwrap_or_else(|| format!("nite-http-{}", Uuid::new_v4())),
         choices: vec![choice],
@@ -994,7 +1062,7 @@ fn send_final_done(
         model: response_model.unwrap_or_else(|| fallback_model.to_string()),
         system_fingerprint: fingerprint.unwrap_or_default(),
         object: "chat.completion".to_string(),
-        usage: usage_from_openai(usage, accumulated_content),
+        usage,
     };
 
     let _ = tx.send(Response::Done(done));
@@ -1004,6 +1072,7 @@ async fn process_sse_stream(
     response: reqwest::Response,
     fallback_model: String,
     tx: mpsc::UnboundedSender<Response>,
+    request_start: Instant,
 ) -> Result<()> {
     let mut body_stream = response.bytes_stream();
     let mut buffer = Vec::new();
@@ -1016,6 +1085,8 @@ async fn process_sse_stream(
     let mut created_ts: Option<u64> = None;
     let mut fingerprint: Option<String> = None;
     let mut latest_usage: Option<OpenAiUsage> = None;
+    let mut first_token_time: Option<Instant> = None;
+    let mut estimated_tokens: usize = 0;
 
     while let Some(item) = body_stream.next().await {
         let chunk = item?;
@@ -1037,6 +1108,11 @@ async fn process_sse_stream(
 
             if trimmed == "[DONE]" {
                 http_debug_log("SSE stream received [DONE]");
+                let metrics = Some(StreamMetrics::from_timing(
+                    request_start,
+                    first_token_time,
+                    estimated_tokens,
+                ));
                 send_final_done(
                     &tx,
                     response_id.clone(),
@@ -1049,6 +1125,7 @@ async fn process_sse_stream(
                     &final_role,
                     &final_finish_reason,
                     &fallback_model,
+                    metrics,
                 );
                 return Ok(());
             }
@@ -1131,18 +1208,22 @@ async fn process_sse_stream(
                 }
 
                 let mut delta_content = None;
-                if let Some(content_value) = content {
-                    let text = content_value.to_text();
-                    if !text.is_empty() {
-                        http_debug_log(format!(
-                            "delta content len={} preview=\"{}\"",
-                            text.chars().count(),
-                            preview_chunk(&text)
-                        ));
-                        accumulated_content.push_str(&text);
-                        delta_content = Some(text);
-                    }
-                } else {
+                        if let Some(content_value) = content {
+                            let text = content_value.to_text();
+                            if !text.is_empty() {
+                                http_debug_log(format!(
+                                    "delta content len={} preview=\"{}\"",
+                                    text.chars().count(),
+                                    preview_chunk(&text)
+                                ));
+                                accumulated_content.push_str(&text);
+                                if first_token_time.is_none() {
+                                    first_token_time = Some(Instant::now());
+                                }
+                                estimated_tokens += estimate_tokens(&text);
+                                delta_content = Some(text);
+                            }
+                        } else {
                     http_debug_log("delta content missing".to_string());
                 }
 
@@ -1194,6 +1275,12 @@ async fn process_sse_stream(
         }
     }
 
+    let metrics = Some(StreamMetrics::from_timing(
+        request_start,
+        first_token_time,
+        estimated_tokens,
+    ));
+
     send_final_done(
         &tx,
         response_id,
@@ -1206,6 +1293,7 @@ async fn process_sse_stream(
         &final_role,
         &final_finish_reason,
         &fallback_model,
+        metrics,
     );
 
     Ok(())
