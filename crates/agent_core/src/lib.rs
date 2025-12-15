@@ -706,6 +706,16 @@ pub enum BackendKind {
     ExternalHttp,
 }
 
+/// Aggregated generation statistics for a completed response turn
+#[derive(Debug, Clone)]
+pub struct GenerationStats {
+    pub avg_completion_tok_per_sec: f32,
+    pub completion_tokens: usize,
+    pub prompt_tokens: usize,
+    pub time_to_first_token_sec: f32,
+    pub stop_reason: String,
+}
+
 /// Message type for communication between TUI and agent
 #[derive(Debug, Clone)]
 pub enum AgentMessage {
@@ -735,8 +745,8 @@ pub enum AgentMessage {
     Done,
     /// Model has finished loading
     ModelLoaded,
-    /// Generation statistics (tokens/sec, token_count, time_to_first_token, stop_reason)
-    GenerationStats(f32, usize, f32, String), // (tok_per_sec, token_count, time_to_first_token_sec, stop_reason)
+    /// Generation statistics (prompt/completion tokens, token/sec, latency, stop reason)
+    GenerationStats(GenerationStats),
     /// Reload the model with a new model file
     ReloadModel(String), // (model_filename)
     /// Request user approval for an action
@@ -1463,22 +1473,29 @@ impl Agent {
                         // Only send stats if there are NO tool calls (final text response only)
                         if let Some(usage_stats) = usage {
                             if accumulated_tool_calls.is_empty() {
-                                let tok_per_sec = usage_stats.avg_compl_tok_per_sec;
-                                let token_count = usage_stats.completion_tokens;
-                                let time_to_first_token = usage_stats.total_prompt_time_sec;
-                                // Try to get finish_reason from the choice
                                 let stop_reason = choices
                                     .first()
                                     .and_then(|c| c.finish_reason.as_ref())
-                                    .map(|s| s.clone())
+                                    .cloned()
                                     .unwrap_or_else(|| "unknown".to_string());
+                                let prompt_tokens = if usage_stats.prompt_tokens > 0 {
+                                    usage_stats.prompt_tokens
+                                } else if usage_stats.total_tokens > usage_stats.completion_tokens
+                                {
+                                    usage_stats.total_tokens - usage_stats.completion_tokens
+                                } else {
+                                    0
+                                };
 
-                                let _ = tx.send(AgentMessage::GenerationStats(
-                                    tok_per_sec,
-                                    token_count,
-                                    time_to_first_token,
+                                let stats = GenerationStats {
+                                    avg_completion_tok_per_sec: usage_stats.avg_compl_tok_per_sec,
+                                    completion_tokens: usage_stats.completion_tokens,
+                                    prompt_tokens,
+                                    time_to_first_token_sec: usage_stats.total_prompt_time_sec,
                                     stop_reason,
-                                ));
+                                };
+
+                                let _ = tx.send(AgentMessage::GenerationStats(stats));
                             }
                         }
 
@@ -1776,22 +1793,30 @@ impl Agent {
                     Response::Done(response) => {
                         // Extract generation statistics only if there are no tool calls
                         if accumulated_tool_calls.is_empty() {
-                            let tok_per_sec = response.usage.avg_compl_tok_per_sec;
-                            let token_count = response.usage.completion_tokens;
-                            let time_to_first_token = response.usage.total_prompt_time_sec;
                             let stop_reason = response
                                 .choices
                                 .first()
                                 .map(|c| c.finish_reason.clone())
                                 .unwrap_or_else(|| "unknown".to_string());
+                            let prompt_tokens = if response.usage.prompt_tokens > 0 {
+                                response.usage.prompt_tokens
+                            } else if response.usage.total_tokens > response.usage.completion_tokens
+                            {
+                                response.usage.total_tokens - response.usage.completion_tokens
+                            } else {
+                                0
+                            };
+
+                            let stats = GenerationStats {
+                                avg_completion_tok_per_sec: response.usage.avg_compl_tok_per_sec,
+                                completion_tokens: response.usage.completion_tokens,
+                                prompt_tokens,
+                                time_to_first_token_sec: response.usage.total_prompt_time_sec,
+                                stop_reason,
+                            };
 
                             // Send stats before Done
-                            let _ = tx.send(AgentMessage::GenerationStats(
-                                tok_per_sec,
-                                token_count,
-                                time_to_first_token,
-                                stop_reason,
-                            ));
+                            let _ = tx.send(AgentMessage::GenerationStats(stats));
                         }
                         break;
                     }

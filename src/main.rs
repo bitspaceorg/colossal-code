@@ -1,4 +1,4 @@
-use agent_core::{Agent, AgentMessage};
+use agent_core::{Agent, AgentMessage, GenerationStats as AgentGenerationStats};
 use color_eyre::Result;
 use edtui::clipboard::ClipboardTrait;
 use markdown_renderer;
@@ -30,6 +30,7 @@ mod survey;
 use survey::{Survey, SurveyQuestion};
 mod session_manager;
 use session_manager::SessionManager;
+mod model_context;
 
 /// Custom border set for messages
 const MESSAGE_BORDER_SET: symbols::border::Set = symbols::border::Set {
@@ -371,6 +372,7 @@ struct ModelInfo {
     file_hash: Option<String>,
     author: Option<String>,
     version: Option<String>,
+    context_length: Option<usize>,
 }
 
 /// File change statistics for rewind points
@@ -489,7 +491,7 @@ struct AppSnapshot {
     thinking_position: usize,
     thinking_loader_frame: usize,
     thinking_current_word: String,
-    generation_stats: Option<(f32, usize, f32, String)>, // Frozen generation stats
+    generation_stats: Option<AgentGenerationStats>, // Frozen generation stats
 }
 
 /// Application state for the TUI
@@ -558,7 +560,7 @@ struct App {
     thinking_token_count: usize,          // Real-time count of thinking tokens generated
     limit_thinking_to_first_token: bool,
     // Generation statistics (only for latest response)
-    generation_stats: Option<(f32, usize, f32, String)>, // (tok_per_sec, token_count, time_to_first_token, stop_reason)
+    generation_stats: Option<AgentGenerationStats>, // Most recent generation stats from the agent
     // Command history
     command_history: Vec<String>,
     history_index: Option<usize>,
@@ -624,6 +626,7 @@ struct App {
     available_models: Vec<ModelInfo>,
     model_selected_index: usize,
     current_model: Option<String>,
+    current_context_tokens: Option<usize>,
     // Rewind panel state
     show_rewind: bool,
     rewind_points: Vec<RewindPoint>,
@@ -639,6 +642,10 @@ impl App {
         let config_dir = std::path::Path::new(&home).join(".config").join(".nite");
         std::fs::create_dir_all(&config_dir)?;
         Ok(config_dir.join("nite.conf"))
+    }
+
+    fn models_directory_path() -> Option<std::path::PathBuf> {
+        dirs::home_dir().map(|home| home.join(".config").join(".nite").join("models"))
     }
 
     fn load_config_value(key: &str) -> Option<String> {
@@ -664,6 +671,19 @@ impl App {
 
     fn load_model_setting() -> Option<String> {
         Self::load_config_value("model")
+    }
+
+    fn detect_context_tokens(model: Option<&str>) -> Option<usize> {
+        if model.is_none() {
+            return None;
+        }
+        let models_dir = Self::models_directory_path();
+        let dir_ref = models_dir.as_deref();
+        model.and_then(|name| model_context::detect_context_length(dir_ref, name))
+    }
+
+    fn refresh_context_window(&mut self) {
+        self.current_context_tokens = Self::detect_context_tokens(self.current_model.as_deref());
     }
 
     fn save_config(&self) -> Result<()> {
@@ -701,13 +721,10 @@ impl App {
     }
 
     fn load_models(&mut self) -> Result<()> {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .map_err(|_| color_eyre::eyre::eyre!("Could not determine home directory"))?;
-        let models_dir = std::path::Path::new(&home)
-            .join(".config")
-            .join(".nite")
-            .join("models");
+        let Some(models_dir) = Self::models_directory_path() else {
+            self.available_models.clear();
+            return Ok(());
+        };
 
         if !models_dir.exists() {
             self.available_models.clear();
@@ -715,7 +732,7 @@ impl App {
         }
 
         let mut models = Vec::new();
-        for entry in std::fs::read_dir(models_dir)? {
+        for entry in std::fs::read_dir(&models_dir)? {
             let entry = entry?;
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("gguf") {
@@ -731,6 +748,8 @@ impl App {
                     let parameter_count = Self::extract_parameter_count(file_name);
                     let author = Self::extract_author(file_name);
                     let version = Self::extract_version(file_name);
+
+                    let context_length = model_context::context_length_from_gguf(&path);
 
                     // Compute file hash (quick hash for integrity checking)
                     let file_hash = Self::compute_file_hash(&path);
@@ -751,6 +770,7 @@ impl App {
                         file_hash,
                         author,
                         version,
+                        context_length,
                     });
                 }
             }
@@ -1348,6 +1368,7 @@ impl App {
 
         // Load model selection from config
         let current_model = Self::load_model_setting();
+        let current_context_tokens = Self::detect_context_tokens(current_model.as_deref());
 
         // Configure backend mode (HTTP by default)
         let backend_setting = Self::load_config_value("backend")
@@ -1764,6 +1785,7 @@ impl App {
             current_file_changes: Vec::new(),
             last_tool_args: None,
             current_model,
+            current_context_tokens,
         })
     }
     fn create_title_lines() -> Vec<Line<'static>> {
@@ -4451,15 +4473,9 @@ Let me analyze the conversation chronologically:
                             self.thinking_token_count = 0;
                             self.agent_response_started = false;
                         }
-                        AgentMessage::GenerationStats(
-                            tok_per_sec,
-                            token_count,
-                            time_to_first_token,
-                            stop_reason,
-                        ) => {
+                        AgentMessage::GenerationStats(stats) => {
                             // Store the generation stats
-                            self.generation_stats =
-                                Some((tok_per_sec, token_count, time_to_first_token, stop_reason));
+                            self.generation_stats = Some(stats);
                         }
                         AgentMessage::BackgroundTaskStarted(session_id, command, log_file) => {
                             // Add background task to the list with current time as start time
@@ -5262,8 +5278,13 @@ Let me analyze the conversation chronologically:
                                             {
                                                 let selected_model = &self.available_models
                                                     [self.model_selected_index];
+                                                let selected_filename =
+                                                    selected_model.filename.clone();
+                                                let selected_display =
+                                                    selected_model.display_name.clone();
                                                 self.current_model =
-                                                    Some(selected_model.filename.clone());
+                                                    Some(selected_filename.clone());
+                                                self.refresh_context_window();
                                                 self.show_model_selection = false;
 
                                                 // Save model selection to config
@@ -5279,18 +5300,18 @@ Let me analyze the conversation chronologically:
                                                 // Send reload model message to agent
                                                 if let Some(ref tx) = self.agent_tx {
                                                     let _ = tx.send(AgentMessage::ReloadModel(
-                                                        selected_model.filename.clone(),
+                                                        selected_filename.clone(),
                                                     ));
                                                     self.messages.push(format!(
                                                         " ⟳ Loading model: {}",
-                                                        selected_model.display_name
+                                                        selected_display
                                                     ));
                                                     self.message_types.push(MessageType::Agent);
                                                     self.message_states.push(MessageState::Sent);
                                                 } else {
                                                     self.messages.push(format!(
                                                         " ✔ Model set to: {}",
-                                                        selected_model.display_name
+                                                        selected_display
                                                     ));
                                                     self.message_types.push(MessageType::Agent);
                                                     self.message_states.push(MessageState::Sent);
@@ -6502,11 +6523,12 @@ Let me analyze the conversation chronologically:
             Self::append_thinking_animation_placeholder(messages, message_types);
         }
     }
-    fn get_generation_stats(&self) -> &Option<(f32, usize, f32, String)> {
-        self.nav_snapshot
-            .as_ref()
-            .map(|s| &s.generation_stats)
-            .unwrap_or(&self.generation_stats)
+    fn get_generation_stats(&self) -> Option<AgentGenerationStats> {
+        if let Some(snapshot) = &self.nav_snapshot {
+            snapshot.generation_stats.clone()
+        } else {
+            self.generation_stats.clone()
+        }
     }
 
     /// Format numbers in compact form: 1, 2, ..., 999, 1k, 1.1k, 1.2k, etc.
@@ -6525,6 +6547,34 @@ Let me analyze the conversation chronologically:
         } else {
             // 10m, 11m, ...
             format!("{}m", num / 1000000)
+        }
+    }
+
+    fn context_status_span(&self) -> Span<'static> {
+        if let Some(limit) = self.current_context_tokens {
+            if limit > 0 {
+                if let Some(stats) = self.get_generation_stats() {
+                    let used = stats.prompt_tokens.saturating_add(stats.completion_tokens);
+                    let remaining = limit.saturating_sub(used);
+                    let percent_left = (remaining as f32 / limit as f32 * 100.0).clamp(0.0, 100.0);
+                    let text = format!("({:.0}% context left)", percent_left);
+                    let color = self.context_status_color(percent_left);
+                    return Span::styled(text, Style::default().fg(color));
+                }
+
+                return Span::styled("(100% context left)", Style::default().fg(Color::DarkGray));
+            }
+        }
+        Span::styled("(context unknown)", Style::default().fg(Color::DarkGray))
+    }
+
+    fn context_status_color(&self, percent_left: f32) -> Color {
+        if percent_left <= 10.0 {
+            Color::Red
+        } else if percent_left <= 35.0 {
+            Color::Yellow
+        } else {
+            Color::DarkGray
         }
     }
 
@@ -7474,6 +7524,9 @@ Let me analyze the conversation chronologically:
                     if let Some(ref quant) = model.quantization {
                         metadata_parts.push(quant.clone());
                     }
+                    if let Some(ctx) = model.context_length {
+                        metadata_parts.push(format!("{} ctx", self.format_compact_number(ctx)));
+                    }
 
                     let metadata = metadata_parts.join(" · ");
 
@@ -8263,7 +8316,7 @@ Let me analyze the conversation chronologically:
         let center_width = center_line.width() as u16;
         let version_text = vec![
             Span::styled("Nite-2.5 ", Style::default().fg(Color::Magenta)),
-            Span::styled("(100% context left)", Style::default().fg(Color::DarkGray)),
+            self.context_status_span(),
         ];
         let version_width = Line::from(version_text.clone()).width() as u16;
         let horizontal = Layout::horizontal([
@@ -8669,14 +8722,16 @@ Let me analyze the conversation chronologically:
                 }
 
                 // Render generation stats after the last message (if available)
-                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) =
-                    self.get_generation_stats()
-                {
+                if let Some(stats) = self.get_generation_stats() {
                     // Only render stats if stop_reason is not "tool_calls" (tool calls render separately)
-                    if stop_reason != "tool_calls" {
+                    if stats.stop_reason != "tool_calls" {
                         let stats_text = format!(
-                            " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
-                            tok_per_sec, token_count, time_to_first_token, stop_reason
+                            " {:.2} tok/sec • {} completion • {} prompt • {:.2}s to first token • Stop reason: {}",
+                            stats.avg_completion_tok_per_sec,
+                            self.format_compact_number(stats.completion_tokens),
+                            self.format_compact_number(stats.prompt_tokens),
+                            stats.time_to_first_token_sec,
+                            stats.stop_reason.as_str()
                         );
                         message_lines.push(Line::from(Span::styled(
                             stats_text,
@@ -8740,14 +8795,16 @@ Let me analyze the conversation chronologically:
                 }
 
                 // Render generation stats after the last message (if available)
-                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) =
-                    self.get_generation_stats()
-                {
+                if let Some(stats) = self.get_generation_stats() {
                     // Only render stats if stop_reason is not "tool_calls" (tool calls render separately)
-                    if stop_reason != "tool_calls" {
+                    if stats.stop_reason != "tool_calls" {
                         let stats_text = format!(
-                            " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
-                            tok_per_sec, token_count, time_to_first_token, stop_reason
+                            " {:.2} tok/sec • {} completion • {} prompt • {:.2}s to first token • Stop reason: {}",
+                            stats.avg_completion_tok_per_sec,
+                            self.format_compact_number(stats.completion_tokens),
+                            self.format_compact_number(stats.prompt_tokens),
+                            stats.time_to_first_token_sec,
+                            stats.stop_reason.as_str()
                         );
                         message_lines.push(Line::from(Span::styled(
                             stats_text,
@@ -8918,14 +8975,16 @@ Let me analyze the conversation chronologically:
                 } else {
                     let mut messages_with_stats = messages.to_vec();
                     let mut message_types_with_stats = message_types_vec.clone();
-                    if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) =
-                        self.get_generation_stats()
-                    {
+                    if let Some(stats) = self.get_generation_stats() {
                         // Only add stats if stop_reason is not "tool_calls" (tool calls render separately)
-                        if stop_reason != "tool_calls" {
+                        if stats.stop_reason != "tool_calls" {
                             let stats_text = format!(
-                                "{:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
-                                tok_per_sec, token_count, time_to_first_token, stop_reason
+                                "{:.2} tok/sec • {} completion • {} prompt • {:.2}s to first token • Stop reason: {}",
+                                stats.avg_completion_tok_per_sec,
+                                self.format_compact_number(stats.completion_tokens),
+                                self.format_compact_number(stats.prompt_tokens),
+                                stats.time_to_first_token_sec,
+                                stats.stop_reason.as_str()
                             );
                             messages_with_stats.push(stats_text);
                             message_types_with_stats.push(MessageType::Agent);
@@ -9033,14 +9092,16 @@ Let me analyze the conversation chronologically:
                 }
 
                 // Render generation stats after the last message (if available)
-                if let Some((tok_per_sec, token_count, time_to_first_token, stop_reason)) =
-                    self.get_generation_stats()
-                {
+                if let Some(stats) = self.get_generation_stats() {
                     // Only render stats if stop_reason is not "tool_calls" (tool calls render separately)
-                    if stop_reason != "tool_calls" {
+                    if stats.stop_reason != "tool_calls" {
                         let stats_text = format!(
-                            " {:.2} tok/sec • {} tokens • {:.2}s to first token • Stop reason: {}",
-                            tok_per_sec, token_count, time_to_first_token, stop_reason
+                            " {:.2} tok/sec • {} completion • {} prompt • {:.2}s to first token • Stop reason: {}",
+                            stats.avg_completion_tok_per_sec,
+                            self.format_compact_number(stats.completion_tokens),
+                            self.format_compact_number(stats.prompt_tokens),
+                            stats.time_to_first_token_sec,
+                            stats.stop_reason.as_str()
                         );
                         message_lines.push(Line::from(Span::styled(
                             stats_text,
