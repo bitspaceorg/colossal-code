@@ -91,12 +91,23 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/summarize",
         "summarize conversation to reduce context. optional: /summarize [custom instructions]",
     ),
+    (
+        "/autosummarize",
+        "show or set the auto-summarize trigger percent (percent of context used)",
+    ),
     ("/todos", "list current todo items"),
     ("/vim", "toggle between vim and normal editing modes"),
 ];
 
 const MAX_COMPACTION_HISTORY: usize = 10;
 const SUMMARY_BANNER_PREFIX: &str = "[SUMMARY_BANNER]";
+const DEFAULT_AUTO_SUMMARIZE_THRESHOLD: f32 = 15.0;
+const MIN_AUTO_SUMMARIZE_THRESHOLD: f32 = 5.0;
+const MAX_AUTO_SUMMARIZE_THRESHOLD: f32 = 99.0;
+const COMPACTION_HISTORY_RESERVE_TOKENS: usize = 1024;
+const DEFAULT_COMPACTION_HISTORY_BUDGET: usize = 6000;
+const MIN_COMPACTION_HISTORY_BUDGET: usize = 1024;
+const APPROX_CHARS_PER_TOKEN: usize = 4;
 /// Application phases for startup animation
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
 enum Phase {
@@ -561,6 +572,8 @@ struct App {
     limit_thinking_to_first_token: bool,
     // Generation statistics (only for latest response)
     generation_stats: Option<AgentGenerationStats>, // Most recent generation stats from the agent
+    streaming_completion_tokens: usize, // Real-time count of completion tokens during streaming
+    last_known_context_tokens: usize, // Preserved context tokens from previous turn (prompt + completion)
     // Command history
     command_history: Vec<String>,
     history_index: Option<usize>,
@@ -580,6 +593,13 @@ struct App {
     review_pending: Option<ReviewOptions>, // Flag to trigger code review in async context
     compact_pending: Option<CompactOptions>, // Flag to trigger compact in async context
     last_compacted_summary: Option<String>,
+    is_auto_summarize: bool, // Track if current summarization was auto-triggered
+    auto_summarize_threshold: f32, // Context percentage used before auto-summarization triggers
+    context_sync_pending: bool, // Waiting for context operation to complete
+    context_sync_started: Option<Instant>, // When sync started (for timeout)
+    context_inject_expected: bool, // Whether ContextInjected is expected (summary was sent)
+    compaction_resume_prompt: Option<String>, // Pending auto-resume prompt after compaction
+    compaction_resume_ready: bool, // Whether we're ready to send the resume prompt
     compaction_history: Vec<CompactionEntry>,
     show_summary_history: bool,
     summary_history_selected: usize,
@@ -673,6 +693,20 @@ impl App {
         Self::load_config_value("model")
     }
 
+    fn clamp_auto_summarize_threshold(value: f32) -> f32 {
+        value.clamp(MIN_AUTO_SUMMARIZE_THRESHOLD, MAX_AUTO_SUMMARIZE_THRESHOLD)
+    }
+
+    fn load_auto_summarize_threshold_setting() -> f32 {
+        Self::load_config_value("auto-summarize-threshold")
+            .and_then(|raw| {
+                let sanitized = raw.trim().trim_end_matches('%').trim().to_string();
+                sanitized.parse::<f32>().ok()
+            })
+            .map(Self::clamp_auto_summarize_threshold)
+            .unwrap_or(DEFAULT_AUTO_SUMMARIZE_THRESHOLD)
+    }
+
     fn detect_context_tokens(model: Option<&str>) -> Option<usize> {
         if model.is_none() {
             return None;
@@ -706,6 +740,10 @@ impl App {
         if let Some(ref model) = self.current_model {
             config_map.insert("model".to_string(), model.clone());
         }
+        config_map.insert(
+            "auto-summarize-threshold".to_string(),
+            format!("{:.1}", self.auto_summarize_threshold),
+        );
 
         // Write back to file
         let mut content = String::new();
@@ -1369,6 +1407,7 @@ impl App {
         // Load model selection from config
         let current_model = Self::load_model_setting();
         let current_context_tokens = Self::detect_context_tokens(current_model.as_deref());
+        let auto_summarize_threshold = Self::load_auto_summarize_threshold_setting();
 
         // Configure backend mode (HTTP by default)
         let backend_setting = Self::load_config_value("backend")
@@ -1498,8 +1537,19 @@ impl App {
                         AgentMessage::ClearContext => {
                             // Clear the conversation context
                             let agent_clone = agent_clone.clone();
+                            let tx_clone = output_tx_clone.clone();
                             tokio::spawn(async move {
                                 agent_clone.clear_conversation().await;
+                                let _ = tx_clone.send(AgentMessage::ContextCleared);
+                            });
+                        }
+                        AgentMessage::InjectContext(summary) => {
+                            // Inject the summary as the new conversation context
+                            let agent_clone = agent_clone.clone();
+                            let tx_clone = output_tx_clone.clone();
+                            tokio::spawn(async move {
+                                agent_clone.inject_summary_context(&summary).await;
+                                let _ = tx_clone.send(AgentMessage::ContextInjected);
                             });
                         }
                         AgentMessage::ReloadModel(model_filename) => {
@@ -1728,6 +1778,8 @@ impl App {
             thinking_token_count: 0,
             limit_thinking_to_first_token,
             generation_stats: None,
+            streaming_completion_tokens: 0,
+            last_known_context_tokens: 0,
             command_history,
             history_index: None,
             temp_input: None,
@@ -1746,6 +1798,13 @@ impl App {
             review_pending: None,
             compact_pending: None,
             last_compacted_summary: None,
+            is_auto_summarize: false,
+            auto_summarize_threshold,
+            context_sync_pending: false,
+            context_sync_started: None,
+            context_inject_expected: false,
+            compaction_resume_prompt: None,
+            compaction_resume_ready: false,
             compaction_history: Vec::new(),
             show_summary_history: false,
             summary_history_selected: 0,
@@ -2651,44 +2710,53 @@ impl App {
     }
 
     fn create_rewind_point(&mut self) {
-        // Only create rewind points if we have messages
-        if self.messages.is_empty() {
-            return;
+        if let Some(rewind_point) = Self::snapshot_rewind_point(
+            &self.messages,
+            &self.message_types,
+            &self.message_states,
+            &self.message_metadata,
+            &self.message_timestamps,
+            &self.current_file_changes,
+        ) {
+            self.rewind_points.push(rewind_point);
+            self.current_file_changes.clear();
+            if self.rewind_points.len() > 50 {
+                self.rewind_points.remove(0);
+            }
+        }
+    }
+
+    fn snapshot_rewind_point(
+        messages: &[String],
+        message_types: &[MessageType],
+        message_states: &[MessageState],
+        message_metadata: &[Option<UIMessageMetadata>],
+        message_timestamps: &[SystemTime],
+        current_file_changes: &[FileChange],
+    ) -> Option<RewindPoint> {
+        if messages.is_empty() {
+            return None;
         }
 
-        // Extract preview from the most recent user message
-        let preview = self
-            .messages
+        let preview = messages
             .iter()
             .enumerate()
             .rev()
-            .find(|(i, _)| matches!(self.message_types.get(*i), Some(MessageType::User)))
+            .find(|(i, _)| matches!(message_types.get(*i), Some(MessageType::User)))
             .map(|(_, msg)| msg.chars().take(80).collect::<String>())
-            .unwrap_or_else(|| format!("{} messages", self.messages.len()));
+            .unwrap_or_else(|| format!("{} messages", messages.len()));
 
-        // Create a snapshot of the current conversation state
-        let rewind_point = RewindPoint {
-            messages: self.messages.clone(),
-            message_types: self.message_types.clone(),
-            message_states: self.message_states.clone(),
-            message_metadata: self.message_metadata.clone(),
-            message_timestamps: self.message_timestamps.clone(),
+        Some(RewindPoint {
+            messages: messages.to_vec(),
+            message_types: message_types.to_vec(),
+            message_states: message_states.to_vec(),
+            message_metadata: message_metadata.to_vec(),
+            message_timestamps: message_timestamps.to_vec(),
             timestamp: SystemTime::now(),
             preview,
-            message_count: self.messages.len(),
-            file_changes: self.current_file_changes.clone(),
-        };
-
-        // Add to rewind points list
-        self.rewind_points.push(rewind_point);
-
-        // Reset file changes tracker for next rewind point
-        self.current_file_changes.clear();
-
-        // Limit to last 50 rewind points to avoid memory issues
-        if self.rewind_points.len() > 50 {
-            self.rewind_points.remove(0);
-        }
+            message_count: messages.len(),
+            file_changes: current_file_changes.to_vec(),
+        })
     }
 
     /// Execute git commands based on review options and return context
@@ -2895,6 +2963,20 @@ impl App {
         prompt
     }
 
+    fn compaction_history_budget(&self) -> usize {
+        if let Some(limit) = self.current_context_tokens {
+            let usable = limit.saturating_sub(COMPACTION_HISTORY_RESERVE_TOKENS);
+            return usable.max(MIN_COMPACTION_HISTORY_BUDGET);
+        }
+        DEFAULT_COMPACTION_HISTORY_BUDGET
+    }
+
+    fn estimate_token_count_for_text(text: &str) -> usize {
+        let chars = text.chars().count();
+        let tokens = (chars + APPROX_CHARS_PER_TOKEN - 1) / APPROX_CHARS_PER_TOKEN;
+        tokens.max(1)
+    }
+
     /// Build compaction prompt with all conversation context
     fn build_compact_prompt(&self, options: &CompactOptions) -> String {
         let mut prompt = String::new();
@@ -2989,9 +3071,9 @@ Let me analyze the conversation chronologically:
 ",
         );
 
-        // Add all messages (excluding system messages like [THINKING_ANIMATION])
+        // Add messages while bounding the payload to the current context budget
+        let mut entries: Vec<(String, String)> = Vec::new();
         for (msg, msg_type) in self.messages.iter().zip(self.message_types.iter()) {
-            // Skip internal messages
             if msg.starts_with("[THINKING_ANIMATION]")
                 || msg.starts_with("[COMMAND:")
                 || msg.starts_with(" ⎿")
@@ -3004,6 +3086,32 @@ Let me analyze the conversation chronologically:
                 MessageType::Agent => "Assistant",
             };
 
+            entries.push((role.to_string(), msg.clone()));
+        }
+
+        let history_budget = self.compaction_history_budget();
+        let mut trimmed_entries: Vec<(String, String)> = Vec::new();
+        let mut used_tokens = 0usize;
+        for (role, text) in entries.iter().rev() {
+            let msg_tokens = Self::estimate_token_count_for_text(text);
+            if used_tokens > 0 && used_tokens + msg_tokens > history_budget {
+                break;
+            }
+            used_tokens += msg_tokens;
+            trimmed_entries.push((role.clone(), text.clone()));
+        }
+        trimmed_entries.reverse();
+        let history_trimmed = trimmed_entries.len() < entries.len();
+
+        if history_trimmed {
+            prompt.push_str(
+                "NOTE: Conversation truncated to the most recent exchanges to stay within the context window.
+
+",
+            );
+        }
+
+        for (role, msg) in trimmed_entries {
             prompt.push_str(&format!(
                 "{}: {}
 
@@ -3351,11 +3459,69 @@ Let me analyze the conversation chronologically:
         self.vim_input_editor.state.cursor.col = col;
     }
 
+    fn handle_auto_summarize_threshold_command(&mut self, command: &str) -> bool {
+        let parts: Vec<&str> = command.split_whitespace().collect();
+
+        if parts.len() == 1 {
+            let status_text = format!(
+                " ⎿ Auto-summarize triggers when {}. Use '/autosummarize 85' to change it.",
+                self.auto_summarize_hint()
+            );
+            self.messages.push(status_text);
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+            return true;
+        }
+
+        let value_token = parts[1].trim().trim_end_matches('%');
+        match value_token.parse::<f32>() {
+            Ok(value) => {
+                if value < MIN_AUTO_SUMMARIZE_THRESHOLD || value > MAX_AUTO_SUMMARIZE_THRESHOLD {
+                    self.messages.push(format!(
+                        " ⎿ Enter a value between {:.0}% and {:.0}% (percent of context used).",
+                        MIN_AUTO_SUMMARIZE_THRESHOLD, MAX_AUTO_SUMMARIZE_THRESHOLD
+                    ));
+                    self.message_types.push(MessageType::Agent);
+                    self.message_states.push(MessageState::Sent);
+                    return true;
+                }
+
+                self.auto_summarize_threshold = Self::clamp_auto_summarize_threshold(value);
+                if let Err(e) = self.save_config() {
+                    self.messages.push(format!(
+                        " ⎿ Auto-summarize updated but failed to persist setting: {}",
+                        e
+                    ));
+                    self.message_types.push(MessageType::Agent);
+                    self.message_states.push(MessageState::Sent);
+                    return true;
+                }
+
+                self.messages.push(format!(
+                    " ⎿ Auto-summarize now triggers when {}.",
+                    self.auto_summarize_hint()
+                ));
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+                true
+            }
+            Err(_) => {
+                self.messages.push(
+                    " ⎿ Invalid auto-summarize threshold. Provide a numeric percent of context used."
+                        .to_string(),
+                );
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+                true
+            }
+        }
+    }
+
     async fn handle_slash_command_async(&mut self) {
         let command = self.input.trim().to_string();
 
-        // Clear generation stats from previous message when new message is added to UI
-        self.generation_stats = None;
+        // Reset streaming tokens for new message (keep generation_stats for context tracking)
+        self.streaming_completion_tokens = 0;
 
         // Add command to messages as user message
         self.messages.push(command.clone());
@@ -3421,6 +3587,7 @@ Let me analyze the conversation chronologically:
 
             // Clear previous generation stats
             self.generation_stats = None;
+            self.streaming_completion_tokens = 0;
         } else if cmd_lower == "/exit" {
             self.messages.push("[COMMAND: Exiting...]".to_string());
             self.message_types.push(MessageType::Agent);
@@ -3455,6 +3622,10 @@ Let me analyze the conversation chronologically:
                 .push("[COMMAND: No conversation history available]".to_string());
             self.message_types.push(MessageType::Agent);
             self.message_states.push(MessageState::Sent);
+        } else if cmd_lower.starts_with("/autosummarize") {
+            if self.handle_auto_summarize_threshold_command(&command) {
+                return;
+            }
         } else if cmd_lower == "/vim" {
             // Toggle vim mode
             self.vim_mode_enabled = !self.vim_mode_enabled;
@@ -3486,8 +3657,8 @@ Let me analyze the conversation chronologically:
     fn handle_slash_command(&mut self) {
         let command = self.input.trim().to_string();
 
-        // Clear generation stats from previous message when new message is added to UI
-        self.generation_stats = None;
+        // Reset streaming tokens for new message (keep generation_stats for context tracking)
+        self.streaming_completion_tokens = 0;
 
         // Add command to messages as user message
         self.messages.push(command.clone());
@@ -3533,6 +3704,7 @@ Let me analyze the conversation chronologically:
 
             // Reset generation stats
             self.generation_stats = None;
+            self.streaming_completion_tokens = 0;
 
             // Clear agent context
             if let Some(tx) = &self.agent_tx {
@@ -3575,10 +3747,16 @@ Let me analyze the conversation chronologically:
             }
 
             // Set pending to trigger async compaction
+            self.compaction_resume_prompt = None;
+            self.compaction_resume_ready = false;
             self.compact_pending = Some(CompactOptions {
                 custom_instructions,
             });
             return;
+        } else if cmd_lower.starts_with("/autosummarize") {
+            if self.handle_auto_summarize_threshold_command(&command) {
+                return;
+            }
         } else if cmd_lower == "/help" {
             // Open help panel
             self.show_help = true;
@@ -4077,8 +4255,15 @@ Let me analyze the conversation chronologically:
                     // eprintln!("[ERROR] Failed to generate conversation ID: {}", e);
                 }
 
+                // Preserve context tokens from previous turn before clearing stats
+                if let Some(stats) = &self.generation_stats {
+                    self.last_known_context_tokens =
+                        stats.prompt_tokens.saturating_add(stats.completion_tokens);
+                }
                 // Clear generation stats from previous message when new message is added to UI
                 self.generation_stats = None;
+                // Reset streaming tokens for new turn
+                self.streaming_completion_tokens = 0;
 
                 self.messages.push(user_message.clone());
                 self.message_types.push(MessageType::User);
@@ -4140,13 +4325,24 @@ Let me analyze the conversation chronologically:
             let mut pending_todos: Option<Vec<TodoItem>> = None;
             let mut create_rewind = false;
             let mut pending_file_change: Option<(String, String, String)> = None; // (tool_name, args, result)
+            let mut check_auto_summarize = false; // Flag to check context after rx borrow is dropped
+            let mut trigger_mid_stream_auto_summarize = false; // Flag to trigger mid-stream auto-summarize after rx borrow dropped
+            let mut schedule_resume_prompt = false; // Flag to send resume prompt after borrow is dropped
             if let Some(rx) = &mut self.agent_rx {
                 while let Ok(msg) = rx.try_recv() {
                     // Skip processing agent messages if we've interrupted
                     if self.agent_interrupted {
-                        // Only process Done message to reset interrupted flag
-                        if matches!(msg, AgentMessage::Done) {
-                            self.agent_interrupted = false;
+                        match msg {
+                            AgentMessage::GenerationStats(stats) => {
+                                self.generation_stats = Some(stats);
+                            }
+                            AgentMessage::Done => {
+                                self.agent_interrupted = false;
+                                // Still check for auto-summarization even after interruption
+                                // If context is low, we should summarize regardless
+                                check_auto_summarize = true;
+                            }
+                            _ => {}
                         }
                         continue;
                     }
@@ -4180,6 +4376,34 @@ Let me analyze the conversation chronologically:
 
                             // Use actual token count from tokenizer
                             self.thinking_token_count += token_count;
+
+                            // Check for mid-stream auto-summarize (inlined to avoid borrow conflict)
+                            // Only check if not already compacting/triggered and no queued messages
+                            if !self.is_compacting
+                                && !self.is_auto_summarize
+                                && self.queued_messages.is_empty()
+                            {
+                                if let Some(limit) = self.current_context_tokens {
+                                    if limit > 0 {
+                                        // Use preserved context from previous turn + current streaming
+                                        let streaming_tokens = self.streaming_completion_tokens
+                                            + self.thinking_token_count;
+                                        let used = self
+                                            .last_known_context_tokens
+                                            .saturating_add(streaming_tokens);
+                                        if used > 0 {
+                                            let remaining = limit.saturating_sub(used);
+                                            let percent_left = (remaining as f32 / limit as f32
+                                                * 100.0)
+                                                .clamp(0.0, 100.0);
+                                            let percent_used = 100.0 - percent_left;
+                                            if percent_used >= self.auto_summarize_threshold {
+                                                trigger_mid_stream_auto_summarize = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                         AgentMessage::ThinkingSummary(summary) => {
                             if self.limit_thinking_to_first_token {
@@ -4234,10 +4458,41 @@ Let me analyze the conversation chronologically:
                             // Reset animation position to start wave from beginning
                             self.thinking_position = 0;
                         }
-                        AgentMessage::AgentResponse(text) => {
+                        AgentMessage::AgentResponse(text, token_count) => {
                             // Skip empty responses
                             if text.is_empty() {
                                 continue;
+                            }
+
+                            // Accumulate completion tokens for real-time context tracking
+                            self.streaming_completion_tokens += token_count;
+
+                            // Check for mid-stream auto-summarize (inlined to avoid borrow conflict)
+                            // Only check if not already compacting/triggered and no queued messages
+                            if !self.is_compacting
+                                && !self.is_auto_summarize
+                                && self.queued_messages.is_empty()
+                            {
+                                if let Some(limit) = self.current_context_tokens {
+                                    if limit > 0 {
+                                        // Use preserved context from previous turn + current streaming
+                                        let streaming_tokens = self.streaming_completion_tokens
+                                            + self.thinking_token_count;
+                                        let used = self
+                                            .last_known_context_tokens
+                                            .saturating_add(streaming_tokens);
+                                        if used > 0 {
+                                            let remaining = limit.saturating_sub(used);
+                                            let percent_left = (remaining as f32 / limit as f32
+                                                * 100.0)
+                                                .clamp(0.0, 100.0);
+                                            let percent_used = 100.0 - percent_left;
+                                            if percent_used >= self.auto_summarize_threshold {
+                                                trigger_mid_stream_auto_summarize = true;
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             // IMPORTANT: Remove thinking animation FIRST, unconditionally
@@ -4486,6 +4741,21 @@ Let me analyze the conversation chronologically:
                                 std::time::Instant::now(),
                             ));
                         }
+                        AgentMessage::ContextCleared => {
+                            // Context cleared - if no inject expected, sync is complete
+                            if !self.context_inject_expected {
+                                self.context_sync_pending = false;
+                                self.context_sync_started = None;
+                            }
+                            // Otherwise wait for ContextInjected
+                        }
+                        AgentMessage::ContextInjected => {
+                            // Context injection complete - sync is done
+                            self.context_sync_pending = false;
+                            self.context_sync_started = None;
+                            self.context_inject_expected = false;
+                            schedule_resume_prompt = true;
+                        }
                         AgentMessage::Done => {
                             // IMPORTANT: Remove thinking animation FIRST, unconditionally
                             Self::remove_thinking_animation_placeholder(
@@ -4510,15 +4780,16 @@ Let me analyze the conversation chronologically:
                             self.thinking_indicator_active = false;
                             self.thinking_start_time = None;
                             self.thinking_token_count = 0;
+                            self.streaming_completion_tokens = 0; // Reset for next turn
                             self.agent_response_started = false;
 
                             // Handle compaction completion
                             if self.is_compacting {
-                                self.is_compacting = false;
+                                let was_auto_summarize = self.is_auto_summarize;
 
-                                // Find the summary (last agent message)
+                                // Find the summary (last agent message that's not a marker)
                                 let mut summary = String::new();
-                                for (i, (msg, msg_type)) in self
+                                for (_i, (msg, msg_type)) in self
                                     .messages
                                     .iter()
                                     .zip(self.message_types.iter())
@@ -4535,6 +4806,50 @@ Let me analyze the conversation chronologically:
                                     }
                                 }
 
+                                // Check if we got a valid summary before clearing anything
+                                if summary.is_empty() {
+                                    // Compaction failed - preserve conversation state
+                                    self.is_compacting = false;
+                                    self.is_auto_summarize = false;
+                                    self.compaction_resume_prompt = None;
+                                    self.compaction_resume_ready = false;
+
+                                    // Show error banner but keep all existing messages
+                                    let error_msg = if was_auto_summarize {
+                                        " ⎿ Auto-summarization failed: no summary generated. Conversation preserved."
+                                    } else {
+                                        " ⎿ Summarization failed: no summary generated. Conversation preserved."
+                                    };
+                                    self.messages.push(error_msg.to_string());
+                                    self.message_types.push(MessageType::Agent);
+                                    self.message_states.push(MessageState::Sent);
+                                    self.message_metadata.push(None);
+                                    self.message_timestamps.push(std::time::SystemTime::now());
+
+                                    // Skip to allow retry later
+                                    continue;
+                                }
+
+                                // Valid summary - now safe to clear and proceed
+                                self.is_compacting = false;
+                                self.is_auto_summarize = false;
+
+                                // Capture a rewind point before wiping the transcript
+                                if let Some(rewind_point) = Self::snapshot_rewind_point(
+                                    &self.messages,
+                                    &self.message_types,
+                                    &self.message_states,
+                                    &self.message_metadata,
+                                    &self.message_timestamps,
+                                    &self.current_file_changes,
+                                ) {
+                                    self.rewind_points.push(rewind_point);
+                                    self.current_file_changes.clear();
+                                    if self.rewind_points.len() > 50 {
+                                        self.rewind_points.remove(0);
+                                    }
+                                }
+
                                 // Clear all messages
                                 self.messages.clear();
                                 self.message_types.clear();
@@ -4542,58 +4857,68 @@ Let me analyze the conversation chronologically:
                                 self.message_metadata.clear();
                                 self.message_timestamps.clear();
 
-                                // Clear agent context
+                                // Clear agent context and inject summary as new context
                                 if let Some(tx) = &self.agent_tx {
+                                    // Start context sync - will wait for ContextInjected
+                                    self.context_sync_pending = true;
+                                    self.context_sync_started = Some(Instant::now());
+                                    self.context_inject_expected = true;
                                     let _ = tx.send(AgentMessage::ClearContext);
+                                    let _ = tx.send(AgentMessage::InjectContext(summary.clone()));
                                 }
 
-                                // Add the summary as the new context
-                                if !summary.is_empty() {
-                                    self.last_compacted_summary = Some(summary.clone());
+                                // Add the summary as the new context (summary is guaranteed non-empty here)
+                                self.last_compacted_summary = Some(summary.clone());
 
-                                    self.compaction_history.push(CompactionEntry {
-                                        summary,
-                                        timestamp: SystemTime::now(),
-                                    });
-                                    if self.compaction_history.len() > MAX_COMPACTION_HISTORY {
-                                        self.compaction_history.remove(0);
-                                    }
-                                    self.summary_history_selected =
-                                        self.compaction_history.len().saturating_sub(1);
+                                self.compaction_history.push(CompactionEntry {
+                                    summary,
+                                    timestamp: SystemTime::now(),
+                                });
+                                if self.compaction_history.len() > MAX_COMPACTION_HISTORY {
+                                    self.compaction_history.remove(0);
+                                }
+                                self.summary_history_selected =
+                                    self.compaction_history.len().saturating_sub(1);
 
-                                    let banner_line = format!(
-                                        "{}Conversation summarized · ctrl+o for history",
-                                        SUMMARY_BANNER_PREFIX
-                                    );
-                                    self.messages.push(banner_line);
-                                    self.message_types.push(MessageType::Agent);
-                                    self.message_states.push(MessageState::Sent);
-                                    self.message_metadata.push(None);
-                                    self.message_timestamps.push(std::time::SystemTime::now());
-
-                                    self.messages.push("/summarize".to_string());
-                                    self.message_types.push(MessageType::User);
-                                    self.message_states.push(MessageState::Sent);
-                                    self.message_metadata.push(None);
-                                    self.message_timestamps.push(std::time::SystemTime::now());
-
-                                    self.messages.push(
-                                        " ⎿ Summarized (ctrl+o to see full summary)".to_string(),
-                                    );
-                                    self.message_types.push(MessageType::Agent);
-                                    self.message_states.push(MessageState::Sent);
-                                    self.message_metadata.push(None);
-                                    self.message_timestamps.push(std::time::SystemTime::now());
+                                // Different banner for auto vs manual summarization
+                                let banner_text = if was_auto_summarize {
+                                    "Context low · auto-summarized · ctrl+o for history"
                                 } else {
-                                    self.last_compacted_summary = None;
-                                    self.messages.push(
-                                        " ⎿ Summarization completed but no summary was generated."
-                                            .to_string(),
-                                    );
-                                    self.message_types.push(MessageType::Agent);
-                                    self.message_states.push(MessageState::Sent);
-                                    self.message_metadata.push(None);
-                                    self.message_timestamps.push(std::time::SystemTime::now());
+                                    "Conversation summarized · ctrl+o for history"
+                                };
+                                let banner_line =
+                                    format!("{}{}", SUMMARY_BANNER_PREFIX, banner_text);
+                                self.messages.push(banner_line);
+                                self.message_types.push(MessageType::Agent);
+                                self.message_states.push(MessageState::Sent);
+                                self.message_metadata.push(None);
+                                self.message_timestamps.push(std::time::SystemTime::now());
+
+                                // Different user message for auto vs manual
+                                let user_msg = if was_auto_summarize {
+                                    "[auto-summarized]".to_string()
+                                } else {
+                                    "/summarize".to_string()
+                                };
+                                self.messages.push(user_msg);
+                                self.message_types.push(MessageType::User);
+                                self.message_states.push(MessageState::Sent);
+                                self.message_metadata.push(None);
+                                self.message_timestamps.push(std::time::SystemTime::now());
+
+                                let result_msg = if was_auto_summarize {
+                                    " ⎿ Auto-summarized (ctrl+o to see full summary)"
+                                } else {
+                                    " ⎿ Summarized (ctrl+o to see full summary)"
+                                };
+                                self.messages.push(result_msg.to_string());
+                                self.message_types.push(MessageType::Agent);
+                                self.message_states.push(MessageState::Sent);
+                                self.message_metadata.push(None);
+                                self.message_timestamps.push(std::time::SystemTime::now());
+
+                                if self.compaction_resume_prompt.is_some() {
+                                    self.compaction_resume_ready = true;
                                 }
 
                                 // Skip normal done handling for compaction
@@ -4634,6 +4959,9 @@ Let me analyze the conversation chronologically:
                                 create_rewind = true;
 
                                 process_queued = true; // Set flag to process queued message after rx is dropped
+
+                                // Set flag to check for auto-summarization after rx borrow is dropped
+                                check_auto_summarize = true;
                             }
                         }
                         AgentMessage::ModelLoaded => {
@@ -4699,8 +5027,57 @@ Let me analyze the conversation chronologically:
                 self.create_rewind_point();
             }
 
+            // Handle mid-stream auto-summarize trigger (from streaming checks)
+            if trigger_mid_stream_auto_summarize {
+                self.trigger_mid_stream_auto_summarize();
+            }
+
+            // Check for auto-summarization after rx borrow is dropped
+            if check_auto_summarize && self.queued_messages.is_empty() {
+                if let Some(percent_left) = self.get_context_percent_left() {
+                    let percent_used = 100.0 - percent_left;
+                    if percent_used >= self.auto_summarize_threshold {
+                        // Trigger auto-summarization
+                        self.compaction_resume_prompt = None;
+                        self.compaction_resume_ready = false;
+                        self.is_auto_summarize = true;
+                        self.compact_pending = Some(CompactOptions {
+                            custom_instructions: Some(
+                                "This is an automatic summarization triggered because context is running low. \
+                                 Preserve all important context for continuing the conversation."
+                                    .to_string(),
+                            ),
+                        });
+                    }
+                }
+            }
+
+            // Check for context sync timeout
+            if self.context_sync_pending {
+                if let Some(started) = self.context_sync_started {
+                    if started.elapsed() > std::time::Duration::from_secs(5) {
+                        // Timeout - proceed with warning
+                        self.messages
+                            .push(" ⎿ Warning: Context sync timed out".to_string());
+                        self.message_types.push(MessageType::Agent);
+                        self.message_states.push(MessageState::Sent);
+                        self.context_sync_pending = false;
+                        self.context_sync_started = None;
+                        self.context_inject_expected = false;
+                        schedule_resume_prompt = true;
+                    }
+                }
+            } else {
+                self.maybe_send_compaction_resume_prompt();
+            }
+
+            if schedule_resume_prompt {
+                self.maybe_send_compaction_resume_prompt();
+            }
+
             // Process queued message after rx borrow is dropped
-            if process_queued {
+            // Block queue processing while context sync is pending
+            if process_queued && !self.context_sync_pending {
                 // Check if user is editing the next message to send (index 0)
                 let is_editing_next_message = self.editing_queue_index == Some(0);
 
@@ -4714,8 +5091,15 @@ Let me analyze the conversation chronologically:
                         self.input = queued_msg;
                         self.handle_slash_command();
                     } else {
+                        // Preserve context tokens from previous turn before clearing stats
+                        if let Some(stats) = &self.generation_stats {
+                            self.last_known_context_tokens =
+                                stats.prompt_tokens.saturating_add(stats.completion_tokens);
+                        }
                         // Regular message - clear generation stats from previous message when new message is added to UI
                         self.generation_stats = None;
+                        // Reset streaming tokens for new turn
+                        self.streaming_completion_tokens = 0;
 
                         self.messages.push(queued_msg.clone());
                         self.message_types.push(MessageType::User);
@@ -6553,19 +6937,63 @@ Let me analyze the conversation chronologically:
     fn context_status_span(&self) -> Span<'static> {
         if let Some(limit) = self.current_context_tokens {
             if limit > 0 {
+                // Use final stats if available
                 if let Some(stats) = self.get_generation_stats() {
                     let used = stats.prompt_tokens.saturating_add(stats.completion_tokens);
                     let remaining = limit.saturating_sub(used);
                     let percent_left = (remaining as f32 / limit as f32 * 100.0).clamp(0.0, 100.0);
-                    let text = format!("({:.0}% context left)", percent_left);
+                    let text = format!(
+                        "({:.0}% context left · auto {})",
+                        percent_left,
+                        self.auto_summarize_hint()
+                    );
                     let color = self.context_status_color(percent_left);
                     return Span::styled(text, Style::default().fg(color));
                 }
 
-                return Span::styled("(100% context left)", Style::default().fg(Color::DarkGray));
+                // During streaming: estimate using streaming tokens + thinking tokens
+                // Use last known prompt_tokens from frozen stats if available
+                if self.agent_processing {
+                    let streaming_tokens =
+                        self.streaming_completion_tokens + self.thinking_token_count;
+                    if streaming_tokens > 0 {
+                        // Estimate: use frozen stats for prompt_tokens if available
+                        let prompt_tokens = self
+                            .nav_snapshot
+                            .as_ref()
+                            .and_then(|s| s.generation_stats.as_ref())
+                            .map(|s| s.prompt_tokens)
+                            .unwrap_or(0);
+                        let used = prompt_tokens.saturating_add(streaming_tokens);
+                        let remaining = limit.saturating_sub(used);
+                        let percent_left =
+                            (remaining as f32 / limit as f32 * 100.0).clamp(0.0, 100.0);
+                        let text = format!(
+                            "(~{:.0}% context left · auto {})",
+                            percent_left,
+                            self.auto_summarize_hint()
+                        );
+                        let color = self.context_status_color(percent_left);
+                        return Span::styled(text, Style::default().fg(color));
+                    }
+                }
+
+                return Span::styled(
+                    format!("(100% context left · auto {})", self.auto_summarize_hint()),
+                    Style::default().fg(Color::DarkGray),
+                );
             }
         }
-        Span::styled("(context unknown)", Style::default().fg(Color::DarkGray))
+        Span::styled(
+            format!("(context unknown · auto {})", self.auto_summarize_hint()),
+            Style::default().fg(Color::DarkGray),
+        )
+    }
+
+    fn auto_summarize_hint(&self) -> String {
+        let used = Self::clamp_auto_summarize_threshold(self.auto_summarize_threshold);
+        let left = (100.0 - used).max(0.0);
+        format!("≥{:.0}% used (~≤{:.0}% left)", used, left)
     }
 
     fn context_status_color(&self, percent_left: f32) -> Color {
@@ -6575,6 +7003,101 @@ Let me analyze the conversation chronologically:
             Color::Yellow
         } else {
             Color::DarkGray
+        }
+    }
+
+    /// Calculate context percentage left, returns None if unavailable
+    fn get_context_percent_left(&self) -> Option<f32> {
+        if let Some(limit) = self.current_context_tokens {
+            if limit > 0 {
+                if let Some(stats) = self.get_generation_stats() {
+                    let used = stats.prompt_tokens.saturating_add(stats.completion_tokens);
+                    let remaining = limit.saturating_sub(used);
+                    let percent_left = (remaining as f32 / limit as f32 * 100.0).clamp(0.0, 100.0);
+                    return Some(percent_left);
+                }
+            }
+        }
+        None
+    }
+
+    /// Trigger mid-stream auto-summarization (mutating action)
+    /// Called after the agent_rx borrow is dropped to avoid borrow conflicts
+    fn trigger_mid_stream_auto_summarize(&mut self) {
+        self.is_auto_summarize = true;
+        self.compact_pending = Some(CompactOptions {
+            custom_instructions: Some(
+                "This is an automatic summarization triggered because context is running low. \
+                 Preserve all important context for continuing the conversation."
+                    .to_string(),
+            ),
+        });
+        self.compaction_resume_prompt = Some(Self::default_compaction_resume_prompt());
+        self.compaction_resume_ready = false;
+
+        // Set interrupted flag to block any further agent message processing
+        // until the cancel is acknowledged
+        self.agent_interrupted = true;
+
+        // Clear thinking UI state
+        if let Some(last_msg) = self.messages.last() {
+            if last_msg == "[THINKING_ANIMATION]" {
+                self.messages.pop();
+                self.message_types.pop();
+                if !self.message_states.is_empty() {
+                    self.message_states.pop();
+                }
+            }
+        }
+        self.is_thinking = false;
+        self.thinking_indicator_active = false;
+        self.thinking_start_time = None;
+        self.thinking_token_count = 0;
+        self.thinking_current_summary = None;
+
+        // Cancel current generation
+        if let Some(tx) = &self.agent_tx {
+            let _ = tx.send(AgentMessage::Cancel);
+        }
+    }
+
+    fn default_compaction_resume_prompt() -> String {
+        "Continue the exact response you were composing before auto-summarization interrupted you. Finish that task now using the summary context above without starting anything new.".to_string()
+    }
+
+    fn maybe_send_compaction_resume_prompt(&mut self) {
+        if !self.compaction_resume_ready || self.context_sync_pending {
+            return;
+        }
+
+        let Some(prompt) = self.compaction_resume_prompt.take() else {
+            self.compaction_resume_ready = false;
+            return;
+        };
+        self.compaction_resume_ready = false;
+
+        self.streaming_completion_tokens = 0;
+        self.last_known_context_tokens = 0;
+
+        self.messages.push(prompt.clone());
+        self.message_types.push(MessageType::User);
+        self.message_states.push(MessageState::Sent);
+        self.message_metadata.push(None);
+        self.message_timestamps.push(SystemTime::now());
+
+        self.messages.push("[THINKING_ANIMATION]".to_string());
+        self.message_types.push(MessageType::Agent);
+        self.is_thinking = true;
+        self.thinking_indicator_active = true;
+        self.thinking_start_time = Some(Instant::now());
+        self.thinking_token_count = 0;
+        self.thinking_raw_content.clear();
+        self.agent_response_started = false;
+
+        if let Some(tx) = &self.agent_tx {
+            self.agent_processing = true;
+            self.agent_interrupted = false;
+            let _ = tx.send(AgentMessage::UserInput(prompt));
         }
     }
 

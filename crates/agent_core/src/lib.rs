@@ -2,11 +2,14 @@ use anyhow::Result;
 use colossal_linux_sandbox::protocol::SandboxPolicy;
 use colossal_linux_sandbox::tools::execute_tools_with_sandbox;
 use colossal_linux_sandbox::types::{ExitStatus, SessionId};
+use either::Either;
 use futures::StreamExt;
+use indexmap::IndexMap;
 use mistralrs::{
     ChatCompletionChunkResponse, Delta, Model, RequestBuilder, Response, TextMessageRole, Tool,
     ToolCallResponse, ToolChoice,
 };
+use mistralrs_core::MessageContent;
 use once_cell::sync::OnceCell;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -721,8 +724,8 @@ pub struct GenerationStats {
 pub enum AgentMessage {
     /// User input to send to the agent
     UserInput(String),
-    /// Agent's text response
-    AgentResponse(String),
+    /// Agent's text response with token count for real-time context tracking
+    AgentResponse(String, usize), // (content, token_count)
     /// Agent's thinking process (internal reasoning) with token count
     ThinkingContent(String, usize), // (content, token_count)
     /// Thinking summary line (from summarizer model)
@@ -739,6 +742,12 @@ pub enum AgentMessage {
     Cancel,
     /// Clear the conversation context/history
     ClearContext,
+    /// Inject a summary as the new conversation context (used after compaction)
+    InjectContext(String),
+    /// Context has been cleared (acknowledgment)
+    ContextCleared,
+    /// Context has been injected (acknowledgment)
+    ContextInjected,
     /// Background task started
     BackgroundTaskStarted(String, String, String), // (session_id, command, log_file)
     /// Agent has finished processing
@@ -1283,6 +1292,42 @@ impl Agent {
         *conversation_guard = None;
     }
 
+    /// Inject a summary as the new conversation context
+    /// This is used after compaction to give the model context about the previous conversation
+    pub async fn inject_summary_context(&self, summary: &str) {
+        let tools = {
+            let tools_guard = self.tools.lock().await;
+            tools_guard.clone()
+        };
+
+        // Get the system prompt (same as used when starting new conversations)
+        let system_prompt_content = {
+            let system_prompt_guard = self.system_prompt.lock().await;
+            system_prompt_guard.clone()
+        };
+
+        let system_msg = "You are Nite 3, a coding agent deployed in the best TUI colossal code. You live inside the terminal, running lean, fast, and sharp. Your role is to serve as the developer's right hand.";
+
+        // Format the summary as if it were the first user message, including full system prompt
+        let full_context_msg = format!(
+            "{}\n\n\
+             This session is being continued from a previous conversation that ran out of context. \
+             The previous conversation has been summarized below:\n\n{}",
+            system_prompt_content, summary
+        );
+
+        // Create a new conversation with the same structure as a normal conversation start
+        let request_builder = RequestBuilder::new()
+            .add_message(TextMessageRole::System, system_msg)
+            .add_message(TextMessageRole::User, &full_context_msg)
+            .set_tools(tools)
+            .set_tool_choice(ToolChoice::Auto)
+            .enable_thinking(true);
+
+        let mut conversation_guard = self.conversation.lock().await;
+        *conversation_guard = Some(request_builder);
+    }
+
     /// Restore conversation from JSON string
     /// Takes a JSON array of messages with "role" and "content" fields
     pub async fn restore_conversation(&self, messages_json: &str) -> Result<()> {
@@ -1337,6 +1382,33 @@ impl Agent {
         } else {
             None
         }
+    }
+
+    /// Convert a structured chat message field into a plain string for token estimation.
+    fn message_content_to_string(value: &MessageContent) -> String {
+        match value {
+            Either::Left(text) => text.clone(),
+            Either::Right(chunks) => chunks
+                .iter()
+                .map(|chunk| serde_json::to_string(chunk).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
+    }
+
+    /// Roughly estimate the prompt tokens for a pending request by flattening all messages.
+    fn estimate_prompt_tokens(&self, request_builder: &RequestBuilder) -> usize {
+        let mut flattened = String::new();
+        for message in request_builder.messages() {
+            for (key, value) in message {
+                flattened.push_str(key);
+                flattened.push(':');
+                flattened.push_str(&Self::message_content_to_string(value));
+                flattened.push('\n');
+            }
+            flattened.push('\n');
+        }
+        self.count_tokens(&flattened)
     }
 
     /// Count tokens in text using the tokenizer
@@ -1399,6 +1471,8 @@ impl Agent {
         let mut _final_accumulated_content = String::new();
 
         while has_more_tool_calls {
+            let prompt_token_estimate = self.estimate_prompt_tokens(&current_request_builder);
+
             let mut stream = self
                 .backend
                 .stream_chat_request(current_request_builder.clone())
@@ -1438,9 +1512,22 @@ impl Agent {
 
                             // Send any accumulated content as partial response
                             if !accumulated_content.is_empty() && !in_thinking {
+                                let token_count = self.count_tokens(&accumulated_content);
                                 let _ = tx
-                                    .send(AgentMessage::AgentResponse(accumulated_content.clone()));
+                                    .send(AgentMessage::AgentResponse(accumulated_content.clone(), token_count));
                             }
+
+                            // Send partial GenerationStats even when cancelled
+                            // This ensures context tracking continues to work
+                            let completion_tokens = self.count_tokens(&accumulated_content);
+                            let stats = GenerationStats {
+                                avg_completion_tok_per_sec: 0.0,
+                                completion_tokens,
+                                prompt_tokens: prompt_token_estimate,
+                                time_to_first_token_sec: 0.0,
+                                stop_reason: "cancelled".to_string(),
+                            };
+                            let _ = tx.send(AgentMessage::GenerationStats(stats));
 
                             // Send Done to finalize
                             let _ = tx.send(AgentMessage::Done);
@@ -1627,8 +1714,10 @@ impl Agent {
                                                     }
                                                     outbound.push_str(after_think);
                                                     accumulated_content.push_str(&outbound);
+                                                    let token_count = self.count_tokens(&outbound);
                                                     let _ = tx.send(AgentMessage::AgentResponse(
                                                         outbound,
+                                                        token_count,
                                                     ));
                                                     final_response_started = true;
                                                 } else {
@@ -1720,7 +1809,8 @@ impl Agent {
                                         }
                                         outbound.push_str(&chunk_content);
                                         accumulated_content.push_str(&outbound);
-                                        let _ = tx.send(AgentMessage::AgentResponse(outbound.clone()));
+                                        let token_count = self.count_tokens(&outbound);
+                                        let _ = tx.send(AgentMessage::AgentResponse(outbound.clone(), token_count));
                                         if chunk_has_visible {
                                             final_response_started = true;
                                         }
@@ -1838,7 +1928,8 @@ impl Agent {
 
             if !pending_prefix.is_empty() {
                 accumulated_content.push_str(&pending_prefix);
-                let _ = tx.send(AgentMessage::AgentResponse(pending_prefix.clone()));
+                let token_count = self.count_tokens(&pending_prefix);
+                let _ = tx.send(AgentMessage::AgentResponse(pending_prefix.clone(), token_count));
             }
 
             // After stream ends, if still in thinking (no </think> found), flush residual
