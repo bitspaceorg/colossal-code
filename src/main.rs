@@ -522,6 +522,7 @@ struct App {
     visible_chars: Vec<usize>,
     visible_tips: usize,
     last_update: Instant,
+    initial_screen_cleared: bool,
     // Cache for mode-specific content to avoid re-rendering
     cached_mode_content: Option<(Mode, Line<'static>)>,
     // Navigation editor state
@@ -1608,6 +1609,7 @@ impl App {
             visible_chars,
             visible_tips: 0,
             last_update: Instant::now(),
+            initial_screen_cleared: false,
             cached_mode_content: None,
             editor: RichEditor::new(),
             last_g_press: None,
@@ -5272,6 +5274,11 @@ Let me analyze the conversation chronologically:
                 }
             }
 
+            if !self.initial_screen_cleared && self.phase == Phase::Input {
+                // Clear once after the loader so static CLI output doesn't leak into the TUI.
+                terminal.clear()?;
+                self.initial_screen_cleared = true;
+            }
             terminal.draw(|frame| self.draw(frame))?;
 
             // Use shorter poll duration for responsive UI
