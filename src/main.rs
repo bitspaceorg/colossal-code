@@ -101,7 +101,11 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 
 const MAX_COMPACTION_HISTORY: usize = 10;
 const SUMMARY_BANNER_PREFIX: &str = "[SUMMARY_BANNER]";
-const DEFAULT_AUTO_SUMMARIZE_THRESHOLD: f32 = 15.0;
+const AUTO_SUMMARIZE_THRESHOLD_CONFIG_KEY: &str = "auto-summarize-threshold";
+const AUTO_SUMMARIZE_THRESHOLD_VERSION_KEY: &str = "auto-summarize-threshold-version";
+const DEFAULT_AUTO_SUMMARIZE_THRESHOLD: f32 = 85.0;
+const LEGACY_AUTO_SUMMARIZE_THRESHOLD: f32 = 15.0;
+const AUTO_SUMMARIZE_THRESHOLD_VERSION: u32 = 2;
 const MIN_AUTO_SUMMARIZE_THRESHOLD: f32 = 5.0;
 const MAX_AUTO_SUMMARIZE_THRESHOLD: f32 = 99.0;
 const COMPACTION_HISTORY_RESERVE_TOKENS: usize = 1024;
@@ -699,13 +703,35 @@ impl App {
     }
 
     fn load_auto_summarize_threshold_setting() -> f32 {
-        Self::load_config_value("auto-summarize-threshold")
+        let stored_value = Self::load_config_value(AUTO_SUMMARIZE_THRESHOLD_CONFIG_KEY)
             .and_then(|raw| {
                 let sanitized = raw.trim().trim_end_matches('%').trim().to_string();
                 sanitized.parse::<f32>().ok()
             })
-            .map(Self::clamp_auto_summarize_threshold)
-            .unwrap_or(DEFAULT_AUTO_SUMMARIZE_THRESHOLD)
+            .map(Self::clamp_auto_summarize_threshold);
+
+        let stored_version = Self::load_config_value(AUTO_SUMMARIZE_THRESHOLD_VERSION_KEY)
+            .and_then(|raw| raw.trim().parse::<u32>().ok());
+
+        match (stored_value, stored_version) {
+            (Some(value), Some(version)) => {
+                if version < AUTO_SUMMARIZE_THRESHOLD_VERSION
+                    && (value - LEGACY_AUTO_SUMMARIZE_THRESHOLD).abs() < f32::EPSILON
+                {
+                    DEFAULT_AUTO_SUMMARIZE_THRESHOLD
+                } else {
+                    value
+                }
+            }
+            (Some(value), None) => {
+                if (value - LEGACY_AUTO_SUMMARIZE_THRESHOLD).abs() < f32::EPSILON {
+                    DEFAULT_AUTO_SUMMARIZE_THRESHOLD
+                } else {
+                    value
+                }
+            }
+            (None, _) => DEFAULT_AUTO_SUMMARIZE_THRESHOLD,
+        }
     }
 
     fn detect_context_tokens(model: Option<&str>) -> Option<usize> {
@@ -742,8 +768,12 @@ impl App {
             config_map.insert("model".to_string(), model.clone());
         }
         config_map.insert(
-            "auto-summarize-threshold".to_string(),
+            AUTO_SUMMARIZE_THRESHOLD_CONFIG_KEY.to_string(),
             format!("{:.1}", self.auto_summarize_threshold),
+        );
+        config_map.insert(
+            AUTO_SUMMARIZE_THRESHOLD_VERSION_KEY.to_string(),
+            AUTO_SUMMARIZE_THRESHOLD_VERSION.to_string(),
         );
 
         // Write back to file
@@ -2208,14 +2238,13 @@ impl App {
 
             // Update position every 40ms for smooth wave effect
             if self.thinking_last_tick.elapsed() >= Duration::from_millis(40) {
-                // Calculate text length based on what's actually being displayed
-                // Always add 3 for the "..." at the end
-                let text_len = if let Some((ref summary, _, _)) = self.thinking_current_summary {
-                    summary.len() + 3 // summary + "..."
+                // Calculate the true display length (counting characters, not bytes)
+                let text_with_dots = if let Some((ref summary, _, _)) = self.thinking_current_summary {
+                    format!("{}...", summary)
                 } else {
-                    let text_with_dots = format!("{}...", self.thinking_current_word);
-                    text_with_dots.len()
+                    format!("{}...", self.thinking_current_word)
                 };
+                let text_len = text_with_dots.chars().count();
                 // Add 7 to complete the wave sweep all the way to the end
                 self.thinking_position = (self.thinking_position + 1) % (text_len + 7);
                 self.thinking_last_tick = Instant::now();
@@ -3466,7 +3495,7 @@ Let me analyze the conversation chronologically:
 
         if parts.len() == 1 {
             let status_text = format!(
-                " ⎿ Auto-summarize triggers when {}. Use '/autosummarize 85' to change it.",
+                " ⎿ Auto-summarize triggers when {}. Use '/autosummarize [percent-used]' to change it.",
                 self.auto_summarize_hint()
             );
             self.messages.push(status_text);
@@ -7069,7 +7098,7 @@ Let me analyze the conversation chronologically:
     }
 
     fn default_compaction_resume_prompt() -> String {
-        "Continue the exact response you were composing before auto-summarization interrupted you. Finish that task now using the summary context above without starting anything new.".to_string()
+        "continue".to_string()
     }
 
     fn maybe_send_compaction_resume_prompt(&mut self) {
