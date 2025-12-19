@@ -174,7 +174,8 @@ impl ThinkingSummarizer {
         let system_prompt = "You are SmolLM, a compact and helpful model. You convert a reasoning trace into a concise summary.";
 
         let request_body = ChatRequestBody {
-            model: "reasoning-summarizer:v0".to_string(),
+            // The local summarizer server exposes the default SmolLM2 model
+            model: "default".to_string(),
             messages: vec![
                 Message {
                     role: "system".to_string(),
@@ -192,9 +193,9 @@ impl ThinkingSummarizer {
         };
 
         let response = client
-            // .post("http://localhost:8080/v1/chat/completions")
-            .post("http://localhost:11434/v1/chat/completions")
-            .header("Authorization", "Bearer ollama")
+            .post("http://localhost:8080/v1/chat/completions")
+            // .post("http://localhost:80/v1/chat/completions")
+            // .header("Authorization", "Bearer ollama")
             .header("Content-Type", "application/json")
             .json(&request_body)
             .send()

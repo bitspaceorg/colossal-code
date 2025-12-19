@@ -2239,11 +2239,12 @@ impl App {
             // Update position every 40ms for smooth wave effect
             if self.thinking_last_tick.elapsed() >= Duration::from_millis(40) {
                 // Calculate the true display length (counting characters, not bytes)
-                let text_with_dots = if let Some((ref summary, _, _)) = self.thinking_current_summary {
-                    format!("{}...", summary)
-                } else {
-                    format!("{}...", self.thinking_current_word)
-                };
+                let text_with_dots =
+                    if let Some((ref summary, _, _)) = self.thinking_current_summary {
+                        format!("{}...", summary)
+                    } else {
+                        format!("{}...", self.thinking_current_word)
+                    };
                 let text_len = text_with_dots.chars().count();
                 // Add 7 to complete the wave sweep all the way to the end
                 self.thinking_position = (self.thinking_position + 1) % (text_len + 7);

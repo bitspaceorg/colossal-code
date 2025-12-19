@@ -41,6 +41,7 @@ toml = "0.8"
 uuid = { version = "1.10", features = ["v4"] }
 either = "1.15.0"
 indexmap = "2.12.1"
+agent_protocol = { path = "../agent_protocol" }
 
 [features]
 default = []

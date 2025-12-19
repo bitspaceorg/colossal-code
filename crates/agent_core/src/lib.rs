@@ -26,6 +26,7 @@ pub mod safety_config;
 pub mod thinking_summarizer;
 pub mod tools;
 pub mod web_search;
+pub mod a2a;
 
 // Global state for persistent shell session
 struct GlobalState {
@@ -1025,7 +1026,10 @@ impl Agent {
         let selected_model =
             model_filename.unwrap_or_else(|| "Qwen_Qwen3-4B-Thinking-2507-Q8_0.gguf".to_string());
 
-        // Load tokenizer from HuggingFace (Qwen2.5 tokenizer)
+        // Detect tokenizer from model filename
+        let tokenizer_name = Self::detect_tokenizer_from_model(&selected_model);
+
+        // Load tokenizer from HuggingFace
         // Suppress output during loading
         #[cfg(unix)]
         let tokenizer = {
@@ -1051,7 +1055,7 @@ impl Agent {
                 }
 
                 // Load tokenizer
-                let tokenizer = Tokenizer::from_pretrained("Qwen/Qwen2.5-0.5B", None);
+                let tokenizer = Tokenizer::from_pretrained(&tokenizer_name, None);
 
                 // Restore stdout and stderr
                 unsafe {
@@ -1064,16 +1068,15 @@ impl Agent {
                 tokenizer
             } else {
                 // Fallback if /dev/null can't be opened
-                Tokenizer::from_pretrained("Qwen/Qwen2.5-0.5B", None)
+                Tokenizer::from_pretrained(&tokenizer_name, None)
             };
 
-            result.map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?
+            result.map_err(|e| anyhow::anyhow!("Failed to load tokenizer '{}': {}", tokenizer_name, e))?
         };
 
         #[cfg(not(unix))]
-        let tokenizer = Tokenizer::from_pretrained("Qwen/Qwen2.5-0.5B", None).map_err(|e| {
-            // eprintln!("Warning: Failed to read .niterules, using default: {}", e);
-            anyhow::anyhow!("Failed to load tokenizer: {}", e)
+        let tokenizer = Tokenizer::from_pretrained(&tokenizer_name, None).map_err(|e| {
+            anyhow::anyhow!("Failed to load tokenizer '{}': {}", tokenizer_name, e)
         })?;
 
         let backend_mode =
@@ -1192,6 +1195,130 @@ impl Agent {
     /// Check if cancellation was requested
     pub fn is_cancel_requested(&self) -> bool {
         self.cancel_requested.load(Ordering::SeqCst)
+    }
+
+    /// Detect the appropriate HuggingFace tokenizer from a model filename
+    fn detect_tokenizer_from_model(model_filename: &str) -> String {
+        let filename_lower = model_filename.to_lowercase();
+
+        // Qwen models
+        if filename_lower.contains("qwen3") || filename_lower.contains("qwen-3") {
+            // Qwen 3 models
+            if filename_lower.contains("32b") {
+                "Qwen/Qwen3-32B".to_string()
+            } else if filename_lower.contains("14b") {
+                "Qwen/Qwen3-14B".to_string()
+            } else if filename_lower.contains("8b") {
+                "Qwen/Qwen3-8B".to_string()
+            } else if filename_lower.contains("4b") {
+                "Qwen/Qwen3-4B".to_string()
+            } else if filename_lower.contains("1.7b") || filename_lower.contains("1_7b") {
+                "Qwen/Qwen3-1.7B".to_string()
+            } else if filename_lower.contains("0.6b") || filename_lower.contains("0_6b") {
+                "Qwen/Qwen3-0.6B".to_string()
+            } else {
+                "Qwen/Qwen3-4B".to_string() // Default Qwen3
+            }
+        } else if filename_lower.contains("qwen2.5") || filename_lower.contains("qwen2_5") {
+            // Qwen 2.5 models
+            if filename_lower.contains("72b") {
+                "Qwen/Qwen2.5-72B".to_string()
+            } else if filename_lower.contains("32b") {
+                "Qwen/Qwen2.5-32B".to_string()
+            } else if filename_lower.contains("14b") {
+                "Qwen/Qwen2.5-14B".to_string()
+            } else if filename_lower.contains("7b") {
+                "Qwen/Qwen2.5-7B".to_string()
+            } else if filename_lower.contains("3b") {
+                "Qwen/Qwen2.5-3B".to_string()
+            } else if filename_lower.contains("1.5b") || filename_lower.contains("1_5b") {
+                "Qwen/Qwen2.5-1.5B".to_string()
+            } else if filename_lower.contains("0.5b") || filename_lower.contains("0_5b") {
+                "Qwen/Qwen2.5-0.5B".to_string()
+            } else {
+                "Qwen/Qwen2.5-7B".to_string() // Default Qwen2.5
+            }
+        } else if filename_lower.contains("qwen2") || filename_lower.contains("qwen-2") {
+            // Qwen 2 models
+            "Qwen/Qwen2-7B".to_string()
+        } else if filename_lower.contains("qwen") {
+            // Generic Qwen - assume Qwen 2.5
+            "Qwen/Qwen2.5-7B".to_string()
+        }
+        // Llama models
+        else if filename_lower.contains("llama-3.3") || filename_lower.contains("llama3.3") {
+            "meta-llama/Llama-3.3-70B-Instruct".to_string()
+        } else if filename_lower.contains("llama-3.2") || filename_lower.contains("llama3.2") {
+            if filename_lower.contains("3b") {
+                "meta-llama/Llama-3.2-3B".to_string()
+            } else if filename_lower.contains("1b") {
+                "meta-llama/Llama-3.2-1B".to_string()
+            } else {
+                "meta-llama/Llama-3.2-3B".to_string()
+            }
+        } else if filename_lower.contains("llama-3.1") || filename_lower.contains("llama3.1") {
+            if filename_lower.contains("405b") {
+                "meta-llama/Llama-3.1-405B".to_string()
+            } else if filename_lower.contains("70b") {
+                "meta-llama/Llama-3.1-70B".to_string()
+            } else {
+                "meta-llama/Llama-3.1-8B".to_string()
+            }
+        } else if filename_lower.contains("llama-3") || filename_lower.contains("llama3") {
+            if filename_lower.contains("70b") {
+                "meta-llama/Meta-Llama-3-70B".to_string()
+            } else {
+                "meta-llama/Meta-Llama-3-8B".to_string()
+            }
+        } else if filename_lower.contains("llama") {
+            "meta-llama/Llama-3.1-8B".to_string()
+        }
+        // Mistral models
+        else if filename_lower.contains("mistral") {
+            if filename_lower.contains("nemo") {
+                "mistralai/Mistral-Nemo-Base-2407".to_string()
+            } else if filename_lower.contains("large") {
+                "mistralai/Mistral-Large-Instruct-2407".to_string()
+            } else {
+                "mistralai/Mistral-7B-v0.3".to_string()
+            }
+        }
+        // Gemma models
+        else if filename_lower.contains("gemma-2") || filename_lower.contains("gemma2") {
+            if filename_lower.contains("27b") {
+                "google/gemma-2-27b".to_string()
+            } else if filename_lower.contains("9b") {
+                "google/gemma-2-9b".to_string()
+            } else {
+                "google/gemma-2-2b".to_string()
+            }
+        } else if filename_lower.contains("gemma") {
+            "google/gemma-7b".to_string()
+        }
+        // Phi models
+        else if filename_lower.contains("phi-4") || filename_lower.contains("phi4") {
+            "microsoft/phi-4".to_string()
+        } else if filename_lower.contains("phi-3") || filename_lower.contains("phi3") {
+            "microsoft/Phi-3-mini-4k-instruct".to_string()
+        } else if filename_lower.contains("phi") {
+            "microsoft/phi-2".to_string()
+        }
+        // DeepSeek models
+        else if filename_lower.contains("deepseek") {
+            if filename_lower.contains("r1") {
+                "deepseek-ai/DeepSeek-R1".to_string()
+            } else if filename_lower.contains("v3") {
+                "deepseek-ai/DeepSeek-V3".to_string()
+            } else if filename_lower.contains("coder") {
+                "deepseek-ai/deepseek-coder-7b-base-v1.5".to_string()
+            } else {
+                "deepseek-ai/deepseek-llm-7b-base".to_string()
+            }
+        }
+        // Default fallback
+        else {
+            "Qwen/Qwen2.5-7B".to_string()
+        }
     }
 
     /// Get the thinking tags configuration
@@ -1481,6 +1608,11 @@ impl Agent {
             let mut accumulated_content = String::new();
             has_more_tool_calls = false;
 
+            // Track timing for stats calculation (even on cancel)
+            let stream_start_time = std::time::Instant::now();
+            let mut first_token_time: Option<std::time::Instant> = None;
+            let mut total_generated_tokens: usize = 0; // Tracks ALL tokens (thinking + completion) for tok/sec
+
             // Track thinking state
             // Start in non-thinking mode; switch to thinking when <think> is detected
             let mut in_thinking = false;
@@ -1519,15 +1651,37 @@ impl Agent {
 
                             // Send partial GenerationStats even when cancelled
                             // This ensures context tracking continues to work
+                            // Use local timing to calculate proper stats
+                            let elapsed_sec = stream_start_time.elapsed().as_secs_f32();
+                            let time_to_first = first_token_time
+                                .map(|t| t.duration_since(stream_start_time).as_secs_f32())
+                                .unwrap_or(0.0);
                             let completion_tokens = self.count_tokens(&accumulated_content);
+                            // Calculate tok/sec using ALL generated tokens (thinking + completion)
+                            let avg_tok_per_sec = if elapsed_sec > 0.0 && total_generated_tokens > 0 {
+                                total_generated_tokens as f32 / elapsed_sec
+                            } else {
+                                0.0
+                            };
                             let stats = GenerationStats {
-                                avg_completion_tok_per_sec: 0.0,
+                                avg_completion_tok_per_sec: avg_tok_per_sec,
                                 completion_tokens,
                                 prompt_tokens: prompt_token_estimate,
-                                time_to_first_token_sec: 0.0,
+                                time_to_first_token_sec: time_to_first,
                                 stop_reason: "cancelled".to_string(),
                             };
                             let _ = tx.send(AgentMessage::GenerationStats(stats));
+
+                            // Save conversation state before returning so context isn't lost
+                            // Add the partial response (if any) to preserve context
+                            let mut updated_request = current_request_builder.clone();
+                            if !accumulated_content.is_empty() {
+                                updated_request = updated_request
+                                    .add_message(TextMessageRole::Assistant, &accumulated_content);
+                            }
+                            let mut conversation_guard = self.conversation.lock().await;
+                            *conversation_guard = Some(updated_request);
+                            drop(conversation_guard);
 
                             // Send Done to finalize
                             let _ = tx.send(AgentMessage::Done);
@@ -1652,6 +1806,11 @@ impl Agent {
                                             let final_thinking = &thinking_buffer[..end_idx];
                                             if !final_thinking.is_empty() {
                                                 let token_count = self.count_tokens(final_thinking);
+                                                // Track first token time and total tokens for stats
+                                                if first_token_time.is_none() && token_count > 0 {
+                                                    first_token_time = Some(std::time::Instant::now());
+                                                }
+                                                total_generated_tokens += token_count;
                                                 let _ = tx.send(AgentMessage::ThinkingContent(
                                                     final_thinking.to_string(),
                                                     token_count,
@@ -1715,6 +1874,11 @@ impl Agent {
                                                     outbound.push_str(after_think);
                                                     accumulated_content.push_str(&outbound);
                                                     let token_count = self.count_tokens(&outbound);
+                                                    // Track first token time and total tokens for stats
+                                                    if first_token_time.is_none() && token_count > 0 {
+                                                        first_token_time = Some(std::time::Instant::now());
+                                                    }
+                                                    total_generated_tokens += token_count;
                                                     let _ = tx.send(AgentMessage::AgentResponse(
                                                         outbound,
                                                         token_count,
@@ -1746,6 +1910,11 @@ impl Agent {
                                                         {
                                                             let chunk = &remaining[..chunk_byte_end];
                                                             let token_count = self.count_tokens(chunk);
+                                                            // Track first token time and total tokens for stats
+                                                            if first_token_time.is_none() && token_count > 0 {
+                                                                first_token_time = Some(std::time::Instant::now());
+                                                            }
+                                                            total_generated_tokens += token_count;
                                                             let _ = tx.send(AgentMessage::ThinkingContent(
                                                                 chunk.to_string(),
                                                                 token_count,
@@ -1758,6 +1927,11 @@ impl Agent {
                                                             remaining = &remaining[chunk_byte_end..];
                                                         } else {
                                                             let token_count = self.count_tokens(remaining);
+                                                            // Track first token time and total tokens for stats
+                                                            if first_token_time.is_none() && token_count > 0 {
+                                                                first_token_time = Some(std::time::Instant::now());
+                                                            }
+                                                            total_generated_tokens += token_count;
                                                             let _ = tx.send(AgentMessage::ThinkingContent(
                                                                 remaining.to_string(),
                                                                 token_count,
@@ -1810,6 +1984,11 @@ impl Agent {
                                         outbound.push_str(&chunk_content);
                                         accumulated_content.push_str(&outbound);
                                         let token_count = self.count_tokens(&outbound);
+                                        // Track first token time and total tokens for stats
+                                        if first_token_time.is_none() && token_count > 0 {
+                                            first_token_time = Some(std::time::Instant::now());
+                                        }
+                                        total_generated_tokens += token_count;
                                         let _ = tx.send(AgentMessage::AgentResponse(outbound.clone(), token_count));
                                         if chunk_has_visible {
                                             final_response_started = true;
@@ -1826,6 +2005,11 @@ impl Agent {
                                     if in_thinking && !thinking_buffer.is_empty() {
                                         // Send remaining thinking content
                                         let token_count = self.count_tokens(&thinking_buffer);
+                                        // Track first token time and total tokens for stats
+                                        if first_token_time.is_none() && token_count > 0 {
+                                            first_token_time = Some(std::time::Instant::now());
+                                        }
+                                        total_generated_tokens += token_count;
                                         let _ = tx.send(AgentMessage::ThinkingContent(
                                             thinking_buffer.clone(),
                                             token_count,
@@ -1929,12 +2113,22 @@ impl Agent {
             if !pending_prefix.is_empty() {
                 accumulated_content.push_str(&pending_prefix);
                 let token_count = self.count_tokens(&pending_prefix);
+                // Track first token time and total tokens for stats
+                if first_token_time.is_none() && token_count > 0 {
+                    first_token_time = Some(std::time::Instant::now());
+                }
+                total_generated_tokens += token_count;
                 let _ = tx.send(AgentMessage::AgentResponse(pending_prefix.clone(), token_count));
             }
 
             // After stream ends, if still in thinking (no </think> found), flush residual
             if in_thinking && !thinking_buffer.is_empty() {
                 let token_count = self.count_tokens(&thinking_buffer);
+                // Track first token time and total tokens for stats
+                if first_token_time.is_none() && token_count > 0 {
+                    first_token_time = Some(std::time::Instant::now());
+                }
+                total_generated_tokens += token_count;
                 let _ = tx.send(AgentMessage::ThinkingContent(
                     thinking_buffer.clone(),
                     token_count,
