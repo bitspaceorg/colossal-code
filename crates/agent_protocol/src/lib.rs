@@ -43,9 +43,13 @@ pub mod error;
 pub use types::agent_card::{
     AgentCard, AgentCardBuilder, AgentCardSignature, AgentExtension, Skill, SecurityScheme,
 };
-pub use types::task::{Task, TaskState, TaskStatus};
+pub use types::task::{Task, TaskMetadata, TaskState, TaskStatus};
 pub use types::message::{Message, MessagePart, Role};
 pub use types::artifact::Artifact;
+pub use types::spec::{
+    FeedbackEntry, SpecSheet, SpecStep, SpecStepRef, SpecValidationError, StepStatus,
+    TaskSummary, TaskVerification, TestResult, TestRun, VerificationStatus,
+};
 pub use jsonrpc::{JsonRpcRequest, JsonRpcResponse, A2AMethod};
 pub use server::A2AServer;
 pub use client::A2AClient;

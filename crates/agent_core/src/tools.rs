@@ -18,6 +18,7 @@ pub enum ToolName {
     WebSearch,
     HtmlToText,
     TodoWrite,
+    RequestSplit,
 }
 
 /// Build a specific tool definition
@@ -433,6 +434,27 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                 }),
             },
         },
+        ToolName::RequestSplit => Tool {
+            tp: ToolType::Function,
+            function: Function {
+                name: "request_split".to_string(),
+                description: Some("Request that the orchestrator split the current spec step into smaller child steps when it is too large or ambiguous.".to_string()),
+                parameters: Some({
+                    let mut params = HashMap::new();
+                    params.insert("type".to_string(), json!("object"));
+                    params.insert(
+                        "properties".to_string(),
+                        json!({
+                            "reason": {
+                                "type": "string",
+                                "description": "Short explanation describing why a split is needed"
+                            }
+                        }),
+                    );
+                    params
+                }),
+            },
+        },
     }
 }
 
@@ -457,6 +479,7 @@ pub fn get_all_tools() -> Vec<Tool> {
         ToolName::WebSearch,
         ToolName::HtmlToText,
         ToolName::TodoWrite,
+        ToolName::RequestSplit,
     ])
 }
 
@@ -475,6 +498,7 @@ pub fn get_readonly_tools() -> Vec<Tool> {
         ToolName::WebSearch,
         ToolName::HtmlToText,
         ToolName::TodoWrite,
+        ToolName::RequestSplit,
     ])
 }
 

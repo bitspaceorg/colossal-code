@@ -3,12 +3,16 @@
 //! Tasks represent units of work that agents perform. They have a defined
 //! lifecycle with state transitions and can contain messages and artifacts.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 use super::artifact::Artifact;
 use super::message::Message;
+use super::spec::{SpecSheet, TaskSummary};
 
 /// A Task represents a unit of work being performed by an agent
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,7 +42,50 @@ pub struct Task {
 
     /// Additional metadata
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
+    pub metadata: Option<TaskMetadata>,
+}
+
+/// Structured metadata for tasks, including optional specification sheets and summaries
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskMetadata {
+    /// Serialized spec sheet associated with the task
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_sheet: Option<Value>,
+
+    /// Serialized task summary payload
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<Value>,
+
+    /// Arbitrary extension metadata preserved for forward compatibility
+    #[serde(default)]
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl TaskMetadata {
+    /// Deserialize metadata from a raw JSON value
+    pub fn from_value(value: Value) -> serde_json::Result<Self> {
+        serde_json::from_value(value)
+    }
+
+    /// Access the spec sheet as a strongly typed `SpecSheet`
+    pub fn spec_sheet(&self) -> serde_json::Result<Option<SpecSheet>> {
+        self
+            .spec_sheet
+            .clone()
+            .map(serde_json::from_value)
+            .transpose()
+    }
+
+    /// Access the task summary as a strongly typed `TaskSummary`
+    pub fn summary(&self) -> serde_json::Result<Option<TaskSummary>> {
+        self
+            .summary
+            .clone()
+            .map(serde_json::from_value)
+            .transpose()
+    }
 }
 
 /// Current status of a task
@@ -291,6 +338,8 @@ impl Default for Task {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use serde_json::json;
 
     #[test]
     fn test_task_lifecycle() {
@@ -316,5 +365,76 @@ mod tests {
 
         assert_eq!(task.status.state, TaskState::Failed);
         assert!(task.status.error.is_some());
+    }
+
+    #[test]
+    fn task_metadata_round_trips_spec_sheet_and_summary() {
+        let spec_value = json!({
+            "id": "spec-1",
+            "title": "Implement feature",
+            "description": "Steps to implement",
+            "steps": [
+                {
+                    "index": "1",
+                    "title": "Write code",
+                    "instructions": "Implement module",
+                    "acceptanceCriteria": ["tests pass"],
+                    "requiredTools": [],
+                    "constraints": [],
+                    "dependencies": [],
+                    "status": "pending"
+                }
+            ],
+            "createdBy": "agent-1",
+            "createdAt": "2024-01-01T00:00:00Z",
+            "metadata": {"priority": "high"}
+        });
+
+        let summary_value = json!({
+            "taskId": "task-99",
+            "stepIndex": "1",
+            "summaryText": "Initial implementation complete",
+            "artifactsTouched": ["src/lib.rs"],
+            "testsRun": [
+                {
+                    "name": "unit",
+                    "result": "pass",
+                    "logsPath": "logs/unit.log",
+                    "durationMs": 321
+                }
+            ],
+            "verification": {
+                "status": "passed",
+                "feedback": [
+                    {
+                        "author": "qa",
+                        "message": "Looks solid",
+                        "timestamp": "2024-01-01T00:00:00Z"
+                    }
+                ]
+            }
+        });
+
+        let metadata = TaskMetadata {
+            spec_sheet: Some(spec_value.clone()),
+            summary: Some(summary_value.clone()),
+            extra: BTreeMap::new(),
+        };
+
+        let mut task = Task::new();
+        task.metadata = Some(metadata);
+
+        let serialized = serde_json::to_value(&task).unwrap();
+        let round_trip: Task = serde_json::from_value(serialized).unwrap();
+        let metadata = round_trip.metadata.expect("metadata missing");
+
+        assert_eq!(metadata.spec_sheet.as_ref().unwrap(), &spec_value);
+        assert_eq!(metadata.summary.as_ref().unwrap(), &summary_value);
+
+        let typed_spec = metadata.spec_sheet().unwrap().unwrap();
+        assert_eq!(typed_spec.title, "Implement feature");
+
+        let typed_summary = metadata.summary().unwrap().unwrap();
+        assert_eq!(typed_summary.summary_text, "Initial implementation complete");
     }
 }

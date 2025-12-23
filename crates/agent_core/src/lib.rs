@@ -1,10 +1,15 @@
 use anyhow::Result;
+use agent_protocol::types::{
+    message::Role,
+    spec::{SpecSheet, SpecStep, StepStatus, TaskSummary, TaskVerification, TestRun, VerificationStatus},
+    task::Task,
+};
+use chrono::Utc;
 use colossal_linux_sandbox::protocol::SandboxPolicy;
 use colossal_linux_sandbox::tools::execute_tools_with_sandbox;
 use colossal_linux_sandbox::types::{ExitStatus, SessionId};
 use either::Either;
 use futures::StreamExt;
-use indexmap::IndexMap;
 use mistralrs::{
     ChatCompletionChunkResponse, Delta, Model, RequestBuilder, Response, TextMessageRole, Tool,
     ToolCallResponse, ToolChoice,
@@ -13,6 +18,7 @@ use mistralrs_core::MessageContent;
 use once_cell::sync::OnceCell;
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokenizers::Tokenizer;
@@ -27,6 +33,7 @@ pub mod thinking_summarizer;
 pub mod tools;
 pub mod web_search;
 pub mod a2a;
+pub mod orchestrator;
 
 // Global state for persistent shell session
 struct GlobalState {
@@ -676,6 +683,18 @@ async fn execute_tool_call(
                 "todos": todos
             });
             Ok(serde_json::to_string(&result)?)
+        }
+        "request_split" => {
+            let reason = arguments
+                .get("reason")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            let payload = serde_json::json!({
+                "status": "split_requested",
+                "reason": reason
+            });
+            Ok(serde_yaml::to_string(&payload)?)
         }
         _ => Ok(format!("Tool '{}' executed (not fully implemented)", name)),
     }
@@ -1511,6 +1530,59 @@ impl Agent {
         }
     }
 
+    pub fn collect_summary(&self, task: &Task) -> TaskSummary {
+        build_summary(task, None)
+    }
+
+    pub fn collect_summary_with_artifacts(
+        &self,
+        task: &Task,
+        artifacts: Option<&[String]>,
+    ) -> TaskSummary {
+        build_summary(task, artifacts)
+    }
+
+    pub async fn request_split(&self, step: &SpecStep) -> Result<SpecSheet> {
+        build_split_spec(step)
+    }
+
+    pub fn synthesize_split_summary(
+        task: &Task,
+        step: &SpecStep,
+        child_spec: &SpecSheet,
+    ) -> TaskSummary {
+        build_split_summary(task, step, child_spec)
+    }
+
+    pub async fn execute_step(&self, _step: SpecStep, _spec: &SpecSheet) -> Result<Task> {
+        Err(anyhow::anyhow!("execute_step is not implemented yet"))
+    }
+
+    pub async fn update_spec_status(
+        &self,
+        _spec: &SpecSheet,
+        _step: &SpecStep,
+        _prefix: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    pub async fn update_task_summary(&self, _summary: &TaskSummary) -> Result<()> {
+        Ok(())
+    }
+
+    pub async fn send_task_message(&self, _task_id: &str, _message: &str) -> Result<()> {
+        Ok(())
+    }
+
+    pub async fn notify_step_success(&self, _summary: &TaskSummary) -> Result<()> {
+        Ok(())
+    }
+
+    pub async fn close_task_channel(&self, _task_id: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// Convert a structured chat message field into a plain string for token estimation.
     fn message_content_to_string(value: &MessageContent) -> String {
         match value {
@@ -2242,6 +2314,248 @@ impl Agent {
 
         let _ = tx.send(AgentMessage::Done);
         Ok(())
+    }
+}
+
+fn build_summary(task: &Task, artifact_override: Option<&[String]>) -> TaskSummary {
+    let (step_index, instructions) = extract_step_context(task);
+    let artifacts = gather_artifacts(artifact_override);
+    let commands = extract_tool_commands(task);
+    let agent_response = extract_agent_message(task);
+    let command_summary = if commands.is_empty() {
+        "none".to_string()
+    } else {
+        commands.join(" | ")
+    };
+    let artifact_summary = if artifacts.is_empty() {
+        "none".to_string()
+    } else {
+        artifacts.join(", ")
+    };
+
+    let summary_text = format!(
+        "Step {step_index} summary:\nInstructions: {instructions}\nCommands: {command_summary}\nArtifacts: {artifact_summary}\nAgent result: {agent_response}"
+    );
+
+    TaskSummary {
+        task_id: task.id.clone(),
+        step_index,
+        summary_text,
+        artifacts_touched: artifacts,
+        tests_run: Vec::<TestRun>::new(),
+        verification: TaskVerification {
+            status: VerificationStatus::Pending,
+            feedback: vec![],
+        },
+    }
+}
+
+fn gather_artifacts(artifact_override: Option<&[String]>) -> Vec<String> {
+    if let Some(values) = artifact_override {
+        return values.iter().map(|value| value.to_string()).collect();
+    }
+    gather_git_changes()
+}
+
+fn gather_git_changes() -> Vec<String> {
+    match Command::new("git").args(["status", "--short"]).output() {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout
+                .lines()
+                .filter_map(|line| {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        return None;
+                    }
+                    let path = if trimmed.len() > 3 {
+                        trimmed[3..].trim()
+                    } else {
+                        trimmed
+                    };
+                    if path.is_empty() {
+                        None
+                    } else {
+                        Some(path.to_string())
+                    }
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn extract_tool_commands(task: &Task) -> Vec<String> {
+    task
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.extra.get("toolLog"))
+        .and_then(|value| value.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let name = entry
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("tool");
+                    let args = entry
+                        .get("arguments")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("{}");
+                    let result = entry
+                        .get("result")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    let mut line = format!("{} -> {}", name, args);
+                    if !result.is_empty() {
+                        line.push_str(&format!(" = {}", result));
+                    }
+                    Some(line)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn extract_agent_message(task: &Task) -> String {
+    task
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::Agent)
+        .map(|message| message.text_content())
+        .unwrap_or_else(|| "No agent response".to_string())
+}
+
+fn extract_step_context(task: &Task) -> (String, String) {
+    if let Some(metadata) = &task.metadata {
+        let index = metadata
+            .extra
+            .get("stepIndex")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let instructions = metadata
+            .extra
+            .get("stepInstructions")
+            .and_then(|value| value.as_str())
+            .unwrap_or("(no instructions)")
+            .to_string();
+        return (index, instructions);
+    }
+    ("unknown".to_string(), "(no instructions)".to_string())
+}
+
+fn build_split_spec(step: &SpecStep) -> Result<SpecSheet> {
+    let created_at = Utc::now();
+    let mut child_steps: Vec<SpecStep> = step
+        .instructions
+        .split(|ch| ch == '\n')
+        .map(|fragment| fragment.trim())
+        .filter(|fragment| !fragment.is_empty())
+        .enumerate()
+        .map(|(idx, fragment)| SpecStep {
+            index: (idx + 1).to_string(),
+            title: format!("{} - subtask {}", step.title, idx + 1),
+            instructions: fragment.to_string(),
+            acceptance_criteria: Vec::new(),
+            required_tools: Vec::new(),
+            constraints: Vec::new(),
+            dependencies: Vec::new(),
+            status: StepStatus::Pending,
+            sub_spec: None,
+            completed_at: None,
+        })
+        .collect();
+
+    if child_steps.is_empty() {
+        child_steps.push(SpecStep {
+            index: "1".to_string(),
+            title: format!("{} - detail", step.title),
+            instructions: step.instructions.clone(),
+            acceptance_criteria: Vec::new(),
+            required_tools: Vec::new(),
+            constraints: Vec::new(),
+            dependencies: Vec::new(),
+            status: StepStatus::Pending,
+            sub_spec: None,
+            completed_at: None,
+        });
+    }
+
+    let child_spec = SpecSheet {
+        id: format!("{}::split", step.index),
+        title: format!("{} (split)", step.title),
+        description: format!("Split from parent step {}", step.index),
+        steps: child_steps,
+        created_by: "nite-agent".to_string(),
+        created_at,
+        metadata: json!({"source": "split"}),
+    };
+
+    child_spec.validate()?;
+    Ok(child_spec)
+}
+
+fn build_split_summary(task: &Task, step: &SpecStep, child: &SpecSheet) -> TaskSummary {
+    TaskSummary {
+        task_id: task.id.clone(),
+        step_index: step.index.clone(),
+        summary_text: format!(
+            "Step {} split into spec {} with {} steps",
+            step.index,
+            child.id,
+            child.steps.len()
+        ),
+        artifacts_touched: Vec::new(),
+        tests_run: Vec::new(),
+        verification: TaskVerification {
+            status: VerificationStatus::Pending,
+            feedback: vec![],
+        },
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+    use agent_protocol::types::message::{Message, Role};
+    use agent_protocol::types::task::TaskMetadata;
+
+    #[test]
+    fn summary_includes_commands_and_artifacts() {
+        let mut task = Task::new();
+        task.id = "task-1".to_string();
+        let mut agent_msg = Message::agent("Done".to_string());
+        agent_msg.role = Role::Agent;
+        agent_msg.task_id = Some(task.id.clone());
+        task.messages.push(agent_msg);
+
+        let mut metadata = TaskMetadata::default();
+        metadata
+            .extra
+            .insert("stepIndex".to_string(), json!("1"));
+        metadata
+            .extra
+            .insert("stepInstructions".to_string(), json!("Implement feature"));
+        metadata.extra.insert(
+            "toolLog".to_string(),
+            json!([
+                {
+                    "name": "exec_command",
+                    "arguments": "cargo test",
+                    "result": "ok"
+                }
+            ]),
+        );
+        task.metadata = Some(metadata);
+
+        let summary = build_summary(&task, Some(&["src/lib.rs".into()]));
+        assert!(summary.summary_text.contains("Implement feature"));
+        assert!(summary.summary_text.contains("cargo test"));
+        assert_eq!(summary.artifacts_touched, vec!["src/lib.rs".to_string()]);
+        serde_json::to_string(&summary).expect("summary serializes");
     }
 }
 

@@ -5,3 +5,4 @@ pub mod task;
 pub mod message;
 pub mod artifact;
 pub mod push_notification;
+pub mod spec;

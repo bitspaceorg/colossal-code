@@ -1,0 +1,22 @@
+{
+  "smollm2-summarizer": {
+    "GGUF": {
+      "tok_model_id": "HuggingFaceTB/SmolLM2-135M-Instruct",
+      "quantized_model_id": "/home/wise/.config/.nite/models",
+      "quantized_filename": "smollm2_reasoning_summarizer.gguf",
+      "dtype": "auto",
+      "max_seq_len": 800,
+      "max_batch_size": 1
+    }
+  },
+  "functiongemma": {
+    "GGUF": {
+      "tok_model_id": "Qwen/Qwen3-4B",
+      "quantized_model_id": "/home/wise/.config/.nite/models",
+      "quantized_filename": "Qwen3-4B-Q8_0.gguf",
+      "dtype": "auto",
+      "max_seq_len": 32768,
+      "max_batch_size": 1
+    }
+  }
+}

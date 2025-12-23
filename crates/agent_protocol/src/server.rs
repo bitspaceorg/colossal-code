@@ -25,6 +25,7 @@ use crate::jsonrpc::{
 };
 use crate::types::agent_card::AgentCard;
 use crate::types::message::{Message, SendMessageParams};
+use crate::types::spec::SpecStepRef;
 use crate::types::task::Task;
 use crate::AGENT_CARD_PATH;
 
@@ -34,7 +35,12 @@ use crate::AGENT_CARD_PATH;
 #[async_trait]
 pub trait A2AHandler: Send + Sync + 'static {
     /// Handle an incoming message and return a task
-    async fn handle_message(&self, message: Message, task_id: Option<String>) -> A2AResult<Task>;
+    async fn handle_message(
+        &self,
+        message: Message,
+        task_id: Option<String>,
+        spec_step: Option<SpecStepRef>,
+    ) -> A2AResult<Task>;
 
     /// Handle a streaming message request
     /// Returns a stream of events for SSE
@@ -42,6 +48,7 @@ pub trait A2AHandler: Send + Sync + 'static {
         &self,
         message: Message,
         task_id: Option<String>,
+        spec_step: Option<SpecStepRef>,
     ) -> A2AResult<mpsc::Receiver<StreamEvent>>;
 
     /// Get a task by ID
@@ -198,7 +205,7 @@ async fn handle_send_message<H: A2AHandler>(
 
     match state
         .handler
-        .handle_message(params.message, None)
+        .handle_message(params.message, None, params.spec_step)
         .await
     {
         Ok(task) => Json(JsonRpcResponse::task(task, request.id)).into_response(),
@@ -218,7 +225,7 @@ async fn handle_streaming_message<H: A2AHandler>(
 
     match state
         .handler
-        .handle_streaming_message(params.message, None)
+        .handle_streaming_message(params.message, None, params.spec_step)
         .await
     {
         Ok(rx) => create_sse_response(rx).into_response(),
@@ -400,7 +407,12 @@ mod tests {
 
     #[async_trait]
     impl A2AHandler for TestHandler {
-        async fn handle_message(&self, message: Message, _task_id: Option<String>) -> A2AResult<Task> {
+        async fn handle_message(
+            &self,
+            message: Message,
+            _task_id: Option<String>,
+            _spec_step: Option<SpecStepRef>,
+        ) -> A2AResult<Task> {
             let mut task = Task::new();
             task.add_message(message);
             task.add_message(Message::agent("Hello from test handler!"));
@@ -412,9 +424,10 @@ mod tests {
             &self,
             message: Message,
             task_id: Option<String>,
+            spec_step: Option<SpecStepRef>,
         ) -> A2AResult<mpsc::Receiver<StreamEvent>> {
             let (tx, rx) = mpsc::channel(10);
-            let task = self.handle_message(message, task_id).await?;
+            let task = self.handle_message(message, task_id, spec_step).await?;
             tokio::spawn(async move {
                 let _ = tx.send(StreamEvent::task(task)).await;
             });

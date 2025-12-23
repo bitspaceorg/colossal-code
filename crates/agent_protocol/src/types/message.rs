@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::spec::SpecStepRef;
+
 /// A message exchanged between agents
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -279,6 +281,11 @@ impl MessagePart {
 pub struct SendMessageParams {
     /// The message to send
     pub message: Message,
+
+    /// Optional reference to the spec step this message is addressing
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub spec_step: Option<SpecStepRef>,
 
     /// Configuration for this request
     #[serde(skip_serializing_if = "Option::is_none")]

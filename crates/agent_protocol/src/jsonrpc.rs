@@ -166,6 +166,7 @@ impl JsonRpcRequest {
     pub fn send_message(message: Message, id: impl Into<RequestId>) -> Self {
         let params = SendMessageParams {
             message,
+            spec_step: None,
             configuration: None,
         };
         Self::new(
@@ -179,6 +180,7 @@ impl JsonRpcRequest {
     pub fn send_streaming_message(message: Message, id: impl Into<RequestId>) -> Self {
         let params = SendMessageParams {
             message,
+            spec_step: None,
             configuration: None,
         };
         Self::new(
