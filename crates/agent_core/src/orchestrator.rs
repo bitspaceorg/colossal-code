@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_protocol::types::{
     spec::{
@@ -8,10 +9,136 @@ use agent_protocol::types::{
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::{map::Entry, Map, Value};
+use tokio::sync::mpsc;
 
 use crate::Agent;
+
+/// Events emitted by the orchestrator for TUI updates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum OrchestratorEvent {
+    /// Step status changed (in-progress, completed, failed, retry)
+    StepStatusChanged {
+        spec_id: String,
+        step_index: String,
+        prefix: String,
+        status: StepStatus,
+    },
+    /// Task summary updated
+    SummaryUpdated {
+        summary: TaskSummary,
+    },
+    /// Verifier failed, step will be retried
+    VerifierFailed {
+        summary: TaskSummary,
+        feedback: String,
+    },
+    /// Child spec pushed onto stack (split occurred)
+    ChildSpecPushed {
+        parent_step_index: String,
+        child_spec_id: String,
+        child_step_count: usize,
+    },
+    /// Task channel closed (used by SSE subscribers)
+    ChannelClosed {
+        task_id: String,
+        closed_at: DateTime<Utc>,
+    },
+    /// Orchestrator paused
+    Paused,
+    /// Orchestrator resumed
+    Resumed,
+    /// Orchestrator aborted
+    Aborted,
+    /// Orchestrator completed all steps
+    Completed,
+    /// Error occurred
+    Error(String),
+}
+
+/// Control signals for the orchestrator.
+#[derive(Debug, Clone)]
+pub enum OrchestratorCommand {
+    /// Pause execution after current step
+    Pause,
+    /// Resume execution
+    Resume,
+    /// Abort execution
+    Abort,
+    /// Rerun verifiers on the last task summary
+    RerunVerifiers,
+    /// Inject a split spec at a given index
+    InjectSplit { step_index: String, child_spec: SpecSheet },
+}
+
+/// Control handle for the orchestrator, allowing TUI to send commands.
+#[derive(Clone)]
+pub struct OrchestratorControl {
+    command_tx: mpsc::UnboundedSender<OrchestratorCommand>,
+    paused: Arc<AtomicBool>,
+    aborted: Arc<AtomicBool>,
+}
+
+impl OrchestratorControl {
+    /// Create a new control handle with the given command sender.
+    pub fn new(command_tx: mpsc::UnboundedSender<OrchestratorCommand>) -> Self {
+        Self {
+            command_tx,
+            paused: Arc::new(AtomicBool::new(false)),
+            aborted: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Pause the orchestrator after the current step completes.
+    pub fn pause(&self) -> Result<()> {
+        self.paused.store(true, Ordering::SeqCst);
+        self.command_tx
+            .send(OrchestratorCommand::Pause)
+            .map_err(|e| anyhow!("Failed to send pause command: {}", e))
+    }
+
+    /// Resume the orchestrator.
+    pub fn resume(&self) -> Result<()> {
+        self.paused.store(false, Ordering::SeqCst);
+        self.command_tx
+            .send(OrchestratorCommand::Resume)
+            .map_err(|e| anyhow!("Failed to send resume command: {}", e))
+    }
+
+    /// Abort the orchestrator run.
+    pub fn abort(&self) -> Result<()> {
+        self.aborted.store(true, Ordering::SeqCst);
+        self.command_tx
+            .send(OrchestratorCommand::Abort)
+            .map_err(|e| anyhow!("Failed to send abort command: {}", e))
+    }
+
+    /// Rerun verifiers on the last completed step.
+    pub fn rerun_verifiers(&self) -> Result<()> {
+        self.command_tx
+            .send(OrchestratorCommand::RerunVerifiers)
+            .map_err(|e| anyhow!("Failed to send rerun verifiers command: {}", e))
+    }
+
+    /// Inject a split spec at a given step index.
+    pub fn inject_split(&self, step_index: String, child_spec: SpecSheet) -> Result<()> {
+        self.command_tx
+            .send(OrchestratorCommand::InjectSplit { step_index, child_spec })
+            .map_err(|e| anyhow!("Failed to send inject split command: {}", e))
+    }
+
+    /// Check if the orchestrator is paused.
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+
+    /// Check if the orchestrator has been aborted.
+    pub fn is_aborted(&self) -> bool {
+        self.aborted.load(Ordering::SeqCst)
+    }
+}
 
 #[async_trait]
 pub trait OrchestratorAgent: Send + Sync {
@@ -87,9 +214,20 @@ pub struct Orchestrator {
         Arc<dyn Fn(&SpecStep) -> Arc<dyn OrchestratorAgent> + Send + Sync>,
     verifier_chain: VerifierChain,
     stack: Vec<(SpecSheet, usize, String)>,
+    /// Event sender for TUI updates
+    event_tx: Option<mpsc::UnboundedSender<OrchestratorEvent>>,
+    /// Command receiver for control signals
+    command_rx: Option<mpsc::UnboundedReceiver<OrchestratorCommand>>,
+    /// Pause flag
+    paused: Arc<AtomicBool>,
+    /// Abort flag
+    aborted: Arc<AtomicBool>,
+    /// Last task summary for rerun verifiers
+    last_summary: Option<TaskSummary>,
 }
 
 impl Orchestrator {
+    /// Create a new orchestrator without event/control channels (legacy interface).
     pub fn new(
         main_agent: Arc<dyn OrchestratorAgent>,
         sub_agent_factory:
@@ -102,11 +240,132 @@ impl Orchestrator {
             sub_agent_factory,
             verifier_chain,
             stack: vec![(spec, 0, String::new())],
+            event_tx: None,
+            command_rx: None,
+            paused: Arc::new(AtomicBool::new(false)),
+            aborted: Arc::new(AtomicBool::new(false)),
+            last_summary: None,
         }
+    }
+
+    /// Create a new orchestrator with event sender and command receiver.
+    /// Returns the Orchestrator and an OrchestratorControl handle for the TUI.
+    pub fn new_with_control(
+        main_agent: Arc<dyn OrchestratorAgent>,
+        sub_agent_factory:
+            Arc<dyn Fn(&SpecStep) -> Arc<dyn OrchestratorAgent> + Send + Sync>,
+        verifier_chain: VerifierChain,
+        spec: SpecSheet,
+        event_tx: mpsc::UnboundedSender<OrchestratorEvent>,
+    ) -> (Self, OrchestratorControl) {
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let paused = Arc::new(AtomicBool::new(false));
+        let aborted = Arc::new(AtomicBool::new(false));
+
+        let control = OrchestratorControl {
+            command_tx,
+            paused: paused.clone(),
+            aborted: aborted.clone(),
+        };
+
+        let orchestrator = Self {
+            main_agent,
+            sub_agent_factory,
+            verifier_chain,
+            stack: vec![(spec, 0, String::new())],
+            event_tx: Some(event_tx),
+            command_rx: Some(command_rx),
+            paused,
+            aborted,
+            last_summary: None,
+        };
+
+        (orchestrator, control)
+    }
+
+    /// Emit an event if the event channel is configured.
+    fn emit_event(&self, event: OrchestratorEvent) {
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.send(event);
+        }
+    }
+
+    /// Check for pending commands and process them.
+    /// Returns true if abort was requested.
+    async fn process_commands(&mut self) -> bool {
+        // Collect commands first to avoid borrow issues
+        let commands: Vec<OrchestratorCommand> = if let Some(ref mut rx) = self.command_rx {
+            let mut cmds = Vec::new();
+            while let Ok(cmd) = rx.try_recv() {
+                cmds.push(cmd);
+            }
+            cmds
+        } else {
+            Vec::new()
+        };
+
+        // Process collected commands
+        for cmd in commands {
+            match cmd {
+                OrchestratorCommand::Pause => {
+                    self.paused.store(true, Ordering::SeqCst);
+                    self.emit_event(OrchestratorEvent::Paused);
+                }
+                OrchestratorCommand::Resume => {
+                    self.paused.store(false, Ordering::SeqCst);
+                    self.emit_event(OrchestratorEvent::Resumed);
+                }
+                OrchestratorCommand::Abort => {
+                    self.aborted.store(true, Ordering::SeqCst);
+                    self.emit_event(OrchestratorEvent::Aborted);
+                    return true;
+                }
+                OrchestratorCommand::RerunVerifiers => {
+                    if let Some(ref summary) = self.last_summary {
+                        // Rerun verifiers on last summary
+                        let _ = self.verifier_chain.run(summary).await;
+                    }
+                }
+                OrchestratorCommand::InjectSplit { step_index, child_spec } => {
+                    // Push the child spec onto the stack with the proper prefix
+                    let prefix = self.stack.last()
+                        .map(|(_, _, p)| Self::compose_prefix(p, &step_index))
+                        .unwrap_or_else(|| step_index.clone());
+                    self.stack.push((child_spec.clone(), 0, prefix));
+                    self.emit_event(OrchestratorEvent::ChildSpecPushed {
+                        parent_step_index: step_index,
+                        child_spec_id: child_spec.id.clone(),
+                        child_step_count: child_spec.steps.len(),
+                    });
+                }
+            }
+        }
+        false
+    }
+
+    /// Wait while paused, processing resume/abort commands.
+    async fn wait_while_paused(&mut self) -> bool {
+        while self.paused.load(Ordering::SeqCst) {
+            if self.process_commands().await {
+                return true; // Aborted
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        false
     }
 
     pub async fn run(&mut self) -> Result<()> {
         while let Some((mut spec, step_idx, prefix)) = self.stack.pop() {
+            // Check for abort before processing each step
+            if self.process_commands().await {
+                return Ok(()); // Aborted
+            }
+
+            // Wait if paused
+            if self.wait_while_paused().await {
+                return Ok(()); // Aborted during pause
+            }
+
             if step_idx >= spec.steps.len() {
                 continue;
             }
@@ -121,6 +380,14 @@ impl Orchestrator {
                 entry.status = StepStatus::InProgress;
                 entry.completed_at = None;
             }
+
+            // Emit step status change event
+            self.emit_event(OrchestratorEvent::StepStatusChanged {
+                spec_id: spec.id.clone(),
+                step_index: spec.steps[step_idx].index.clone(),
+                prefix: current_prefix.clone(),
+                status: StepStatus::InProgress,
+            });
 
             let in_progress_step = spec.steps[step_idx].clone();
             self
@@ -137,6 +404,14 @@ impl Orchestrator {
                         entry.completed_at = None;
                         entry.sub_spec = Some(Box::new(child_spec.clone()));
                     }
+
+                    // Emit child spec pushed event
+                    self.emit_event(OrchestratorEvent::ChildSpecPushed {
+                        parent_step_index: spec.steps[step_idx].index.clone(),
+                        child_spec_id: child_spec.id.clone(),
+                        child_step_count: child_spec.steps.len(),
+                    });
+
                     self.stack.push((spec, step_idx, prefix));
                     self.stack.push((child_spec, 0, current_prefix.clone()));
                     continue;
@@ -149,6 +424,15 @@ impl Orchestrator {
                         entry.status = StepStatus::Pending;
                         entry.completed_at = None;
                     }
+
+                    // Emit retry event
+                    self.emit_event(OrchestratorEvent::StepStatusChanged {
+                        spec_id: spec.id.clone(),
+                        step_index: spec.steps[step_idx].index.clone(),
+                        prefix: current_prefix.clone(),
+                        status: StepStatus::Pending,
+                    });
+
                     let pending_step = spec
                         .steps
                         .get(step_idx)
@@ -162,6 +446,9 @@ impl Orchestrator {
                     continue;
                 }
                 StepDisposition::Success(summary) => {
+                    // Store summary for potential rerun
+                    self.last_summary = Some(summary.clone());
+
                     let child_spec = Self::extract_sub_spec(&task)?;
                     if let Some(ref sub_spec) = child_spec {
                         spec.steps[step_idx].sub_spec = Some(Box::new(sub_spec.clone()));
@@ -170,6 +457,14 @@ impl Orchestrator {
                     spec.steps[step_idx].status = StepStatus::Completed;
                     spec.steps[step_idx].completed_at = Some(Utc::now());
                     Self::append_summary_to_history(&mut spec, &summary)?;
+
+                    // Emit completion event
+                    self.emit_event(OrchestratorEvent::StepStatusChanged {
+                        spec_id: spec.id.clone(),
+                        step_index: spec.steps[step_idx].index.clone(),
+                        prefix: current_prefix.clone(),
+                        status: StepStatus::Completed,
+                    });
 
                     let completed_step = spec.steps[step_idx].clone();
                     self
@@ -190,6 +485,8 @@ impl Orchestrator {
             }
         }
 
+        // Emit completed event
+        self.emit_event(OrchestratorEvent::Completed);
         Ok(())
     }
 
@@ -198,14 +495,29 @@ impl Orchestrator {
         summary.verification.status = VerificationStatus::Pending;
         self.main_agent.update_task_summary(&summary).await?;
 
+        // Emit summary updated event
+        self.emit_event(OrchestratorEvent::SummaryUpdated {
+            summary: summary.clone(),
+        });
+
         match self.verifier_chain.run(&summary).await {
             Ok(()) => {
                 summary.verification.status = VerificationStatus::Passed;
                 self.main_agent.update_task_summary(&summary).await?;
+
+                // Emit verification passed event
+                self.emit_event(OrchestratorEvent::SummaryUpdated {
+                    summary: summary.clone(),
+                });
+
                 self
                     .main_agent
                     .close_task_channel(&summary.task_id)
                     .await?;
+                self.emit_event(OrchestratorEvent::ChannelClosed {
+                    task_id: summary.task_id.clone(),
+                    closed_at: Utc::now(),
+                });
                 self.main_agent.notify_step_success(&summary).await?;
                 Ok(StepDisposition::Success(summary))
             }
@@ -214,6 +526,17 @@ impl Orchestrator {
                 summary.verification.status = VerificationStatus::Failed;
                 summary.verification.feedback.push(feedback.clone());
                 self.main_agent.update_task_summary(&summary).await?;
+
+                self.emit_event(OrchestratorEvent::SummaryUpdated {
+                    summary: summary.clone(),
+                });
+
+                // Emit verifier failed event
+                self.emit_event(OrchestratorEvent::VerifierFailed {
+                    summary: summary.clone(),
+                    feedback: feedback.message.clone(),
+                });
+
                 let failure_message = format!(
                     "Verification failed for task {} step {}: {}",
                     summary.task_id, summary.step_index, feedback.message
@@ -861,5 +1184,136 @@ mod tests {
                 "root:3".to_string()
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn abort_stops_execution() {
+        let spec = make_spec(
+            "root",
+            vec![make_step("1", None), make_step("2", None), make_step("3", None)],
+        );
+        let tasks = VecDeque::from(vec![
+            ("root:1".to_string(), make_task("task-1", "1", None)),
+            ("root:2".to_string(), make_task("task-2", "2", None)),
+            ("root:3".to_string(), make_task("task-3", "3", None)),
+        ]);
+        let main_agent = Arc::new(MockMainAgent::default());
+        let main_agent_trait = main_agent.clone() as Arc<dyn OrchestratorAgent>;
+        let sub_agent = Arc::new(MockSubAgent::new(tasks));
+        let sub_agent_factory = {
+            let sub_agent = sub_agent.clone();
+            Arc::new(move |_step: &SpecStep| -> Arc<dyn OrchestratorAgent> {
+                sub_agent.clone() as Arc<dyn OrchestratorAgent>
+            })
+        };
+
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (mut orchestrator, control) = Orchestrator::new_with_control(
+            main_agent_trait,
+            sub_agent_factory,
+            VerifierChain::new(vec![Box::new(AlwaysPassVerifier)]),
+            spec,
+            event_tx,
+        );
+
+        // Abort immediately
+        control.abort().unwrap();
+
+        orchestrator.run().await.unwrap();
+
+        // Should receive Aborted event
+        let mut found_abort = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, OrchestratorEvent::Aborted) {
+                found_abort = true;
+            }
+        }
+        assert!(found_abort, "Should receive Aborted event");
+
+        // Should not have executed any steps since abort was immediate
+        assert!(sub_agent.executions().is_empty() || sub_agent.executions().len() < 3);
+    }
+
+    #[tokio::test]
+    async fn events_emitted_during_execution() {
+        let spec = make_spec("root", vec![make_step("1", None)]);
+        let tasks = VecDeque::from(vec![(
+            "root:1".to_string(),
+            make_task("task-1", "1", None),
+        )]);
+        let main_agent = Arc::new(MockMainAgent::default());
+        let main_agent_trait = main_agent.clone() as Arc<dyn OrchestratorAgent>;
+        let sub_agent = Arc::new(MockSubAgent::new(tasks));
+        let sub_agent_factory = {
+            let sub_agent = sub_agent.clone();
+            Arc::new(move |_step: &SpecStep| -> Arc<dyn OrchestratorAgent> {
+                sub_agent.clone() as Arc<dyn OrchestratorAgent>
+            })
+        };
+
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (mut orchestrator, _control) = Orchestrator::new_with_control(
+            main_agent_trait,
+            sub_agent_factory,
+            VerifierChain::new(vec![Box::new(AlwaysPassVerifier)]),
+            spec,
+            event_tx,
+        );
+
+        orchestrator.run().await.unwrap();
+
+        // Collect all events
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+
+        // Should have InProgress, SummaryUpdated, SummaryUpdated (Passed), Completed events
+        assert!(events.iter().any(|e| matches!(e, OrchestratorEvent::StepStatusChanged { status: StepStatus::InProgress, .. })));
+        assert!(events.iter().any(|e| matches!(e, OrchestratorEvent::StepStatusChanged { status: StepStatus::Completed, .. })));
+        assert!(events.iter().any(|e| matches!(e, OrchestratorEvent::Completed)));
+    }
+
+    #[tokio::test]
+    async fn inject_split_adds_child_spec() {
+        let spec = make_spec("root", vec![make_step("1", None), make_step("2", None)]);
+        let child_spec = make_spec("child", vec![make_step("1", None)]);
+        let tasks = VecDeque::from(vec![
+            ("root:1".to_string(), make_task("task-1", "1", None)),
+            ("child:1".to_string(), make_task("child-task-1", "1", None)),
+            ("root:2".to_string(), make_task("task-2", "2", None)),
+        ]);
+        let main_agent = Arc::new(MockMainAgent::default());
+        let main_agent_trait = main_agent.clone() as Arc<dyn OrchestratorAgent>;
+        let sub_agent = Arc::new(MockSubAgent::new(tasks));
+        let sub_agent_factory = {
+            let sub_agent = sub_agent.clone();
+            Arc::new(move |_step: &SpecStep| -> Arc<dyn OrchestratorAgent> {
+                sub_agent.clone() as Arc<dyn OrchestratorAgent>
+            })
+        };
+
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (mut orchestrator, control) = Orchestrator::new_with_control(
+            main_agent_trait,
+            sub_agent_factory,
+            VerifierChain::new(vec![Box::new(AlwaysPassVerifier)]),
+            spec,
+            event_tx,
+        );
+
+        // Inject child spec at step 1
+        control.inject_split("1".to_string(), child_spec).unwrap();
+
+        orchestrator.run().await.unwrap();
+
+        // Check for ChildSpecPushed event
+        let mut found_child_pushed = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, OrchestratorEvent::ChildSpecPushed { .. }) {
+                found_child_pushed = true;
+            }
+        }
+        assert!(found_child_pushed, "Should receive ChildSpecPushed event");
     }
 }

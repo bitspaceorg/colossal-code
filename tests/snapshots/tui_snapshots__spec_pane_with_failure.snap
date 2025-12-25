@@ -1,0 +1,14 @@
+---
+source: tests/tui_snapshots.rs
+expression: output
+---
+╭ Spec Sheet (S to close) ───────────────────────╮
+│📋  Spec with Failed Step                        │
+│  ● 0: Successful step                          │
+│  ✗ 1: Failed step                              │
+│  ○ 2: Pending step                             │
+│                                                │
+│                                                │
+│                                                │
+│                                                │
+╰────────────────────────────────────────────────╯

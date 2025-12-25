@@ -1,7 +1,8 @@
 use anyhow::Result;
+// Re-export spec types from agent_protocol for convenience
+pub use agent_protocol::types::spec::{SpecSheet, SpecStep, StepStatus, TaskSummary, TaskVerification, TestRun, VerificationStatus};
 use agent_protocol::types::{
     message::Role,
-    spec::{SpecSheet, SpecStep, StepStatus, TaskSummary, TaskVerification, TestRun, VerificationStatus},
     task::Task,
 };
 use chrono::Utc;
@@ -18,6 +19,7 @@ use mistralrs_core::MessageContent;
 use once_cell::sync::OnceCell;
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1583,6 +1585,60 @@ impl Agent {
         Ok(())
     }
 
+    /// Create a new SpecSheet from either a path to a JSON file or a goal string.
+    ///
+    /// If `path_or_goal` points to an existing file, the SpecSheet is loaded from that file.
+    /// Otherwise, it is treated as a goal description and a new SpecSheet is generated
+    /// with the goal parsed into steps (each line becomes a step).
+    ///
+    /// # Arguments
+    /// * `path_or_goal` - Either a path to a JSON file containing a SpecSheet, or a goal description
+    ///
+    /// # Returns
+    /// A Result containing the loaded or generated SpecSheet
+    pub fn create_spec_sheet(&self, path_or_goal: &str) -> Result<SpecSheet> {
+        let path = Path::new(path_or_goal);
+
+        // If it's an existing file, try to load it
+        if path.exists() && path.is_file() {
+            let content = std::fs::read_to_string(path)?;
+            let spec: SpecSheet = serde_json::from_str(&content)?;
+            spec.validate().map_err(|e| anyhow::anyhow!("{}", e))?;
+            return Ok(spec);
+        }
+
+        // Otherwise, treat it as a goal and generate a SpecSheet
+        build_spec_from_goal(path_or_goal)
+    }
+
+    /// Create a new SpecSheet from a goal string asynchronously.
+    /// This variant allows for more complex goal parsing in the future.
+    pub async fn create_spec_sheet_async(&self, path_or_goal: &str) -> Result<SpecSheet> {
+        self.create_spec_sheet(path_or_goal)
+    }
+
+    /// Validate a step index against a SpecSheet.
+    /// Returns Ok(()) if the index is valid, or an error describing the issue.
+    pub fn validate_step_index(&self, spec: &SpecSheet, index: &str) -> Result<()> {
+        // Check if index exists in the spec steps
+        let valid = spec.steps.iter().any(|step| step.index == index);
+        if !valid {
+            let valid_indices: Vec<&str> = spec.steps.iter().map(|s| s.index.as_str()).collect();
+            return Err(anyhow::anyhow!(
+                "Invalid step index '{}'. Valid indices are: {:?}",
+                index,
+                valid_indices
+            ));
+        }
+        Ok(())
+    }
+
+    /// Get the current spec status as a JSON snapshot.
+    /// Returns serialized SpecSheet with current step statuses and history.
+    pub fn get_spec_status(&self, spec: &SpecSheet) -> Result<String> {
+        serde_json::to_string_pretty(spec).map_err(|e| anyhow::anyhow!("Failed to serialize spec: {}", e))
+    }
+
     /// Convert a structured chat message field into a plain string for token estimation.
     fn message_content_to_string(value: &MessageContent) -> String {
         match value {
@@ -2514,6 +2570,102 @@ fn build_split_summary(task: &Task, step: &SpecStep, child: &SpecSheet) -> TaskS
             status: VerificationStatus::Pending,
             feedback: vec![],
         },
+    }
+}
+
+/// Build a SpecSheet from a goal description string.
+/// Each non-empty line in the goal becomes a separate step.
+/// If the goal is a single line, it becomes a single-step spec.
+fn build_spec_from_goal(goal: &str) -> Result<SpecSheet> {
+    let created_at = Utc::now();
+    let spec_id = format!("spec-{}", created_at.timestamp_millis());
+
+    // Parse goal into steps - each non-empty line becomes a step
+    let lines: Vec<&str> = goal
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    // Create steps from lines
+    let steps: Vec<SpecStep> = if lines.is_empty() {
+        // If no lines, use the entire goal as a single step
+        vec![SpecStep {
+            index: "1".to_string(),
+            title: truncate_title(goal, 50),
+            instructions: goal.to_string(),
+            acceptance_criteria: Vec::new(),
+            required_tools: Vec::new(),
+            constraints: Vec::new(),
+            dependencies: Vec::new(),
+            status: StepStatus::Pending,
+            sub_spec: None,
+            completed_at: None,
+        }]
+    } else if lines.len() == 1 {
+        // Single line goal
+        vec![SpecStep {
+            index: "1".to_string(),
+            title: truncate_title(lines[0], 50),
+            instructions: lines[0].to_string(),
+            acceptance_criteria: Vec::new(),
+            required_tools: Vec::new(),
+            constraints: Vec::new(),
+            dependencies: Vec::new(),
+            status: StepStatus::Pending,
+            sub_spec: None,
+            completed_at: None,
+        }]
+    } else {
+        // Multiple lines - first line is title/description, rest are steps
+        lines
+            .iter()
+            .enumerate()
+            .map(|(idx, line)| SpecStep {
+                index: (idx + 1).to_string(),
+                title: truncate_title(line, 50),
+                instructions: line.to_string(),
+                acceptance_criteria: Vec::new(),
+                required_tools: Vec::new(),
+                constraints: Vec::new(),
+                dependencies: if idx > 0 {
+                    vec![idx.to_string()] // Each step depends on the previous
+                } else {
+                    Vec::new()
+                },
+                status: StepStatus::Pending,
+                sub_spec: None,
+                completed_at: None,
+            })
+            .collect()
+    };
+
+    let title = if lines.is_empty() {
+        truncate_title(goal, 80)
+    } else {
+        truncate_title(lines[0], 80)
+    };
+
+    let spec = SpecSheet {
+        id: spec_id,
+        title,
+        description: goal.to_string(),
+        steps,
+        created_by: "cli".to_string(),
+        created_at,
+        metadata: json!({}),
+    };
+
+    spec.validate().map_err(|e| anyhow::anyhow!("{}", e))?;
+    Ok(spec)
+}
+
+/// Truncate a string to a maximum length, adding "..." if truncated.
+fn truncate_title(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
     }
 }
 

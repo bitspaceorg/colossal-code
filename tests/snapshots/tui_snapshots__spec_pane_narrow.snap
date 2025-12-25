@@ -1,0 +1,14 @@
+---
+source: tests/tui_snapshots.rs
+expression: output
+---
+╭ Spec Sheet (S to close) ───╮
+│📋  Test Specification:      │
+│  ● 0: Step 1: Implementa   │
+│  ◐ 1: Step 2: Implementa   │
+│  ○ 2: Step 3: Implementa   │
+│                            │
+│                            │
+│                            │
+│                            │
+╰────────────────────────────╯

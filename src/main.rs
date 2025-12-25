@@ -1,4 +1,10 @@
-use agent_core::{Agent, AgentMessage, GenerationStats as AgentGenerationStats};
+use agent_core::{
+    Agent, AgentMessage, GenerationStats as AgentGenerationStats, SpecSheet, SpecStep, StepStatus,
+    TaskSummary, VerificationStatus,
+    orchestrator::{
+        Orchestrator, OrchestratorAgent, OrchestratorControl, OrchestratorEvent, VerifierChain,
+    },
+};
 use color_eyre::Result;
 use edtui::clipboard::ClipboardTrait;
 use markdown_renderer;
@@ -9,10 +15,12 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Paragraph},
+    widgets::{
+        Block, BorderType, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
+    },
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::{
@@ -29,8 +37,11 @@ use rich_editor::{RichEditor, ThinkingContext, create_rich_content_from_messages
 mod survey;
 use survey::{Survey, SurveyQuestion};
 mod session_manager;
-use session_manager::SessionManager;
+pub use session_manager::{OrchestratorEntry, Session, SessionManager, SessionStatus};
 mod model_context;
+mod spec_cli;
+use spec_cli::{MessageLog, SpecAgentBridge, SpecCliContext, SpecCliHandler, SpecCommandResult};
+pub mod spec_ui;
 
 /// Custom border set for messages
 const MESSAGE_BORDER_SET: symbols::border::Set = symbols::border::Set {
@@ -97,6 +108,19 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/todos", "list current todo items"),
     ("/vim", "toggle between vim and normal editing modes"),
+    (
+        "/spec",
+        "show current spec or load a new spec. usage: /spec [path|goal]",
+    ),
+    (
+        "/spec split",
+        "split a step into sub-steps. usage: /spec split <index>",
+    ),
+    (
+        "/spec status",
+        "show detailed spec status as JSON (steps + history)",
+    ),
+    ("/spec abort", "abort the current orchestrator run"),
 ];
 
 const MAX_COMPACTION_HISTORY: usize = 10;
@@ -215,9 +239,33 @@ const TIPS: &[&str] = &[
     "3. /help for more information.",
     "4. Press Alt+n to enter navigation mode (vim-style hjkl, gg, G).",
 ];
+
+/// Parse command line arguments for --spec flag.
+/// Returns the spec path/goal if provided.
+fn parse_spec_arg(args: &[String]) -> Option<String> {
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--spec" {
+            // Check if next argument exists and is the value
+            if let Some(value) = iter.next() {
+                if !value.starts_with('-') {
+                    return Some(value.clone());
+                }
+            }
+        } else if let Some(stripped) = arg.strip_prefix("--spec=") {
+            return Some(stripped.to_string());
+        }
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
+
+    // Parse command line arguments for --spec flag
+    let args: Vec<String> = std::env::args().collect();
+    let spec_arg = parse_spec_arg(&args);
 
     // Show loading spinner while initializing
     let terminal = ratatui::init();
@@ -242,11 +290,18 @@ async fn main() -> Result<()> {
         });
 
         // Initialize app (this loads the model)
-        let app = App::new().await?;
+        let mut app = App::new().await?;
 
         // Cancel the spinner
         loading_handle.abort();
         print!("\r✓ Model loaded successfully!\n");
+
+        // Load spec if --spec flag was provided
+        if let Some(spec_path) = spec_arg {
+            if let Err(e) = app.load_spec(&spec_path) {
+                eprintln!("Warning: Failed to load spec: {}", e);
+            }
+        }
 
         // Run the app
         app.run(terminal).await
@@ -266,6 +321,22 @@ pub enum MessageType {
     Agent,
 }
 
+/// Represents a tool call in the condensed breadcrumb view
+#[derive(Clone, Debug)]
+struct ToolCallBreadcrumb {
+    agent_path: Vec<String>, // e.g., ["main", "sub-1"]
+    tool_name: String,
+    status: ToolCallStatus,
+    timestamp: std::time::Instant,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ToolCallStatus {
+    Started,
+    Completed,
+    Error,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AgentConnector {
     None,
@@ -274,7 +345,7 @@ enum AgentConnector {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
-enum MessageState {
+pub(crate) enum MessageState {
     Sent,        // Normal sent message
     Queued,      // Message queued, waiting to be sent
     Interrupted, // Message generation was interrupted (partial)
@@ -340,7 +411,7 @@ struct SavedUIMessage {
 
 /// Rich metadata for different message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum UIMessageMetadata {
+pub(crate) enum UIMessageMetadata {
     Thinking {
         summaries: Vec<String>,
         token_count: usize,
@@ -658,6 +729,28 @@ struct App {
     rewind_selected: usize,
     current_file_changes: Vec<FileChange>, // Track file changes since last rewind point
     last_tool_args: Option<(String, String)>, // (tool_name, arguments) for tracking file changes
+    // Spec workflow state
+    current_spec: Option<SpecSheet>, // Currently loaded/active spec sheet
+    show_spec_pane: bool,            // Whether the spec pane is visible (toggled with S)
+    spec_pane_selected: usize,       // Selected step in the spec pane
+    // Orchestrator control and events
+    orchestrator_control: Option<OrchestratorControl>, // Control handle for pause/resume/abort
+    orchestrator_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<OrchestratorEvent>>,
+    orchestrator_task: Option<task::JoinHandle<()>>, // Background task running orchestrator
+    orchestrator_sessions: HashMap<String, session_manager::OrchestratorEntry>,
+    orchestrator_history: Vec<TaskSummary>, // History of completed task summaries
+    latest_summaries: HashMap<String, TaskSummary>, // Latest summary per step index
+    orchestrator_paused: bool,              // Whether orchestrator is currently paused
+    spec_pane_show_history: bool,           // Whether to show history view in spec pane
+    spec_step_drawer_open: bool,            // Whether the drawer for selected step is visible
+    show_history_panel: bool,               // Dedicated history panel visibility
+    history_panel_selected: usize,          // Selected summary in history panel
+    // Status message for session window
+    status_message: Option<String>, // Temporary status message for user feedback
+    // Condensed tool-call breadcrumb view
+    condensed_tool_view: bool, // Show only tool calls in condensed breadcrumb format
+    current_agent_path: Vec<String>, // Stack of agent prefixes for breadcrumb: ["main", "sub-1", ...]
+    tool_call_history: Vec<ToolCallBreadcrumb>, // Recent tool calls for condensed view
 }
 impl App {
     fn get_config_file_path() -> Result<std::path::PathBuf> {
@@ -1877,8 +1970,255 @@ impl App {
             last_tool_args: None,
             current_model,
             current_context_tokens,
+            // Spec workflow initialization
+            current_spec: None,
+            show_spec_pane: false,
+            spec_pane_selected: 0,
+            orchestrator_control: None,
+            orchestrator_event_rx: None,
+            orchestrator_task: None,
+            orchestrator_sessions: HashMap::new(),
+            orchestrator_history: Vec::new(),
+            latest_summaries: HashMap::new(),
+            orchestrator_paused: false,
+            spec_pane_show_history: false,
+            spec_step_drawer_open: false,
+            show_history_panel: false,
+            history_panel_selected: 0,
+            status_message: None,
+            // Condensed tool-call breadcrumb view
+            condensed_tool_view: false,
+            current_agent_path: vec!["main".to_string()],
+            tool_call_history: Vec::new(),
         })
     }
+
+    /// Format the current agent path as a breadcrumb string.
+    /// e.g., ["main", "sub-1", "sub-1.1"] -> "main › sub-1 › sub-1.1"
+    fn format_agent_breadcrumb(&self) -> String {
+        self.current_agent_path.join(" › ")
+    }
+
+    /// Format a tool call as a condensed breadcrumb message.
+    /// e.g., "main › sub-1 › read_file"
+    fn format_tool_breadcrumb(&self, tool_name: &str, status: &ToolCallStatus) -> String {
+        let path = self.format_agent_breadcrumb();
+        let status_icon = match status {
+            ToolCallStatus::Started => "◐",
+            ToolCallStatus::Completed => "●",
+            ToolCallStatus::Error => "✗",
+        };
+        format!("[{}] {} › {}", status_icon, path, tool_name)
+    }
+
+    /// Add a tool call to the breadcrumb history.
+    fn record_tool_call(&mut self, tool_name: &str, status: ToolCallStatus) {
+        // Keep only recent tool calls (last 50)
+        if self.tool_call_history.len() >= 50 {
+            self.tool_call_history.remove(0);
+        }
+        self.tool_call_history.push(ToolCallBreadcrumb {
+            agent_path: self.current_agent_path.clone(),
+            tool_name: tool_name.to_string(),
+            status,
+            timestamp: std::time::Instant::now(),
+        });
+    }
+
+    /// Push a new agent onto the path stack (e.g., when entering a sub-agent).
+    fn push_agent_path(&mut self, agent_id: &str) {
+        self.current_agent_path.push(agent_id.to_string());
+    }
+
+    /// Pop the current agent from the path stack (e.g., when exiting a sub-agent).
+    fn pop_agent_path(&mut self) {
+        if self.current_agent_path.len() > 1 {
+            self.current_agent_path.pop();
+        }
+    }
+
+    /// Get condensed tool-call messages for rendering.
+    fn get_condensed_tool_messages(&self) -> Vec<String> {
+        self.tool_call_history
+            .iter()
+            .map(|bc| {
+                let path = bc.agent_path.join(" › ");
+                let status_icon = match bc.status {
+                    ToolCallStatus::Started => "◐",
+                    ToolCallStatus::Completed => "●",
+                    ToolCallStatus::Error => "✗",
+                };
+                format!("{} {} › {}", status_icon, path, bc.tool_name)
+            })
+            .collect()
+    }
+
+    fn reset_orchestrator_views(&mut self) {
+        self.orchestrator_history.clear();
+        self.latest_summaries.clear();
+        self.orchestrator_sessions.clear();
+        self.session_manager.clear_orchestrator_entries();
+        self.spec_pane_selected = 0;
+        self.spec_pane_show_history = false;
+        self.spec_step_drawer_open = false;
+        self.show_history_panel = false;
+        self.history_panel_selected = 0;
+    }
+
+    fn teardown_orchestrator_handles(&mut self) {
+        if let Some(handle) = self.orchestrator_task.take() {
+            handle.abort();
+        }
+        self.orchestrator_control = None;
+        self.orchestrator_event_rx = None;
+        self.orchestrator_paused = false;
+    }
+
+    fn start_orchestrator_run(&mut self, spec: SpecSheet) -> Result<()> {
+        self.teardown_orchestrator_handles();
+        self.reset_orchestrator_views();
+
+        let agent = self
+            .agent
+            .as_ref()
+            .ok_or_else(|| color_eyre::eyre::eyre!("Agent not initialized"))?
+            .clone();
+        let main_agent: Arc<dyn OrchestratorAgent> = agent.clone();
+        let sub_agent_factory = {
+            let sub_agent = agent.clone();
+            Arc::new(move |_step: &SpecStep| -> Arc<dyn OrchestratorAgent> { sub_agent.clone() })
+        };
+
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (mut orchestrator, control) = Orchestrator::new_with_control(
+            main_agent,
+            sub_agent_factory,
+            VerifierChain::default(),
+            spec.clone(),
+            event_tx.clone(),
+        );
+        self.orchestrator_control = Some(control);
+        self.orchestrator_event_rx = Some(event_rx);
+
+        self.orchestrator_task = Some(task::spawn(async move {
+            if let Err(err) = orchestrator.run().await {
+                let _ = event_tx.send(OrchestratorEvent::Error(err.to_string()));
+            }
+        }));
+
+        self.status_message = Some(format!("Started orchestration for {}", spec.title));
+        Ok(())
+    }
+
+    fn upsert_summary_history(&mut self, summary: TaskSummary) {
+        self.latest_summaries
+            .insert(summary.step_index.clone(), summary.clone());
+
+        if let Some(position) = self
+            .orchestrator_history
+            .iter()
+            .position(|existing| existing.task_id == summary.task_id)
+        {
+            self.orchestrator_history[position] = summary;
+        } else {
+            self.orchestrator_history.push(summary);
+        }
+
+        if self.history_panel_selected >= self.orchestrator_history.len() {
+            self.history_panel_selected = self.orchestrator_history.len().saturating_sub(1);
+        }
+
+        self.sync_spec_history_metadata();
+    }
+
+    fn sync_spec_history_metadata(&mut self) {
+        if let Some(spec) = self.current_spec.as_mut() {
+            if let Ok(history_value) = serde_json::to_value(&self.orchestrator_history) {
+                if !spec.metadata.is_object() {
+                    spec.metadata = serde_json::Value::Object(serde_json::Map::new());
+                }
+                if let Some(obj) = spec.metadata.as_object_mut() {
+                    obj.insert("history".to_string(), history_value);
+                }
+            }
+        }
+    }
+
+    fn latest_summary_for_step(&self, step_index: &str) -> Option<&TaskSummary> {
+        self.latest_summaries.get(step_index)
+    }
+
+    fn update_session_for_step(
+        &mut self,
+        spec_id: &str,
+        spec_title: &str,
+        prefix: &str,
+        step_index: &str,
+        step_title: &str,
+        status: StepStatus,
+    ) {
+        let entry = self
+            .orchestrator_sessions
+            .entry(prefix.to_string())
+            .or_insert_with(|| session_manager::OrchestratorEntry {
+                spec_id: spec_id.to_string(),
+                spec_title: spec_title.to_string(),
+                prefix: prefix.to_string(),
+                step_index: step_index.to_string(),
+                step_title: step_title.to_string(),
+                status: SessionStatus::Pending,
+                started_at: None,
+                completed_at: None,
+            });
+
+        entry.status = match status {
+            StepStatus::Pending => SessionStatus::Pending,
+            StepStatus::InProgress => SessionStatus::InProgress,
+            StepStatus::Completed => SessionStatus::Completed,
+            StepStatus::Failed => SessionStatus::Failed,
+        };
+
+        match status {
+            StepStatus::InProgress => {
+                if entry.started_at.is_none() {
+                    entry.started_at = Some(Instant::now());
+                }
+                entry.completed_at = None;
+            }
+            StepStatus::Completed | StepStatus::Failed => {
+                if entry.started_at.is_none() {
+                    entry.started_at = Some(Instant::now());
+                }
+                entry.completed_at = Some(Instant::now());
+            }
+            StepStatus::Pending => {
+                entry.started_at = None;
+                entry.completed_at = None;
+            }
+        }
+
+        let snapshot: Vec<session_manager::OrchestratorEntry> =
+            self.orchestrator_sessions.values().cloned().collect();
+        self.session_manager.update_from_orchestrator(snapshot);
+    }
+
+    /// Load a spec from a path or goal string and store it in app state.
+    /// This should be called after App::new() when --spec flag is used.
+    pub fn load_spec(&mut self, path_or_goal: &str) -> Result<()> {
+        if let Some(agent) = &self.agent {
+            let spec = agent
+                .create_spec_sheet(path_or_goal)
+                .map_err(|e| color_eyre::eyre::eyre!("Failed to create spec: {}", e))?;
+            let orchestrator_spec = spec.clone();
+            self.current_spec = Some(spec);
+            self.show_spec_pane = true;
+            self.start_orchestrator_run(orchestrator_spec)?;
+            Ok(())
+        } else {
+            Err(color_eyre::eyre::eyre!("Agent not initialized"))
+        }
+    }
+
     fn create_title_lines() -> Vec<Line<'static>> {
         let ascii_art = r"__     _________  __   ____  ___________   __     _________  ___  ____
 \ \   / ___/ __ \/ /  / __ \/ __/ __/ _ | / /    / ___/ __ \/ _ \/ __/
@@ -1948,7 +2288,7 @@ impl App {
             Mode::SessionWindow => Line::from(vec![
                 Span::styled(" > ", Style::default().fg(Color::Blue)),
                 Span::styled(
-                    "SESSION WINDOW - ↑↓: navigate, Esc/Alt+w: close",
+                    "SESSION WINDOW - ↑↓: navigate, Enter: select, d: detach, x: kill, Esc: close",
                     Style::default().fg(Color::Blue),
                 ),
             ]),
@@ -3678,11 +4018,207 @@ Let me analyze the conversation chronologically:
                 .push(format!("[COMMAND: Vim keybindings {}]", status));
             self.message_types.push(MessageType::Agent);
             self.message_states.push(MessageState::Sent);
+        } else if cmd_lower.starts_with("/spec") {
+            self.handle_spec_command(&command).await;
         } else {
             self.messages
                 .push(format!("[COMMAND: Unknown command '{}']", command));
             self.message_types.push(MessageType::Agent);
             self.message_states.push(MessageState::Sent);
+        }
+    }
+
+    /// Handle /spec commands: /spec, /spec split <index>, /spec status, /spec abort
+    async fn handle_spec_command(&mut self, command: &str) {
+        let mut handler = SpecCliHandler::new(SpecCliContext {
+            current_spec: &mut self.current_spec,
+            orchestrator_control: self.orchestrator_control.as_ref(),
+            orchestrator_history: &self.orchestrator_history,
+            orchestrator_paused: &mut self.orchestrator_paused,
+            status_message: &mut self.status_message,
+            message_log: MessageLog {
+                messages: &mut self.messages,
+                types: &mut self.message_types,
+                states: &mut self.message_states,
+                metadata: &mut self.message_metadata,
+                timestamps: &mut self.message_timestamps,
+            },
+        });
+
+        let agent_ref = self
+            .agent
+            .as_deref()
+            .map(|agent| agent as &(dyn SpecAgentBridge + Send + Sync));
+
+        if let SpecCommandResult::Handled = handler.execute(agent_ref, command).await {
+            return;
+        }
+
+        let parts: Vec<&str> = command.split_whitespace().collect();
+
+        if parts.len() >= 2 && parts[0].eq_ignore_ascii_case("/spec") {
+            // Load a new spec: /spec <path|goal>
+            let path_or_goal = parts[1..].join(" ");
+            match self.load_spec(&path_or_goal) {
+                Ok(()) => {
+                    if let Some(ref spec) = self.current_spec {
+                        self.messages.push(format!(
+                            "[SPEC] Loaded spec: {} ({} steps)\nToggle spec pane with 'S' in normal mode.",
+                            spec.title,
+                            spec.steps.len()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    self.messages.push(format!("[SPEC ERROR] {}", e));
+                }
+            }
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+            self.message_metadata.push(None);
+            self.message_timestamps.push(std::time::SystemTime::now());
+        } else {
+            self.messages.push("[SPEC] Unknown spec command. Available: /spec, /spec split <index>, /spec status, /spec abort, /spec pause, /spec resume, /spec rerun, /spec history".to_string());
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+            self.message_metadata.push(None);
+            self.message_timestamps.push(std::time::SystemTime::now());
+        }
+    }
+
+    /// Handle orchestrator events and update TUI state accordingly.
+    fn handle_orchestrator_event(&mut self, event: OrchestratorEvent) {
+        match event {
+            OrchestratorEvent::StepStatusChanged {
+                spec_id,
+                step_index,
+                prefix,
+                status,
+            } => {
+                if let Some(ref mut spec) = self.current_spec {
+                    if spec.id == spec_id {
+                        if let Some(step) = spec.steps.iter_mut().find(|s| s.index == step_index) {
+                            let spec_title = spec.title.clone();
+                            let spec_id = spec.id.clone();
+                            let step_index_clone = step.index.clone();
+                            let step_title = step.title.clone();
+                            step.status = status.clone();
+                            self.update_session_for_step(
+                                &spec_id,
+                                &spec_title,
+                                &prefix,
+                                &step_index_clone,
+                                &step_title,
+                                status.clone(),
+                            );
+                        }
+                    }
+                }
+
+                let status_str = match status {
+                    StepStatus::Pending => "pending",
+                    StepStatus::InProgress => "in progress",
+                    StepStatus::Completed => "completed",
+                    StepStatus::Failed => "failed",
+                };
+                self.status_message = Some(format!("Step {}: {}", step_index, status_str));
+            }
+
+            OrchestratorEvent::SummaryUpdated { summary } => {
+                self.upsert_summary_history(summary.clone());
+                let status_str = match summary.verification.status {
+                    VerificationStatus::Passed => "passed",
+                    VerificationStatus::Failed => "failed",
+                    VerificationStatus::Pending => "pending",
+                };
+                self.status_message = Some(format!(
+                    "Step {} summary {}",
+                    summary.step_index, status_str
+                ));
+            }
+
+            OrchestratorEvent::VerifierFailed { summary, feedback } => {
+                self.upsert_summary_history(summary.clone());
+                self.messages.push(format!(
+                    "[SPEC] Step {} verification failed: {}",
+                    summary.step_index, feedback
+                ));
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+                self.message_metadata.push(None);
+                self.message_timestamps.push(std::time::SystemTime::now());
+                self.status_message =
+                    Some(format!("Verifier failed on step {}", summary.step_index));
+            }
+
+            OrchestratorEvent::ChildSpecPushed {
+                parent_step_index,
+                child_spec_id,
+                child_step_count,
+            } => {
+                self.status_message = Some(format!(
+                    "Step {} split into {} sub-steps",
+                    parent_step_index, child_step_count
+                ));
+            }
+
+            OrchestratorEvent::ChannelClosed { task_id, closed_at } => {
+                self.messages.push(format!(
+                    "[SPEC] Channel closed for {} at {}",
+                    task_id,
+                    closed_at.to_rfc3339()
+                ));
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+                self.message_metadata.push(None);
+                self.message_timestamps.push(std::time::SystemTime::now());
+            }
+
+            OrchestratorEvent::Paused => {
+                self.orchestrator_paused = true;
+                self.status_message = Some("Orchestrator paused".to_string());
+            }
+
+            OrchestratorEvent::Resumed => {
+                self.orchestrator_paused = false;
+                self.status_message = Some("Orchestrator resumed".to_string());
+            }
+
+            OrchestratorEvent::Aborted => {
+                self.teardown_orchestrator_handles();
+                self.reset_orchestrator_views();
+                self.messages
+                    .push("[SPEC] Orchestrator aborted.".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+                self.message_metadata.push(None);
+                self.message_timestamps.push(std::time::SystemTime::now());
+                self.tool_call_history.clear();
+                self.condensed_tool_view = false;
+                self.status_message = Some("Run aborted".to_string());
+            }
+
+            OrchestratorEvent::Completed => {
+                self.teardown_orchestrator_handles();
+                self.reset_orchestrator_views();
+                self.messages
+                    .push("[SPEC] All steps completed successfully.".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+                self.message_metadata.push(None);
+                self.message_timestamps.push(std::time::SystemTime::now());
+                self.tool_call_history.clear();
+                self.condensed_tool_view = false;
+                self.status_message = Some("Spec completed".to_string());
+            }
+
+            OrchestratorEvent::Error(error) => {
+                self.messages.push(format!("[SPEC ERROR] {}", error));
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+                self.message_metadata.push(None);
+                self.message_timestamps.push(std::time::SystemTime::now());
+            }
         }
     }
 
@@ -4610,6 +5146,17 @@ Let me analyze the conversation chronologically:
                             // Store raw arguments for file change tracking
                             self.last_tool_args = Some((tool_name.clone(), arguments.clone()));
 
+                            // Record tool call for condensed breadcrumb view (inlined to avoid borrow issues)
+                            if self.tool_call_history.len() >= 50 {
+                                self.tool_call_history.remove(0);
+                            }
+                            self.tool_call_history.push(ToolCallBreadcrumb {
+                                agent_path: self.current_agent_path.clone(),
+                                tool_name: tool_name.clone(),
+                                status: ToolCallStatus::Started,
+                                timestamp: std::time::Instant::now(),
+                            });
+
                             // Format arguments for display
                             let formatted_args =
                                 Self::format_tool_arguments(&tool_name, &arguments);
@@ -4634,6 +5181,24 @@ Let me analyze the conversation chronologically:
                             // Note: Don't clear thinking_raw_content here - it will be used in export
                         }
                         AgentMessage::ToolCallCompleted(tool_name, result) => {
+                            // Record tool call completion for condensed breadcrumb view (inlined to avoid borrow issues)
+                            let is_error = result.contains("error")
+                                || result.contains("Error")
+                                || result.contains("failed");
+                            if self.tool_call_history.len() >= 50 {
+                                self.tool_call_history.remove(0);
+                            }
+                            self.tool_call_history.push(ToolCallBreadcrumb {
+                                agent_path: self.current_agent_path.clone(),
+                                tool_name: tool_name.clone(),
+                                status: if is_error {
+                                    ToolCallStatus::Error
+                                } else {
+                                    ToolCallStatus::Completed
+                                },
+                                timestamp: std::time::Instant::now(),
+                            });
+
                             // Check for sandbox permission errors and offer to add to writable roots
                             if let Ok(result_yaml) =
                                 serde_yaml::from_str::<serde_yaml::Value>(&result)
@@ -5006,6 +5571,21 @@ Let me analyze the conversation chronologically:
                         _ => {}
                     }
                 }
+            }
+
+            // Process orchestrator events if available
+            let orchestrator_events: Vec<OrchestratorEvent> =
+                if let Some(rx) = &mut self.orchestrator_event_rx {
+                    let mut events = Vec::new();
+                    while let Ok(event) = rx.try_recv() {
+                        events.push(event);
+                    }
+                    events
+                } else {
+                    Vec::new()
+                };
+            for event in orchestrator_events {
+                self.handle_orchestrator_event(event);
             }
 
             // Process interrupt message after rx borrow is dropped
@@ -5604,6 +6184,30 @@ Let me analyze the conversation chronologically:
                                     }
                                 }
 
+                                if self.show_history_panel {
+                                    match key.code {
+                                        KeyCode::Esc => {
+                                            self.show_history_panel = false;
+                                            continue;
+                                        }
+                                        KeyCode::Up | KeyCode::Char('k') => {
+                                            if self.history_panel_selected > 0 {
+                                                self.history_panel_selected -= 1;
+                                            }
+                                            continue;
+                                        }
+                                        KeyCode::Down | KeyCode::Char('j') => {
+                                            if self.history_panel_selected + 1
+                                                < self.orchestrator_history.len()
+                                            {
+                                                self.history_panel_selected += 1;
+                                            }
+                                            continue;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+
                                 // Rewind panel key handlers
                                 if self.show_rewind {
                                     match key.code {
@@ -5792,6 +6396,38 @@ Let me analyze the conversation chronologically:
                                         }
                                     }
 
+                                    continue;
+                                }
+
+                                if key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && key.code == KeyCode::Char('w')
+                                {
+                                    self.condensed_tool_view = !self.condensed_tool_view;
+                                    self.status_message = Some(
+                                        if self.condensed_tool_view {
+                                            "Condensed tool view enabled"
+                                        } else {
+                                            "Condensed tool view disabled"
+                                        }
+                                        .to_string(),
+                                    );
+                                    continue;
+                                }
+
+                                if key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && key.modifiers.contains(KeyModifiers::SHIFT)
+                                    && matches!(key.code, KeyCode::Char('h') | KeyCode::Char('H'))
+                                {
+                                    self.show_history_panel = !self.show_history_panel;
+                                    if self.show_history_panel {
+                                        self.history_panel_selected =
+                                            self.orchestrator_history.len().saturating_sub(1);
+                                        self.status_message =
+                                            Some("History panel opened".to_string());
+                                    } else {
+                                        self.status_message =
+                                            Some("History panel closed".to_string());
+                                    }
                                     continue;
                                 }
 
@@ -5992,6 +6628,99 @@ Let me analyze the conversation chronologically:
                                     // Flag that we need to init cursor position on first draw
                                     self.nav_needs_init = true;
                                     self.nav_scroll_offset = 0;
+                                } else if key.code == KeyCode::Char('S')
+                                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && !key.modifiers.contains(KeyModifiers::ALT)
+                                    && self.current_spec.is_some()
+                                {
+                                    // Toggle spec pane with Shift+S (capital S)
+                                    self.show_spec_pane = !self.show_spec_pane;
+                                    let status = if self.show_spec_pane {
+                                        "opened"
+                                    } else {
+                                        "closed"
+                                    };
+                                    self.messages.push(format!(" ⎿ Spec pane {}", status));
+                                    self.message_types.push(MessageType::Agent);
+                                    self.message_states.push(MessageState::Sent);
+                                    self.message_metadata.push(None);
+                                    self.message_timestamps.push(SystemTime::now());
+                                } else if self.show_spec_pane && self.current_spec.is_some() {
+                                    // Handle spec pane navigation
+                                    match key.code {
+                                        KeyCode::Up | KeyCode::Char('k') => {
+                                            if let Some(ref spec) = self.current_spec {
+                                                if self.spec_pane_selected > 0 {
+                                                    self.spec_pane_selected -= 1;
+                                                }
+                                            }
+                                        }
+                                        KeyCode::Down | KeyCode::Char('j') => {
+                                            if let Some(ref spec) = self.current_spec {
+                                                if self.spec_pane_selected
+                                                    < spec.steps.len().saturating_sub(1)
+                                                {
+                                                    self.spec_pane_selected += 1;
+                                                }
+                                            }
+                                        }
+                                        KeyCode::Char(c) => match c.to_ascii_lowercase() {
+                                            'p' => {
+                                                if let Some(ref control) = self.orchestrator_control
+                                                {
+                                                    if control.is_paused() {
+                                                        let _ = control.resume();
+                                                        self.orchestrator_paused = false;
+                                                        self.status_message =
+                                                            Some("Resumed".to_string());
+                                                    } else {
+                                                        let _ = control.pause();
+                                                        self.orchestrator_paused = true;
+                                                        self.status_message =
+                                                            Some("Paused".to_string());
+                                                    }
+                                                }
+                                            }
+                                            'a' => {
+                                                if let Some(ref control) = self.orchestrator_control
+                                                {
+                                                    let _ = control.abort();
+                                                    self.status_message =
+                                                        Some("Abort signal sent".to_string());
+                                                }
+                                            }
+                                            'r' => {
+                                                if let Some(ref control) = self.orchestrator_control
+                                                {
+                                                    let _ = control.rerun_verifiers();
+                                                    self.status_message =
+                                                        Some("Re-running verifiers".to_string());
+                                                }
+                                            }
+                                            'h' => {
+                                                self.spec_pane_show_history =
+                                                    !self.spec_pane_show_history;
+                                                self.status_message = Some(
+                                                    if self.spec_pane_show_history {
+                                                        "Showing history in spec pane"
+                                                    } else {
+                                                        "Showing step details"
+                                                    }
+                                                    .to_string(),
+                                                );
+                                            }
+                                            _ => {}
+                                        },
+                                        KeyCode::Enter => {
+                                            self.spec_step_drawer_open =
+                                                !self.spec_step_drawer_open;
+                                            if self.spec_step_drawer_open {
+                                                self.status_message =
+                                                    Some("Opened step drawer".to_string());
+                                            }
+                                        }
+                                        _ => {}
+                                    }
                                 } else {
                                     // Handle vim mode keybindings before other keys if vim mode is enabled
                                     if self.vim_mode_enabled
@@ -6575,6 +7304,69 @@ Let me analyze the conversation chronologically:
                                     }
                                     KeyCode::Down => {
                                         self.session_manager.next_session();
+                                    }
+                                    KeyCode::Enter => {
+                                        // Drill into the highlighted session
+                                        let info =
+                                            self.session_manager.get_selected_session().map(|s| {
+                                                (
+                                                    s.name.clone(),
+                                                    self.session_manager
+                                                        .get_selected_status_badge()
+                                                        .unwrap_or("")
+                                                        .to_string(),
+                                                )
+                                            });
+                                        if let Some((name, badge)) = info {
+                                            // For now, just show the session info in status
+                                            // Future: could attach to the session or show details
+                                            self.status_message =
+                                                Some(format!("Session: {} {}", name, badge));
+                                        }
+                                    }
+                                    KeyCode::Char('d') => {
+                                        // Toggle detach or kill session
+                                        // Get info first to avoid borrow issues
+                                        let session_info = self
+                                            .session_manager
+                                            .get_selected_session()
+                                            .map(|s| (s.name.clone(), s.group.clone()));
+                                        if let Some((name, group)) = session_info {
+                                            // Check if it's an orchestrator session (don't allow killing)
+                                            if group.as_deref() == Some("orchestrator") {
+                                                self.status_message = Some(
+                                                    "Cannot detach orchestrator sessions"
+                                                        .to_string(),
+                                                );
+                                            } else {
+                                                self.session_manager.toggle_detach();
+                                                let badge = self
+                                                    .session_manager
+                                                    .get_selected_status_badge()
+                                                    .unwrap_or("");
+                                                self.status_message =
+                                                    Some(format!("Session {} {}", name, badge));
+                                            }
+                                        }
+                                    }
+                                    KeyCode::Char('x') => {
+                                        // Kill/remove the selected session
+                                        // Get info first to avoid borrow issues
+                                        let is_orchestrator = self
+                                            .session_manager
+                                            .get_selected_session()
+                                            .map(|s| s.group.as_deref() == Some("orchestrator"))
+                                            .unwrap_or(false);
+                                        if is_orchestrator {
+                                            self.status_message = Some(
+                                                "Cannot kill orchestrator sessions".to_string(),
+                                            );
+                                        } else if let Some(name) =
+                                            self.session_manager.kill_selected()
+                                        {
+                                            self.status_message =
+                                                Some(format!("Killed session: {}", name));
+                                        }
                                     }
                                     KeyCode::Char('q') | KeyCode::Esc => {
                                         self.mode = Mode::Normal;
@@ -7695,6 +8487,119 @@ Let me analyze the conversation chronologically:
             })
             .collect()
     }
+
+    /// Render the spec pane showing current spec status and steps
+    fn render_spec_pane(&self, frame: &mut Frame, area: ratatui::layout::Rect, spec: &SpecSheet) {
+        spec_ui::render_spec_pane_view(
+            frame,
+            area,
+            spec,
+            self.orchestrator_paused,
+            self.spec_pane_selected,
+            self.spec_pane_show_history,
+            self.spec_step_drawer_open,
+            &self.orchestrator_history,
+            &self.latest_summaries,
+        );
+    }
+
+    fn render_history_panel(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        if area.height < 4 {
+            return;
+        }
+
+        let outer = Block::default()
+            .title(" Spec history (Esc to close) ")
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded);
+        frame.render_widget(outer.clone(), area);
+        let inner = outer.inner(area);
+
+        if self.orchestrator_history.is_empty() {
+            frame.render_widget(
+                Paragraph::new("No task history yet.")
+                    .block(Block::default())
+                    .wrap(Wrap { trim: true }),
+                inner,
+            );
+            return;
+        }
+
+        let chunks =
+            Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(inner);
+        let mut items: Vec<ListItem> = Vec::new();
+        for summary in &self.orchestrator_history {
+            let status_icon = match summary.verification.status {
+                VerificationStatus::Passed => "✓",
+                VerificationStatus::Failed => "✗",
+                VerificationStatus::Pending => "○",
+            };
+            items.push(ListItem::new(format!(
+                "{} Step {} · {}",
+                status_icon, summary.step_index, summary.summary_text
+            )));
+        }
+        let mut state = ListState::default();
+        let max_index = self.orchestrator_history.len().saturating_sub(1);
+        state.select(Some(self.history_panel_selected.min(max_index)));
+        let list = List::new(items)
+            .block(Block::default())
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        frame.render_stateful_widget(list, chunks[0], &mut state);
+
+        let mut detail_lines: Vec<Line> = Vec::new();
+        if let Some(summary) = self
+            .orchestrator_history
+            .get(self.history_panel_selected.min(max_index))
+        {
+            detail_lines.push(Line::from(format!("Step {}", summary.step_index)));
+            detail_lines.push(Line::from(summary.summary_text.clone()));
+            if !summary.tests_run.is_empty() {
+                let tests = summary
+                    .tests_run
+                    .iter()
+                    .map(|test| format!("{}({:?})", test.name, test.result))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                detail_lines.push(Line::from(format!("Tests: {}", tests)));
+            }
+            if !summary.artifacts_touched.is_empty() {
+                detail_lines.push(Line::from(format!(
+                    "Artifacts: {}",
+                    summary.artifacts_touched.join(", ")
+                )));
+            }
+            detail_lines.push(Line::from(format!(
+                "Verification: {:?}",
+                summary.verification.status
+            )));
+            if !summary.verification.feedback.is_empty() {
+                for feedback in &summary.verification.feedback {
+                    detail_lines.push(Line::from(format!(
+                        "{}: {}",
+                        feedback.author, feedback.message
+                    )));
+                }
+            }
+        }
+
+        if detail_lines.is_empty() {
+            detail_lines.push(Line::from("Select an entry to inspect details."));
+        }
+
+        frame.render_widget(
+            Paragraph::new(detail_lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::TOP)
+                        .title(" Details ")
+                        .border_type(BorderType::Plain),
+                )
+                .wrap(Wrap { trim: true }),
+            chunks[1],
+        );
+    }
+
     fn center_horizontal(area: ratatui::layout::Rect, width: u16) -> ratatui::layout::Rect {
         let [area] = Layout::horizontal([Constraint::Length(width)])
             .flex(ratatui::layout::Flex::Center)
@@ -8915,12 +9820,25 @@ Let me analyze the conversation chronologically:
                 &self.session_manager.sessions,
                 self.session_manager.selected_index,
             );
-        let sessions_list = ratatui::widgets::List::new(session_items)
-            .block(Block::default().borders(ratatui::widgets::Borders::NONE));
-        frame.render_widget(sessions_list, sessions_area);
+        let sessions_list = List::new(session_items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Agent sessions (Alt+W to close) "),
+            )
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        frame.render_stateful_widget(
+            sessions_list,
+            sessions_area,
+            &mut self.session_manager.list_state,
+        );
 
         // Render the bordered box with title
-        let title = format!(" {} (sort: index) ", self.session_manager.selected_index);
+        let title = self
+            .session_manager
+            .get_selected_session()
+            .map(|s| format!(" Live UI: {} ", s.name))
+            .unwrap_or_else(|| " Live UI ".to_string());
         let input_box = Block::default()
             .borders(ratatui::widgets::Borders::ALL)
             .title(title);
@@ -9052,14 +9970,31 @@ Let me analyze the conversation chronologically:
                 } else {
                     0
                 };
+                let spec_pane_height = if self.show_spec_pane && self.current_spec.is_some() {
+                    // Height: 2 (title/desc) + steps count + 2 (border)
+                    let step_count = self
+                        .current_spec
+                        .as_ref()
+                        .map(|s| s.steps.len())
+                        .unwrap_or(0);
+                    (step_count as u16 + 4).min(15) // Max 15 lines
+                } else {
+                    0
+                };
                 let has_infobar = self.ctrl_c_pressed.is_some() || !self.queued_messages.is_empty();
 
                 // Build constraints dynamically
                 let mut constraints_vec = vec![
                     Constraint::Length(self.title_lines.len() as u16),
                     Constraint::Length(1), // One character gap
-                    Constraint::Min(1),    // Messages area (includes tips)
                 ];
+
+                // Add spec pane constraint if active
+                if spec_pane_height > 0 {
+                    constraints_vec.push(Constraint::Length(spec_pane_height));
+                }
+
+                constraints_vec.push(Constraint::Min(1)); // Messages area (includes tips)
 
                 if queue_choice_height > 0 {
                     constraints_vec.push(Constraint::Length(queue_choice_height));
@@ -9152,11 +10087,23 @@ Let me analyze the conversation chronologically:
         let has_survey_or_thanks = self.survey.is_active() || self.survey.has_thank_you();
         let has_infobar = self.ctrl_c_pressed.is_some() || !self.queued_messages.is_empty();
         let has_autocomplete = self.autocomplete_active && self.mode == Mode::Normal;
+        let has_spec_pane = self.show_spec_pane && self.current_spec.is_some();
 
-        let messages_area_idx = 2;
+        // Spec pane area (if active, appears right after the gap)
+        let spec_pane_area_idx = if has_spec_pane { Some(2) } else { None };
 
-        // Calculate indices dynamically
-        let mut idx = 3;
+        // Messages area index shifts by 1 if spec pane is active
+        let messages_area_idx = if has_spec_pane { 3 } else { 2 };
+
+        // Render spec pane if active
+        if let (Some(idx), Some(spec)) = (spec_pane_area_idx, &self.current_spec) {
+            if self.phase == Phase::Input && idx < areas.len() {
+                self.render_spec_pane(frame, areas[idx], spec);
+            }
+        }
+
+        // Calculate indices dynamically (accounting for spec pane if active)
+        let mut idx = messages_area_idx + 1;
         let queue_choice_area_idx = if has_queue_choice {
             let i = idx;
             idx += 1;
@@ -9223,6 +10170,13 @@ Let me analyze the conversation chronologically:
         } else {
             None
         };
+        let history_panel_area_idx = if self.show_history_panel {
+            let i = idx;
+            idx += 1;
+            Some(i)
+        } else {
+            None
+        };
         let rewind_area_idx = if self.show_rewind {
             let i = idx;
             idx += 1;
@@ -9267,18 +10221,33 @@ Let me analyze the conversation chronologically:
                     message_lines.push(Line::from(" "));
                 }
                 let max_width = messages_area.width.saturating_sub(4) as usize; // Account for: 1 space margin + bullet + space
-                // Use snapshot messages if in nav mode, otherwise use live messages
-                let messages = self.get_messages();
-                let message_types = self.get_message_types();
-                for (idx, message) in messages.iter().enumerate() {
-                    let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
-                    let connector = self.agent_connector_for_index(message_types, idx);
-                    message_lines.extend(
-                        self.render_message_with_max_width(
-                            message, max_width, None, is_agent, connector,
-                        )
-                        .lines,
-                    );
+                if self.condensed_tool_view {
+                    for breadcrumb in self.get_condensed_tool_messages() {
+                        message_lines.extend(
+                            self.render_message_with_max_width(
+                                &breadcrumb,
+                                max_width,
+                                None,
+                                true,
+                                AgentConnector::None,
+                            )
+                            .lines,
+                        );
+                    }
+                } else {
+                    // Use snapshot messages if in nav mode, otherwise use live messages
+                    let messages = self.get_messages();
+                    let message_types = self.get_message_types();
+                    for (idx, message) in messages.iter().enumerate() {
+                        let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
+                        let connector = self.agent_connector_for_index(message_types, idx);
+                        message_lines.extend(
+                            self.render_message_with_max_width(
+                                message, max_width, None, is_agent, connector,
+                            )
+                            .lines,
+                        );
+                    }
                 }
 
                 // Render generation stats after the last message (if available)
@@ -9340,18 +10309,33 @@ Let me analyze the conversation chronologically:
                     message_lines.push(Line::from(" ")); // One character gap after tips
                 }
                 let max_width = messages_area.width.saturating_sub(4) as usize; // Account for: 1 space margin + bullet + space
-                // Use snapshot messages if in nav mode, otherwise use live messages
-                let messages = self.get_messages();
-                let message_types = self.get_message_types();
-                for (idx, message) in messages.iter().enumerate() {
-                    let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
-                    let connector = self.agent_connector_for_index(message_types, idx);
-                    message_lines.extend(
-                        self.render_message_with_max_width(
-                            message, max_width, None, is_agent, connector,
-                        )
-                        .lines,
-                    );
+                if self.condensed_tool_view {
+                    for breadcrumb in self.get_condensed_tool_messages() {
+                        message_lines.extend(
+                            self.render_message_with_max_width(
+                                &breadcrumb,
+                                max_width,
+                                None,
+                                true,
+                                AgentConnector::None,
+                            )
+                            .lines,
+                        );
+                    }
+                } else {
+                    // Use snapshot messages if in nav mode, otherwise use live messages
+                    let messages = self.get_messages();
+                    let message_types = self.get_message_types();
+                    for (idx, message) in messages.iter().enumerate() {
+                        let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
+                        let connector = self.agent_connector_for_index(message_types, idx);
+                        message_lines.extend(
+                            self.render_message_with_max_width(
+                                message, max_width, None, is_agent, connector,
+                            )
+                            .lines,
+                        );
+                    }
                 }
 
                 // Render generation stats after the last message (if available)
@@ -10129,6 +11113,11 @@ Let me analyze the conversation chronologically:
             if let Some(idx) = resume_area_idx {
                 let resume_area = areas[idx];
                 self.render_resume_panel(frame, resume_area);
+            }
+
+            if let Some(idx) = history_panel_area_idx {
+                let history_area = areas[idx];
+                self.render_history_panel(frame, history_area);
             }
 
             if let Some(idx) = rewind_area_idx {

@@ -24,6 +24,13 @@ serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
 dirs = "5.0"
 uuid = { version = "1.10", features = ["v4", "serde"] }
+async-trait = "0.1"
+anyhow = "1.0"
+
+[dev-dependencies]
+chrono = "0.4"
+agent_protocol = { path = "./crates/agent_protocol" }
+insta = "1.38"
 
 [features]
 syntax-highlighting = ["edtui/syntax-highlighting"]

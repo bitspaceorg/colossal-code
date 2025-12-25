@@ -1,0 +1,24 @@
+---
+source: tests/tui_snapshots.rs
+expression: output
+---
+╭ Spec metadata ─────────────────────────────────────────────────────────────────────────╮
+│📋  Snapshot Spec                                                                        │
+│Created by tests • 1970-01-01 00:00                                                     │
+│Controls: P Pause · R Rerun · A Abort · H History · Enter Drawer                        │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Steps ─────────────────────────────────────────────────────────────────────────────────╮
+│#    State  Title                           Details                                     │
+│1    ●      Step 1: Feature                 Criteria 1 | —                              │
+│2    ◐      Step 2: Feature                 Criteria 2 | ↳ 1                            │
+│3    ○      Step 3: Feature                 Criteria 3 | ↳ 2                            │
+│                                                                                        │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Step drawer (Enter to toggle) ─────────────────────────────────────────────────────────╮
+│Summary: Completed step 2                                                               │
+│Tests: test-step-2(Pass)                                                                │
+│Artifacts: file2.rs                                                                     │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
