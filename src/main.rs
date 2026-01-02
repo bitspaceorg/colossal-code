@@ -11141,19 +11141,44 @@ Let me analyze the conversation chronologically:
                             lines.push(Line::from(spans));
                         }
                     } else if self.rendering_sub_agent_view {
-                        // Show thinking animation for sub-agent view when thinking is active
+                        // Show thinking animation for sub-agent view when:
+                        // 1. Sub-agent is actively thinking, OR
+                        // 2. Orchestration is in progress (shows general "working" animation)
                         if let Some(snapshot) = &self.nav_snapshot {
-                            if snapshot.thinking_indicator_active {
-                                let current_frame =
-                                    self.thinking_snowflake_frames[snapshot.thinking_loader_frame];
-                                let text_with_dots = format!("{}...", &snapshot.thinking_current_word);
+                            if snapshot.thinking_indicator_active || self.orchestration_in_progress {
+                                // Use sub-agent's state if actively thinking, else use main app's LIVE state
+                                // (not getters which read from snapshot)
+                                let current_frame = if snapshot.thinking_indicator_active {
+                                    self.thinking_snowflake_frames[snapshot.thinking_loader_frame]
+                                } else {
+                                    self.thinking_snowflake_frames[self.thinking_loader_frame]
+                                };
+
+                                let text_with_dots = if snapshot.thinking_indicator_active {
+                                    format!("{}...", &snapshot.thinking_current_word)
+                                } else {
+                                    format!("{}...", &self.thinking_current_word)
+                                };
+
+                                let position = if snapshot.thinking_indicator_active {
+                                    snapshot.thinking_position
+                                } else {
+                                    self.thinking_position
+                                };
+
                                 let color_spans = Self::create_thinking_highlight_spans(
                                     &text_with_dots,
-                                    snapshot.thinking_position,
+                                    position,
                                 );
 
                                 // Build elapsed time string
-                                let elapsed = snapshot.thinking_elapsed_secs;
+                                let elapsed = if snapshot.thinking_indicator_active {
+                                    snapshot.thinking_elapsed_secs
+                                } else {
+                                    self.thinking_start_time
+                                        .map(|t| t.elapsed().as_secs())
+                                        .unwrap_or(0)
+                                };
                                 let mins = elapsed / 60;
                                 let secs = elapsed % 60;
                                 let time_str = if mins > 0 {
@@ -11173,7 +11198,7 @@ Let me analyze the conversation chronologically:
                                     spans.push(Span::styled(text, Style::default().fg(color)));
                                 }
                                 spans.push(Span::styled(
-                                    format!(" [{}]", time_str),
+                                    format!(" [Esc to interrupt | {}]", time_str),
                                     Style::default().fg(Color::DarkGray),
                                 ));
                                 lines.push(Line::from(spans));
