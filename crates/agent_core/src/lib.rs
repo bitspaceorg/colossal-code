@@ -1652,6 +1652,9 @@ impl Agent {
         use agent_protocol::{Task, TaskState, TaskVerification, VerificationStatus};
         use tokio::runtime::Builder;
 
+        // Clear conversation from previous step - each orchestration step should start fresh
+        self.clear_conversation().await;
+
         // Build the prompt from step instructions
         let prompt = format!(
             "## Current Task: {}\n\n\
@@ -1694,16 +1697,55 @@ impl Agent {
         let mut error_message: Option<String> = None;
         let mut tool_log: Vec<serde_json::Value> = Vec::new();
         let prefix_owned = prefix.to_string();
+        let mut thinking_start_time = std::time::Instant::now();
+
+        // Emit the user prompt as the first sub-agent message
+        if let Some(ref tx) = event_tx {
+            let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
+                prefix: prefix_owned.clone(),
+                message: crate::orchestrator::SubAgentMessage::UserPrompt {
+                    content: prompt.clone(),
+                },
+            });
+        }
 
         while let Some(agent_msg) = rx.recv().await {
             match agent_msg {
                 AgentMessage::AgentResponse(content, _) => {
-                    latest_response = content.clone();
-                    // Emit orchestrator event for agent response
+                    // Emit agent text response
                     if let Some(ref tx) = event_tx {
-                        let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentResponse {
+                        let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
                             prefix: prefix_owned.clone(),
-                            content,
+                            message: crate::orchestrator::SubAgentMessage::Text {
+                                content: content.clone(),
+                            },
+                        });
+                    }
+                    latest_response = content;
+                }
+                AgentMessage::ThinkingContent(content, _) => {
+                    // Start or continue thinking
+                    thinking_start_time = std::time::Instant::now();
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
+                            prefix: prefix_owned.clone(),
+                            message: crate::orchestrator::SubAgentMessage::Thinking {
+                                content,
+                                duration_secs: 0,
+                            },
+                        });
+                    }
+                }
+                AgentMessage::ThinkingComplete(_) => {
+                    // Emit thinking completion with duration
+                    let duration = thinking_start_time.elapsed().as_secs();
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
+                            prefix: prefix_owned.clone(),
+                            message: crate::orchestrator::SubAgentMessage::Thinking {
+                                content: String::new(),
+                                duration_secs: duration,
+                            },
                         });
                     }
                 }
@@ -1718,6 +1760,16 @@ impl Agent {
                             prefix: prefix_owned.clone(),
                             tool_name: name.clone(),
                             arguments: args.clone(),
+                        });
+                        // Also emit as AgentMessage for sub-agent view
+                        let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
+                            prefix: prefix_owned.clone(),
+                            message: crate::orchestrator::SubAgentMessage::ToolCall {
+                                tool_name: name.clone(),
+                                arguments: args.clone(),
+                                result: None,
+                                is_error: false,
+                            },
                         });
                     }
                     tool_log.push(serde_json::json!({
@@ -1750,6 +1802,16 @@ impl Agent {
                             result: result.clone(),
                             is_error,
                         });
+                        // Also emit as AgentMessage for sub-agent view with result
+                        let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
+                            prefix: prefix_owned.clone(),
+                            message: crate::orchestrator::SubAgentMessage::ToolCall {
+                                tool_name: name.clone(),
+                                arguments: String::new(),
+                                result: Some(result.clone()),
+                                is_error,
+                            },
+                        });
                     }
 
                     // Update tool log
@@ -1758,6 +1820,19 @@ impl Agent {
                               && e.get("result").map(|r| r.is_null()).unwrap_or(false))
                     {
                         entry["result"] = serde_json::Value::String(result);
+                    }
+                }
+                AgentMessage::GenerationStats(stats) => {
+                    // Emit generation stats
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
+                            prefix: prefix_owned.clone(),
+                            message: crate::orchestrator::SubAgentMessage::GenerationStats {
+                                tokens_per_sec: stats.avg_completion_tok_per_sec,
+                                input_tokens: stats.prompt_tokens,
+                                output_tokens: stats.completion_tokens,
+                            },
+                        });
                     }
                 }
                 AgentMessage::Done => break,

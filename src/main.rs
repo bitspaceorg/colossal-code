@@ -2,7 +2,8 @@ use agent_core::{
     Agent, AgentMessage, GenerationStats as AgentGenerationStats, SpecSheet, SpecStep, StepStatus,
     TaskSummary, VerificationStatus,
     orchestrator::{
-        Orchestrator, OrchestratorAgent, OrchestratorControl, OrchestratorEvent, VerifierChain,
+        Orchestrator, OrchestratorAgent, OrchestratorControl, OrchestratorEvent, SubAgentMessage,
+        VerifierChain,
     },
 };
 use color_eyre::Result;
@@ -315,7 +316,7 @@ async fn main() -> Result<()> {
     app_result
 }
 /// Message type to distinguish between user and agent messages
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageType {
     User,
     Agent,
@@ -335,129 +336,238 @@ pub struct StepToolCallEntry {
     pub status: ToolCallStatus,
 }
 
-#[derive(Clone, Debug, Default)]
-struct SubAgentSession {
-    messages: Vec<String>,
-    message_types: Vec<MessageType>,
-    message_states: Vec<MessageState>,
-    message_metadata: Vec<Option<UIMessageMetadata>>,
-    message_timestamps: Vec<SystemTime>,
-    current_agent_index: Option<usize>,
-    step_title: Option<String>,
-    instructions: Option<String>,
+/// Stores the transcript for a sub-agent so we can replay it inside the UI.
+#[derive(Clone, Debug)]
+pub struct SubAgentContext {
+    pub prefix: String,
+    pub step_title: String,
+    pub messages: Vec<String>,
+    pub message_types: Vec<MessageType>,
+    pub message_states: Vec<MessageState>,
+    pub thinking_indicator_active: bool,
+    pub is_thinking: bool,
+    pub thinking_elapsed_secs: u64,
+    pub thinking_token_count: usize,
+    pub thinking_current_summary: Option<(String, usize, usize)>,
+    pub thinking_position: usize,
+    pub thinking_loader_frame: usize,
+    pub thinking_current_word: String,
+    pub generation_stats: Option<AgentGenerationStats>,
+    pub started_orchestration: bool,
+    pub thinking_last_update: Instant,
+    pub thinking_last_word_change: Instant,
+    pub thinking_last_tick: Instant,
+    pub thinking_start_time: Option<Instant>,
 }
 
-#[derive(Clone)]
-struct MessageViewSnapshot {
-    messages: Vec<String>,
-    message_types: Vec<MessageType>,
-    message_states: Vec<MessageState>,
-    message_metadata: Vec<Option<UIMessageMetadata>>,
-    message_timestamps: Vec<SystemTime>,
-}
-
-impl MessageViewSnapshot {
-    fn capture(app: &App) -> Self {
+impl SubAgentContext {
+    pub fn new(prefix: String, step_title: String) -> Self {
         Self {
-            messages: app.messages.clone(),
-            message_types: app.message_types.clone(),
-            message_states: app.message_states.clone(),
-            message_metadata: app.message_metadata.clone(),
-            message_timestamps: app.message_timestamps.clone(),
+            prefix,
+            step_title,
+            messages: Vec::new(),
+            message_types: Vec::new(),
+            message_states: Vec::new(),
+            thinking_indicator_active: false,
+            is_thinking: false,
+            thinking_elapsed_secs: 0,
+            thinking_token_count: 0,
+            thinking_current_summary: None,
+            thinking_position: 0,
+            thinking_loader_frame: 0,
+            thinking_current_word: "thinking".to_string(),
+            generation_stats: None,
+            started_orchestration: false,
+            thinking_last_update: Instant::now(),
+            thinking_last_word_change: Instant::now(),
+            thinking_last_tick: Instant::now(),
+            thinking_start_time: None,
         }
     }
 
-    fn restore(self, app: &mut App) {
-        app.messages = self.messages;
-        app.message_types = self.message_types;
-        app.message_states = self.message_states;
-        app.message_metadata = self.message_metadata;
-        app.message_timestamps = self.message_timestamps;
-    }
-}
-
-impl SubAgentSession {
-    fn ensure_intro(&mut self, title: Option<String>, instructions: Option<String>) {
-        self.step_title = title.clone();
-        self.instructions = instructions.clone();
-
-        if self.messages.is_empty() {
-            if let Some(intro) = Self::build_intro_message(title, instructions) {
-                self.append_message(intro, MessageType::User);
-            }
-        }
-    }
-
-    fn build_intro_message(title: Option<String>, instructions: Option<String>) -> Option<String> {
-        let mut content = String::new();
-        if let Some(t) = title {
-            if !t.trim().is_empty() {
-                content.push_str(t.trim());
-            }
-        }
-        if let Some(instr) = instructions {
-            let trimmed = instr.trim();
-            if !trimmed.is_empty() {
-                if !content.is_empty() {
-                    content.push_str("\n\n");
-                }
-                content.push_str(trimmed);
-            }
-        }
-        if content.trim().is_empty() {
-            None
-        } else {
-            Some(content)
-        }
-    }
-
-    fn append_message(&mut self, content: String, kind: MessageType) -> usize {
+    fn push_message(&mut self, content: String, message_type: MessageType) {
         self.messages.push(content);
-        self.message_types.push(kind);
+        self.message_types.push(message_type);
         self.message_states.push(MessageState::Sent);
-        self.message_metadata.push(None);
-        self.message_timestamps.push(SystemTime::now());
-        self.messages.len() - 1
     }
 
-    fn update_agent_response(&mut self, content: String) {
-        if let Some(idx) = self.current_agent_index {
-            if let Some(entry) = self.messages.get_mut(idx) {
-                *entry = content;
-                if let Some(ts) = self.message_timestamps.get_mut(idx) {
-                    *ts = SystemTime::now();
-                }
+    pub fn add_user_message(&mut self, content: String) {
+        self.push_message(content, MessageType::User);
+    }
+
+    pub fn add_agent_text(&mut self, content: String) {
+        // Remove thinking placeholder before showing agent text
+        self.remove_thinking_placeholder();
+
+        let append_to_last = if let Some(MessageType::Agent) = self.message_types.last() {
+            if let Some(last) = self.messages.last() {
+                !(last.starts_with("[TOOL_CALL_STARTED:") || last.starts_with("[TOOL_CALL_COMPLETED:"))
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if append_to_last {
+            if let Some(last) = self.messages.last_mut() {
+                last.push_str(&content);
                 return;
             }
         }
-        let idx = self.append_message(content, MessageType::Agent);
-        self.current_agent_index = Some(idx);
+
+        self.push_message(content, MessageType::Agent);
     }
 
-    fn push_tool_call_started(&mut self, tool_name: &str, formatted_args: String) {
-        let marker = format!("[TOOL_CALL_STARTED:{}|{}]", tool_name, formatted_args);
-        self.append_message(marker, MessageType::Agent);
-        self.current_agent_index = None;
+    pub fn start_thinking(&mut self, summary: String) {
+        if !self.messages.last().map(|m| m == "[THINKING_ANIMATION]").unwrap_or(false) {
+            self.push_message("[THINKING_ANIMATION]".to_string(), MessageType::Agent);
+        }
+        self.thinking_indicator_active = true;
+        self.is_thinking = true;
+        self.thinking_loader_frame = 0;
+        self.thinking_position = 0;
+        self.thinking_last_update = Instant::now();
+        self.thinking_last_word_change = Instant::now();
+        self.thinking_last_tick = Instant::now();
+        self.thinking_start_time = Some(Instant::now());
+        self.thinking_current_summary = if summary.is_empty() {
+            None
+        } else {
+            Some((summary, 0, 0))
+        };
     }
 
-    fn complete_tool_call(&mut self, tool_name: &str, formatted_result: String) {
-        if let Some(msg) = self
-            .messages
-            .iter_mut()
-            .rev()
-            .find(|msg| msg.starts_with(&format!("[TOOL_CALL_STARTED:{}|", tool_name)))
-        {
-            if let Some(args) = msg
-                .trim_start_matches(&format!("[TOOL_CALL_STARTED:{}|", tool_name))
-                .strip_suffix(']')
-                .map(|s| s.to_string())
-            {
+    pub fn finish_thinking(&mut self, duration_secs: u64) {
+        self.remove_thinking_placeholder();
+        self.thinking_indicator_active = false;
+        self.is_thinking = false;
+        self.thinking_elapsed_secs = duration_secs;
+        self.thinking_start_time = None;
+    }
+
+    fn remove_thinking_placeholder(&mut self) {
+        if let Some(last) = self.messages.last() {
+            if last == "[THINKING_ANIMATION]" {
+                self.messages.pop();
+                self.message_types.pop();
+                self.message_states.pop();
+            }
+        }
+        self.thinking_indicator_active = false;
+        self.is_thinking = false;
+    }
+
+    pub fn add_tool_call_started(&mut self, tool_name: &str, formatted_args: String) {
+        if tool_name == "orchestrate_task" {
+            self.started_orchestration = true;
+        }
+        self.push_message(
+            format!("[TOOL_CALL_STARTED:{}|{}]", tool_name, formatted_args),
+            MessageType::Agent,
+        );
+    }
+
+    pub fn complete_tool_call(&mut self, tool_name: &str, formatted_result: String) {
+        for msg in self.messages.iter_mut().rev() {
+            if msg.starts_with(&format!("[TOOL_CALL_STARTED:{}|", tool_name)) {
+                let args = msg
+                    .trim_start_matches(&format!("[TOOL_CALL_STARTED:{}|", tool_name))
+                    .trim_end_matches(']')
+                    .to_string();
                 *msg = format!(
                     "[TOOL_CALL_COMPLETED:{}|{}|{}]",
                     tool_name, args, formatted_result
                 );
+                break;
             }
         }
+    }
+
+    pub fn set_generation_stats(
+        &mut self,
+        tokens_per_sec: f32,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+    ) {
+        self.generation_stats = Some(AgentGenerationStats {
+            avg_completion_tok_per_sec: tokens_per_sec,
+            completion_tokens,
+            prompt_tokens,
+            time_to_first_token_sec: 0.0,
+            stop_reason: "end_turn".to_string(),
+        });
+    }
+
+    pub fn to_snapshot(&self) -> AppSnapshot {
+        // Calculate elapsed time: use live calculation if thinking is active, otherwise use stored value
+        let elapsed_secs = if self.thinking_indicator_active {
+            self.thinking_start_time
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0)
+        } else {
+            self.thinking_elapsed_secs
+        };
+
+        AppSnapshot {
+            messages: self.messages.clone(),
+            message_types: self.message_types.clone(),
+            message_states: self.message_states.clone(),
+            is_thinking: self.is_thinking,
+            thinking_indicator_active: self.thinking_indicator_active,
+            thinking_elapsed_secs: elapsed_secs,
+            thinking_token_count: self.thinking_token_count,
+            thinking_current_summary: self.thinking_current_summary.clone(),
+            thinking_position: self.thinking_position,
+            thinking_loader_frame: self.thinking_loader_frame,
+            thinking_current_word: self.thinking_current_word.clone(),
+            generation_stats: self.generation_stats.clone(),
+        }
+    }
+
+    pub fn update_thinking_animation(
+        &mut self,
+        snowflake_len: usize,
+        thinking_words: &[&'static str],
+    ) {
+        if !self.thinking_indicator_active {
+            return;
+        }
+
+        let now = Instant::now();
+        if snowflake_len > 0 && now.duration_since(self.thinking_last_update) >= Duration::from_millis(100) {
+            self.thinking_loader_frame = (self.thinking_loader_frame + 1) % snowflake_len.max(1);
+            self.thinking_last_update = now;
+        }
+
+        if now.duration_since(self.thinking_last_word_change) >= Duration::from_secs(4) {
+            use rand::seq::SliceRandom;
+            if let Some(word) = thinking_words.choose(&mut rand::thread_rng()) {
+                self.thinking_current_word = word.to_string();
+                self.thinking_position = 0;
+            }
+            self.thinking_last_word_change = now;
+        }
+
+        if now.duration_since(self.thinking_last_tick) >= Duration::from_millis(40) {
+            let text_with_dots = if let Some((summary, _, _)) = &self.thinking_current_summary {
+                format!("{}...", summary)
+            } else {
+                format!("{}...", self.thinking_current_word)
+            };
+            let text_len = text_with_dots.chars().count();
+            let sweep = text_len + 7;
+            if sweep > 0 {
+                self.thinking_position = (self.thinking_position + 1) % sweep;
+            }
+            self.thinking_last_tick = now;
+        }
+    }
+}
+
+impl Default for SubAgentContext {
+    fn default() -> Self {
+        Self::new(String::new(), String::new())
     }
 }
 
@@ -793,7 +903,7 @@ struct App {
     review_pending: Option<ReviewOptions>, // Flag to trigger code review in async context
     spec_pending: Option<String>, // Flag to trigger /spec command in async context
     orchestration_pending: Option<String>, // Flag to trigger orchestration from tool call
-    orchestration_in_progress: bool, // True while orchestration is running - pauses main agent
+    orchestration_in_progress: bool,       // True while orchestration is running - pauses main agent
     compact_pending: Option<CompactOptions>, // Flag to trigger compact in async context
     last_compacted_summary: Option<String>,
     is_auto_summarize: bool, // Track if current summarization was auto-triggered
@@ -871,7 +981,6 @@ struct App {
     orchestrator_sessions: HashMap<String, session_manager::OrchestratorEntry>,
     orchestrator_history: Vec<TaskSummary>, // History of completed task summaries
     latest_summaries: HashMap<String, TaskSummary>, // Latest summary per step index
-    subagent_sessions: HashMap<String, SubAgentSession>, // Captured UI state per subagent prefix
     orchestrator_paused: bool,              // Whether orchestrator is currently paused
     spec_pane_show_history: bool,           // Whether to show history view in spec pane
     spec_step_drawer_open: bool,            // Whether the drawer for selected step is visible
@@ -881,6 +990,12 @@ struct App {
     status_message: Option<String>, // Temporary status message for user feedback
     // Agent path tracking for subagent hierarchy
     current_agent_path: Vec<String>, // Stack of agent prefixes: ["main", "sub-1", ...]
+    // Per-sub-agent message contexts for Alt+W view
+    sub_agent_contexts: HashMap<String, SubAgentContext>, // prefix -> context
+    // When set, we're viewing a sub-agent in full-screen mode (Enter from session window)
+    expanded_sub_agent: Option<String>, // prefix of the expanded sub-agent
+    rendering_sub_agent_view: bool,
+    rendering_sub_agent_prefix: Option<String>,
 }
 impl App {
     fn get_config_file_path() -> Result<std::path::PathBuf> {
@@ -2117,7 +2232,6 @@ impl App {
             orchestrator_sessions: HashMap::new(),
             orchestrator_history: Vec::new(),
             latest_summaries: HashMap::new(),
-            subagent_sessions: HashMap::new(),
             orchestrator_paused: false,
             spec_pane_show_history: false,
             spec_step_drawer_open: false,
@@ -2126,6 +2240,12 @@ impl App {
             status_message: None,
             // Agent path tracking for subagent hierarchy
             current_agent_path: vec!["main".to_string()],
+            // Per-sub-agent message contexts
+            sub_agent_contexts: HashMap::new(),
+            // No expanded sub-agent initially
+            expanded_sub_agent: None,
+            rendering_sub_agent_view: false,
+            rendering_sub_agent_prefix: None,
         })
     }
 
@@ -2151,7 +2271,6 @@ impl App {
         self.orchestrator_history.clear();
         self.latest_summaries.clear();
         self.orchestrator_sessions.clear();
-        self.subagent_sessions.clear();
         self.session_manager.clear_orchestrator_entries();
         self.spec_pane_selected = 0;
         self.spec_pane_show_history = false;
@@ -2159,6 +2278,10 @@ impl App {
         self.show_history_panel = false;
         self.history_panel_selected = 0;
         self.step_tool_calls.clear();
+        self.sub_agent_contexts.clear();
+        self.expanded_sub_agent = None;
+        self.rendering_sub_agent_view = false;
+        self.rendering_sub_agent_prefix = None;
         self.active_step_prefix = None;
         self.active_tool_call = None;
         self.next_tool_call_id = 0;
@@ -2411,6 +2534,10 @@ impl App {
             // Tool activity is shown via compressed tool view in message stream
             self.spec_pane_selected = 0;
             self.step_tool_calls.clear();
+            self.sub_agent_contexts.clear();
+            self.expanded_sub_agent = None;
+            self.rendering_sub_agent_view = false;
+            self.rendering_sub_agent_prefix = None;
             self.active_step_prefix = None;
             self.active_tool_call = None;
             self.next_tool_call_id = 0;
@@ -2719,6 +2846,22 @@ impl App {
         false
     }
 
+    fn allow_plan_tree_render(&self) -> bool {
+        if !self.rendering_sub_agent_view {
+            return true;
+        }
+
+        if let Some(prefix) = &self.rendering_sub_agent_prefix {
+            return self
+                .sub_agent_contexts
+                .get(prefix)
+                .map(|ctx| ctx.started_orchestration)
+                .unwrap_or(false);
+        }
+
+        false
+    }
+
     /// Check if we have an active spec that should show tool activity in the message stream.
     fn has_active_spec_with_tools(&self) -> bool {
         self.current_spec.is_some() && !self.step_tool_calls.is_empty()
@@ -2828,53 +2971,26 @@ impl App {
                 .unwrap_or_else(|| "Fetched URL".to_string()),
             "TodoWrite" => {
                 // Describe the todo action based on what's being done
-                if let Some(todos) = parsed
-                    .as_ref()
-                    .and_then(|v| v.get("todos"))
-                    .and_then(|t| t.as_array())
-                {
+                if let Some(todos) = parsed.as_ref().and_then(|v| v.get("todos")).and_then(|t| t.as_array()) {
                     // Find the most relevant action to describe
                     // Priority: in_progress > completed > pending (for new todos)
-                    if let Some(in_progress) = todos
-                        .iter()
-                        .find(|t| t.get("status").and_then(|s| s.as_str()) == Some("in_progress"))
-                    {
-                        let content = in_progress
-                            .get("content")
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("task");
-                        let truncated = if content.len() > 40 {
-                            format!("{}...", &content[..40])
-                        } else {
-                            content.to_string()
-                        };
+                    if let Some(in_progress) = todos.iter().find(|t| {
+                        t.get("status").and_then(|s| s.as_str()) == Some("in_progress")
+                    }) {
+                        let content = in_progress.get("content").and_then(|c| c.as_str()).unwrap_or("task");
+                        let truncated = if content.len() > 40 { format!("{}...", &content[..40]) } else { content.to_string() };
                         return format!("Marked todo {} as in-progress", truncated);
                     }
-                    if let Some(completed) = todos
-                        .iter()
-                        .find(|t| t.get("status").and_then(|s| s.as_str()) == Some("completed"))
-                    {
-                        let content = completed
-                            .get("content")
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("task");
-                        let truncated = if content.len() > 40 {
-                            format!("{}...", &content[..40])
-                        } else {
-                            content.to_string()
-                        };
+                    if let Some(completed) = todos.iter().find(|t| {
+                        t.get("status").and_then(|s| s.as_str()) == Some("completed")
+                    }) {
+                        let content = completed.get("content").and_then(|c| c.as_str()).unwrap_or("task");
+                        let truncated = if content.len() > 40 { format!("{}...", &content[..40]) } else { content.to_string() };
                         return format!("Marked todo {} as completed", truncated);
                     }
                     if let Some(first) = todos.first() {
-                        let content = first
-                            .get("content")
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("task");
-                        let truncated = if content.len() > 40 {
-                            format!("{}...", &content[..40])
-                        } else {
-                            content.to_string()
-                        };
+                        let content = first.get("content").and_then(|c| c.as_str()).unwrap_or("task");
+                        let truncated = if content.len() > 40 { format!("{}...", &content[..40]) } else { content.to_string() };
                         return format!("Created todo {}", truncated);
                     }
                 }
@@ -2975,6 +3091,13 @@ impl App {
                 self.thinking_position = (self.thinking_position + 1) % (text_len + 7);
                 self.thinking_last_tick = Instant::now();
             }
+        }
+
+        for context in self.sub_agent_contexts.values_mut() {
+            context.update_thinking_animation(
+                self.thinking_snowflake_frames.len(),
+                &self.thinking_words,
+            );
         }
 
         match self.phase {
@@ -4508,7 +4631,6 @@ Let me analyze the conversation chronologically:
                     StepStatus::Failed => "failed",
                 };
                 self.status_message = Some(format!("Step {}: {}", step_index, status_str));
-                self.ensure_subagent_session(&prefix);
             }
 
             OrchestratorEvent::SummaryUpdated { summary } => {
@@ -4522,18 +4644,13 @@ Let me analyze the conversation chronologically:
                     "Step {} summary {}",
                     summary.step_index, status_str
                 ));
-                self.ensure_subagent_session(&summary.step_index);
             }
 
-            OrchestratorEvent::VerifierFailed {
-                summary,
-                feedback: _,
-            } => {
+            OrchestratorEvent::VerifierFailed { summary, feedback: _ } => {
                 self.upsert_summary_history(summary.clone());
                 // Don't add to messages - visible in Alt+W session view
                 self.status_message =
                     Some(format!("Verifier failed on step {}", summary.step_index));
-                self.ensure_subagent_session(&summary.step_index);
             }
 
             OrchestratorEvent::ChildSpecPushed {
@@ -4547,10 +4664,7 @@ Let me analyze the conversation chronologically:
                 ));
             }
 
-            OrchestratorEvent::ChannelClosed {
-                task_id: _,
-                closed_at: _,
-            } => {
+            OrchestratorEvent::ChannelClosed { task_id: _, closed_at: _ } => {
                 // Channel closed events are internal - don't show in main view
             }
 
@@ -4600,8 +4714,9 @@ Let me analyze the conversation chronologically:
                 } else {
                     None
                 };
-                let label = planned_label
-                    .unwrap_or_else(|| Self::describe_tool_call(&tool_name, &arguments));
+                let label = planned_label.unwrap_or_else(|| {
+                    Self::describe_tool_call(&tool_name, &arguments)
+                });
                 let entry_id = self.next_tool_call_id;
                 self.next_tool_call_id = self.next_tool_call_id.saturating_add(1);
 
@@ -4610,46 +4725,97 @@ Let me analyze the conversation chronologically:
                     .or_default()
                     .push(StepToolCallEntry {
                         id: entry_id,
-                        label: label.clone(),
+                        label,
                         status: ToolCallStatus::Started,
                     });
-                self.active_tool_call = Some((prefix.clone(), entry_id));
-                let formatted_args = Self::format_tool_arguments(&tool_name, &arguments);
-                let session = self.ensure_subagent_session(&prefix);
-                session.push_tool_call_started(&tool_name, formatted_args);
+                self.active_tool_call = Some((prefix, entry_id));
             }
 
             OrchestratorEvent::ToolCallCompleted {
                 prefix,
-                tool_name,
-                result,
+                tool_name: _,
+                result: _,
                 is_error,
             } => {
                 // Find and update the matching tool call entry
                 if let Some((active_prefix, entry_id)) = self.active_tool_call.take() {
                     if active_prefix == prefix {
-                        let final_status = if is_error {
-                            ToolCallStatus::Error
-                        } else {
-                            ToolCallStatus::Completed
-                        };
                         if let Some(entries) = self.step_tool_calls.get_mut(&prefix) {
                             if let Some(entry) = entries.iter_mut().find(|e| e.id == entry_id) {
-                                entry.status = final_status;
+                                entry.status = if is_error {
+                                    ToolCallStatus::Error
+                                } else {
+                                    ToolCallStatus::Completed
+                                };
                             }
                         }
-                        let formatted = Self::format_tool_result(&tool_name, &result);
-                        let session = self.ensure_subagent_session(&prefix);
-                        session.complete_tool_call(&tool_name, formatted);
                     }
                 }
             }
 
-            OrchestratorEvent::AgentResponse { prefix, content } => {
-                let session = self.ensure_subagent_session(&prefix);
-                session.update_agent_response(content);
+            OrchestratorEvent::AgentMessage { prefix, message } => {
+                // Store sub-agent message in the context for this prefix
+                let context = self.sub_agent_contexts.entry(prefix.clone()).or_insert_with(|| {
+                    // Get step title from current spec if available
+                    let step_title = self.current_spec.as_ref()
+                        .and_then(|spec| Self::find_step_by_prefix(&spec.steps, &prefix))
+                        .map(|step| step.title.clone())
+                        .unwrap_or_else(|| format!("Step {}", prefix));
+                    SubAgentContext::new(prefix.clone(), step_title)
+                });
+
+                match message {
+                    SubAgentMessage::UserPrompt { content } => {
+                        context.add_user_message(content);
+                    }
+                    SubAgentMessage::Text { content } => {
+                        context.add_agent_text(content);
+                    }
+                    SubAgentMessage::Thinking { content, duration_secs } => {
+                        if duration_secs == 0 {
+                            context.start_thinking(content);
+                        } else {
+                            context.finish_thinking(duration_secs);
+                        }
+                    }
+                    SubAgentMessage::ToolCall { tool_name, arguments, result, is_error: _ } => {
+                        if let Some(result) = result {
+                            let formatted_result = Self::format_tool_result(&tool_name, &result);
+                            context.complete_tool_call(&tool_name, formatted_result);
+                        } else {
+                            let formatted_args = Self::format_tool_arguments(&tool_name, &arguments);
+                            context.add_tool_call_started(&tool_name, formatted_args);
+                        }
+                    }
+                    SubAgentMessage::GenerationStats { tokens_per_sec, input_tokens, output_tokens } => {
+                        context.set_generation_stats(tokens_per_sec, input_tokens, output_tokens);
+                    }
+                }
             }
         }
+    }
+
+    /// Find a step by its prefix in a nested step tree.
+    fn find_step_by_prefix<'a>(steps: &'a [SpecStep], prefix: &str) -> Option<&'a SpecStep> {
+        let parts: Vec<&str> = prefix.split('.').collect();
+        Self::find_step_recursive(steps, &parts, 0)
+    }
+
+    fn find_step_recursive<'a>(steps: &'a [SpecStep], parts: &[&str], depth: usize) -> Option<&'a SpecStep> {
+        if depth >= parts.len() {
+            return None;
+        }
+        let target_index = parts[depth];
+        for step in steps {
+            if step.index == target_index {
+                if depth == parts.len() - 1 {
+                    return Some(step);
+                } else if let Some(sub_spec) = &step.sub_spec {
+                    return Self::find_step_recursive(&sub_spec.steps, parts, depth + 1);
+                }
+            }
+        }
+        None
     }
 
     fn handle_slash_command(&mut self) {
@@ -7095,57 +7261,88 @@ Let me analyze the conversation chronologically:
                                 if key.modifiers.contains(KeyModifiers::ALT)
                                     && key.code == KeyCode::Char('w')
                                 {
-                                    // Toggle session window
-                                    if self.mode == Mode::SessionWindow {
-                                        self.mode = Mode::Normal;
-                                    } else {
+                                    if self.expanded_sub_agent.is_some() {
+                                        // Leaving sub-agent view returns to session window
+                                        self.expanded_sub_agent = None;
                                         self.mode = Mode::SessionWindow;
+                                    } else {
+                                        // Toggle session window visibility
+                                        if self.mode == Mode::SessionWindow {
+                                            self.mode = Mode::Normal;
+                                        } else {
+                                            self.mode = Mode::SessionWindow;
+                                        }
                                     }
-                                } else if key.modifiers.contains(KeyModifiers::ALT)
+                                    self.cached_mode_content = None;
+                                    continue;
+                                }
+
+                                // Exit sub-agent view with 'q' key
+                                if key.code == KeyCode::Char('q')
+                                    && self.expanded_sub_agent.is_some()
+                                {
+                                    self.expanded_sub_agent = None;
+                                    self.mode = Mode::SessionWindow;
+                                    self.cached_mode_content = None;
+                                    continue;
+                                }
+
+                                if key.modifiers.contains(KeyModifiers::ALT)
                                     && key.code == KeyCode::Char('n')
                                 {
                                     // Capture snapshot of current UI state before entering nav mode
-                                    // Calculate elapsed time NOW and freeze it
-                                    let elapsed_secs =
-                                        if let Some(start_time) = self.thinking_start_time {
-                                            start_time.elapsed().as_secs()
-                                        } else {
-                                            0
-                                        };
+                                    let mut snapshot = None;
+                                    if let Some(prefix) = self.expanded_sub_agent.clone() {
+                                        if let Some(context) = self.sub_agent_contexts.get(&prefix) {
+                                            snapshot = Some(context.to_snapshot());
+                                        }
+                                    }
 
-                                    let (snapshot_messages, snapshot_types, snapshot_states) =
-                                        if self.show_summary_history {
-                                            let overlay_messages =
-                                                self.summary_history_virtual_messages();
-                                            let overlay_types =
-                                                vec![MessageType::Agent; overlay_messages.len()];
-                                            let overlay_states =
-                                                vec![MessageState::Sent; overlay_messages.len()];
-                                            (overlay_messages, overlay_types, overlay_states)
-                                        } else {
-                                            (
-                                                self.messages.clone(),
-                                                self.message_types.clone(),
-                                                self.message_states.clone(),
-                                            )
-                                        };
+                                    if snapshot.is_none() {
+                                        // Calculate elapsed time NOW and freeze it
+                                        let elapsed_secs =
+                                            if let Some(start_time) = self.thinking_start_time {
+                                                start_time.elapsed().as_secs()
+                                            } else {
+                                                0
+                                            };
 
-                                    self.nav_snapshot = Some(AppSnapshot {
-                                        messages: snapshot_messages,
-                                        message_types: snapshot_types,
-                                        message_states: snapshot_states,
-                                        is_thinking: self.is_thinking,
-                                        thinking_indicator_active: self.thinking_indicator_active,
-                                        thinking_elapsed_secs: elapsed_secs,
-                                        thinking_token_count: self.thinking_token_count,
-                                        thinking_current_summary: self
-                                            .thinking_current_summary
-                                            .clone(),
-                                        thinking_position: self.thinking_position,
-                                        thinking_loader_frame: self.thinking_loader_frame,
-                                        thinking_current_word: self.thinking_current_word.clone(),
-                                        generation_stats: self.generation_stats.clone(),
-                                    });
+                                        let (snapshot_messages, snapshot_types, snapshot_states) =
+                                            if self.show_summary_history {
+                                                let overlay_messages =
+                                                    self.summary_history_virtual_messages();
+                                                let overlay_types =
+                                                    vec![MessageType::Agent; overlay_messages.len()];
+                                                let overlay_states =
+                                                    vec![MessageState::Sent; overlay_messages.len()];
+                                                (overlay_messages, overlay_types, overlay_states)
+                                            } else {
+                                                (
+                                                    self.messages.clone(),
+                                                    self.message_types.clone(),
+                                                    self.message_states.clone(),
+                                                )
+                                            };
+
+                                        snapshot = Some(AppSnapshot {
+                                            messages: snapshot_messages,
+                                            message_types: snapshot_types,
+                                            message_states: snapshot_states,
+                                            is_thinking: self.is_thinking,
+                                            thinking_indicator_active: self.thinking_indicator_active,
+                                            thinking_elapsed_secs: elapsed_secs,
+                                            thinking_token_count: self.thinking_token_count,
+                                            thinking_current_summary: self
+                                                .thinking_current_summary
+                                                .clone(),
+                                            thinking_position: self.thinking_position,
+                                            thinking_loader_frame: self.thinking_loader_frame,
+                                            thinking_current_word: self.thinking_current_word.clone(),
+                                            generation_stats: self.generation_stats.clone(),
+                                        });
+                                    }
+
+                                    self.nav_snapshot = snapshot;
 
                                     self.mode = Mode::Navigation;
                                     // Flag that we need to init cursor position on first draw
@@ -7736,22 +7933,26 @@ Let me analyze the conversation chronologically:
                                         self.session_manager.next_session();
                                     }
                                     KeyCode::Enter => {
-                                        // Drill into the highlighted session
-                                        let info =
-                                            self.session_manager.get_selected_session().map(|s| {
-                                                (
-                                                    s.name.clone(),
-                                                    self.session_manager
-                                                        .get_selected_status_badge()
-                                                        .unwrap_or("")
-                                                        .to_string(),
-                                                )
-                                            });
-                                        if let Some((name, badge)) = info {
-                                            // For now, just show the session info in status
-                                            // Future: could attach to the session or show details
-                                            self.status_message =
-                                                Some(format!("Session: {} {}", name, badge));
+                                        // Expand the selected sub-agent to full screen
+                                        if let Some(session) = self.session_manager.get_selected_session() {
+                                            if let Some(prefix) = session.prefix.clone() {
+                                                // Check if we have context for this prefix
+                                                if self.sub_agent_contexts.contains_key(&prefix) {
+                                                    self.expanded_sub_agent = Some(prefix);
+                                                    self.mode = Mode::Normal;
+                                                    self.cached_mode_content = None;
+                                                } else {
+                                                    self.status_message = Some(format!(
+                                                        "No activity yet for: {}",
+                                                        session.name
+                                                    ));
+                                                }
+                                            } else {
+                                                // Root session - go back to main view
+                                                self.expanded_sub_agent = None;
+                                                self.mode = Mode::Normal;
+                                                self.cached_mode_content = None;
+                                            }
                                         }
                                     }
                                     KeyCode::Char('d') => {
@@ -7798,8 +7999,11 @@ Let me analyze the conversation chronologically:
                                                 Some(format!("Killed session: {}", name));
                                         }
                                     }
-                                    KeyCode::Char('q') | KeyCode::Esc => {
-                                        self.mode = Mode::Normal;
+                                    KeyCode::Esc => {
+                                        // Leave expanded view (if active) but remain in session window
+                                        if self.expanded_sub_agent.is_some() {
+                                            self.expanded_sub_agent = None;
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -10252,13 +10456,16 @@ Let me analyze the conversation chronologically:
             &mut self.session_manager.list_state,
         );
 
-        // Check if selected session is a subagent (has a prefix)
-        let selected_session = self.session_manager.get_selected_session().cloned();
-        let selected_prefix = selected_session.as_ref().and_then(|s| s.prefix.clone());
+        // Get the selected session's prefix to find the sub-agent context
+        let selected_prefix = self
+            .session_manager
+            .get_selected_session()
+            .and_then(|s| s.prefix.clone());
 
         // Render the bordered box with title
-        let title = selected_session
-            .as_ref()
+        let title = self
+            .session_manager
+            .get_selected_session()
             .map(|s| format!(" Live UI: {} ", s.name))
             .unwrap_or_else(|| " Live UI ".to_string());
         let input_box = Block::default()
@@ -10267,120 +10474,108 @@ Let me analyze the conversation chronologically:
         let agent_ui_area = input_box.inner(input_box_area);
         frame.render_widget(input_box, input_box_area);
 
-        // If a subagent is selected (has prefix), render subagent-specific view
-        // Otherwise render the full main agent UI
-        if let Some(prefix) = selected_prefix {
-            self.render_subagent_session_ui(frame, agent_ui_area, &prefix);
-        } else {
-            self.draw_internal(frame, Some(agent_ui_area));
+        // If we have a selected prefix with sub-agent context, render that sub-agent's messages
+        // Otherwise fall back to the main agent UI
+        if let Some(ref prefix) = selected_prefix {
+            if let Some(context) = self.sub_agent_contexts.get(prefix) {
+                self.render_sub_agent_context(frame, agent_ui_area, context.clone());
+                return;
+            }
         }
+
+        // Fall back to main agent UI if no sub-agent context exists
+        self.draw_internal(frame, Some(agent_ui_area));
     }
 
-    /// Render the full agent UI for a subagent by temporarily swapping message buffers
-    fn render_subagent_session_ui(
+    /// Render a sub-agent's context in full screen mode using the standard UI layout.
+    fn render_sub_agent_fullscreen(&mut self, frame: &mut Frame, context: SubAgentContext) {
+        let snapshot = context.to_snapshot();
+        let previous_snapshot = self.nav_snapshot.clone();
+        let previous_render_flag = self.rendering_sub_agent_view;
+        let previous_render_prefix = self.rendering_sub_agent_prefix.clone();
+        let context_prefix = context.prefix.clone();
+
+        self.nav_snapshot = Some(snapshot);
+        self.rendering_sub_agent_view = true;
+        self.rendering_sub_agent_prefix = Some(context_prefix);
+        self.draw_internal(frame, Some(frame.area()));
+
+        self.nav_snapshot = previous_snapshot;
+        self.rendering_sub_agent_view = previous_render_flag;
+        self.rendering_sub_agent_prefix = previous_render_prefix;
+    }
+
+    /// Render a sub-agent's context (messages, tool calls, etc.) in the given area.
+    fn render_sub_agent_context(
         &mut self,
         frame: &mut Frame,
         area: ratatui::layout::Rect,
-        prefix: &str,
+        context: SubAgentContext,
     ) {
-        if let Some(session) = self.subagent_sessions.get(prefix) {
-            let snapshot = MessageViewSnapshot::capture(self);
-            let session_state = session.clone();
-            self.load_subagent_session(&session_state);
-            self.draw_internal(frame, Some(area));
-            snapshot.restore(self);
-        } else {
-            use ratatui::text::{Line, Span};
-            use ratatui::widgets::Paragraph;
+        let max_width = area.width.saturating_sub(4) as usize;
+        let mut lines: Vec<Line<'static>> = Vec::new();
 
-            let mut lines = Vec::new();
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![Span::styled(
-                "Waiting for agent activity...",
+        let snapshot = context.to_snapshot();
+        let previous_snapshot = self.nav_snapshot.clone();
+        let previous_render_flag = self.rendering_sub_agent_view;
+        let previous_render_prefix = self.rendering_sub_agent_prefix.clone();
+        let context_prefix = context.prefix.clone();
+
+        self.nav_snapshot = Some(snapshot);
+        self.rendering_sub_agent_view = true;
+        self.rendering_sub_agent_prefix = Some(context_prefix.clone());
+
+        lines.push(Line::from(vec![
+            Span::styled("● ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{} — {}", context_prefix, context.step_title),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        lines.push(Line::from(""));
+
+        let message_count = context.messages.len();
+        if message_count == 0 {
+            lines.push(Line::from(Span::styled(
+                "Waiting for sub-agent activity…",
                 Style::default().fg(Color::DarkGray),
-            )]));
-            lines.push(Line::from(vec![Span::raw(
-                " Use the orchestrator to start this step to see live output.",
-            )]));
-            let paragraph = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
-            frame.render_widget(paragraph, area);
-        }
-    }
-
-    fn load_subagent_session(&mut self, session: &SubAgentSession) {
-        self.messages = session.messages.clone();
-        self.message_types = session.message_types.clone();
-        self.message_states = session.message_states.clone();
-        self.message_metadata = session.message_metadata.clone();
-        self.message_timestamps = session.message_timestamps.clone();
-    }
-
-    /// Find a step by its prefix in a nested spec structure
-    fn find_step_by_prefix<'a>(
-        steps: &'a [agent_core::SpecStep],
-        target_prefix: &str,
-        current_prefix: &str,
-    ) -> Option<(&'a agent_core::SpecStep, String)> {
-        for step in steps {
-            let step_prefix = if current_prefix.is_empty() {
-                step.index.clone()
-            } else {
-                format!("{}.{}", current_prefix, step.index)
-            };
-
-            if step_prefix == target_prefix {
-                return Some((step, step_prefix));
+            )));
+        } else {
+            for (idx, message) in context.messages.iter().enumerate() {
+                let is_agent = matches!(context.message_types.get(idx), Some(MessageType::Agent));
+                let connector = self.agent_connector_for_index(&context.message_types, idx);
+                let rendered = self.render_message_with_max_width(
+                    message,
+                    max_width,
+                    None,
+                    is_agent,
+                    connector,
+                );
+                lines.extend(rendered.lines);
             }
 
-            // Search in sub-spec if present
-            if let Some(sub_spec) = &step.sub_spec {
-                if let Some(found) =
-                    Self::find_step_by_prefix(&sub_spec.steps, target_prefix, &step_prefix)
-                {
-                    return Some(found);
-                }
+            if let Some(stats) = context.generation_stats.clone() {
+                let stats_text = format!(
+                    " {:.2} tok/sec • {} completion • {} prompt",
+                    stats.avg_completion_tok_per_sec,
+                    self.format_compact_number(stats.completion_tokens),
+                    self.format_compact_number(stats.prompt_tokens),
+                );
+                lines.push(Line::from(Span::styled(
+                    stats_text,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(ratatui::style::Modifier::ITALIC),
+                )));
             }
         }
-        None
-    }
 
-    /// Truncate text to fit within a given width
-    fn truncate_to_width(text: &str, max_width: usize) -> String {
-        use unicode_width::UnicodeWidthChar;
-        if max_width == 0 {
-            return String::new();
-        }
-        let mut result = String::new();
-        let mut width = 0;
-        for ch in text.chars() {
-            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1);
-            if width + ch_width > max_width {
-                result.push('…');
-                break;
-            }
-            result.push(ch);
-            width += ch_width;
-        }
-        result
-    }
+        let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
 
-    fn subagent_metadata(&self, prefix: &str) -> Option<(String, String)> {
-        self.current_spec.as_ref().and_then(|spec| {
-            Self::find_step_by_prefix(&spec.steps, prefix, "")
-                .map(|(step, _)| (step.title.clone(), step.instructions.clone()))
-        })
-    }
-
-    fn ensure_subagent_session(&mut self, prefix: &str) -> &mut SubAgentSession {
-        let metadata = self.subagent_metadata(prefix);
-        let session = self
-            .subagent_sessions
-            .entry(prefix.to_string())
-            .or_insert_with(SubAgentSession::default);
-        if let Some((title, instructions)) = metadata {
-            session.ensure_intro(Some(title), Some(instructions));
-        }
-        session
+        self.nav_snapshot = previous_snapshot;
+        self.rendering_sub_agent_view = previous_render_flag;
+        self.rendering_sub_agent_prefix = previous_render_prefix;
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -10392,6 +10587,15 @@ Let me analyze the conversation chronologically:
         frame: &mut Frame,
         constrained_area: Option<ratatui::layout::Rect>,
     ) {
+        if constrained_area.is_none() {
+            if let Some(prefix) = self.expanded_sub_agent.clone() {
+                if let Some(context) = self.sub_agent_contexts.get(&prefix) {
+                    self.render_sub_agent_fullscreen(frame, context.clone());
+                    return;
+                }
+            }
+        }
+
         // If in SessionWindow mode (and not called recursively), render session window
         if self.mode == Mode::SessionWindow && constrained_area.is_none() {
             // SessionManager will render itself and call back to render Agent UI in its bottom box
@@ -10768,7 +10972,7 @@ Let me analyze the conversation chronologically:
                 }
 
                 // If spec is active, append tool-only plan tree to messages
-                if self.current_spec.is_some() {
+                if self.current_spec.is_some() && self.allow_plan_tree_render() {
                     message_lines.push(Line::from(" ")); // Gap before plan tree
                     message_lines.extend(self.build_tool_only_plan_lines(max_width));
 
@@ -10860,7 +11064,8 @@ Let me analyze the conversation chronologically:
                     let messages = self.get_messages();
                     let message_types = self.get_message_types();
                     for (idx, message) in messages.iter().enumerate() {
-                        let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
+                        let is_agent =
+                            matches!(message_types.get(idx), Some(MessageType::Agent));
                         let connector = self.agent_connector_for_index(message_types, idx);
                         lines.extend(
                             self.render_message_with_max_width(
@@ -10892,7 +11097,7 @@ Let me analyze the conversation chronologically:
                     }
 
                     // If spec is active, append tool-only plan tree to messages
-                    if self.current_spec.is_some() {
+                    if self.current_spec.is_some() && self.allow_plan_tree_render() {
                         lines.push(Line::from(" ")); // Gap before plan tree
                         lines.extend(self.build_tool_only_plan_lines(max_width));
 
@@ -10934,6 +11139,45 @@ Let me analyze the conversation chronologically:
                                 Style::default().fg(Color::DarkGray),
                             ));
                             lines.push(Line::from(spans));
+                        }
+                    } else if self.rendering_sub_agent_view {
+                        // Show thinking animation for sub-agent view when thinking is active
+                        if let Some(snapshot) = &self.nav_snapshot {
+                            if snapshot.thinking_indicator_active {
+                                let current_frame =
+                                    self.thinking_snowflake_frames[snapshot.thinking_loader_frame];
+                                let text_with_dots = format!("{}...", &snapshot.thinking_current_word);
+                                let color_spans = Self::create_thinking_highlight_spans(
+                                    &text_with_dots,
+                                    snapshot.thinking_position,
+                                );
+
+                                // Build elapsed time string
+                                let elapsed = snapshot.thinking_elapsed_secs;
+                                let mins = elapsed / 60;
+                                let secs = elapsed % 60;
+                                let time_str = if mins > 0 {
+                                    format!("{}m {:02}s", mins, secs)
+                                } else {
+                                    format!("{}s", secs)
+                                };
+
+                                let mut spans = vec![
+                                    Span::styled(
+                                        current_frame,
+                                        Style::default().fg(Color::Rgb(255, 165, 0)),
+                                    ),
+                                    Span::raw(" "),
+                                ];
+                                for (text, color) in color_spans {
+                                    spans.push(Span::styled(text, Style::default().fg(color)));
+                                }
+                                spans.push(Span::styled(
+                                    format!(" [{}]", time_str),
+                                    Style::default().fg(Color::DarkGray),
+                                ));
+                                lines.push(Line::from(spans));
+                            }
                         }
                     }
 

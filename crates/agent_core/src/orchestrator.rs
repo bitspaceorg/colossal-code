@@ -69,10 +69,34 @@ pub enum OrchestratorEvent {
         result: String,
         is_error: bool,
     },
-    /// Agent response text during step execution
-    AgentResponse {
+    /// Sub-agent message (text, thinking, or tool call detail)
+    AgentMessage {
         prefix: String,
-        content: String,
+        message: SubAgentMessage,
+    },
+}
+
+/// A message from a sub-agent during step execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SubAgentMessage {
+    /// User prompt sent to the sub-agent
+    UserPrompt { content: String },
+    /// Text response from the sub-agent
+    Text { content: String },
+    /// Thinking block from the sub-agent
+    Thinking { content: String, duration_secs: u64 },
+    /// Tool call with full details
+    ToolCall {
+        tool_name: String,
+        arguments: String,
+        result: Option<String>,
+        is_error: bool,
+    },
+    /// Generation statistics
+    GenerationStats {
+        tokens_per_sec: f32,
+        input_tokens: usize,
+        output_tokens: usize,
     },
 }
 
