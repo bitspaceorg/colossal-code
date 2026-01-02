@@ -7,7 +7,21 @@ use agent_core::{
 };
 use agent_protocol::types::spec::TestResult;
 use chrono::{TimeZone, Utc};
-use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, layout::Rect};
+use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, layout::Rect, widgets::Paragraph};
+
+#[derive(Clone, Debug)]
+pub struct StepToolCallEntry {
+    pub id: u64,
+    pub label: String,
+    pub status: ToolCallStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolCallStatus {
+    Started,
+    Completed,
+    Error,
+}
 
 #[path = "../src/spec_ui.rs"]
 mod spec_ui;
@@ -16,7 +30,7 @@ mod spec_ui;
 mod session_manager;
 
 use session_manager::{OrchestratorEntry, SessionManager, SessionStatus};
-use spec_ui::render_spec_pane_view;
+use spec_ui::build_spec_plan_lines;
 
 fn buffer_to_string(buffer: &Buffer) -> String {
     let mut rows = Vec::new();
@@ -91,6 +105,7 @@ fn draw_spec_pane(
     latest: &HashMap<String, TaskSummary>,
     show_history: bool,
     drawer_open: bool,
+    step_tools: &HashMap<String, Vec<StepToolCallEntry>>,
 ) -> Buffer {
     let backend = TestBackend::new(90, 20);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -98,17 +113,49 @@ fn draw_spec_pane(
     terminal
         .draw(|frame| {
             let area = frame.size();
-            render_spec_pane_view(
-                frame,
-                area,
+            let lines = build_spec_plan_lines(
                 spec,
                 false,
-                1,
+                1.min(spec.steps.len().saturating_sub(1)),
                 show_history,
                 drawer_open,
                 &history_vec,
                 latest,
+                step_tools,
+                None,
+                true,
+                area.width as usize,
             );
+            frame.render_widget(Paragraph::new(lines), area);
+        })
+        .unwrap();
+    terminal.backend().buffer().clone()
+}
+
+fn draw_plan_view(
+    spec: &SpecSheet,
+    latest: &HashMap<String, TaskSummary>,
+    step_tools: &HashMap<String, Vec<StepToolCallEntry>>,
+) -> Buffer {
+    let backend = TestBackend::new(90, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = frame.size();
+            let lines = build_spec_plan_lines(
+                spec,
+                false,
+                1.min(spec.steps.len().saturating_sub(1)),
+                false,
+                false,
+                &[],
+                latest,
+                step_tools,
+                None,
+                false,
+                area.width as usize,
+            );
+            frame.render_widget(Paragraph::new(lines), area);
         })
         .unwrap();
     terminal.backend().buffer().clone()
@@ -120,7 +167,8 @@ fn spec_pane_metadata_and_steps_snapshot() {
     let mut latest = HashMap::new();
     let summary = sample_summary("2");
     latest.insert("2".to_string(), summary);
-    let buffer = draw_spec_pane(&spec, &[], &latest, false, true);
+    let step_tools = HashMap::new();
+    let buffer = draw_spec_pane(&spec, &[], &latest, false, true, &step_tools);
     let output = buffer_to_string(&buffer);
     insta::assert_snapshot!("spec_pane_full", output);
 }
@@ -130,9 +178,78 @@ fn spec_pane_history_snapshot() {
     let spec = create_spec(3);
     let history = vec![sample_summary("1"), sample_summary("2")];
     let latest = HashMap::new();
-    let buffer = draw_spec_pane(&spec, &history, &latest, true, false);
+    let step_tools = HashMap::new();
+    let buffer = draw_spec_pane(&spec, &history, &latest, true, false, &step_tools);
     let output = buffer_to_string(&buffer);
     insta::assert_snapshot!("spec_pane_history", output);
+}
+
+#[test]
+fn spec_pane_tool_activity_snapshot() {
+    let spec = create_spec(3);
+    let latest = HashMap::new();
+    let mut step_tools: HashMap<String, Vec<StepToolCallEntry>> = HashMap::new();
+    step_tools.insert(
+        "1".to_string(),
+        vec![
+            StepToolCallEntry {
+                id: 1,
+                label: "Read orchestrator.rs".to_string(),
+                status: ToolCallStatus::Completed,
+            },
+            StepToolCallEntry {
+                id: 2,
+                label: "Search extract_sub_spec in orchestrator.rs".to_string(),
+                status: ToolCallStatus::Started,
+            },
+        ],
+    );
+    step_tools.insert(
+        "2".to_string(),
+        vec![StepToolCallEntry {
+            id: 3,
+            label: "Write src/spec_ui.rs".to_string(),
+            status: ToolCallStatus::Error,
+        }],
+    );
+
+    let buffer = draw_spec_pane(&spec, &[], &latest, false, false, &step_tools);
+    let output = buffer_to_string(&buffer);
+    insta::assert_snapshot!("spec_pane_tool_activity", output);
+}
+
+#[test]
+fn plan_view_tool_activity_snapshot() {
+    let spec = create_spec(3);
+    let latest = HashMap::new();
+    let mut step_tools: HashMap<String, Vec<StepToolCallEntry>> = HashMap::new();
+    step_tools.insert(
+        "1".to_string(),
+        vec![
+            StepToolCallEntry {
+                id: 1,
+                label: "Read orchestrator.rs".to_string(),
+                status: ToolCallStatus::Completed,
+            },
+            StepToolCallEntry {
+                id: 2,
+                label: "Search extract_sub_spec in orchestrator.rs".to_string(),
+                status: ToolCallStatus::Started,
+            },
+        ],
+    );
+    step_tools.insert(
+        "2".to_string(),
+        vec![StepToolCallEntry {
+            id: 3,
+            label: "Write src/spec_ui.rs".to_string(),
+            status: ToolCallStatus::Error,
+        }],
+    );
+
+    let buffer = draw_plan_view(&spec, &latest, &step_tools);
+    let output = buffer_to_string(&buffer);
+    insta::assert_snapshot!("plan_view_tool_activity", output);
 }
 
 fn draw_session_window(entries: Vec<OrchestratorEntry>) -> Buffer {

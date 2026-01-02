@@ -56,6 +56,24 @@ pub enum OrchestratorEvent {
     Completed,
     /// Error occurred
     Error(String),
+    /// Tool call started during step execution
+    ToolCallStarted {
+        prefix: String,
+        tool_name: String,
+        arguments: String,
+    },
+    /// Tool call completed during step execution
+    ToolCallCompleted {
+        prefix: String,
+        tool_name: String,
+        result: String,
+        is_error: bool,
+    },
+    /// Agent response text during step execution
+    AgentResponse {
+        prefix: String,
+        content: String,
+    },
 }
 
 /// Control signals for the orchestrator.
@@ -150,6 +168,20 @@ pub trait OrchestratorAgent: Send + Sync {
     ) -> Result<()>;
 
     async fn execute_step(&self, step: SpecStep, spec: &SpecSheet) -> Result<Task>;
+
+    /// Execute a step with optional event sink for tool call notifications.
+    /// Default implementation just calls execute_step, ignoring events.
+    async fn execute_step_with_events(
+        &self,
+        step: SpecStep,
+        spec: &SpecSheet,
+        prefix: &str,
+        event_tx: Option<mpsc::UnboundedSender<OrchestratorEvent>>,
+    ) -> Result<Task> {
+        let _ = prefix;
+        let _ = event_tx;
+        self.execute_step(step, spec).await
+    }
 
     async fn update_task_summary(&self, summary: &TaskSummary) -> Result<()>;
 
@@ -396,7 +428,12 @@ impl Orchestrator {
                 .await?;
 
             let sub_agent = (self.sub_agent_factory)(&in_progress_step);
-            let task = sub_agent.execute_step(in_progress_step.clone(), &spec).await?;
+            let task = sub_agent.execute_step_with_events(
+                in_progress_step.clone(),
+                &spec,
+                &current_prefix,
+                self.event_tx.clone(),
+            ).await?;
             if task.status.state == TaskState::Submitted {
                 if let Some(child_spec) = Self::extract_sub_spec(&task)? {
                     if let Some(entry) = spec.steps.get_mut(step_idx) {
@@ -416,6 +453,26 @@ impl Orchestrator {
                     self.stack.push((child_spec, 0, current_prefix.clone()));
                     continue;
                 }
+            }
+
+            // Skip verification for failed tasks - just mark step as failed
+            if task.status.state == TaskState::Failed {
+                if let Some(entry) = spec.steps.get_mut(step_idx) {
+                    entry.status = StepStatus::Failed;
+                    entry.completed_at = Some(chrono::Utc::now());
+                }
+                self.emit_event(OrchestratorEvent::StepStatusChanged {
+                    spec_id: spec.id.clone(),
+                    step_index: spec.steps[step_idx].index.clone(),
+                    prefix: current_prefix.clone(),
+                    status: StepStatus::Failed,
+                });
+                self.main_agent
+                    .update_spec_status(&spec, &spec.steps[step_idx], &current_prefix)
+                    .await?;
+                // Continue to next step
+                self.stack.push((spec, step_idx + 1, prefix));
+                continue;
             }
 
             match self.verify_and_feedback(&task).await? {
@@ -629,6 +686,16 @@ impl OrchestratorAgent for Agent {
 
     async fn execute_step(&self, step: SpecStep, spec: &SpecSheet) -> Result<Task> {
         self.execute_step(step, spec).await
+    }
+
+    async fn execute_step_with_events(
+        &self,
+        step: SpecStep,
+        spec: &SpecSheet,
+        prefix: &str,
+        event_tx: Option<mpsc::UnboundedSender<OrchestratorEvent>>,
+    ) -> Result<Task> {
+        self.execute_step_with_events(step, spec, prefix, event_tx).await
     }
 
     async fn update_task_summary(&self, summary: &TaskSummary) -> Result<()> {

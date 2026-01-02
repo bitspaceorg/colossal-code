@@ -956,9 +956,15 @@ pub async fn create_sandboxed_exec_session(
         for arg in &args[1..] {
             command_builder.arg(arg);
         }
-        
+
         // Set working directory
         command_builder.cwd(&cwd);
+
+        // Disable shell history to prevent AI commands from polluting user's history
+        command_builder.env("HISTFILE", "/dev/null");
+        command_builder.env("HISTSIZE", "0");
+        command_builder.env("SAVEHIST", "0"); // zsh
+        command_builder.env("HISTCONTROL", "ignoreboth"); // bash
 
         match pair.slave.spawn_command(command_builder) {
             Ok(c) => {
@@ -1120,9 +1126,15 @@ pub async fn create_persistent_shell_session(
         if login {
             command_builder.arg("-l");
         }
-        
+
         // Set working directory
         command_builder.cwd(&cwd);
+
+        // Disable shell history to prevent AI commands from polluting user's history
+        command_builder.env("HISTFILE", "/dev/null");
+        command_builder.env("HISTSIZE", "0");
+        command_builder.env("SAVEHIST", "0"); // zsh
+        command_builder.env("HISTCONTROL", "ignoreboth"); // bash
 
         match pair.slave.spawn_command(command_builder) {
             Ok(c) => {

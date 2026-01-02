@@ -1,0 +1,10 @@
+---
+source: tests/tui_snapshots.rs
+expression: output
+---
+● Step 1: Feature                                                                         
+  └ ● Read orchestrator.rs                                                                
+  └ ◐ Search extract_sub_spec in orchestrator.rs                                          
+◐ Step 2: Feature                                                                         
+  └ ✗ Write src/spec_ui.rs                                                                
+○ Step 3: Feature

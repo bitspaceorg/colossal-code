@@ -19,6 +19,7 @@ pub enum ToolName {
     HtmlToText,
     TodoWrite,
     RequestSplit,
+    OrchestrateTask,
 }
 
 /// Build a specific tool definition
@@ -455,6 +456,32 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                 }),
             },
         },
+        ToolName::OrchestrateTask => Tool {
+            tp: ToolType::Function,
+            function: Function {
+                name: "orchestrate_task".to_string(),
+                description: Some("Start a multi-step orchestrated workflow for complex tasks. Use this when a task requires multiple distinct steps, verification, or would benefit from structured execution. The orchestrator will break down the goal into steps, execute them depth-first with sub-agents, and verify each step before proceeding.".to_string()),
+                parameters: Some({
+                    let mut params = HashMap::new();
+                    params.insert("type".to_string(), json!("object"));
+                    params.insert(
+                        "properties".to_string(),
+                        json!({
+                            "goal": {
+                                "type": "string",
+                                "description": "The high-level goal or task to accomplish. Should describe the desired outcome clearly."
+                            },
+                            "reason": {
+                                "type": "string",
+                                "description": "Brief explanation of why orchestration is appropriate for this task (e.g., 'multi-file changes', 'requires testing', 'complex feature')"
+                            }
+                        }),
+                    );
+                    params.insert("required".to_string(), json!(["goal"]));
+                    params
+                }),
+            },
+        },
     }
 }
 
@@ -480,6 +507,7 @@ pub fn get_all_tools() -> Vec<Tool> {
         ToolName::HtmlToText,
         ToolName::TodoWrite,
         ToolName::RequestSplit,
+        ToolName::OrchestrateTask,
     ])
 }
 

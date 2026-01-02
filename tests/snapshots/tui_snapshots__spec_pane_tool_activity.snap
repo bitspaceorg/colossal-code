@@ -1,0 +1,14 @@
+---
+source: tests/tui_snapshots.rs
+expression: output
+---
+📋  Snapshot Spec                                                                          
+Created by tests • 1970-01-01 00:00                                                       
+Controls: P Pause · R Rerun · A Abort · H History · Enter Drawer                          
+                                                                                          
+● Step 1: Feature                                                                         
+  └ ● Read orchestrator.rs                                                                
+  └ ◐ Search extract_sub_spec in orchestrator.rs                                          
+◐ Step 2: Feature                                                                         
+  └ ✗ Write src/spec_ui.rs                                                                
+○ Step 3: Feature

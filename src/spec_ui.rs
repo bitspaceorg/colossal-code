@@ -1,17 +1,150 @@
 use std::collections::HashMap;
 
-use agent_core::{SpecSheet, StepStatus, TaskSummary, VerificationStatus};
+use agent_core::{SpecSheet, SpecStep, StepStatus, TaskSummary, VerificationStatus};
 use ratatui::{
-    Frame,
-    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, Wrap},
 };
+use unicode_width::UnicodeWidthChar;
 
-pub fn render_spec_pane_view<'a>(
-    frame: &mut Frame<'a>,
-    area: Rect,
+use crate::{StepToolCallEntry, ToolCallStatus};
+
+/// Build tool-only plan lines for the main message view.
+/// Only shows steps that have actual tool activity - no empty steps.
+pub fn build_tool_only_plan_lines(
+    spec: &SpecSheet,
+    step_tool_calls: &HashMap<String, Vec<StepToolCallEntry>>,
+    active_prefix: Option<&str>,
+    max_width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    // Only show if there's actual tool activity
+    if step_tool_calls.is_empty() {
+        return lines;
+    }
+
+    for step in &spec.steps {
+        append_tool_only_step_lines(
+            &mut lines,
+            step,
+            "",
+            0,
+            active_prefix,
+            step_tool_calls,
+            max_width,
+        );
+    }
+
+    lines
+}
+
+/// Check if a step or any of its children have tool calls
+fn step_has_tool_activity(
+    step: &SpecStep,
+    parent_prefix: &str,
+    step_tool_calls: &HashMap<String, Vec<StepToolCallEntry>>,
+) -> bool {
+    let prefix = compose_prefix(parent_prefix, &step.index);
+
+    // Check if this step has tool calls
+    if step_tool_calls.contains_key(&prefix) {
+        return true;
+    }
+
+    // Check children
+    if let Some(sub_spec) = &step.sub_spec {
+        for child in &sub_spec.steps {
+            if step_has_tool_activity(child, &prefix, step_tool_calls) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn append_tool_only_step_lines(
+    lines: &mut Vec<Line<'static>>,
+    step: &SpecStep,
+    parent_prefix: &str,
+    depth: usize,
+    active_prefix: Option<&str>,
+    step_tool_calls: &HashMap<String, Vec<StepToolCallEntry>>,
+    max_width: usize,
+) {
+    let prefix = compose_prefix(parent_prefix, &step.index);
+
+    // Skip steps without any tool activity (including children)
+    if !step_has_tool_activity(step, parent_prefix, step_tool_calls) {
+        return;
+    }
+
+    let indent = "  ".repeat(depth);
+    let mut style = style_for_step(step.status);
+
+    // Highlight active step
+    if let Some(active) = active_prefix {
+        if active == prefix {
+            style = Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD);
+        }
+    }
+
+    let bullet = "●";
+
+    let base_text = if step.title.trim().is_empty() {
+        step.instructions.clone()
+    } else {
+        step.title.clone()
+    };
+    let reserved = indent.len() + 4;
+    let available = max_width.saturating_sub(reserved);
+    let content = trim_to_width(&base_text, available);
+
+    lines.push(Line::from(vec![
+        Span::raw(format!("{}{} ", indent, bullet)),
+        Span::styled(content, style),
+    ]));
+
+    // Show tool calls under this step
+    if let Some(entries) = step_tool_calls.get(&prefix) {
+        for (i, entry) in entries.iter().enumerate() {
+            let entry_indent = "  ".repeat(depth);
+            let is_last = i == entries.len() - 1;
+            let connector = if is_last { "└ " } else { "│ " };
+            let available = max_width.saturating_sub(entry_indent.len() + 6);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{}│ {} ", entry_indent, connector),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    trim_to_width(&entry.label, available),
+                    style_for_tool(entry.status),
+                ),
+            ]));
+        }
+    }
+
+    // Process sub-spec steps recursively
+    if let Some(sub_spec) = &step.sub_spec {
+        for child in &sub_spec.steps {
+            append_tool_only_step_lines(
+                lines,
+                child,
+                &prefix,
+                depth + 1,
+                active_prefix,
+                step_tool_calls,
+                max_width,
+            );
+        }
+    }
+}
+
+pub fn build_spec_plan_lines(
     spec: &SpecSheet,
     orchestrator_paused: bool,
     selected_index: usize,
@@ -19,39 +152,35 @@ pub fn render_spec_pane_view<'a>(
     step_drawer_open: bool,
     orchestrator_history: &[TaskSummary],
     latest_summaries: &HashMap<String, TaskSummary>,
-) {
-    if area.height < 6 {
-        return;
-    }
+    step_tool_calls: &HashMap<String, Vec<StepToolCallEntry>>,
+    active_prefix: Option<&str>,
+    include_metadata: bool,
+    max_width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
 
-    let sections = Layout::vertical([
-        Constraint::Length(5),
-        Constraint::Min(6),
-        Constraint::Length(8),
-    ])
-    .split(area);
-
-    // Metadata section
-    let created_at = spec.created_at.format("%Y-%m-%d %H:%M").to_string();
-    let paused_badge = if orchestrator_paused { " [PAUSED]" } else { "" };
-    let metadata_text = vec![
-        Line::from(vec![
+    if include_metadata {
+        let paused_badge = if orchestrator_paused { " [PAUSED]" } else { "" };
+        lines.push(Line::from(vec![
             Span::styled("📋 ", Style::default().fg(Color::Yellow)),
             Span::styled(
-                &spec.title,
+                spec.title.clone(),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(paused_badge, Style::default().fg(Color::Yellow)),
-        ]),
-        Line::from(vec![
+        ]));
+        lines.push(Line::from(vec![
             Span::styled("Created by ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&spec.created_by, Style::default().fg(Color::Gray)),
+            Span::styled(spec.created_by.clone(), Style::default().fg(Color::Gray)),
             Span::styled(" • ", Style::default().fg(Color::DarkGray)),
-            Span::styled(created_at, Style::default().fg(Color::Gray)),
-        ]),
-        Line::from(vec![
+            Span::styled(
+                spec.created_at.format("%Y-%m-%d %H:%M").to_string(),
+                Style::default().fg(Color::Gray),
+            ),
+        ]));
+        lines.push(Line::from(vec![
             Span::styled("Controls: ", Style::default().fg(Color::DarkGray)),
             Span::styled("P Pause", Style::default().fg(Color::Cyan)),
             Span::raw(" · "),
@@ -62,211 +191,378 @@ pub fn render_spec_pane_view<'a>(
             Span::styled("H History", Style::default().fg(Color::Cyan)),
             Span::raw(" · "),
             Span::styled("Enter Drawer", Style::default().fg(Color::Cyan)),
-        ]),
-    ];
-    let metadata = Paragraph::new(metadata_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .title(" Spec metadata "),
-        )
-        .wrap(Wrap { trim: true });
-    frame.render_widget(metadata, sections[0]);
-
-    // Table section
-    let mut rows: Vec<Row> = Vec::new();
-    for (idx, step) in spec.steps.iter().enumerate() {
-        let status_icon = match step.status {
-            StepStatus::Pending => "○",
-            StepStatus::InProgress => "◐",
-            StepStatus::Completed => "●",
-            StepStatus::Failed => "✗",
-        };
-        let deps = if step.dependencies.is_empty() {
-            "—".to_string()
-        } else {
-            format!("↳ {}", step.dependencies.join(", "))
-        };
-        let criteria_snippet = if let Some(first) = step.acceptance_criteria.first() {
-            let mut snippet = first.clone();
-            if snippet.len() > 24 {
-                snippet.truncate(24);
-                snippet.push_str("…");
-            }
-            snippet
-        } else {
-            "No acceptance criteria".to_string()
-        };
-        let mut row = Row::new(vec![
-            Cell::from(step.index.clone()),
-            Cell::from(status_icon.to_string()),
-            Cell::from(step.title.clone()),
-            Cell::from(format!("{} | {}", criteria_snippet, deps)),
-        ]);
-        if idx == selected_index {
-            row = row.style(Style::default().fg(Color::Cyan));
-        }
-        rows.push(row);
+        ]));
+        lines.push(Line::from(""));
     }
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(4),
-            Constraint::Length(6),
-            Constraint::Percentage(35),
-            Constraint::Percentage(55),
-        ],
-    )
-    .header(
-        Row::new(vec![
-            Cell::from("#"),
-            Cell::from("State"),
-            Cell::from("Title"),
-            Cell::from("Details"),
-        ])
-        .style(
-            Style::default()
-                .fg(Color::Gray)
-                .add_modifier(Modifier::BOLD),
-        ),
-    )
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .title(" Steps "),
-    )
-    .column_spacing(1);
-    frame.render_widget(table, sections[1]);
 
     if show_history {
-        let mut lines: Vec<Line> = Vec::new();
-        if orchestrator_history.is_empty() {
-            lines.push(Line::from("No task history available."));
-        } else {
-            for summary in orchestrator_history {
-                let status_icon = match summary.verification.status {
-                    VerificationStatus::Passed => "✓",
-                    VerificationStatus::Failed => "✗",
-                    VerificationStatus::Pending => "○",
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(status_icon, Style::default().fg(Color::Green)),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("Step {} · {}", summary.step_index, summary.summary_text),
-                        Style::default().fg(Color::White),
-                    ),
-                ]));
-                if !summary.tests_run.is_empty() {
-                    let tests = summary
-                        .tests_run
-                        .iter()
-                        .map(|test| format!("{}({:?})", test.name, test.result))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    lines.push(Line::from(format!("  Tests: {}", tests)));
-                }
-                if !summary.artifacts_touched.is_empty() {
-                    lines.push(Line::from(format!(
-                        "  Artifacts: {}",
-                        summary.artifacts_touched.join(", ")
-                    )));
-                }
-                if !summary.verification.feedback.is_empty() {
-                    for feedback in &summary.verification.feedback {
-                        lines.push(Line::from(format!(
-                            "  Feedback {}: {}",
-                            feedback.author, feedback.message
-                        )));
-                    }
-                }
-            }
-        }
-        let history_block = Block::default()
-            .title(" Spec history (H to toggle) ")
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded);
-        frame.render_widget(
-            Paragraph::new(lines)
-                .block(history_block)
-                .wrap(Wrap { trim: true }),
-            sections[2],
+        lines.extend(build_history_lines(orchestrator_history));
+        return lines;
+    }
+
+    if spec.steps.is_empty() {
+        lines.push(Line::from("No steps in this spec."));
+        return lines;
+    }
+
+    let bounded_index = selected_index.min(spec.steps.len().saturating_sub(1));
+    let selected_prefix = spec.steps.get(bounded_index).map(|step| step.index.clone());
+
+    for step in &spec.steps {
+        append_step_lines(
+            &mut lines,
+            step,
+            "",
+            0,
+            selected_prefix.as_deref(),
+            step_drawer_open && include_metadata,
+            active_prefix,
+            step_tool_calls,
+            latest_summaries,
+            max_width,
         );
+    }
+
+    lines
+}
+
+fn append_step_lines(
+    lines: &mut Vec<Line<'static>>,
+    step: &SpecStep,
+    parent_prefix: &str,
+    depth: usize,
+    selected_prefix: Option<&str>,
+    drawer_open: bool,
+    active_prefix: Option<&str>,
+    step_tool_calls: &HashMap<String, Vec<StepToolCallEntry>>,
+    latest_summaries: &HashMap<String, TaskSummary>,
+    max_width: usize,
+) {
+    let prefix = compose_prefix(parent_prefix, &step.index);
+    let indent = "  ".repeat(depth);
+    let mut style = style_for_step(step.status);
+    if let Some(active) = active_prefix {
+        if active == prefix {
+            style = Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD);
+        }
+    }
+    let mut branch_selected = false;
+    if let Some(selected) = selected_prefix {
+        if prefix.starts_with(selected) {
+            style = style.add_modifier(Modifier::ITALIC);
+            branch_selected = prefix == selected;
+        }
+    }
+
+    let base_text = if step.title.trim().is_empty() {
+        step.instructions.clone()
     } else {
-        let drawer_block = Block::default()
-            .title(" Step drawer (Enter to toggle) ")
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded);
-        let mut drawer_lines: Vec<Line> = Vec::new();
-        if let Some(step) = spec.steps.get(selected_index) {
-            if step_drawer_open {
-                if let Some(summary) = latest_summaries.get(&step.index) {
-                    drawer_lines.push(Line::from(format!("Summary: {}", summary.summary_text)));
-                    if !summary.tests_run.is_empty() {
-                        let tests = summary
-                            .tests_run
-                            .iter()
-                            .map(|test| format!("{}({:?})", test.name, test.result))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        drawer_lines.push(Line::from(format!("Tests: {}", tests)));
-                    }
-                    if !summary.artifacts_touched.is_empty() {
-                        drawer_lines.push(Line::from(format!(
-                            "Artifacts: {}",
-                            summary.artifacts_touched.join(", ")
-                        )));
-                    }
-                    if !summary.verification.feedback.is_empty() {
-                        for feedback in &summary.verification.feedback {
-                            drawer_lines.push(Line::from(format!(
-                                "Feedback {}: {}",
-                                feedback.author, feedback.message
-                            )));
-                        }
-                    }
-                } else {
-                    drawer_lines.push(Line::from("No summary available yet."));
-                }
-            } else {
-                drawer_lines.push(Line::from(vec![
-                    Span::styled("Step ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(&step.index, Style::default().fg(Color::Blue)),
-                    Span::raw(": "),
-                    Span::styled(
-                        &step.title,
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-                if !step.instructions.is_empty() {
-                    drawer_lines.push(Line::from(format!("Instructions: {}", step.instructions)));
-                }
-                if !step.acceptance_criteria.is_empty() {
-                    drawer_lines.push(Line::from("Acceptance criteria:"));
-                    for criterion in &step.acceptance_criteria {
-                        drawer_lines.push(Line::from(format!("  • {}", criterion)));
-                    }
-                }
-                if !step.dependencies.is_empty() {
-                    drawer_lines.push(Line::from(format!(
-                        "Depends on: {}",
-                        step.dependencies.join(", ")
-                    )));
-                }
+        step.title.clone()
+    };
+    let reserved = indent.len() + 4;
+    let available = max_width.saturating_sub(reserved);
+    let content = trim_to_width(&base_text, available);
+
+    lines.push(Line::from(vec![
+        Span::raw(format!("{}{} ", indent, step_status_icon(step.status))),
+        Span::styled(content, style),
+    ]));
+
+    if drawer_open && branch_selected {
+        append_drawer_lines(lines, depth + 1, step, latest_summaries, max_width);
+    }
+
+    if let Some(entries) = step_tool_calls.get(&prefix) {
+        for entry in entries {
+            let entry_indent = "  ".repeat(depth + 1);
+            let available = max_width.saturating_sub(entry_indent.len() + 6);
+            lines.push(Line::from(vec![
+                Span::raw(format!(
+                    "{}└ {} ",
+                    entry_indent,
+                    tool_status_icon(entry.status)
+                )),
+                Span::styled(
+                    trim_to_width(&entry.label, available),
+                    style_for_tool(entry.status),
+                ),
+            ]));
+        }
+    }
+
+    if let Some(sub_spec) = &step.sub_spec {
+        for child in &sub_spec.steps {
+            append_step_lines(
+                lines,
+                child,
+                &prefix,
+                depth + 1,
+                selected_prefix,
+                drawer_open,
+                active_prefix,
+                step_tool_calls,
+                latest_summaries,
+                max_width,
+            );
+        }
+    }
+}
+
+fn append_drawer_lines(
+    lines: &mut Vec<Line<'static>>,
+    depth: usize,
+    step: &SpecStep,
+    latest_summaries: &HashMap<String, TaskSummary>,
+    max_width: usize,
+) {
+    let indent = "  ".repeat(depth);
+    let available = max_width.saturating_sub(indent.len() + 2);
+    let mut pushed = false;
+
+    if !step.instructions.trim().is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            format!("{}Instructions:", indent),
+            Style::default().fg(Color::Gray),
+        )]));
+        for chunk in step
+            .instructions
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+        {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{}↳ ", indent),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    trim_to_width(chunk.trim(), available),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+        }
+        pushed = true;
+    }
+
+    if !step.acceptance_criteria.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            format!("{}Acceptance criteria:", indent),
+            Style::default().fg(Color::Gray),
+        )]));
+        for criterion in &step.acceptance_criteria {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{}• ", indent),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    trim_to_width(criterion, available),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+        }
+        pushed = true;
+    }
+
+    if !step.dependencies.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{}Depends on: ", indent),
+                Style::default().fg(Color::Gray),
+            ),
+            Span::styled(
+                trim_to_width(&step.dependencies.join(", "), available),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+        pushed = true;
+    }
+
+    if let Some(summary) = latest_summaries.get(&step.index) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{}Latest: ", indent),
+                Style::default().fg(Color::Gray),
+            ),
+            Span::styled(
+                trim_to_width(&summary.summary_text, available),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+        if !summary.tests_run.is_empty() {
+            let tests = summary
+                .tests_run
+                .iter()
+                .map(|test| format!("{}({:?})", test.name, test.result))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{}Tests: ", indent),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(
+                    trim_to_width(&tests, available),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+        }
+        if !summary.artifacts_touched.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{}Artifacts: ", indent),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(
+                    trim_to_width(&summary.artifacts_touched.join(", "), available),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+        }
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{}Verification: ", indent),
+                Style::default().fg(Color::Gray),
+            ),
+            Span::styled(
+                format!("{:?}", summary.verification.status),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+        for feedback in &summary.verification.feedback {
+            let message = format!("{}: {}", feedback.author, feedback.message);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{}• ", indent),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    trim_to_width(&message, available),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+        }
+        pushed = true;
+    }
+
+    if !pushed {
+        lines.push(Line::from(vec![Span::styled(
+            format!("{}No additional details yet.", indent),
+            Style::default().fg(Color::DarkGray),
+        )]));
+    }
+}
+
+fn build_history_lines(history: &[TaskSummary]) -> Vec<Line<'static>> {
+    if history.is_empty() {
+        return vec![Line::from("History: no entries yet.".to_string())];
+    }
+    let mut lines = vec![Line::from(Span::styled(
+        "History (H to toggle):",
+        Style::default().fg(Color::Gray),
+    ))];
+    for summary in history {
+        let status_icon = match summary.verification.status {
+            VerificationStatus::Passed => "✓",
+            VerificationStatus::Failed => "✗",
+            VerificationStatus::Pending => "○",
+        };
+        lines.push(Line::from(vec![
+            Span::styled(status_icon, Style::default().fg(Color::Green)),
+            Span::raw(" "),
+            Span::styled(
+                format!("Step {} · {}", summary.step_index, summary.summary_text),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+        if !summary.tests_run.is_empty() {
+            let tests = summary
+                .tests_run
+                .iter()
+                .map(|test| format!("{}({:?})", test.name, test.result))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(Line::from(format!("  Tests: {}", tests)));
+        }
+        if !summary.artifacts_touched.is_empty() {
+            lines.push(Line::from(format!(
+                "  Artifacts: {}",
+                summary.artifacts_touched.join(", ")
+            )));
+        }
+        if !summary.verification.feedback.is_empty() {
+            for feedback in &summary.verification.feedback {
+                lines.push(Line::from(format!(
+                    "  Feedback {}: {}",
+                    feedback.author, feedback.message
+                )));
             }
         }
-        if drawer_lines.is_empty() {
-            drawer_lines.push(Line::from("No step selected."));
+    }
+    lines
+}
+
+fn compose_prefix(parent: &str, index: &str) -> String {
+    if parent.is_empty() {
+        index.to_string()
+    } else {
+        format!("{}.{}", parent, index)
+    }
+}
+
+fn step_status_icon(status: StepStatus) -> &'static str {
+    match status {
+        StepStatus::Pending => "○",
+        StepStatus::InProgress => "◐",
+        StepStatus::Completed => "●",
+        StepStatus::Failed => "✗",
+    }
+}
+
+fn tool_status_icon(status: ToolCallStatus) -> &'static str {
+    match status {
+        ToolCallStatus::Started => "◐",
+        ToolCallStatus::Completed => "●",
+        ToolCallStatus::Error => "✗",
+    }
+}
+
+fn style_for_step(status: StepStatus) -> Style {
+    match status {
+        StepStatus::Pending => Style::default().fg(Color::DarkGray),
+        StepStatus::InProgress => Style::default().fg(Color::Yellow),
+        StepStatus::Completed => Style::default().fg(Color::Green),
+        StepStatus::Failed => Style::default().fg(Color::Red),
+    }
+}
+
+fn style_for_tool(status: ToolCallStatus) -> Style {
+    match status {
+        ToolCallStatus::Started => Style::default().fg(Color::Yellow),
+        ToolCallStatus::Completed => Style::default().fg(Color::Green),
+        ToolCallStatus::Error => Style::default().fg(Color::Red),
+    }
+}
+
+fn trim_to_width(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut result = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1);
+        if width + ch_width > max_width {
+            result.push('…');
+            break;
         }
-        frame.render_widget(
-            Paragraph::new(drawer_lines)
-                .block(drawer_block)
-                .wrap(Wrap { trim: true }),
-            sections[2],
-        );
+        result.push(ch);
+        width += ch_width;
+    }
+    if result.is_empty() {
+        text.chars().take(max_width).collect()
+    } else {
+        result
     }
 }
