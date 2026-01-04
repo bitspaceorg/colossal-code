@@ -401,7 +401,8 @@ impl SubAgentContext {
 
         let append_to_last = if let Some(MessageType::Agent) = self.message_types.last() {
             if let Some(last) = self.messages.last() {
-                !(last.starts_with("[TOOL_CALL_STARTED:") || last.starts_with("[TOOL_CALL_COMPLETED:"))
+                !(last.starts_with("[TOOL_CALL_STARTED:")
+                    || last.starts_with("[TOOL_CALL_COMPLETED:"))
             } else {
                 false
             }
@@ -420,7 +421,12 @@ impl SubAgentContext {
     }
 
     pub fn start_thinking(&mut self, summary: String) {
-        if !self.messages.last().map(|m| m == "[THINKING_ANIMATION]").unwrap_or(false) {
+        if !self
+            .messages
+            .last()
+            .map(|m| m == "[THINKING_ANIMATION]")
+            .unwrap_or(false)
+        {
             self.push_message("[THINKING_ANIMATION]".to_string(), MessageType::Agent);
         }
         self.thinking_indicator_active = true;
@@ -535,7 +541,9 @@ impl SubAgentContext {
         }
 
         let now = Instant::now();
-        if snowflake_len > 0 && now.duration_since(self.thinking_last_update) >= Duration::from_millis(100) {
+        if snowflake_len > 0
+            && now.duration_since(self.thinking_last_update) >= Duration::from_millis(100)
+        {
             self.thinking_loader_frame = (self.thinking_loader_frame + 1) % snowflake_len.max(1);
             self.thinking_last_update = now;
         }
@@ -903,7 +911,7 @@ struct App {
     review_pending: Option<ReviewOptions>, // Flag to trigger code review in async context
     spec_pending: Option<String>, // Flag to trigger /spec command in async context
     orchestration_pending: Option<String>, // Flag to trigger orchestration from tool call
-    orchestration_in_progress: bool,       // True while orchestration is running - pauses main agent
+    orchestration_in_progress: bool, // True while orchestration is running - pauses main agent
     compact_pending: Option<CompactOptions>, // Flag to trigger compact in async context
     last_compacted_summary: Option<String>,
     is_auto_summarize: bool, // Track if current summarization was auto-triggered
@@ -982,6 +990,7 @@ struct App {
     orchestrator_history: Vec<TaskSummary>, // History of completed task summaries
     latest_summaries: HashMap<String, TaskSummary>, // Latest summary per step index
     orchestrator_paused: bool,              // Whether orchestrator is currently paused
+    has_orchestrator_activity: bool,        // Alt+W gating: true once an orchestrator event arrives
     spec_pane_show_history: bool,           // Whether to show history view in spec pane
     spec_step_drawer_open: bool,            // Whether the drawer for selected step is visible
     show_history_panel: bool,               // Dedicated history panel visibility
@@ -994,6 +1003,8 @@ struct App {
     sub_agent_contexts: HashMap<String, SubAgentContext>, // prefix -> context
     // When set, we're viewing a sub-agent in full-screen mode (Enter from session window)
     expanded_sub_agent: Option<String>, // prefix of the expanded sub-agent
+    expanded_sub_agent_before_alt_w: Option<String>, // last expanded sub-agent before entering Alt+W
+    mode_before_sub_agent: Option<Mode>,             // mode to restore when leaving Alt+W
     rendering_sub_agent_view: bool,
     rendering_sub_agent_prefix: Option<String>,
 }
@@ -2233,6 +2244,7 @@ impl App {
             orchestrator_history: Vec::new(),
             latest_summaries: HashMap::new(),
             orchestrator_paused: false,
+            has_orchestrator_activity: false,
             spec_pane_show_history: false,
             spec_step_drawer_open: false,
             show_history_panel: false,
@@ -2244,6 +2256,8 @@ impl App {
             sub_agent_contexts: HashMap::new(),
             // No expanded sub-agent initially
             expanded_sub_agent: None,
+            expanded_sub_agent_before_alt_w: None,
+            mode_before_sub_agent: None,
             rendering_sub_agent_view: false,
             rendering_sub_agent_prefix: None,
         })
@@ -2267,6 +2281,32 @@ impl App {
         }
     }
 
+    fn can_open_alt_w_view(&self) -> bool {
+        self.has_orchestrator_activity
+    }
+
+    fn enter_alt_w_view(&mut self) -> bool {
+        if !self.can_open_alt_w_view() {
+            return false;
+        }
+        if self.mode != Mode::SessionWindow {
+            self.mode_before_sub_agent = Some(self.mode);
+            self.expanded_sub_agent_before_alt_w = self.expanded_sub_agent.clone();
+            self.expanded_sub_agent = None;
+            self.mode = Mode::SessionWindow;
+        }
+        true
+    }
+
+    fn leave_alt_w_view(&mut self) {
+        if let Some(prefix) = self.expanded_sub_agent_before_alt_w.take() {
+            self.expanded_sub_agent = Some(prefix);
+        } else {
+            self.expanded_sub_agent = None;
+        }
+        self.mode = self.mode_before_sub_agent.take().unwrap_or(Mode::Normal);
+    }
+
     fn reset_orchestrator_views(&mut self) {
         self.orchestrator_history.clear();
         self.latest_summaries.clear();
@@ -2280,6 +2320,9 @@ impl App {
         self.step_tool_calls.clear();
         self.sub_agent_contexts.clear();
         self.expanded_sub_agent = None;
+        self.expanded_sub_agent_before_alt_w = None;
+        self.mode_before_sub_agent = None;
+        self.has_orchestrator_activity = false;
         self.rendering_sub_agent_view = false;
         self.rendering_sub_agent_prefix = None;
         self.active_step_prefix = None;
@@ -2536,6 +2579,9 @@ impl App {
             self.step_tool_calls.clear();
             self.sub_agent_contexts.clear();
             self.expanded_sub_agent = None;
+            self.expanded_sub_agent_before_alt_w = None;
+            self.mode_before_sub_agent = None;
+            self.has_orchestrator_activity = false;
             self.rendering_sub_agent_view = false;
             self.rendering_sub_agent_prefix = None;
             self.active_step_prefix = None;
@@ -2971,26 +3017,53 @@ impl App {
                 .unwrap_or_else(|| "Fetched URL".to_string()),
             "TodoWrite" => {
                 // Describe the todo action based on what's being done
-                if let Some(todos) = parsed.as_ref().and_then(|v| v.get("todos")).and_then(|t| t.as_array()) {
+                if let Some(todos) = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("todos"))
+                    .and_then(|t| t.as_array())
+                {
                     // Find the most relevant action to describe
                     // Priority: in_progress > completed > pending (for new todos)
-                    if let Some(in_progress) = todos.iter().find(|t| {
-                        t.get("status").and_then(|s| s.as_str()) == Some("in_progress")
-                    }) {
-                        let content = in_progress.get("content").and_then(|c| c.as_str()).unwrap_or("task");
-                        let truncated = if content.len() > 40 { format!("{}...", &content[..40]) } else { content.to_string() };
+                    if let Some(in_progress) = todos
+                        .iter()
+                        .find(|t| t.get("status").and_then(|s| s.as_str()) == Some("in_progress"))
+                    {
+                        let content = in_progress
+                            .get("content")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("task");
+                        let truncated = if content.len() > 40 {
+                            format!("{}...", &content[..40])
+                        } else {
+                            content.to_string()
+                        };
                         return format!("Marked todo {} as in-progress", truncated);
                     }
-                    if let Some(completed) = todos.iter().find(|t| {
-                        t.get("status").and_then(|s| s.as_str()) == Some("completed")
-                    }) {
-                        let content = completed.get("content").and_then(|c| c.as_str()).unwrap_or("task");
-                        let truncated = if content.len() > 40 { format!("{}...", &content[..40]) } else { content.to_string() };
+                    if let Some(completed) = todos
+                        .iter()
+                        .find(|t| t.get("status").and_then(|s| s.as_str()) == Some("completed"))
+                    {
+                        let content = completed
+                            .get("content")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("task");
+                        let truncated = if content.len() > 40 {
+                            format!("{}...", &content[..40])
+                        } else {
+                            content.to_string()
+                        };
                         return format!("Marked todo {} as completed", truncated);
                     }
                     if let Some(first) = todos.first() {
-                        let content = first.get("content").and_then(|c| c.as_str()).unwrap_or("task");
-                        let truncated = if content.len() > 40 { format!("{}...", &content[..40]) } else { content.to_string() };
+                        let content = first
+                            .get("content")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("task");
+                        let truncated = if content.len() > 40 {
+                            format!("{}...", &content[..40])
+                        } else {
+                            content.to_string()
+                        };
                         return format!("Created todo {}", truncated);
                     }
                 }
@@ -4586,6 +4659,7 @@ Let me analyze the conversation chronologically:
 
     /// Handle orchestrator events and update TUI state accordingly.
     fn handle_orchestrator_event(&mut self, event: OrchestratorEvent) {
+        self.has_orchestrator_activity = true;
         match event {
             OrchestratorEvent::StepStatusChanged {
                 spec_id,
@@ -4646,7 +4720,10 @@ Let me analyze the conversation chronologically:
                 ));
             }
 
-            OrchestratorEvent::VerifierFailed { summary, feedback: _ } => {
+            OrchestratorEvent::VerifierFailed {
+                summary,
+                feedback: _,
+            } => {
                 self.upsert_summary_history(summary.clone());
                 // Don't add to messages - visible in Alt+W session view
                 self.status_message =
@@ -4664,7 +4741,10 @@ Let me analyze the conversation chronologically:
                 ));
             }
 
-            OrchestratorEvent::ChannelClosed { task_id: _, closed_at: _ } => {
+            OrchestratorEvent::ChannelClosed {
+                task_id: _,
+                closed_at: _,
+            } => {
                 // Channel closed events are internal - don't show in main view
             }
 
@@ -4714,9 +4794,8 @@ Let me analyze the conversation chronologically:
                 } else {
                     None
                 };
-                let label = planned_label.unwrap_or_else(|| {
-                    Self::describe_tool_call(&tool_name, &arguments)
-                });
+                let label = planned_label
+                    .unwrap_or_else(|| Self::describe_tool_call(&tool_name, &arguments));
                 let entry_id = self.next_tool_call_id;
                 self.next_tool_call_id = self.next_tool_call_id.saturating_add(1);
 
@@ -4755,14 +4834,19 @@ Let me analyze the conversation chronologically:
 
             OrchestratorEvent::AgentMessage { prefix, message } => {
                 // Store sub-agent message in the context for this prefix
-                let context = self.sub_agent_contexts.entry(prefix.clone()).or_insert_with(|| {
-                    // Get step title from current spec if available
-                    let step_title = self.current_spec.as_ref()
-                        .and_then(|spec| Self::find_step_by_prefix(&spec.steps, &prefix))
-                        .map(|step| step.title.clone())
-                        .unwrap_or_else(|| format!("Step {}", prefix));
-                    SubAgentContext::new(prefix.clone(), step_title)
-                });
+                let context = self
+                    .sub_agent_contexts
+                    .entry(prefix.clone())
+                    .or_insert_with(|| {
+                        // Get step title from current spec if available
+                        let step_title = self
+                            .current_spec
+                            .as_ref()
+                            .and_then(|spec| Self::find_step_by_prefix(&spec.steps, &prefix))
+                            .map(|step| step.title.clone())
+                            .unwrap_or_else(|| format!("Step {}", prefix));
+                        SubAgentContext::new(prefix.clone(), step_title)
+                    });
 
                 match message {
                     SubAgentMessage::UserPrompt { content } => {
@@ -4771,23 +4855,36 @@ Let me analyze the conversation chronologically:
                     SubAgentMessage::Text { content } => {
                         context.add_agent_text(content);
                     }
-                    SubAgentMessage::Thinking { content, duration_secs } => {
+                    SubAgentMessage::Thinking {
+                        content,
+                        duration_secs,
+                    } => {
                         if duration_secs == 0 {
                             context.start_thinking(content);
                         } else {
                             context.finish_thinking(duration_secs);
                         }
                     }
-                    SubAgentMessage::ToolCall { tool_name, arguments, result, is_error: _ } => {
+                    SubAgentMessage::ToolCall {
+                        tool_name,
+                        arguments,
+                        result,
+                        is_error: _,
+                    } => {
                         if let Some(result) = result {
                             let formatted_result = Self::format_tool_result(&tool_name, &result);
                             context.complete_tool_call(&tool_name, formatted_result);
                         } else {
-                            let formatted_args = Self::format_tool_arguments(&tool_name, &arguments);
+                            let formatted_args =
+                                Self::format_tool_arguments(&tool_name, &arguments);
                             context.add_tool_call_started(&tool_name, formatted_args);
                         }
                     }
-                    SubAgentMessage::GenerationStats { tokens_per_sec, input_tokens, output_tokens } => {
+                    SubAgentMessage::GenerationStats {
+                        tokens_per_sec,
+                        input_tokens,
+                        output_tokens,
+                    } => {
                         context.set_generation_stats(tokens_per_sec, input_tokens, output_tokens);
                     }
                 }
@@ -4801,7 +4898,11 @@ Let me analyze the conversation chronologically:
         Self::find_step_recursive(steps, &parts, 0)
     }
 
-    fn find_step_recursive<'a>(steps: &'a [SpecStep], parts: &[&str], depth: usize) -> Option<&'a SpecStep> {
+    fn find_step_recursive<'a>(
+        steps: &'a [SpecStep],
+        parts: &[&str],
+        depth: usize,
+    ) -> Option<&'a SpecStep> {
         if depth >= parts.len() {
             return None;
         }
@@ -7261,28 +7362,14 @@ Let me analyze the conversation chronologically:
                                 if key.modifiers.contains(KeyModifiers::ALT)
                                     && key.code == KeyCode::Char('w')
                                 {
-                                    if self.expanded_sub_agent.is_some() {
-                                        // Leaving sub-agent view returns to session window
-                                        self.expanded_sub_agent = None;
-                                        self.mode = Mode::SessionWindow;
-                                    } else {
-                                        // Toggle session window visibility
-                                        if self.mode == Mode::SessionWindow {
-                                            self.mode = Mode::Normal;
-                                        } else {
-                                            self.mode = Mode::SessionWindow;
-                                        }
+                                    if self.mode == Mode::SessionWindow {
+                                        self.leave_alt_w_view();
+                                    } else if !self.enter_alt_w_view() {
+                                        self.status_message = Some(
+                                            "Alt+W is available after orchestrator activity"
+                                                .to_string(),
+                                        );
                                     }
-                                    self.cached_mode_content = None;
-                                    continue;
-                                }
-
-                                // Exit sub-agent view with 'q' key
-                                if key.code == KeyCode::Char('q')
-                                    && self.expanded_sub_agent.is_some()
-                                {
-                                    self.expanded_sub_agent = None;
-                                    self.mode = Mode::SessionWindow;
                                     self.cached_mode_content = None;
                                     continue;
                                 }
@@ -7293,7 +7380,8 @@ Let me analyze the conversation chronologically:
                                     // Capture snapshot of current UI state before entering nav mode
                                     let mut snapshot = None;
                                     if let Some(prefix) = self.expanded_sub_agent.clone() {
-                                        if let Some(context) = self.sub_agent_contexts.get(&prefix) {
+                                        if let Some(context) = self.sub_agent_contexts.get(&prefix)
+                                        {
                                             snapshot = Some(context.to_snapshot());
                                         }
                                     }
@@ -7311,10 +7399,14 @@ Let me analyze the conversation chronologically:
                                             if self.show_summary_history {
                                                 let overlay_messages =
                                                     self.summary_history_virtual_messages();
-                                                let overlay_types =
-                                                    vec![MessageType::Agent; overlay_messages.len()];
-                                                let overlay_states =
-                                                    vec![MessageState::Sent; overlay_messages.len()];
+                                                let overlay_types = vec![
+                                                    MessageType::Agent;
+                                                    overlay_messages.len()
+                                                ];
+                                                let overlay_states = vec![
+                                                    MessageState::Sent;
+                                                    overlay_messages.len()
+                                                ];
                                                 (overlay_messages, overlay_types, overlay_states)
                                             } else {
                                                 (
@@ -7329,7 +7421,8 @@ Let me analyze the conversation chronologically:
                                             message_types: snapshot_types,
                                             message_states: snapshot_states,
                                             is_thinking: self.is_thinking,
-                                            thinking_indicator_active: self.thinking_indicator_active,
+                                            thinking_indicator_active: self
+                                                .thinking_indicator_active,
                                             thinking_elapsed_secs: elapsed_secs,
                                             thinking_token_count: self.thinking_token_count,
                                             thinking_current_summary: self
@@ -7337,7 +7430,9 @@ Let me analyze the conversation chronologically:
                                                 .clone(),
                                             thinking_position: self.thinking_position,
                                             thinking_loader_frame: self.thinking_loader_frame,
-                                            thinking_current_word: self.thinking_current_word.clone(),
+                                            thinking_current_word: self
+                                                .thinking_current_word
+                                                .clone(),
                                             generation_stats: self.generation_stats.clone(),
                                         });
                                     }
@@ -7926,6 +8021,16 @@ Let me analyze the conversation chronologically:
                             Mode::SessionWindow => {
                                 // Handle session window navigation (read-only mode for Agent UI below)
                                 match key.code {
+                                    KeyCode::Char('q') => {
+                                        self.leave_alt_w_view();
+                                        self.cached_mode_content = None;
+                                    }
+                                    KeyCode::Char('w')
+                                        if key.modifiers.contains(KeyModifiers::ALT) =>
+                                    {
+                                        self.leave_alt_w_view();
+                                        self.cached_mode_content = None;
+                                    }
                                     KeyCode::Up => {
                                         self.session_manager.previous_session();
                                     }
@@ -7934,11 +8039,15 @@ Let me analyze the conversation chronologically:
                                     }
                                     KeyCode::Enter => {
                                         // Expand the selected sub-agent to full screen
-                                        if let Some(session) = self.session_manager.get_selected_session() {
+                                        if let Some(session) =
+                                            self.session_manager.get_selected_session()
+                                        {
                                             if let Some(prefix) = session.prefix.clone() {
                                                 // Check if we have context for this prefix
                                                 if self.sub_agent_contexts.contains_key(&prefix) {
-                                                    self.expanded_sub_agent = Some(prefix);
+                                                    self.expanded_sub_agent = Some(prefix.clone());
+                                                    self.expanded_sub_agent_before_alt_w = None;
+                                                    self.mode_before_sub_agent = None;
                                                     self.mode = Mode::Normal;
                                                     self.cached_mode_content = None;
                                                 } else {
@@ -7950,7 +8059,8 @@ Let me analyze the conversation chronologically:
                                             } else {
                                                 // Root session - go back to main view
                                                 self.expanded_sub_agent = None;
-                                                self.mode = Mode::Normal;
+                                                self.expanded_sub_agent_before_alt_w = None;
+                                                self.leave_alt_w_view();
                                                 self.cached_mode_content = None;
                                             }
                                         }
@@ -10529,7 +10639,9 @@ Let me analyze the conversation chronologically:
             Span::styled("● ", Style::default().fg(Color::Yellow)),
             Span::styled(
                 format!("{} — {}", context_prefix, context.step_title),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]));
         lines.push(Line::from(""));
@@ -10544,13 +10656,8 @@ Let me analyze the conversation chronologically:
             for (idx, message) in context.messages.iter().enumerate() {
                 let is_agent = matches!(context.message_types.get(idx), Some(MessageType::Agent));
                 let connector = self.agent_connector_for_index(&context.message_types, idx);
-                let rendered = self.render_message_with_max_width(
-                    message,
-                    max_width,
-                    None,
-                    is_agent,
-                    connector,
-                );
+                let rendered = self
+                    .render_message_with_max_width(message, max_width, None, is_agent, connector);
                 lines.extend(rendered.lines);
             }
 
@@ -11064,8 +11171,7 @@ Let me analyze the conversation chronologically:
                     let messages = self.get_messages();
                     let message_types = self.get_message_types();
                     for (idx, message) in messages.iter().enumerate() {
-                        let is_agent =
-                            matches!(message_types.get(idx), Some(MessageType::Agent));
+                        let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
                         let connector = self.agent_connector_for_index(message_types, idx);
                         lines.extend(
                             self.render_message_with_max_width(
@@ -11145,7 +11251,8 @@ Let me analyze the conversation chronologically:
                         // 1. Sub-agent is actively thinking, OR
                         // 2. Orchestration is in progress (shows general "working" animation)
                         if let Some(snapshot) = &self.nav_snapshot {
-                            if snapshot.thinking_indicator_active || self.orchestration_in_progress {
+                            if snapshot.thinking_indicator_active || self.orchestration_in_progress
+                            {
                                 // Use sub-agent's state if actively thinking, else use main app's LIVE state
                                 // (not getters which read from snapshot)
                                 let current_frame = if snapshot.thinking_indicator_active {
