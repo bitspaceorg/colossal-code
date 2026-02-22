@@ -7,7 +7,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthChar;
 
-use crate::{StepToolCallEntry, ToolCallStatus};
+use crate::{SessionRole, StepToolCallEntry, ToolCallStatus};
 
 /// Build tool-only plan lines for the main message view.
 /// Only shows steps that have actual tool activity - no empty steps.
@@ -121,7 +121,7 @@ fn append_tool_only_step_lines(
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(
-                    trim_to_width(&entry.label, available),
+                    format_tool_label(entry, available),
                     style_for_tool(entry.status),
                 ),
             ]));
@@ -285,7 +285,7 @@ fn append_step_lines(
                     tool_status_icon(entry.status)
                 )),
                 Span::styled(
-                    trim_to_width(&entry.label, available),
+                    format_tool_label(entry, available),
                     style_for_tool(entry.status),
                 ),
             ]));
@@ -499,8 +499,29 @@ fn build_history_lines(history: &[TaskSummary]) -> Vec<Line<'static>> {
                 )));
             }
         }
+        if let Some(worktree) = &summary.worktree {
+            let mut spans = vec![
+                Span::styled("  Branch: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(worktree.branch.clone(), Style::default().fg(Color::White)),
+            ];
+            spans.push(Span::styled(
+                format!(" ({})", worktree.path),
+                Style::default().fg(Color::DarkGray),
+            ));
+            lines.push(Line::from(spans));
+        }
     }
     lines
+}
+
+fn format_tool_label(entry: &StepToolCallEntry, available: usize) -> String {
+    let role_prefix = match entry.role {
+        SessionRole::Implementor => "",
+        SessionRole::Summarizer => "[Summarize] ",
+        SessionRole::Verifier => "[Verifier] ",
+        SessionRole::Merge => "[Merge] ",
+    };
+    trim_to_width(&format!("{}{}", role_prefix, entry.label), available)
 }
 
 fn compose_prefix(parent: &str, index: &str) -> String {

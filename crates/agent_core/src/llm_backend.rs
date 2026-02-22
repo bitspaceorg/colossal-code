@@ -12,8 +12,8 @@ use mistralrs::{
     GgufModelBuilder, Model, RequestBuilder, RequestLike, Response, ResponseMessage, Usage,
 };
 use mistralrs_core::{CalledFunction, MessageContent, ToolCallResponse, ToolCallType, ToolChoice};
-use reqwest::{Client, Url, header::CONTENT_TYPE};
 use once_cell::sync::OnceCell;
+use reqwest::{Client, Url, header::CONTENT_TYPE};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{net::IpAddr, sync::Arc, time::Instant};
@@ -135,7 +135,12 @@ fn http_debug_enabled() -> bool {
     static FLAG: OnceCell<bool> = OnceCell::new();
     *FLAG.get_or_init(|| {
         std::env::var("NITE_DEBUG_HTTP")
-            .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false)
     })
 }
@@ -198,11 +203,13 @@ impl HttpBackend {
     }
 
     fn env_bool(var: &str) -> Option<bool> {
-        std::env::var(var).ok().and_then(|value| match value.trim().to_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => Some(true),
-            "0" | "false" | "no" | "off" => Some(false),
-            _ => None,
-        })
+        std::env::var(var)
+            .ok()
+            .and_then(|value| match value.trim().to_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => Some(true),
+                "0" | "false" | "no" | "off" => Some(false),
+                _ => None,
+            })
     }
 
     fn extract_host_parts(base_url: &str) -> Option<(String, Option<u16>)> {
@@ -221,10 +228,13 @@ impl HttpBackend {
 
         let host_lower = host.to_lowercase();
         let host_with_port = port.map(|value| format!("{}:{}", host, value));
-        let host_with_port_lower =
-            host_with_port.as_ref().map(|value| value.to_lowercase());
+        let host_with_port_lower = host_with_port.as_ref().map(|value| value.to_lowercase());
 
-        for entry in entries.split(',').map(|value| value.trim()).filter(|v| !v.is_empty()) {
+        for entry in entries
+            .split(',')
+            .map(|value| value.trim())
+            .filter(|v| !v.is_empty())
+        {
             let entry_lower = entry.to_lowercase();
             if entry_lower == host_lower {
                 return true;
@@ -263,10 +273,7 @@ impl HttpBackend {
                     let octets = v4.octets();
                     matches!(
                         octets,
-                        [10, _, _, _]
-                            | [127, _, _, _]
-                            | [192, 168, _, _]
-                            | [169, 254, _, _]
+                        [10, _, _, _] | [127, _, _, _] | [192, 168, _, _] | [169, 254, _, _]
                     ) || (octets[0] == 172 && (16..=31).contains(&octets[1]))
                         || (octets[0] == 100 && (64..=127).contains(&octets[1]))
                 }
@@ -377,8 +384,7 @@ impl HttpBackend {
         }
         let elapsed = request_start.elapsed().as_secs_f32();
         if usage.avg_compl_tok_per_sec == 0.0 && token_estimate > 0 && elapsed > 0.0 {
-            usage.avg_compl_tok_per_sec =
-                token_estimate as f32 / elapsed.max(0.001);
+            usage.avg_compl_tok_per_sec = token_estimate as f32 / elapsed.max(0.001);
             usage.total_completion_time_sec = elapsed;
             usage.total_time_sec = elapsed;
         }
@@ -524,9 +530,7 @@ impl LLMBackend for HttpBackend {
 
         http_debug_log(format!(
             "Dispatching HTTP request to {}{} with payload {}",
-            self.base_url,
-            self.completions_path,
-            payload
+            self.base_url, self.completions_path, payload
         ));
         let request_start = Instant::now();
 
@@ -832,11 +836,7 @@ struct StreamMetrics {
 }
 
 impl StreamMetrics {
-    fn from_timing(
-        start: Instant,
-        first_token: Option<Instant>,
-        completion_tokens: usize,
-    ) -> Self {
+    fn from_timing(start: Instant, first_token: Option<Instant>, completion_tokens: usize) -> Self {
         let total_time_sec = start.elapsed().as_secs_f32();
         let time_to_first_token_sec = first_token
             .map(|ts| ts.duration_since(start).as_secs_f32())
@@ -1045,8 +1045,8 @@ fn send_final_done(
             && metrics.completion_tokens > 0
             && metrics.total_time_sec > 0.0
         {
-            usage.avg_compl_tok_per_sec = metrics.completion_tokens as f32
-                / metrics.total_time_sec.max(0.001);
+            usage.avg_compl_tok_per_sec =
+                metrics.completion_tokens as f32 / metrics.total_time_sec.max(0.001);
             usage.total_completion_time_sec = metrics.total_time_sec;
             usage.total_time_sec = metrics.total_time_sec;
         }
@@ -1208,22 +1208,22 @@ async fn process_sse_stream(
                 }
 
                 let mut delta_content = None;
-                        if let Some(content_value) = content {
-                            let text = content_value.to_text();
-                            if !text.is_empty() {
-                                http_debug_log(format!(
-                                    "delta content len={} preview=\"{}\"",
-                                    text.chars().count(),
-                                    preview_chunk(&text)
-                                ));
-                                accumulated_content.push_str(&text);
-                                if first_token_time.is_none() {
-                                    first_token_time = Some(Instant::now());
-                                }
-                                estimated_tokens += estimate_tokens(&text);
-                                delta_content = Some(text);
-                            }
-                        } else {
+                if let Some(content_value) = content {
+                    let text = content_value.to_text();
+                    if !text.is_empty() {
+                        http_debug_log(format!(
+                            "delta content len={} preview=\"{}\"",
+                            text.chars().count(),
+                            preview_chunk(&text)
+                        ));
+                        accumulated_content.push_str(&text);
+                        if first_token_time.is_none() {
+                            first_token_time = Some(Instant::now());
+                        }
+                        estimated_tokens += estimate_tokens(&text);
+                        delta_content = Some(text);
+                    }
+                } else {
                     http_debug_log("delta content missing".to_string());
                 }
 

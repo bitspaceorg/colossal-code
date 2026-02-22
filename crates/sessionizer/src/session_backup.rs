@@ -284,12 +284,12 @@ impl SessionManager {
         let mut stderr_buf = Vec::with_capacity(8192.min(cap_bytes));
         let mut aggregated_buf = Vec::with_capacity(8192.min(cap_bytes));
         let start_time = Instant::now();
-        let deadline = start_time + Duration::from_millis(params.timeout_ms.unwrap_or(10000));
+        let deadline = start_time + Duration::from_millis(params.timeout_ms.unwrap_or(600_000));
         let mut exit_code: Option<i32> = None;
         let mut exit_future = Box::pin(exit_rx);
         loop {
             if Instant::now() >= deadline {
-                // eprintln!("Command timed out after {}ms", params.timeout_ms.unwrap_or(10000));
+                // eprintln!("Command timed out after {}ms", params.timeout_ms.unwrap_or(600000));
                 break;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());

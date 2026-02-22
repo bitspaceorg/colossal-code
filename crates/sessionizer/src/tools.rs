@@ -24,7 +24,7 @@ pub async fn exec_command(
         shell: shell.clone(),
         cwd,
         env: Default::default(),
-        timeout_ms: if is_background { None } else { Some(10000) },
+        timeout_ms: if is_background { None } else { Some(600_000) },
         max_output_tokens: 1000,
         sandbox_policy: sandbox_policy.clone(),
         is_background,

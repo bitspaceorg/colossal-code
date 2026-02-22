@@ -20,6 +20,7 @@ pub enum ToolName {
     TodoWrite,
     RequestSplit,
     OrchestrateTask,
+    SubmitVerification,
 }
 
 /// Build a specific tool definition
@@ -154,7 +155,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
             tp: ToolType::Function,
             function: Function {
                 name: "get_files_recursive".to_string(),
-                description: Some("Recursively list all files in a directory and its subdirectories. This shows the full directory tree. Use this when you need to understand project structure.".to_string()),
+                description: Some("Recursively list all files in a directory and its subdirectories. Results are capped at 200 unless a smaller limit is provided.".to_string()),
                 parameters: Some({
                     let mut params = HashMap::new();
                     params.insert("type".to_string(), json!("object"));
@@ -242,7 +243,10 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
             tp: ToolType::Function,
             function: Function {
                 name: "read_file".to_string(),
-                description: Some("Read the contents of a file".to_string()),
+                description: Some(
+                    "Read the contents of a file. Supports head/tail style windowing via limit/offset or explicit line ranges."
+                        .to_string(),
+                ),
                 parameters: Some({
                     let mut params = HashMap::new();
                     params.insert("type".to_string(), json!("object"));
@@ -257,23 +261,24 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                                 "type": "boolean",
                                 "description": "Whether to read the entire file"
                             },
-                            "start_byte_one_indexed": {
+                            "start_line_one_indexed": {
                                 "type": "integer",
-                                "description": "The starting byte position (1-indexed)"
+                                "description": "The starting line (1-indexed) to begin reading"
                             },
-                            "end_byte_one_indexed": {
+                            "end_line_one_indexed": {
                                 "type": "integer",
-                                "description": "The ending byte position (1-indexed)"
+                                "description": "The ending line (1-indexed) to stop reading"
                             },
                             "offset": {
                                 "type": "integer",
-                                "description": "Byte offset to start reading from (alternative to start_byte_one_indexed)"
+                                "description": "Number of lines to skip before reading (negative values count from the end, like tail)"
                             },
                             "limit": {
                                 "type": "integer",
-                                "description": "Maximum number of bytes to read from the offset"
+                                "description": "Maximum number of lines to return"
                             }
                         }),
+
                     );
                     params.insert("required".to_string(), json!(["path"]));
                     params
@@ -482,6 +487,36 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                 }),
             },
         },
+        ToolName::SubmitVerification => Tool {
+            tp: ToolType::Function,
+            function: Function {
+                name: "submit_verification".to_string(),
+                description: Some("Submit verification results for a spec step after reviewing code and running any necessary checks.".to_string()),
+                parameters: Some({
+                    let mut params = HashMap::new();
+                    params.insert("type".to_string(), json!("object"));
+                    params.insert(
+                        "properties".to_string(),
+                        json!({
+                            "status": {
+                                "type": "string",
+                                "description": "Verification outcome: verified, needs_revision, or failed"
+                            },
+                            "feedback": {
+                                "type": "string",
+                                "description": "Short feedback for the implementor"
+                            },
+                            "end_convo": {
+                                "type": "boolean",
+                                "description": "Must be true to finish verification"
+                            }
+                        }),
+                    );
+                    params.insert("required".to_string(), json!(["status", "end_convo"]));
+                    params
+                }),
+            },
+        },
     }
 }
 
@@ -509,6 +544,13 @@ pub fn get_all_tools() -> Vec<Tool> {
         ToolName::RequestSplit,
         ToolName::OrchestrateTask,
     ])
+}
+
+/// Get tools for verifier agents (read-only + submit_verification)
+pub fn get_verifier_tools() -> Vec<Tool> {
+    let mut tools = get_readonly_tools();
+    tools.push(build_tool(ToolName::SubmitVerification));
+    tools
 }
 
 /// Get read-only tools (safe mode - no modifications)

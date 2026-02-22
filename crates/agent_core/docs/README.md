@@ -142,7 +142,14 @@ nite --spec /path/to/spec.json
 
 # Create spec from goal
 nite --spec "Implement user authentication with JWT tokens"
+
+# Target a different workspace directory (worktrees + commands run there)
+nite --workspace-root ~/rust/todo --spec "Build a Rust CLI todo app"
 ```
+
+You can also set the `NITE_WORKSPACE_ROOT` environment variable before launching the TUI if you prefer an env-based override. When provided, all orchestrator worktrees and default shell commands run relative to that directory instead of the CLI's current working directory.
+
+> **Important:** the workspace root must be a git repository with at least one commit (e.g., run `git init`, add files, and create an initial commit). The orchestrator branches from the current HEAD, so it needs a base history to clone and merge.
 
 ### Slash Commands
 

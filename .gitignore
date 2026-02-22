@@ -18,8 +18,4 @@
 **/target/
 
 # TODO directory for tracking issues
-/todo/
-/todo.txt
-/todoer.txt
-/issues.txt
 .cargo-local/

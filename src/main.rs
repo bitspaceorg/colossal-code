@@ -2,9 +2,10 @@ use agent_core::{
     Agent, AgentMessage, GenerationStats as AgentGenerationStats, SpecSheet, SpecStep, StepStatus,
     TaskSummary, VerificationStatus,
     orchestrator::{
-        Orchestrator, OrchestratorAgent, OrchestratorControl, OrchestratorEvent, SubAgentMessage,
-        VerifierChain,
+        Orchestrator, OrchestratorAgent, OrchestratorControl, OrchestratorEvent, StepRole,
+        SubAgentMessage,
     },
+    set_workspace_root_override,
 };
 use color_eyre::Result;
 use edtui::clipboard::ClipboardTrait;
@@ -13,6 +14,7 @@ use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     layout::{Constraint, Layout, Position},
+    prelude::Alignment,
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span, Text},
@@ -38,7 +40,7 @@ use rich_editor::{RichEditor, ThinkingContext, create_rich_content_from_messages
 mod survey;
 use survey::{Survey, SurveyQuestion};
 mod session_manager;
-pub use session_manager::{OrchestratorEntry, Session, SessionManager, SessionStatus};
+pub use session_manager::{OrchestratorEntry, Session, SessionManager, SessionRole, SessionStatus};
 mod model_context;
 mod spec_cli;
 use spec_cli::{MessageLog, SpecAgentBridge, SpecCliContext, SpecCliHandler, SpecCommandResult};
@@ -241,19 +243,19 @@ const TIPS: &[&str] = &[
     "4. Press Alt+n to enter navigation mode (vim-style hjkl, gg, G).",
 ];
 
-/// Parse command line arguments for --spec flag.
-/// Returns the spec path/goal if provided.
-fn parse_spec_arg(args: &[String]) -> Option<String> {
-    let mut iter = args.iter().peekable();
+/// Parse command line arguments for a flag (`--flag` or `--flag=value`).
+/// Returns the associated value if provided.
+fn parse_arg_value(args: &[String], flag: &str) -> Option<String> {
+    let mut iter = args.iter();
     while let Some(arg) = iter.next() {
-        if arg == "--spec" {
+        if arg == flag {
             // Check if next argument exists and is the value
             if let Some(value) = iter.next() {
                 if !value.starts_with('-') {
                     return Some(value.clone());
                 }
             }
-        } else if let Some(stripped) = arg.strip_prefix("--spec=") {
+        } else if let Some(stripped) = arg.strip_prefix(&format!("{}=", flag)) {
             return Some(stripped.to_string());
         }
     }
@@ -264,9 +266,11 @@ fn parse_spec_arg(args: &[String]) -> Option<String> {
 async fn main() -> Result<()> {
     color_eyre::install()?;
 
-    // Parse command line arguments for --spec flag
     let args: Vec<String> = std::env::args().collect();
-    let spec_arg = parse_spec_arg(&args);
+    let spec_arg = parse_arg_value(&args, "--spec");
+    if let Some(workspace_root) = parse_arg_value(&args, "--workspace-root") {
+        set_workspace_root_override(workspace_root);
+    }
 
     // Show loading spinner while initializing
     let terminal = ratatui::init();
@@ -334,6 +338,9 @@ pub struct StepToolCallEntry {
     pub id: u64,
     pub label: String,
     pub status: ToolCallStatus,
+    pub role: SessionRole,
+    pub worktree_branch: Option<String>,
+    pub worktree_path: Option<String>,
 }
 
 /// Stores the transcript for a sub-agent so we can replay it inside the UI.
@@ -353,6 +360,7 @@ pub struct SubAgentContext {
     pub thinking_loader_frame: usize,
     pub thinking_current_word: String,
     pub generation_stats: Option<AgentGenerationStats>,
+    pub generation_stats_rendered: bool,
     pub started_orchestration: bool,
     pub thinking_last_update: Instant,
     pub thinking_last_word_change: Instant,
@@ -377,6 +385,7 @@ impl SubAgentContext {
             thinking_loader_frame: 0,
             thinking_current_word: "thinking".to_string(),
             generation_stats: None,
+            generation_stats_rendered: false,
             started_orchestration: false,
             thinking_last_update: Instant::now(),
             thinking_last_word_change: Instant::now(),
@@ -503,6 +512,7 @@ impl SubAgentContext {
             time_to_first_token_sec: 0.0,
             stop_reason: "end_turn".to_string(),
         });
+        self.generation_stats_rendered = false;
     }
 
     pub fn to_snapshot(&self) -> AppSnapshot {
@@ -528,6 +538,39 @@ impl SubAgentContext {
             thinking_loader_frame: self.thinking_loader_frame,
             thinking_current_word: self.thinking_current_word.clone(),
             generation_stats: self.generation_stats.clone(),
+            generation_stats_rendered: self.generation_stats_rendered,
+        }
+    }
+
+    pub fn clear_generation_stats(&mut self) {
+        self.generation_stats = None;
+        self.generation_stats_rendered = false;
+    }
+
+    pub fn ensure_generation_stats_marker(&mut self) {
+        if self.generation_stats_rendered {
+            return;
+        }
+
+        let has_marker = self
+            .messages
+            .iter()
+            .rev()
+            .take(6)
+            .any(|msg| msg.starts_with("[GEN_STATS:"));
+        if has_marker {
+            self.generation_stats_rendered = true;
+            return;
+        }
+
+        if let Some(stats) = self.generation_stats.clone() {
+            App::push_generation_stats_message(
+                &mut self.messages,
+                &mut self.message_types,
+                &mut self.message_states,
+                &stats,
+            );
+            self.generation_stats_rendered = true;
         }
     }
 
@@ -820,6 +863,7 @@ struct AppSnapshot {
     thinking_loader_frame: usize,
     thinking_current_word: String,
     generation_stats: Option<AgentGenerationStats>, // Frozen generation stats
+    generation_stats_rendered: bool,
 }
 
 /// Application state for the TUI
@@ -890,6 +934,7 @@ struct App {
     limit_thinking_to_first_token: bool,
     // Generation statistics (only for latest response)
     generation_stats: Option<AgentGenerationStats>, // Most recent generation stats from the agent
+    generation_stats_rendered: bool,
     streaming_completion_tokens: usize, // Real-time count of completion tokens during streaming
     last_known_context_tokens: usize, // Preserved context tokens from previous turn (prompt + completion)
     // Command history
@@ -2159,6 +2204,7 @@ impl App {
             thinking_token_count: 0,
             limit_thinking_to_first_token,
             generation_stats: None,
+            generation_stats_rendered: false,
             streaming_completion_tokens: 0,
             last_known_context_tokens: 0,
             command_history,
@@ -2281,14 +2327,7 @@ impl App {
         }
     }
 
-    fn can_open_alt_w_view(&self) -> bool {
-        self.has_orchestrator_activity
-    }
-
     fn enter_alt_w_view(&mut self) -> bool {
-        if !self.can_open_alt_w_view() {
-            return false;
-        }
         if self.mode != Mode::SessionWindow {
             self.mode_before_sub_agent = Some(self.mode);
             self.expanded_sub_agent_before_alt_w = self.expanded_sub_agent.clone();
@@ -2390,14 +2429,23 @@ impl App {
         let main_agent: Arc<dyn OrchestratorAgent> = agent.clone();
         let sub_agent_factory = {
             let sub_agent = agent.clone();
-            Arc::new(move |_step: &SpecStep| -> Arc<dyn OrchestratorAgent> { sub_agent.clone() })
+            Arc::new(
+                move |_step: &SpecStep,
+                      cwd: Option<std::path::PathBuf>|
+                      -> Arc<dyn OrchestratorAgent> {
+                    if let Some(path) = cwd {
+                        Arc::new(sub_agent.with_working_directory(path))
+                    } else {
+                        sub_agent.clone()
+                    }
+                },
+            )
         };
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (mut orchestrator, control) = Orchestrator::new_with_control(
             main_agent,
             sub_agent_factory,
-            VerifierChain::default(),
             spec.clone(),
             event_tx.clone(),
         );
@@ -2517,7 +2565,9 @@ impl App {
         step_index: &str,
         step_title: &str,
         status: StepStatus,
+        role: StepRole,
     ) {
+        let session_role = Self::session_role_from_step_role(role);
         let entry = self
             .orchestrator_sessions
             .entry(prefix.to_string())
@@ -2527,10 +2577,15 @@ impl App {
                 prefix: prefix.to_string(),
                 step_index: step_index.to_string(),
                 step_title: step_title.to_string(),
+                role: session_role.clone(),
                 status: SessionStatus::Pending,
                 started_at: None,
                 completed_at: None,
+                worktree_branch: None,
+                worktree_path: None,
             });
+
+        entry.role = session_role;
 
         entry.status = match status {
             StepStatus::Pending => SessionStatus::Pending,
@@ -2561,6 +2616,15 @@ impl App {
         let snapshot: Vec<session_manager::OrchestratorEntry> =
             self.orchestrator_sessions.values().cloned().collect();
         self.session_manager.update_from_orchestrator(snapshot);
+    }
+
+    fn session_role_from_step_role(role: StepRole) -> SessionRole {
+        match role {
+            StepRole::Implementor => SessionRole::Implementor,
+            StepRole::Summarizer => SessionRole::Summarizer,
+            StepRole::Verifier => SessionRole::Verifier,
+            StepRole::Merge => SessionRole::Merge,
+        }
     }
 
     /// Load a spec from a path or goal string and store it in app state.
@@ -4539,7 +4603,7 @@ Let me analyze the conversation chronologically:
             }
 
             // Clear previous generation stats
-            self.generation_stats = None;
+            self.clear_generation_stats();
             self.streaming_completion_tokens = 0;
         } else if cmd_lower == "/exit" {
             self.messages.push("[COMMAND: Exiting...]".to_string());
@@ -4663,29 +4727,30 @@ Let me analyze the conversation chronologically:
         match event {
             OrchestratorEvent::StepStatusChanged {
                 spec_id,
+                spec_title,
                 step_index,
+                step_title,
                 prefix,
+                role,
                 status,
             } => {
                 if let Some(ref mut spec) = self.current_spec {
                     if spec.id == spec_id {
                         if let Some(step) = spec.steps.iter_mut().find(|s| s.index == step_index) {
-                            let spec_title = spec.title.clone();
-                            let spec_id = spec.id.clone();
-                            let step_index_clone = step.index.clone();
-                            let step_title = step.title.clone();
                             step.status = status.clone();
-                            self.update_session_for_step(
-                                &spec_id,
-                                &spec_title,
-                                &prefix,
-                                &step_index_clone,
-                                &step_title,
-                                status.clone(),
-                            );
                         }
                     }
                 }
+
+                self.update_session_for_step(
+                    &spec_id,
+                    &spec_title,
+                    &prefix,
+                    &step_index,
+                    &step_title,
+                    status.clone(),
+                    role,
+                );
 
                 match status {
                     StepStatus::InProgress => {
@@ -4799,6 +4864,14 @@ Let me analyze the conversation chronologically:
                 let entry_id = self.next_tool_call_id;
                 self.next_tool_call_id = self.next_tool_call_id.saturating_add(1);
 
+                let session_metadata = self.orchestrator_sessions.get(&prefix);
+                let role = session_metadata
+                    .map(|entry| entry.role.clone())
+                    .unwrap_or(SessionRole::Implementor);
+                let worktree_branch =
+                    session_metadata.and_then(|entry| entry.worktree_branch.clone());
+                let worktree_path = session_metadata.and_then(|entry| entry.worktree_path.clone());
+
                 self.step_tool_calls
                     .entry(prefix.clone())
                     .or_default()
@@ -4806,6 +4879,9 @@ Let me analyze the conversation chronologically:
                         id: entry_id,
                         label,
                         status: ToolCallStatus::Started,
+                        role,
+                        worktree_branch,
+                        worktree_path,
                     });
                 self.active_tool_call = Some((prefix, entry_id));
             }
@@ -4887,7 +4963,29 @@ Let me analyze the conversation chronologically:
                     } => {
                         context.set_generation_stats(tokens_per_sec, input_tokens, output_tokens);
                     }
+                    SubAgentMessage::Done => {
+                        let elapsed = context
+                            .thinking_start_time
+                            .map(|t| t.elapsed().as_secs())
+                            .unwrap_or(context.thinking_elapsed_secs);
+                        context.finish_thinking(elapsed);
+                    }
+                    SubAgentMessage::Error { message } => {
+                        context.add_agent_text(format!("[Error: {}]", message));
+                        let elapsed = context
+                            .thinking_start_time
+                            .map(|t| t.elapsed().as_secs())
+                            .unwrap_or(context.thinking_elapsed_secs);
+                        context.finish_thinking(elapsed);
+                    }
                 }
+            }
+
+            OrchestratorEvent::StepCancelled { prefix } => {
+                if let Some(context) = self.sub_agent_contexts.get_mut(&prefix) {
+                    context.ensure_generation_stats_marker();
+                }
+                self.status_message = Some(format!("Step {} cancelled", prefix));
             }
         }
     }
@@ -4968,7 +5066,7 @@ Let me analyze the conversation chronologically:
             self.message_states.push(MessageState::Sent);
 
             // Reset generation stats
-            self.generation_stats = None;
+            self.clear_generation_stats();
             self.streaming_completion_tokens = 0;
 
             // Clear agent context
@@ -5403,6 +5501,7 @@ Let me analyze the conversation chronologically:
                             .push(" ⎿ Interrupted. What should Nite do instead?".to_string());
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
+                        self.ensure_generation_stats_marker();
                     }
                     _ => {
                         // Invalid choice, keep the popup
@@ -5462,6 +5561,7 @@ Let me analyze the conversation chronologically:
                             .push(" ⎿ Interrupted. What should Nite do instead?".to_string());
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
+                        self.ensure_generation_stats_marker();
                     }
                     _ => {
                         // Invalid choice, keep the popup
@@ -5530,7 +5630,7 @@ Let me analyze the conversation chronologically:
                         stats.prompt_tokens.saturating_add(stats.completion_tokens);
                 }
                 // Clear generation stats from previous message when new message is added to UI
-                self.generation_stats = None;
+                self.clear_generation_stats();
                 // Reset streaming tokens for new turn
                 self.streaming_completion_tokens = 0;
 
@@ -5603,7 +5703,11 @@ Let me analyze the conversation chronologically:
                     if self.agent_interrupted {
                         match msg {
                             AgentMessage::GenerationStats(stats) => {
-                                self.generation_stats = Some(stats);
+                                Self::record_generation_stats_fields(
+                                    &mut self.generation_stats,
+                                    &mut self.generation_stats_rendered,
+                                    stats,
+                                );
                             }
                             AgentMessage::Done => {
                                 self.agent_interrupted = false;
@@ -5891,6 +5995,14 @@ Let me analyze the conversation chronologically:
                                     let entry_id = self.next_tool_call_id;
                                     self.next_tool_call_id =
                                         self.next_tool_call_id.saturating_add(1);
+                                    let session_metadata = self.orchestrator_sessions.get(&prefix);
+                                    let role = session_metadata
+                                        .map(|entry| entry.role.clone())
+                                        .unwrap_or(SessionRole::Implementor);
+                                    let worktree_branch = session_metadata
+                                        .and_then(|entry| entry.worktree_branch.clone());
+                                    let worktree_path = session_metadata
+                                        .and_then(|entry| entry.worktree_path.clone());
                                     self.step_tool_calls
                                         .entry(prefix.clone())
                                         .or_default()
@@ -5898,6 +6010,9 @@ Let me analyze the conversation chronologically:
                                             id: entry_id,
                                             label,
                                             status: ToolCallStatus::Started,
+                                            role,
+                                            worktree_branch,
+                                            worktree_path,
                                         });
                                     self.active_tool_call = Some((prefix, entry_id));
                                 }
@@ -6100,7 +6215,11 @@ Let me analyze the conversation chronologically:
                         }
                         AgentMessage::GenerationStats(stats) => {
                             // Store the generation stats
-                            self.generation_stats = Some(stats);
+                            Self::record_generation_stats_fields(
+                                &mut self.generation_stats,
+                                &mut self.generation_stats_rendered,
+                                stats,
+                            );
                         }
                         AgentMessage::BackgroundTaskStarted(session_id, command, log_file) => {
                             // Add background task to the list with current time as start time
@@ -6298,9 +6417,11 @@ Let me analyze the conversation chronologically:
                             // Check for interrupt pending FIRST
                             if let Some(interrupt_msg) = self.interrupt_pending.take() {
                                 // Mark last message (interrupted one) as Interrupted
-                                if let Some(last_state) = self.message_states.last_mut() {
-                                    if matches!(last_state, MessageState::Sent) {
-                                        *last_state = MessageState::Interrupted;
+                                {
+                                    if let Some(last_state) = self.message_states.last_mut() {
+                                        if matches!(last_state, MessageState::Sent) {
+                                            *last_state = MessageState::Interrupted;
+                                        }
                                     }
                                 }
 
@@ -6315,13 +6436,25 @@ Let me analyze the conversation chronologically:
                                 self.message_types.push(MessageType::Agent);
                                 self.message_states.push(MessageState::Sent);
 
+                                Self::ensure_generation_stats_marker_fields(
+                                    &mut self.messages,
+                                    &mut self.message_types,
+                                    &mut self.message_states,
+                                    &mut self.message_metadata,
+                                    &mut self.message_timestamps,
+                                    &self.generation_stats,
+                                    &mut self.generation_stats_rendered,
+                                );
+
                                 // Set flag to process interrupt after rx is dropped
                                 process_interrupt = Some(interrupt_msg);
                             } else {
                                 // Update last message state from Queued to Sent if needed
-                                if let Some(last_state) = self.message_states.last_mut() {
-                                    if matches!(last_state, MessageState::Queued) {
-                                        *last_state = MessageState::Sent;
+                                {
+                                    if let Some(last_state) = self.message_states.last_mut() {
+                                        if matches!(last_state, MessageState::Queued) {
+                                            *last_state = MessageState::Sent;
+                                        }
                                     }
                                 }
 
@@ -6332,6 +6465,16 @@ Let me analyze the conversation chronologically:
 
                                 // Set flag to check for auto-summarization after rx borrow is dropped
                                 check_auto_summarize = true;
+
+                                Self::ensure_generation_stats_marker_fields(
+                                    &mut self.messages,
+                                    &mut self.message_types,
+                                    &mut self.message_states,
+                                    &mut self.message_metadata,
+                                    &mut self.message_timestamps,
+                                    &self.generation_stats,
+                                    &mut self.generation_stats_rendered,
+                                );
                             }
                         }
                         AgentMessage::ModelLoaded => {
@@ -6482,7 +6625,7 @@ Let me analyze the conversation chronologically:
                                 stats.prompt_tokens.saturating_add(stats.completion_tokens);
                         }
                         // Regular message - clear generation stats from previous message when new message is added to UI
-                        self.generation_stats = None;
+                        self.clear_generation_stats();
                         // Reset streaming tokens for new turn
                         self.streaming_completion_tokens = 0;
 
@@ -7326,6 +7469,8 @@ Let me analyze the conversation chronologically:
                                     self.message_types.push(MessageType::Agent);
                                     self.message_states.push(MessageState::Sent);
 
+                                    self.ensure_generation_stats_marker();
+
                                     // Reset all thinking state
                                     self.is_thinking = false;
                                     self.thinking_indicator_active = false;
@@ -7364,11 +7509,8 @@ Let me analyze the conversation chronologically:
                                 {
                                     if self.mode == Mode::SessionWindow {
                                         self.leave_alt_w_view();
-                                    } else if !self.enter_alt_w_view() {
-                                        self.status_message = Some(
-                                            "Alt+W is available after orchestrator activity"
-                                                .to_string(),
-                                        );
+                                    } else {
+                                        self.enter_alt_w_view();
                                     }
                                     self.cached_mode_content = None;
                                     continue;
@@ -7434,6 +7576,8 @@ Let me analyze the conversation chronologically:
                                                 .thinking_current_word
                                                 .clone(),
                                             generation_stats: self.generation_stats.clone(),
+                                            generation_stats_rendered: self
+                                                .generation_stats_rendered,
                                         });
                                     }
 
@@ -8251,6 +8395,103 @@ Let me analyze the conversation chronologically:
         Text::from(lines)
     }
 
+    fn encode_generation_stats_message(stats: &AgentGenerationStats) -> String {
+        format!(
+            "[GEN_STATS:{:.6}|{}|{}|{:.6}|{}]",
+            stats.avg_completion_tok_per_sec,
+            stats.completion_tokens,
+            stats.prompt_tokens,
+            stats.time_to_first_token_sec,
+            stats.stop_reason.replace('|', "\\u{007C}")
+        )
+    }
+
+    fn push_generation_stats_message(
+        messages: &mut Vec<String>,
+        message_types: &mut Vec<MessageType>,
+        message_states: &mut Vec<MessageState>,
+        stats: &AgentGenerationStats,
+    ) {
+        messages.push(Self::encode_generation_stats_message(stats));
+        message_types.push(MessageType::Agent);
+        message_states.push(MessageState::Sent);
+    }
+
+    fn record_generation_stats(&mut self, stats: AgentGenerationStats) {
+        Self::record_generation_stats_fields(
+            &mut self.generation_stats,
+            &mut self.generation_stats_rendered,
+            stats,
+        );
+    }
+
+    fn clear_generation_stats(&mut self) {
+        Self::clear_generation_stats_fields(
+            &mut self.generation_stats,
+            &mut self.generation_stats_rendered,
+        );
+    }
+
+    fn ensure_generation_stats_marker(&mut self) {
+        Self::ensure_generation_stats_marker_fields(
+            &mut self.messages,
+            &mut self.message_types,
+            &mut self.message_states,
+            &mut self.message_metadata,
+            &mut self.message_timestamps,
+            &self.generation_stats,
+            &mut self.generation_stats_rendered,
+        );
+    }
+
+    fn record_generation_stats_fields(
+        slot: &mut Option<AgentGenerationStats>,
+        rendered_flag: &mut bool,
+        stats: AgentGenerationStats,
+    ) {
+        *slot = Some(stats);
+        *rendered_flag = false;
+    }
+
+    fn clear_generation_stats_fields(
+        slot: &mut Option<AgentGenerationStats>,
+        rendered_flag: &mut bool,
+    ) {
+        *slot = None;
+        *rendered_flag = false;
+    }
+
+    fn ensure_generation_stats_marker_fields(
+        messages: &mut Vec<String>,
+        message_types: &mut Vec<MessageType>,
+        message_states: &mut Vec<MessageState>,
+        message_metadata: &mut Vec<Option<UIMessageMetadata>>,
+        message_timestamps: &mut Vec<SystemTime>,
+        stats: &Option<AgentGenerationStats>,
+        rendered_flag: &mut bool,
+    ) {
+        if *rendered_flag {
+            return;
+        }
+
+        let has_marker = messages
+            .iter()
+            .rev()
+            .take(6)
+            .any(|msg| msg.starts_with("[GEN_STATS:"));
+        if has_marker {
+            *rendered_flag = true;
+            return;
+        }
+
+        if let Some(stats) = stats.clone() {
+            Self::push_generation_stats_message(messages, message_types, message_states, &stats);
+            message_metadata.push(None);
+            message_timestamps.push(SystemTime::now());
+            *rendered_flag = true;
+        }
+    }
+
     fn render_summary_history_lines(&self, max_width: usize) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         for message in self.summary_history_virtual_messages() {
@@ -8769,6 +9010,46 @@ Let me analyze the conversation chronologically:
                 Span::styled(content, Style::default().fg(Color::Green)),
             ]));
             return Text::from(lines);
+        }
+
+        if message.starts_with("[GEN_STATS:") {
+            let mut parts = message
+                .trim_start_matches("[GEN_STATS:")
+                .trim_end_matches(']')
+                .splitn(5, '|');
+            if let (Some(tps), Some(comp), Some(prompt), Some(ttft), Some(reason)) = (
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+            ) {
+                if let (Ok(tps), Ok(comp), Ok(prompt), Ok(ttft)) = (
+                    tps.parse::<f32>(),
+                    comp.parse::<usize>(),
+                    prompt.parse::<usize>(),
+                    ttft.parse::<f32>(),
+                ) {
+                    let reason = reason.replace("\\u{007C}", "|");
+                    let stats_text = format!(
+                        " {:.2} tok/sec • {} completion • {} prompt • {:.2}s to first token • Stop reason: {}",
+                        tps,
+                        self.format_compact_number(comp),
+                        self.format_compact_number(prompt),
+                        ttft,
+                        reason
+                    );
+                    return Text::from(vec![Line::from(vec![
+                        Self::connector_prefix(connector, true),
+                        Span::styled(
+                            stats_text,
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(ratatui::style::Modifier::ITALIC),
+                        ),
+                    ])]);
+                }
+            }
         }
 
         // Check for "What should Nite do instead?" prompt (only for agent messages)
@@ -10547,24 +10828,28 @@ Let me analyze the conversation chronologically:
         let layout = Layout::vertical([Constraint::Percentage(49), Constraint::Percentage(51)]);
         let [sessions_area, input_box_area] = layout.areas(frame.area());
 
-        // Render sessions list in top area
-        let session_items =
-            session_manager::SessionManager::create_session_list_items_with_selection(
-                &self.session_manager.sessions,
-                self.session_manager.selected_index,
+        let sessions_block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Agent sessions (Alt+W to close) ");
+
+        if self.session_manager.sessions.is_empty() {
+            frame.render_widget(sessions_block.clone(), sessions_area);
+        } else {
+            // Render sessions list in top area
+            let session_items =
+                session_manager::SessionManager::create_session_list_items_with_selection(
+                    &self.session_manager.sessions,
+                    self.session_manager.selected_index,
+                );
+            let sessions_list = List::new(session_items)
+                .block(sessions_block)
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+            frame.render_stateful_widget(
+                sessions_list,
+                sessions_area,
+                &mut self.session_manager.list_state,
             );
-        let sessions_list = List::new(session_items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Agent sessions (Alt+W to close) "),
-            )
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-        frame.render_stateful_widget(
-            sessions_list,
-            sessions_area,
-            &mut self.session_manager.list_state,
-        );
+        }
 
         // Get the selected session's prefix to find the sub-agent context
         let selected_prefix = self

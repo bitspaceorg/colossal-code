@@ -36,6 +36,14 @@ impl SpecSheet {
                     found: step.index.clone(),
                 });
             }
+            if let Some(max_parallelism) = step.max_parallelism {
+                if max_parallelism == 0 {
+                    return Err(SpecValidationError::InvalidParallelism {
+                        step: step.index.clone(),
+                        value: max_parallelism,
+                    });
+                }
+            }
             if let Some(sub_spec) = &step.sub_spec {
                 sub_spec.validate()?;
             }
@@ -72,6 +80,12 @@ pub struct SpecStep {
     pub constraints: Vec<String>,
     #[serde(default)]
     pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub is_parallel: bool,
+    #[serde(default)]
+    pub requires_verification: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallelism: Option<usize>,
     #[serde(default)]
     pub status: StepStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,6 +128,19 @@ pub struct TaskSummary {
     #[serde(default)]
     pub tests_run: Vec<TestRun>,
     pub verification: TaskVerification,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeMetadata>,
+}
+
+/// Worktree metadata recorded with task summaries so downstream agents
+/// know which branch/path contains the step's changes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeMetadata {
+    pub branch: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -168,6 +195,8 @@ pub enum SpecValidationError {
     InvalidIndex { expected: String, found: String },
     #[error("step {step} references unknown dependency {dependency}")]
     UnknownDependency { step: String, dependency: String },
+    #[error("step {step} has invalid max_parallelism value {value} (must be at least 1)")]
+    InvalidParallelism { step: String, value: usize },
 }
 
 #[cfg(test)]
@@ -186,6 +215,9 @@ mod tests {
             required_tools: vec![],
             constraints: vec![],
             dependencies: vec![],
+            is_parallel: false,
+            requires_verification: false,
+            max_parallelism: None,
             status: StepStatus::Pending,
             sub_spec: None,
             completed_at: None,
@@ -225,6 +257,9 @@ mod tests {
                 required_tools: vec![],
                 constraints: vec![],
                 dependencies: vec![],
+                is_parallel: false,
+                requires_verification: false,
+                max_parallelism: None,
                 status: StepStatus::InProgress,
                 sub_spec: None,
                 completed_at: None,
@@ -246,6 +281,9 @@ mod tests {
                 required_tools: vec!["tool-a".to_string()],
                 constraints: vec![],
                 dependencies: vec![],
+                is_parallel: false,
+                requires_verification: false,
+                max_parallelism: None,
                 status: StepStatus::Pending,
                 sub_spec: Some(Box::new(child.clone())),
                 completed_at: None,
@@ -281,6 +319,7 @@ mod tests {
                     timestamp: Utc::now(),
                 }],
             },
+            worktree: None,
         };
 
         let value = serde_json::to_value(&summary).unwrap();

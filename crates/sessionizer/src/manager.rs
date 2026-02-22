@@ -373,12 +373,12 @@ impl SessionManager {
             let stderr_buf = Vec::with_capacity(8192.min(cap_bytes));
             let mut aggregated_buf = Vec::with_capacity(8192.min(cap_bytes));
             let start_time = Instant::now();
-            let deadline = start_time + Duration::from_millis(params.timeout_ms.unwrap_or(10000));
+            let deadline = start_time + Duration::from_millis(params.timeout_ms.unwrap_or(600_000));
             let mut exit_code: Option<i32> = None;
             let mut exit_future = Box::pin(exit_rx);
             loop {
                 if Instant::now() >= deadline {
-                    // eprintln!("Command timed out after {}ms", params.timeout_ms.unwrap_or(10000));
+                    // eprintln!("Command timed out after {}ms", params.timeout_ms.unwrap_or(600000));
                     break;
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
@@ -456,18 +456,28 @@ impl SessionManager {
     ) -> Result<String, ColossalErr> {
         let log_file_path = std::path::PathBuf::from(format!("/tmp/shell_{}.log", session_id.as_str()));
 
-        // Check if log file exists
+        // Wait for log file to be created (up to 2 seconds) - handles race condition
+        // where read_output is called before the background task creates the file
+        for _ in 0..20 {
+            if log_file_path.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        // If file still doesn't exist, return empty string (process may still be starting)
         if !log_file_path.exists() {
-            return Err(ColossalErr::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Log file not found for session {}", session_id.as_str()),
-            )));
+            return Ok("(waiting for output...)".to_string());
         }
 
         // Read the log file
         let contents = tokio::fs::read_to_string(&log_file_path)
             .await
             .map_err(|e| ColossalErr::Io(e))?;
+
+        if contents.is_empty() {
+            return Ok("(no output yet)".to_string());
+        }
 
         Ok(contents)
     }

@@ -388,6 +388,7 @@ impl<'a> SpecCliHandler<'a> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
     use agent_core::{StepStatus, TaskSummary, TaskVerification, TestRun, VerificationStatus};
     use agent_protocol::types::spec::TestResult;
@@ -488,6 +489,9 @@ mod tests {
                 acceptance_criteria: vec![],
                 required_tools: vec![],
                 constraints: vec![],
+                is_parallel: false,
+                requires_verification: false,
+                max_parallelism: None,
                 status: StepStatus::Pending,
                 dependencies: vec![],
                 sub_spec: None,
@@ -515,6 +519,7 @@ mod tests {
                 status: VerificationStatus::Passed,
                 feedback: vec![],
             },
+            worktree: None,
         }
     }
 

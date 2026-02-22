@@ -10,6 +10,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState},
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
 pub struct Session {
@@ -22,9 +23,12 @@ pub struct Session {
     pub breadcrumb: Option<String>,
     pub started_at: Option<Instant>,
     pub completed_at: Option<Instant>,
+    pub role: Option<SessionRole>,
+    pub worktree_branch: Option<String>,
+    pub worktree_path: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SessionStatus {
     Attached,
     Detached,
@@ -47,9 +51,20 @@ pub struct OrchestratorEntry {
     pub prefix: String,
     pub step_index: String,
     pub step_title: String,
+    pub role: SessionRole,
     pub status: SessionStatus,
     pub started_at: Option<Instant>,
     pub completed_at: Option<Instant>,
+    pub worktree_branch: Option<String>,
+    pub worktree_path: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionRole {
+    Implementor,
+    Summarizer,
+    Verifier,
+    Merge,
 }
 
 pub struct SessionManager {
@@ -105,6 +120,9 @@ impl SessionManager {
                 breadcrumb: Some("main".to_string()),
                 started_at: None,
                 completed_at: None,
+                role: None,
+                worktree_branch: None,
+                worktree_path: None,
             };
             for entry in steps {
                 Self::insert_entry(&mut root, entry);
@@ -130,6 +148,9 @@ impl SessionManager {
             root.status = entry.status;
             root.started_at = entry.started_at;
             root.completed_at = entry.completed_at;
+            root.role = Some(entry.role.clone());
+            root.worktree_branch = entry.worktree_branch.clone();
+            root.worktree_path = entry.worktree_path.clone();
             return;
         }
 
@@ -163,6 +184,9 @@ impl SessionManager {
                     breadcrumb: Some(format!("main › {}", key)),
                     started_at: None,
                     completed_at: None,
+                    role: Some(entry.role.clone()),
+                    worktree_branch: entry.worktree_branch.clone(),
+                    worktree_path: entry.worktree_path.clone(),
                 });
                 let idx = current.children.len() - 1;
                 current = current.children.get_mut(idx).expect("child just inserted");
@@ -171,6 +195,9 @@ impl SessionManager {
 
         current.name = format!("{} › {}", entry.prefix, entry.step_title);
         current.status = entry.status;
+        current.role = Some(entry.role.clone());
+        current.worktree_branch = entry.worktree_branch.clone();
+        current.worktree_path = entry.worktree_path.clone();
         if current.started_at.is_none() {
             current.started_at = entry.started_at;
         }
@@ -439,6 +466,18 @@ impl SessionManager {
                 },
             ),
         ];
+        if let Some(role) = session.role.as_ref() {
+            let (label, color) = Self::role_badge(role);
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(label, Style::default().fg(color)));
+        }
+        if let Some(branch) = session.worktree_branch.as_ref() {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!("· {}", branch),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
         if let Some(runtime) = runtime {
             spans.push(Span::styled(
                 format!(" · {}", runtime),
@@ -471,6 +510,15 @@ impl SessionManager {
             let minutes = secs / 60;
             let seconds = secs % 60;
             format!("{}m {}s", minutes, seconds)
+        }
+    }
+
+    fn role_badge(role: &SessionRole) -> (&'static str, Color) {
+        match role {
+            SessionRole::Implementor => ("[impl]", Color::Gray),
+            SessionRole::Summarizer => ("[summarize]", Color::Cyan),
+            SessionRole::Verifier => ("[verifier]", Color::Magenta),
+            SessionRole::Merge => ("[merge]", Color::LightBlue),
         }
     }
 }

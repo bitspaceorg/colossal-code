@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use agent_protocol::{
+    A2AError,
     error::A2AResult,
     jsonrpc::StreamEvent,
     server::{A2AHandler, A2AServer},
@@ -10,18 +11,17 @@ use agent_protocol::{
         spec::{SpecSheet, SpecStep, SpecStepRef, TaskSummary},
         task::{Task, TaskError, TaskMetadata, TaskState, TaskStatusUpdateEvent},
     },
-    A2AError,
 };
-use async_trait::async_trait;
 use anyhow::anyhow;
+use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{Value, json};
 use tokio::{
     runtime::Builder,
-    sync::{mpsc, RwLock},
+    sync::{RwLock, mpsc},
 };
-use uuid::Uuid;
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 use crate::{Agent, AgentMessage};
 
@@ -64,12 +64,9 @@ fn parse_spec_sheet(metadata: Option<&Value>) -> A2AResult<SpecSheet> {
                 .or_else(|| value.get("spec_sheet"))
                 .cloned()
         })
-        .ok_or_else(|| {
-            A2AError::InvalidParams("message metadata missing specSheet".to_string())
-        })?;
-    serde_json::from_value(spec_value).map_err(|err| {
-        A2AError::InvalidParams(format!("invalid specSheet metadata: {err}"))
-    })
+        .ok_or_else(|| A2AError::InvalidParams("message metadata missing specSheet".to_string()))?;
+    serde_json::from_value(spec_value)
+        .map_err(|err| A2AError::InvalidParams(format!("invalid specSheet metadata: {err}")))
 }
 
 fn parse_spec_step(
@@ -80,9 +77,8 @@ fn parse_spec_step(
         .and_then(|value| value.get("specStep").or_else(|| value.get("spec_step")))
         .cloned()
     {
-        return serde_json::from_value(step_value).map_err(|err| {
-            A2AError::InvalidParams(format!("invalid specStep metadata: {err}"))
-        });
+        return serde_json::from_value(step_value)
+            .map_err(|err| A2AError::InvalidParams(format!("invalid specStep metadata: {err}")));
     }
 
     if let Some(step) = fallback {
@@ -96,16 +92,12 @@ fn parse_spec_step(
 }
 
 fn resolve_step(spec: &SpecSheet, step_ref: &SpecStepRef) -> A2AResult<SpecStep> {
-    spec
-        .steps
+    spec.steps
         .iter()
         .find(|step| step.index == step_ref.index)
         .cloned()
         .ok_or_else(|| {
-            A2AError::InvalidParams(format!(
-                "spec {} missing step {}",
-                spec.id, step_ref.index
-            ))
+            A2AError::InvalidParams(format!("spec {} missing step {}", spec.id, step_ref.index))
         })
 }
 
@@ -138,9 +130,7 @@ fn prepare_spec_and_step(
     let base_step = resolve_step(&spec, &step_ref)?;
     let mut prepared_step = append_user_context(&base_step, message);
     if split_requested(message.metadata.as_ref()) {
-        prepared_step
-            .constraints
-            .push(SPLIT_DIRECTIVE.to_string());
+        prepared_step.constraints.push(SPLIT_DIRECTIVE.to_string());
     }
 
     Ok((spec, prepared_step))
@@ -154,7 +144,8 @@ fn append_user_context(step: &SpecStep, message: &Message) -> SpecStep {
     }
     updated.instructions = format!(
         "{}\n\nUser context:\n{}",
-        updated.instructions, trimmed.trim()
+        updated.instructions,
+        trimmed.trim()
     );
     updated
 }
@@ -174,7 +165,11 @@ impl TaskStreamManager {
     async fn register(
         &self,
         task_id: &str,
-    ) -> (String, mpsc::Sender<StreamEvent>, mpsc::Receiver<StreamEvent>) {
+    ) -> (
+        String,
+        mpsc::Sender<StreamEvent>,
+        mpsc::Receiver<StreamEvent>,
+    ) {
         let (tx, rx) = mpsc::channel(32);
         let subscriber_id = Uuid::new_v4().to_string();
         {
@@ -331,8 +326,7 @@ impl AgentA2AHandler {
 
     /// Store the current task snapshot for later queries
     async fn persist_task(&self, task: Task) {
-        self
-            .stream_manager
+        self.stream_manager
             .send(&task.id, StreamEvent::task(task.clone()))
             .await;
         self.tasks.write().await.insert(task.id.clone(), task);
@@ -345,8 +339,7 @@ impl AgentA2AHandler {
             status: task.status.clone(),
             final_update,
         };
-        self
-            .stream_manager
+        self.stream_manager
             .send(&task.id, StreamEvent::status_update(event))
             .await;
     }
@@ -356,8 +349,7 @@ impl AgentA2AHandler {
         if enriched.task_id.is_none() {
             enriched.task_id = Some(task_id.to_string());
         }
-        self
-            .stream_manager
+        self.stream_manager
             .send(task_id, StreamEvent::message(enriched))
             .await;
     }
@@ -437,9 +429,11 @@ impl AgentA2AHandler {
                     tool_events.push((name, args, None));
                 }
                 AgentMessage::ToolCallCompleted(name, result) => {
-                    if let Some(entry) = tool_events.iter_mut().rev().find(|(existing, _, completed)| {
-                        existing == &name && completed.is_none()
-                    }) {
+                    if let Some(entry) = tool_events
+                        .iter_mut()
+                        .rev()
+                        .find(|(existing, _, completed)| existing == &name && completed.is_none())
+                    {
                         entry.2 = Some(result.clone());
                     }
                     if name == "request_split" {
@@ -490,14 +484,16 @@ impl AgentA2AHandler {
 
         metadata.extra.insert(
             "toolLog".to_string(),
-            json!(tool_events
-                .into_iter()
-                .map(|(name, args, result)| json!({
-                    "name": name,
-                    "arguments": args,
-                    "result": result,
-                }))
-                .collect::<Vec<_>>()),
+            json!(
+                tool_events
+                    .into_iter()
+                    .map(|(name, args, result)| json!({
+                        "name": name,
+                        "arguments": args,
+                        "result": result,
+                    }))
+                    .collect::<Vec<_>>()
+            ),
         );
 
         task.metadata = Some(metadata.clone());
@@ -538,11 +534,10 @@ impl AgentA2AHandler {
         spec: &SpecSheet,
         split_reason: Option<String>,
     ) -> A2AResult<Task> {
-        let split_spec = self
-            .agent
-            .request_split(step)
-            .await
-            .map_err(|err| A2AError::InternalError(format!("failed to request split: {err}")))?;
+        let split_spec =
+            self.agent.request_split(step).await.map_err(|err| {
+                A2AError::InternalError(format!("failed to request split: {err}"))
+            })?;
 
         let summary = Agent::synthesize_split_summary(&task, step, &split_spec);
         Self::apply_split_metadata(&mut metadata, &split_spec, &summary).map_err(|err| {
@@ -577,7 +572,7 @@ impl AgentA2AHandler {
         }
         contexts.remove(task_id);
     }
- 
+
     pub async fn register_cleanup_action<F>(&self, task_id: &str, cleanup: F) -> bool
     where
         F: FnOnce() + Send + Sync + 'static,
@@ -656,7 +651,8 @@ impl A2AHandler for AgentA2AHandler {
             );
         }
 
-        let (subscriber_id, _stream_sender, rx) = self.stream_manager.register(&resolved_task_id).await;
+        let (subscriber_id, _stream_sender, rx) =
+            self.stream_manager.register(&resolved_task_id).await;
         let manager = self.stream_manager.clone();
         let task_for_cleanup = resolved_task_id.clone();
         let subscriber_for_cleanup = subscriber_id.clone();
@@ -687,8 +683,7 @@ impl A2AHandler for AgentA2AHandler {
     }
 
     async fn get_task(&self, task_id: &str) -> A2AResult<Task> {
-        self
-            .tasks
+        self.tasks
             .read()
             .await
             .get(task_id)
@@ -728,10 +723,7 @@ impl A2AHandler for AgentA2AHandler {
         Err(A2AError::TaskNotFound(task_id.to_string()))
     }
 
-    async fn subscribe_to_task(
-        &self,
-        task_id: &str,
-    ) -> A2AResult<mpsc::Receiver<StreamEvent>> {
+    async fn subscribe_to_task(&self, task_id: &str) -> A2AResult<mpsc::Receiver<StreamEvent>> {
         let current_task = {
             let tasks = self.tasks.read().await;
             tasks.get(task_id).cloned()
@@ -742,10 +734,9 @@ impl A2AHandler for AgentA2AHandler {
 
         let (_subscriber_id, sender, rx) = self.stream_manager.register(task_id).await;
         if let Some(task) = current_task {
-            sender
-                .send(StreamEvent::task(task))
-                .await
-                .map_err(|_| A2AError::InternalError("failed to initialize task stream".to_string()))?;
+            sender.send(StreamEvent::task(task)).await.map_err(|_| {
+                A2AError::InternalError("failed to initialize task stream".to_string())
+            })?;
         }
         Ok(rx)
     }
@@ -764,7 +755,11 @@ pub fn default_agent_card(base_url: impl Into<String>) -> AgentCard {
         .description("Terminal-native coding agent")
         .base_url(base_url)
         .streaming(false)
-        .skill("code", "Code Assistant", Some("General-purpose coding help".to_string()))
+        .skill(
+            "code",
+            "Code Assistant",
+            Some("General-purpose coding help".to_string()),
+        )
         .build()
         .expect("default agent card is always valid")
 }
@@ -779,9 +774,9 @@ mod tests {
     use agent_protocol::types::task::{Task, TaskMetadata, TaskState};
     use chrono::Utc;
     use serde_json::json;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use tokio::time::{sleep, Duration};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::time::{Duration, sleep};
 
     fn sample_spec() -> SpecSheet {
         SpecSheet {
@@ -796,6 +791,9 @@ mod tests {
                 required_tools: vec![],
                 constraints: vec![],
                 dependencies: vec![],
+                is_parallel: false,
+                requires_verification: false,
+                max_parallelism: None,
                 status: StepStatus::Pending,
                 sub_spec: None,
                 completed_at: None,
@@ -896,6 +894,7 @@ mod tests {
                 status: VerificationStatus::Pending,
                 feedback: vec![],
             },
+            worktree: None,
         };
         AgentA2AHandler::apply_split_metadata(&mut metadata, &child, &summary).unwrap();
         assert!(metadata.spec_sheet.is_some());

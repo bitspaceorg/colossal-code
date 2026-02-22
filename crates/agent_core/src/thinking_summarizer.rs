@@ -1,8 +1,10 @@
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{error::TryRecvError, unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::task;
 use tokenizers::Tokenizer;
+use tokio::sync::mpsc::{
+    UnboundedReceiver, UnboundedSender, error::TryRecvError, unbounded_channel,
+};
+use tokio::task;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Message {

@@ -1,41 +1,46 @@
 use anyhow::Result;
 // Re-export spec types from agent_protocol for convenience
-pub use agent_protocol::types::spec::{SpecSheet, SpecStep, StepStatus, TaskSummary, TaskVerification, TestRun, VerificationStatus};
-use agent_protocol::types::{
-    message::Role,
-    task::Task,
+pub use agent_protocol::types::spec::{
+    SpecSheet, SpecStep, StepStatus, TaskSummary, TaskVerification, TestRun, VerificationStatus,
 };
+use agent_protocol::types::{message::Role, task::Task};
 use chrono::Utc;
 use colossal_linux_sandbox::protocol::SandboxPolicy;
 use colossal_linux_sandbox::tools::execute_tools_with_sandbox;
 use colossal_linux_sandbox::types::{ExitStatus, SessionId};
 use either::Either;
 use futures::StreamExt;
+use indexmap::IndexMap;
 use mistralrs::{
     ChatCompletionChunkResponse, Delta, Model, RequestBuilder, Response, TextMessageRole, Tool,
     ToolCallResponse, ToolChoice,
 };
 use mistralrs_core::MessageContent;
-use once_cell::sync::OnceCell;
+use once_cell::sync::{Lazy, OnceCell};
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::path::Path;
+use shell_escape::escape;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokenizers::Tokenizer;
+use tokio::process::Command as TokioCommand;
 use tokio::sync::{Mutex, mpsc};
+
+static GIT_COMMAND_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+static WORKSPACE_ROOT_OVERRIDE: OnceCell<Option<PathBuf>> = OnceCell::new();
 
 pub mod config;
 mod llm_backend;
 pub use llm_backend::{HttpBackend, LLMBackend, LocalBackend};
+pub mod a2a;
 pub mod model_config;
+pub mod orchestrator;
 pub mod safety_config;
 pub mod thinking_summarizer;
 pub mod tools;
 pub mod web_search;
-pub mod a2a;
-pub mod orchestrator;
 
 // Global state for persistent shell session
 struct GlobalState {
@@ -55,7 +60,12 @@ fn thinking_debug_enabled() -> bool {
     static FLAG: OnceCell<bool> = OnceCell::new();
     *FLAG.get_or_init(|| {
         std::env::var("NITE_DEBUG_THINKING")
-            .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false)
     })
 }
@@ -72,6 +82,41 @@ fn preview_thinking(text: &str) -> String {
         preview.push_str("…");
     }
     preview
+}
+
+pub(crate) fn workspace_root_override() -> Option<PathBuf> {
+    WORKSPACE_ROOT_OVERRIDE
+        .get_or_init(|| {
+            std::env::var("NITE_WORKSPACE_ROOT").ok().and_then(|raw| {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                let candidate = PathBuf::from(trimmed);
+                if candidate.is_absolute() {
+                    Some(candidate)
+                } else {
+                    std::env::current_dir().ok().map(|cwd| cwd.join(candidate))
+                }
+            })
+        })
+        .clone()
+}
+
+pub fn set_workspace_root_override(path: impl AsRef<Path>) {
+    let absolute = if path.as_ref().is_absolute() {
+        path.as_ref().to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path.as_ref())
+    };
+    let _ = WORKSPACE_ROOT_OVERRIDE.set(Some(absolute));
+}
+
+pub(crate) fn resolve_workspace_root() -> PathBuf {
+    workspace_root_override()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 #[derive(Serialize)]
@@ -105,7 +150,23 @@ struct HtmlToTextResult {
 
 async fn execute_tool_binary(args: Vec<String>, sandbox_policy: &SandboxPolicy) -> Result<String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let output = execute_tools_with_sandbox(args, sandbox_policy, cwd).await?;
+
+    // 10 minute timeout for tool execution to allow cargo/npm/etc operations
+    let timeout_duration = std::time::Duration::from_secs(600);
+    let output = match tokio::time::timeout(
+        timeout_duration,
+        execute_tools_with_sandbox(args, sandbox_policy, cwd),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(anyhow::anyhow!(
+                "Tool execution timed out after {} seconds",
+                timeout_duration.as_secs()
+            ));
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -233,7 +294,7 @@ pub async fn add_writable_root(path: std::path::PathBuf) -> Result<()> {
     }
 }
 
-async fn get_or_create_shell_session() -> Result<(
+pub(crate) async fn get_or_create_shell_session() -> Result<(
     Arc<colossal_linux_sandbox::manager::SessionManager>,
     colossal_linux_sandbox::types::SessionId,
 )> {
@@ -241,6 +302,15 @@ async fn get_or_create_shell_session() -> Result<(
 
     let state = GLOBAL_STATE.get().unwrap();
     let mut session_id_lock = state.shell_session_id.lock().await;
+
+    if let Some(existing) = session_id_lock.clone() {
+        if state.manager.get_session_info(existing.clone()).is_none() {
+            *session_id_lock = None;
+            let mut background = state.session_has_background_process.lock().await;
+            *background = false;
+        }
+    }
+
     let has_background = state.session_has_background_process.lock().await;
 
     // Create new session if:
@@ -283,7 +353,55 @@ async fn get_or_create_shell_session() -> Result<(
     Ok((state.manager.clone(), session_id_lock.clone().unwrap()))
 }
 
+pub(crate) async fn run_shell_command(command: &str) -> Result<String> {
+    ensure_global_state_initialized().await;
+    let (manager, session_id) = get_or_create_shell_session().await?;
+    let result = manager
+        .exec_command_in_shell_session(session_id, command.to_string(), Some(120_000), 2000, None)
+        .await?;
+
+    match result.exit_status {
+        ExitStatus::Completed { code } if code == 0 => Ok(result.stdout),
+        other => Err(anyhow::anyhow!(
+            "Command `{}` failed ({:?}): {}",
+            command,
+            other,
+            result.stderr
+        )),
+    }
+}
+
+pub(crate) async fn run_git_command(command: &str) -> Result<String> {
+    if !command.trim().starts_with("git ") {
+        return Err(anyhow::anyhow!(
+            "git helper requires commands to start with `git`: {}",
+            command
+        ));
+    }
+    let _guard = GIT_COMMAND_LOCK.lock().await;
+    let workspace_root = resolve_workspace_root();
+    let escaped_root = escape(workspace_root.to_string_lossy());
+    let full_command = format!("cd {} && {}", escaped_root, command);
+    let output = TokioCommand::new("sh")
+        .arg("-c")
+        .arg(&full_command)
+        .output()
+        .await?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(anyhow::anyhow!(
+            "Command `{}` failed (code {:?}): {}",
+            full_command,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
 async fn execute_tool_call(
+    agent: &Agent,
     tool_call: &ToolCallResponse,
     tx: mpsc::UnboundedSender<AgentMessage>,
 ) -> Result<String> {
@@ -300,9 +418,11 @@ async fn execute_tool_call(
                 .get("is_background")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-
-            // Get or create shell session (will create new one if current has background process)
-            let (manager, session_id) = get_or_create_shell_session().await?;
+            // Parse timeout from arguments, default to 10 minutes (600000ms) for long-running commands
+            let timeout_ms = arguments
+                .get("timeout")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(600_000); // 10 minutes default
 
             // Determine safety strategy
             let safety_mode = if std::env::var("SAFE_MODE").is_ok() {
@@ -312,8 +432,12 @@ async fn execute_tool_call(
             };
 
             let mut current_approval = Some(safety_mode);
+            let mut retried_session = false;
 
             loop {
+                // Get or create shell session (will create new one if current has background process)
+                let (manager, session_id) = get_or_create_shell_session().await?;
+
                 if is_background {
                     // Mark session as busy BEFORE starting the command
                     let mut has_background = state.session_has_background_process.lock().await;
@@ -326,7 +450,11 @@ async fn execute_tool_call(
                     // Run command in background with output redirected to log file
                     // Strip trailing & if present since we'll add it with redirection
                     let command_clean = command.trim_end().trim_end_matches('&').trim_end();
-                    let bg_command = format!("{} > {} 2>&1 &", command_clean, log_file_path);
+                    let bg_command = format!(
+                        "{} > {} 2>&1 &",
+                        agent.wrap_command_for_shell(command_clean),
+                        log_file_path
+                    );
 
                     match manager
                         .send_input_to_shell_session(
@@ -347,6 +475,29 @@ async fn execute_tool_call(
                             return Ok(serde_yaml::to_string(&exec_result)?);
                         }
                         Err(e) => {
+                            if matches!(
+                                &e,
+                                colossal_linux_sandbox::error::ColossalErr::Io(err)
+                                    if err.to_string().contains("failed to send input to shell")
+                            ) && !retried_session
+                            {
+                                retried_session = true;
+                                if let Err(err) =
+                                    state.manager.terminate_session(session_id.clone()).await
+                                {
+                                    tracing::warn!(
+                                        "Failed to terminate broken shell session: {}",
+                                        err
+                                    );
+                                }
+                                let mut session_id_lock = state.shell_session_id.lock().await;
+                                *session_id_lock = None;
+                                let mut has_background =
+                                    state.session_has_background_process.lock().await;
+                                *has_background = false;
+                                continue;
+                            }
+
                             if let colossal_linux_sandbox::error::ColossalErr::Sandbox(
                                 colossal_linux_sandbox::error::SandboxErr::Denied(_, reason, _),
                             ) = &e
@@ -400,7 +551,11 @@ async fn execute_tool_call(
                             let mut has_background =
                                 state.session_has_background_process.lock().await;
                             *has_background = false;
-                            return Err(e.into());
+                            return Ok(serde_yaml::to_string(&json!({
+                                "status": "Failure",
+                                "command": command,
+                                "message": format!("{}", e)
+                            }))?);
                         }
                     }
                 } else {
@@ -408,8 +563,8 @@ async fn execute_tool_call(
                     match manager
                         .exec_command_in_shell_session(
                             session_id.clone(),
-                            command.to_string(),
-                            Some(5000),
+                            agent.wrap_command_for_shell(command),
+                            Some(timeout_ms),
                             1000,
                             current_approval,
                         )
@@ -434,6 +589,26 @@ async fn execute_tool_call(
                             return Ok(serde_yaml::to_string(&exec_result)?);
                         }
                         Err(e) => {
+                            if matches!(
+                                &e,
+                                colossal_linux_sandbox::error::ColossalErr::Io(err)
+                                    if err.to_string().contains("failed to send input to shell")
+                            ) && !retried_session
+                            {
+                                retried_session = true;
+                                if let Err(err) =
+                                    state.manager.terminate_session(session_id.clone()).await
+                                {
+                                    tracing::warn!(
+                                        "Failed to terminate broken shell session: {}",
+                                        err
+                                    );
+                                }
+                                let mut session_id_lock = state.shell_session_id.lock().await;
+                                *session_id_lock = None;
+                                continue;
+                            }
+
                             if let colossal_linux_sandbox::error::ColossalErr::Sandbox(
                                 colossal_linux_sandbox::error::SandboxErr::Denied(_, reason, _),
                             ) = &e
@@ -471,7 +646,11 @@ async fn execute_tool_call(
                                     }
                                 }
                             }
-                            return Err(e.into());
+                            return Ok(serde_yaml::to_string(&json!({
+                                "status": "Failure",
+                                "command": command,
+                                "message": format!("{}", e)
+                            }))?);
                         }
                     }
                 }
@@ -501,6 +680,21 @@ async fn execute_tool_call(
                 }
             }
         }
+        "submit_verification" => {
+            let status = arguments["status"].as_str().unwrap_or("unknown");
+            let feedback = arguments.get("feedback").and_then(|v| v.as_str());
+            let end_convo = arguments
+                .get("end_convo")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let payload = serde_json::json!({
+                "status": "Success",
+                "verification_status": status,
+                "feedback": feedback,
+                "end_convo": end_convo,
+            });
+            Ok(serde_yaml::to_string(&payload)?)
+        }
         "read_file"
         | "delete_path"
         | "delete_many"
@@ -519,9 +713,60 @@ async fn execute_tool_call(
                     let should_read_entire = arguments["should_read_entire_file"]
                         .as_bool()
                         .unwrap_or(true);
+
+                    let start_byte = arguments
+                        .get("start_byte_one_indexed")
+                        .and_then(|v| v.as_u64());
+                    let end_byte = arguments
+                        .get("end_byte_one_indexed")
+                        .and_then(|v| v.as_u64());
+
+                    let start_line = arguments
+                        .get("start_line_one_indexed")
+                        .and_then(|v| v.as_u64());
+                    let end_line = arguments
+                        .get("end_line_one_indexed")
+                        .and_then(|v| v.as_u64());
+                    let line_limit = arguments.get("limit").and_then(|v| v.as_i64());
+                    let line_offset = arguments.get("offset").and_then(|v| v.as_i64());
+
                     args.push(path.to_string());
-                    if should_read_entire {
-                        args.push("entire".to_string());
+                    if start_byte.is_some() || end_byte.is_some() {
+                        args.push("bytes".to_string());
+                        args.push(start_byte.map(|v| v.to_string()).unwrap_or_default());
+                        args.push(end_byte.map(|v| v.to_string()).unwrap_or_default());
+                    } else {
+                        let mut use_lines = false;
+                        let mut offset_lines: i64 = 0;
+                        let mut limit_lines: Option<i64> = None;
+
+                        if let Some(start) = start_line {
+                            use_lines = true;
+                            offset_lines = start.saturating_sub(1) as i64;
+                            if let Some(end) = end_line {
+                                if end >= start {
+                                    limit_lines = Some((end - start + 1) as i64);
+                                }
+                            }
+                        } else if line_limit.is_some() || line_offset.is_some() {
+                            use_lines = true;
+                            offset_lines = line_offset.unwrap_or(0);
+                            limit_lines = line_limit;
+                        }
+
+                        if use_lines {
+                            args.push("lines".to_string());
+                            args.push(offset_lines.to_string());
+                            let limit_arg = limit_lines.unwrap_or(-1);
+                            args.push(limit_arg.to_string());
+                        } else if should_read_entire {
+                            args.push("entire".to_string());
+                        } else {
+                            // Default to the whole file when no explicit limits are provided
+                            args.push("lines".to_string());
+                            args.push("0".to_string());
+                            args.push("-1".to_string());
+                        }
                     }
                 }
                 "delete_path" => {
@@ -541,9 +786,15 @@ async fn execute_tool_call(
                     let path = arguments["path"].as_str().unwrap_or(".");
                     args.push(path.to_string());
 
-                    // Add limit if provided
-                    if let Some(limit) = arguments.get("limit").and_then(|v| v.as_u64()) {
-                        args.push(limit.to_string());
+                    let limit = arguments
+                        .get("limit")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(200)
+                        .min(200);
+                    args.push(limit.to_string());
+
+                    if let Some(offset) = arguments.get("offset").and_then(|v| v.as_u64()) {
+                        args.push(offset.to_string());
                     }
 
                     // Add include patterns if provided
@@ -582,6 +833,30 @@ async fn execute_tool_call(
                 "semantic_search" => {
                     let query = arguments["query"].as_str().unwrap_or("");
                     args.push(query.to_string());
+                }
+                "search_files_with_regex" => {
+                    // tools binary expects: <path> <regex_pattern> [limit] [case_sensitive]
+                    let path = arguments["path"].as_str().unwrap_or(".");
+                    let regex_pattern = arguments["regex_pattern"].as_str().unwrap_or("");
+                    let case_sensitive = arguments["case_sensitive"].as_bool().unwrap_or(false);
+                    let limit = arguments["limit"].as_u64();
+                    args.push(path.to_string());
+                    args.push(regex_pattern.to_string());
+                    // limit is optional but must come before case_sensitive
+                    args.push(
+                        limit
+                            .map(|l| l.to_string())
+                            .unwrap_or_else(|| "1000".to_string()),
+                    );
+                    args.push(case_sensitive.to_string());
+                }
+                "delete_many" => {
+                    // delete_many expects paths as a JSON array string
+                    if let Some(paths) = arguments.get("paths").and_then(|v| v.as_array()) {
+                        let paths_json =
+                            serde_json::to_string(paths).unwrap_or_else(|_| "[]".to_string());
+                        args.push(paths_json);
+                    }
                 }
                 _ => {}
             }
@@ -855,15 +1130,14 @@ pub struct Agent {
     thinking_tags: Arc<Mutex<model_config::ThinkingTags>>,
     /// Safety configuration for tool access
     safety_config: Arc<Mutex<safety_config::SafetyConfig>>,
+    /// Optional working directory override for orchestration (worktree support)
+    working_directory: Option<PathBuf>,
 }
 
 impl Agent {
     /// Load thinking tag configuration from disk if available.
     /// Falls back to default `<think>`/`</think>` tags when no config is present.
-    fn load_thinking_tags(
-        _model_path: &str,
-        model_filename: &str,
-    ) -> model_config::ThinkingTags {
+    fn load_thinking_tags(_model_path: &str, model_filename: &str) -> model_config::ThinkingTags {
         let filename_stem = std::path::Path::new(model_filename)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -920,11 +1194,7 @@ impl Agent {
                 } else {
                     model_config::ThinkingTags::default()
                 };
-                (
-                    backend,
-                    BackendKind::Local,
-                    thinking_tags,
-                )
+                (backend, BackendKind::Local, thinking_tags)
             }
             BackendConfig::Http {
                 base_url,
@@ -969,6 +1239,108 @@ impl Agent {
             conversation: Arc::new(Mutex::new(None)),
             thinking_tags: Arc::new(Mutex::new(thinking_tags)),
             safety_config: Arc::new(Mutex::new(safety_config)),
+            working_directory: None,
+        }
+    }
+
+    /// Create a clone of this agent with a different working directory.
+    /// Used by the orchestrator to run steps in isolated worktrees.
+    pub fn with_working_directory(&self, cwd: PathBuf) -> Self {
+        Self {
+            backend: self.backend.clone(),
+            backend_kind: self.backend_kind,
+            system_prompt: self.system_prompt.clone(),
+            tools: self.tools.clone(),
+            thinking_summarizer: self.thinking_summarizer.clone(),
+            cancel_requested: Arc::new(AtomicBool::new(false)),
+            tokenizer: self.tokenizer.clone(),
+            conversation: Arc::new(Mutex::new(None)), // Fresh conversation for worktree agent
+            thinking_tags: self.thinking_tags.clone(),
+            safety_config: self.safety_config.clone(),
+            working_directory: Some(cwd),
+        }
+    }
+
+    /// Create a new agent with a custom tool list and prompt.
+    pub async fn with_tools(&self, tools: Vec<Tool>) -> Result<Self> {
+        let mut agent = self.clone();
+
+        {
+            let mut tools_guard = agent.tools.lock().await;
+            *tools_guard = tools.clone();
+        }
+
+        let safety_config = self.safety_config.lock().await.clone();
+        let tools_section = generate_tools_section(&tools);
+        let os_info = std::env::consts::OS;
+        let os_version = if os_info == "linux" {
+            std::fs::read_to_string("/etc/os-release")
+                .ok()
+                .and_then(|content| {
+                    content
+                        .lines()
+                        .find(|line| line.starts_with("PRETTY_NAME="))
+                        .map(|line| {
+                            line.trim_start_matches("PRETTY_NAME=")
+                                .trim_matches('"')
+                                .to_string()
+                        })
+                })
+                .unwrap_or_else(|| "Linux".to_string())
+        } else {
+            os_info.to_string()
+        };
+        let workspace_path = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .display()
+            .to_string();
+
+        let system_prompt_template =
+            read_system_prompt().unwrap_or_else(|_e| get_default_niterules());
+
+        let mut updated_system_prompt = system_prompt_template
+            .replace("{tools_section}", &tools_section)
+            .replace("{os_version}", &os_version)
+            .replace("{workspace_path}", &workspace_path);
+
+        if let Some(suffix) = safety_config.get_system_prompt_suffix() {
+            updated_system_prompt.push_str(&suffix);
+        }
+
+        {
+            let mut system_prompt_guard = agent.system_prompt.lock().await;
+            *system_prompt_guard = updated_system_prompt;
+        }
+
+        {
+            let mut conversation_guard = agent.conversation.lock().await;
+            *conversation_guard = None;
+        }
+
+        Ok(agent)
+    }
+
+    /// Get the effective working directory for this agent.
+    /// Returns the configured working_directory if set, otherwise uses current_dir.
+    pub fn effective_cwd(&self) -> PathBuf {
+        self.working_directory
+            .clone()
+            .or_else(|| crate::workspace_root_override())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    /// Wrap a shell command so it executes inside the agent's working directory
+    /// without mutating the shared shell session state.
+    fn wrap_command_for_shell(&self, command: &str) -> String {
+        if let Some(cwd) = self
+            .working_directory
+            .clone()
+            .or_else(|| crate::workspace_root_override())
+        {
+            let escaped = escape(cwd.to_string_lossy());
+            format!("(cd {} && {})", escaped, command)
+        } else {
+            command.to_string()
         }
     }
 
@@ -1105,13 +1477,14 @@ impl Agent {
                 Tokenizer::from_pretrained(&tokenizer_name, None)
             };
 
-            result.map_err(|e| anyhow::anyhow!("Failed to load tokenizer '{}': {}", tokenizer_name, e))?
+            result.map_err(|e| {
+                anyhow::anyhow!("Failed to load tokenizer '{}': {}", tokenizer_name, e)
+            })?
         };
 
         #[cfg(not(unix))]
-        let tokenizer = Tokenizer::from_pretrained(&tokenizer_name, None).map_err(|e| {
-            anyhow::anyhow!("Failed to load tokenizer '{}': {}", tokenizer_name, e)
-        })?;
+        let tokenizer = Tokenizer::from_pretrained(&tokenizer_name, None)
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer '{}': {}", tokenizer_name, e))?;
 
         let backend_mode =
             std::env::var("NITE_BACKEND_MODE").unwrap_or_else(|_| "http".to_string());
@@ -1592,7 +1965,8 @@ impl Agent {
             spec.steps.len(),
             step.title,
             step.instructions,
-            step.acceptance_criteria.iter()
+            step.acceptance_criteria
+                .iter()
                 .map(|c| format!("- {}", c))
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -1616,6 +1990,7 @@ impl Agent {
                 status: VerificationStatus::Passed,
                 feedback: Vec::new(),
             },
+            worktree: None,
         };
 
         // Set metadata with step info AND the required summary
@@ -1625,10 +2000,9 @@ impl Agent {
             "step_index".to_string(),
             serde_json::Value::String(step.index.clone()),
         );
-        metadata.extra.insert(
-            "prompt".to_string(),
-            serde_json::Value::String(prompt),
-        );
+        metadata
+            .extra
+            .insert("prompt".to_string(), serde_json::Value::String(prompt));
         metadata.extra.insert(
             "step_title".to_string(),
             serde_json::Value::String(step.title.clone()),
@@ -1636,18 +2010,36 @@ impl Agent {
         task.metadata = Some(metadata);
 
         // Mark as completed
-        task.set_state(TaskState::Completed, Some(format!("Step {} completed: {}", step.index, step.title)));
+        task.set_state(
+            TaskState::Completed,
+            Some(format!("Step {} completed: {}", step.index, step.title)),
+        );
 
         Ok(task)
     }
 
     /// Execute a spec step with real LLM execution, emitting tool events.
+    /// If `cancel_rx` is provided and receives a message, execution will be interrupted.
     pub async fn execute_step_with_events(
         &self,
         step: SpecStep,
         spec: &SpecSheet,
         prefix: &str,
         event_tx: Option<mpsc::UnboundedSender<crate::orchestrator::OrchestratorEvent>>,
+    ) -> Result<Task> {
+        self.execute_step_with_events_and_cancel(step, spec, prefix, event_tx, None)
+            .await
+    }
+
+    /// Execute a spec step with real LLM execution, emitting tool events.
+    /// If `cancel_rx` is provided and receives a message, execution will be interrupted.
+    pub async fn execute_step_with_events_and_cancel(
+        &self,
+        step: SpecStep,
+        spec: &SpecSheet,
+        prefix: &str,
+        event_tx: Option<mpsc::UnboundedSender<crate::orchestrator::OrchestratorEvent>>,
+        mut cancel_rx: Option<mpsc::UnboundedReceiver<()>>,
     ) -> Result<Task> {
         use agent_protocol::{Task, TaskState, TaskVerification, VerificationStatus};
         use tokio::runtime::Builder;
@@ -1656,11 +2048,25 @@ impl Agent {
         self.clear_conversation().await;
 
         // Build the prompt from step instructions
+        // Include worktree context if this agent has a working_directory set
+        let worktree_context = if let Some(ref cwd) = self.working_directory {
+            format!(
+                "\n\n**IMPORTANT - Working Directory:**\n\
+                You are working in an isolated git worktree at: {}\n\
+                ALL file operations (create, edit, read) MUST use this directory as the base.\n\
+                Use relative paths from this directory, or absolute paths starting with this path.\n\
+                Do NOT use paths like ~/rust/todo or /home/user/... - use the worktree path instead.",
+                cwd.display()
+            )
+        } else {
+            String::new()
+        };
+
         let prompt = format!(
             "## Current Task: {}\n\n\
             **Spec:** {}\n\n\
             **Step {} of {}:** {}\n\n\
-            **Instructions:**\n{}\n\n\
+            **Instructions:**\n{}{}\n\n\
             **Acceptance Criteria:**\n{}",
             step.title,
             spec.title,
@@ -1668,7 +2074,9 @@ impl Agent {
             spec.steps.len(),
             step.title,
             step.instructions,
-            step.acceptance_criteria.iter()
+            worktree_context,
+            step.acceptance_criteria
+                .iter()
                 .map(|c| format!("- {}", c))
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -1709,136 +2117,61 @@ impl Agent {
             });
         }
 
-        while let Some(agent_msg) = rx.recv().await {
-            match agent_msg {
-                AgentMessage::AgentResponse(content, _) => {
-                    // Emit agent text response
-                    if let Some(ref tx) = event_tx {
-                        let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
-                            prefix: prefix_owned.clone(),
-                            message: crate::orchestrator::SubAgentMessage::Text {
-                                content: content.clone(),
-                            },
-                        });
-                    }
-                    latest_response = content;
-                }
-                AgentMessage::ThinkingContent(content, _) => {
-                    // Start or continue thinking
-                    thinking_start_time = std::time::Instant::now();
-                    if let Some(ref tx) = event_tx {
-                        let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
-                            prefix: prefix_owned.clone(),
-                            message: crate::orchestrator::SubAgentMessage::Thinking {
-                                content,
-                                duration_secs: 0,
-                            },
-                        });
-                    }
-                }
-                AgentMessage::ThinkingComplete(_) => {
-                    // Emit thinking completion with duration
-                    let duration = thinking_start_time.elapsed().as_secs();
-                    if let Some(ref tx) = event_tx {
-                        let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
-                            prefix: prefix_owned.clone(),
-                            message: crate::orchestrator::SubAgentMessage::Thinking {
-                                content: String::new(),
-                                duration_secs: duration,
-                            },
-                        });
-                    }
-                }
-                AgentMessage::Error(err) => {
-                    error_message = Some(err);
-                    break;
-                }
-                AgentMessage::ToolCallStarted(name, args) => {
-                    // Emit orchestrator event for tool start
-                    if let Some(ref tx) = event_tx {
-                        let _ = tx.send(crate::orchestrator::OrchestratorEvent::ToolCallStarted {
-                            prefix: prefix_owned.clone(),
-                            tool_name: name.clone(),
-                            arguments: args.clone(),
-                        });
-                        // Also emit as AgentMessage for sub-agent view
-                        let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
-                            prefix: prefix_owned.clone(),
-                            message: crate::orchestrator::SubAgentMessage::ToolCall {
-                                tool_name: name.clone(),
-                                arguments: args.clone(),
-                                result: None,
-                                is_error: false,
-                            },
-                        });
-                    }
-                    tool_log.push(serde_json::json!({
-                        "name": name,
-                        "arguments": args,
-                        "result": serde_json::Value::Null,
-                    }));
-                }
-                AgentMessage::ToolCallCompleted(name, result) => {
-                    // Check for actual tool errors, not just content containing "error"
-                    // Tool errors typically start with error prefixes or are short error messages
-                    let is_error = result.starts_with("Error:")
-                        || result.starts_with("error:")
-                        || result.starts_with("Failed:")
-                        || result.starts_with("failed:")
-                        || result.starts_with("Permission denied")
-                        || result.starts_with("No such file")
-                        || result.starts_with("Command failed")
-                        // Check for JSON error structure (short results with error field)
-                        || (result.len() < 500 && result.contains("\"error\""))
-                        || (result.len() < 500 && result.contains("\"is_error\": true"))
-                        // Check for YAML-format tool results with status: Failure
-                        || result.contains("status: Failure");
+        let mut cancel_requested = false;
 
-                    // Emit orchestrator event for tool completion
-                    if let Some(ref tx) = event_tx {
-                        let _ = tx.send(crate::orchestrator::OrchestratorEvent::ToolCallCompleted {
-                            prefix: prefix_owned.clone(),
-                            tool_name: name.clone(),
-                            result: result.clone(),
-                            is_error,
-                        });
-                        // Also emit as AgentMessage for sub-agent view with result
-                        let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
-                            prefix: prefix_owned.clone(),
-                            message: crate::orchestrator::SubAgentMessage::ToolCall {
-                                tool_name: name.clone(),
-                                arguments: String::new(),
-                                result: Some(result.clone()),
-                                is_error,
-                            },
-                        });
+        loop {
+            if cancel_requested || cancel_rx.is_none() {
+                match rx.recv().await {
+                    Some(agent_msg) => {
+                        if Self::handle_agent_message(
+                            agent_msg,
+                            &mut latest_response,
+                            &mut tool_log,
+                            &mut thinking_start_time,
+                            &mut error_message,
+                            &event_tx,
+                            &prefix_owned,
+                        ) {
+                            break;
+                        }
                     }
-
-                    // Update tool log
-                    if let Some(entry) = tool_log.iter_mut().rev()
-                        .find(|e| e.get("name").and_then(|n| n.as_str()) == Some(&name)
-                              && e.get("result").map(|r| r.is_null()).unwrap_or(false))
-                    {
-                        entry["result"] = serde_json::Value::String(result);
+                    None => break,
+                }
+            } else {
+                // Safe to unwrap since we checked is_some above
+                let mut cancel_stream = cancel_rx.take().unwrap();
+                tokio::select! {
+                    msg = rx.recv() => {
+                        cancel_rx = Some(cancel_stream);
+                        match msg {
+                            Some(agent_msg) => {
+                                if Self::handle_agent_message(
+                                    agent_msg,
+                                    &mut latest_response,
+                                    &mut tool_log,
+                                    &mut thinking_start_time,
+                                    &mut error_message,
+                                    &event_tx,
+                                    &prefix_owned,
+                                ) {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                    signal = cancel_stream.recv() => {
+                        if signal.is_some() {
+                            cancel_requested = true;
+                            self.request_cancel();
+                        }
+                        // Drop cancel_stream so future iterations don't poll again
                     }
                 }
-                AgentMessage::GenerationStats(stats) => {
-                    // Emit generation stats
-                    if let Some(ref tx) = event_tx {
-                        let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
-                            prefix: prefix_owned.clone(),
-                            message: crate::orchestrator::SubAgentMessage::GenerationStats {
-                                tokens_per_sec: stats.avg_completion_tok_per_sec,
-                                input_tokens: stats.prompt_tokens,
-                                output_tokens: stats.completion_tokens,
-                            },
-                        });
-                    }
-                }
-                AgentMessage::Done => break,
-                _ => {}
             }
         }
+
+        let was_cancelled = cancel_requested;
 
         // Wait for blocking task
         match blocking.await {
@@ -1853,6 +2186,18 @@ impl Agent {
                     error_message = Some(err.to_string());
                 }
             }
+        }
+
+        if was_cancelled {
+            let mut task = Task::new();
+            task.context_id = Some(spec.id.clone());
+            task.status = agent_protocol::TaskStatus {
+                state: TaskState::Cancelled,
+                timestamp: Some(chrono::Utc::now()),
+                message: Some("Step cancelled by user".to_string()),
+                error: None,
+            };
+            return Ok(task);
         }
 
         // Build summary and complete task
@@ -1873,6 +2218,7 @@ impl Agent {
                     status: VerificationStatus::Passed,
                     feedback: Vec::new(),
                 },
+                worktree: None,
             };
 
             let mut metadata = agent_protocol::TaskMetadata::default();
@@ -1881,23 +2227,168 @@ impl Agent {
                 "step_index".to_string(),
                 serde_json::Value::String(step.index.clone()),
             );
-            metadata.extra.insert(
-                "prompt".to_string(),
-                serde_json::Value::String(prompt),
-            );
+            metadata
+                .extra
+                .insert("prompt".to_string(), serde_json::Value::String(prompt));
             metadata.extra.insert(
                 "step_title".to_string(),
                 serde_json::Value::String(step.title.clone()),
             );
-            metadata.extra.insert(
-                "toolLog".to_string(),
-                serde_json::Value::Array(tool_log),
-            );
+            metadata
+                .extra
+                .insert("toolLog".to_string(), serde_json::Value::Array(tool_log));
             task.metadata = Some(metadata);
-            task.set_state(TaskState::Completed, Some(format!("Step {} completed", step.index)));
+            task.set_state(
+                TaskState::Completed,
+                Some(format!("Step {} completed", step.index)),
+            );
         }
 
         Ok(task)
+    }
+
+    fn handle_agent_message(
+        agent_msg: AgentMessage,
+        latest_response: &mut String,
+        tool_log: &mut Vec<serde_json::Value>,
+        thinking_start_time: &mut std::time::Instant,
+        error_message: &mut Option<String>,
+        event_tx: &Option<mpsc::UnboundedSender<crate::orchestrator::OrchestratorEvent>>,
+        prefix_owned: &String,
+    ) -> bool {
+        match agent_msg {
+            AgentMessage::AgentResponse(content, _) => {
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
+                        prefix: prefix_owned.clone(),
+                        message: crate::orchestrator::SubAgentMessage::Text {
+                            content: content.clone(),
+                        },
+                    });
+                }
+                *latest_response = content;
+            }
+            AgentMessage::ThinkingContent(content, _) => {
+                *thinking_start_time = std::time::Instant::now();
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
+                        prefix: prefix_owned.clone(),
+                        message: crate::orchestrator::SubAgentMessage::Thinking {
+                            content,
+                            duration_secs: 0,
+                        },
+                    });
+                }
+            }
+            AgentMessage::ThinkingComplete(_) => {
+                let duration = thinking_start_time.elapsed().as_secs();
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
+                        prefix: prefix_owned.clone(),
+                        message: crate::orchestrator::SubAgentMessage::Thinking {
+                            content: String::new(),
+                            duration_secs: duration,
+                        },
+                    });
+                }
+            }
+            AgentMessage::Error(err) => {
+                *error_message = Some(err.clone());
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
+                        prefix: prefix_owned.clone(),
+                        message: crate::orchestrator::SubAgentMessage::Error {
+                            message: err.clone(),
+                        },
+                    });
+                }
+                return true;
+            }
+            AgentMessage::ToolCallStarted(name, args) => {
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(crate::orchestrator::OrchestratorEvent::ToolCallStarted {
+                        prefix: prefix_owned.clone(),
+                        tool_name: name.clone(),
+                        arguments: args.clone(),
+                    });
+                    let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
+                        prefix: prefix_owned.clone(),
+                        message: crate::orchestrator::SubAgentMessage::ToolCall {
+                            tool_name: name.clone(),
+                            arguments: args.clone(),
+                            result: None,
+                            is_error: false,
+                        },
+                    });
+                }
+                tool_log.push(serde_json::json!({
+                    "name": name,
+                    "arguments": args,
+                    "result": serde_json::Value::Null,
+                }));
+            }
+            AgentMessage::ToolCallCompleted(name, result) => {
+                let is_error = result.starts_with("Error:")
+                    || result.starts_with("error:")
+                    || result.starts_with("Failed:")
+                    || result.starts_with("failed:")
+                    || result.starts_with("Permission denied")
+                    || result.starts_with("No such file")
+                    || result.starts_with("Command failed")
+                    || (result.len() < 500 && result.contains("\"error\""))
+                    || (result.len() < 500 && result.contains("\"is_error\": true"))
+                    || result.contains("status: Failure");
+
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(crate::orchestrator::OrchestratorEvent::ToolCallCompleted {
+                        prefix: prefix_owned.clone(),
+                        tool_name: name.clone(),
+                        result: result.clone(),
+                        is_error,
+                    });
+                    let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
+                        prefix: prefix_owned.clone(),
+                        message: crate::orchestrator::SubAgentMessage::ToolCall {
+                            tool_name: name.clone(),
+                            arguments: String::new(),
+                            result: Some(result.clone()),
+                            is_error,
+                        },
+                    });
+                }
+
+                if let Some(entry) = tool_log.iter_mut().rev().find(|e| {
+                    e.get("name").and_then(|n| n.as_str()) == Some(&name)
+                        && e.get("result").map(|r| r.is_null()).unwrap_or(false)
+                }) {
+                    entry["result"] = serde_json::Value::String(result);
+                }
+            }
+            AgentMessage::GenerationStats(stats) => {
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
+                        prefix: prefix_owned.clone(),
+                        message: crate::orchestrator::SubAgentMessage::GenerationStats {
+                            tokens_per_sec: stats.avg_completion_tok_per_sec,
+                            input_tokens: stats.prompt_tokens,
+                            output_tokens: stats.completion_tokens,
+                        },
+                    });
+                }
+            }
+            AgentMessage::Done => {
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(crate::orchestrator::OrchestratorEvent::AgentMessage {
+                        prefix: prefix_owned.clone(),
+                        message: crate::orchestrator::SubAgentMessage::Done,
+                    });
+                }
+                return true;
+            }
+            _ => {}
+        }
+
+        false
     }
 
     pub async fn update_spec_status(
@@ -1976,7 +2467,8 @@ impl Agent {
     /// Get the current spec status as a JSON snapshot.
     /// Returns serialized SpecSheet with current step statuses and history.
     pub fn get_spec_status(&self, spec: &SpecSheet) -> Result<String> {
-        serde_json::to_string_pretty(spec).map_err(|e| anyhow::anyhow!("Failed to serialize spec: {}", e))
+        serde_json::to_string_pretty(spec)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize spec: {}", e))
     }
 
     /// Convert a structured chat message field into a plain string for token estimation.
@@ -2072,7 +2564,7 @@ impl Agent {
                 .backend
                 .stream_chat_request(current_request_builder.clone())
                 .await?;
-            let mut accumulated_tool_calls: Vec<ToolCallResponse> = Vec::new();
+            let mut accumulated_tool_calls: IndexMap<usize, ToolCallResponse> = IndexMap::new();
             let mut accumulated_content = String::new();
             has_more_tool_calls = false;
 
@@ -2113,8 +2605,10 @@ impl Agent {
                             // Send any accumulated content as partial response
                             if !accumulated_content.is_empty() && !in_thinking {
                                 let token_count = self.count_tokens(&accumulated_content);
-                                let _ = tx
-                                    .send(AgentMessage::AgentResponse(accumulated_content.clone(), token_count));
+                                let _ = tx.send(AgentMessage::AgentResponse(
+                                    accumulated_content.clone(),
+                                    token_count,
+                                ));
                             }
 
                             // Send partial GenerationStats even when cancelled
@@ -2126,7 +2620,8 @@ impl Agent {
                                 .unwrap_or(0.0);
                             let completion_tokens = self.count_tokens(&accumulated_content);
                             // Calculate tok/sec using ALL generated tokens (thinking + completion)
-                            let avg_tok_per_sec = if elapsed_sec > 0.0 && total_generated_tokens > 0 {
+                            let avg_tok_per_sec = if elapsed_sec > 0.0 && total_generated_tokens > 0
+                            {
                                 total_generated_tokens as f32 / elapsed_sec
                             } else {
                                 0.0
@@ -2189,8 +2684,7 @@ impl Agent {
                                     .unwrap_or_else(|| "unknown".to_string());
                                 let prompt_tokens = if usage_stats.prompt_tokens > 0 {
                                     usage_stats.prompt_tokens
-                                } else if usage_stats.total_tokens > usage_stats.completion_tokens
-                                {
+                                } else if usage_stats.total_tokens > usage_stats.completion_tokens {
                                     usage_stats.total_tokens - usage_stats.completion_tokens
                                 } else {
                                     0
@@ -2234,17 +2728,24 @@ impl Agent {
                                                 check_cancel!();
                                                 continue;
                                             }
-                                            ThinkingStartDecision::Detected { content_start_idx } => {
-                                                thinking_debug_log("Detected <think> start in HTTP chunk");
+                                            ThinkingStartDecision::Detected {
+                                                content_start_idx,
+                                            } => {
+                                                thinking_debug_log(
+                                                    "Detected <think> start in HTTP chunk",
+                                                );
                                                 allow_thinking_start = false;
                                                 in_thinking = true;
                                                 process_as_thinking = true;
-                                                let after_tag = pending_prefix.split_off(content_start_idx);
+                                                let after_tag =
+                                                    pending_prefix.split_off(content_start_idx);
                                                 pending_prefix.clear();
                                                 chunk_content = after_tag;
                                             }
                                             ThinkingStartDecision::NotThinking => {
-                                                thinking_debug_log("Chunk does not start with <think>, treating as visible content");
+                                                thinking_debug_log(
+                                                    "Chunk does not start with <think>, treating as visible content",
+                                                );
                                                 allow_thinking_start = false;
                                                 chunk_content = pending_prefix.clone();
                                                 pending_prefix.clear();
@@ -2276,7 +2777,8 @@ impl Agent {
                                                 let token_count = self.count_tokens(final_thinking);
                                                 // Track first token time and total tokens for stats
                                                 if first_token_time.is_none() && token_count > 0 {
-                                                    first_token_time = Some(std::time::Instant::now());
+                                                    first_token_time =
+                                                        Some(std::time::Instant::now());
                                                 }
                                                 total_generated_tokens += token_count;
                                                 let _ = tx.send(AgentMessage::ThinkingContent(
@@ -2292,7 +2794,9 @@ impl Agent {
 
                                                 let mut summarizer_guard =
                                                     self.thinking_summarizer.lock().await;
-                                                summarizer_guard.add_thinking_chunk(final_thinking).await;
+                                                summarizer_guard
+                                                    .add_thinking_chunk(final_thinking)
+                                                    .await;
                                                 for (summary, token_count, chunk_count) in
                                                     summarizer_guard.get_new_summaries()
                                                 {
@@ -2343,8 +2847,10 @@ impl Agent {
                                                     accumulated_content.push_str(&outbound);
                                                     let token_count = self.count_tokens(&outbound);
                                                     // Track first token time and total tokens for stats
-                                                    if first_token_time.is_none() && token_count > 0 {
-                                                        first_token_time = Some(std::time::Instant::now());
+                                                    if first_token_time.is_none() && token_count > 0
+                                                    {
+                                                        first_token_time =
+                                                            Some(std::time::Instant::now());
                                                     }
                                                     total_generated_tokens += token_count;
                                                     let _ = tx.send(AgentMessage::AgentResponse(
@@ -2373,37 +2879,52 @@ impl Agent {
 
                                                         let chunk_chars =
                                                             remaining.chars().take(100).count();
-                                                        if let Some((chunk_byte_end, _)) =
-                                                            remaining.char_indices().nth(chunk_chars)
+                                                        if let Some((chunk_byte_end, _)) = remaining
+                                                            .char_indices()
+                                                            .nth(chunk_chars)
                                                         {
-                                                            let chunk = &remaining[..chunk_byte_end];
-                                                            let token_count = self.count_tokens(chunk);
+                                                            let chunk =
+                                                                &remaining[..chunk_byte_end];
+                                                            let token_count =
+                                                                self.count_tokens(chunk);
                                                             // Track first token time and total tokens for stats
-                                                            if first_token_time.is_none() && token_count > 0 {
-                                                                first_token_time = Some(std::time::Instant::now());
+                                                            if first_token_time.is_none()
+                                                                && token_count > 0
+                                                            {
+                                                                first_token_time =
+                                                                    Some(std::time::Instant::now());
                                                             }
                                                             total_generated_tokens += token_count;
-                                                            let _ = tx.send(AgentMessage::ThinkingContent(
-                                                                chunk.to_string(),
-                                                                token_count,
-                                                            ));
+                                                            let _ = tx.send(
+                                                                AgentMessage::ThinkingContent(
+                                                                    chunk.to_string(),
+                                                                    token_count,
+                                                                ),
+                                                            );
                                                             thinking_debug_log(format!(
                                                                 "Sent ThinkingContent (stream) tokens={} preview=\"{}\"",
                                                                 token_count,
                                                                 preview_thinking(chunk)
                                                             ));
-                                                            remaining = &remaining[chunk_byte_end..];
+                                                            remaining =
+                                                                &remaining[chunk_byte_end..];
                                                         } else {
-                                                            let token_count = self.count_tokens(remaining);
+                                                            let token_count =
+                                                                self.count_tokens(remaining);
                                                             // Track first token time and total tokens for stats
-                                                            if first_token_time.is_none() && token_count > 0 {
-                                                                first_token_time = Some(std::time::Instant::now());
+                                                            if first_token_time.is_none()
+                                                                && token_count > 0
+                                                            {
+                                                                first_token_time =
+                                                                    Some(std::time::Instant::now());
                                                             }
                                                             total_generated_tokens += token_count;
-                                                            let _ = tx.send(AgentMessage::ThinkingContent(
-                                                                remaining.to_string(),
-                                                                token_count,
-                                                            ));
+                                                            let _ = tx.send(
+                                                                AgentMessage::ThinkingContent(
+                                                                    remaining.to_string(),
+                                                                    token_count,
+                                                                ),
+                                                            );
                                                             thinking_debug_log(format!(
                                                                 "Sent ThinkingContent (final chunk) tokens={} preview=\"{}\"",
                                                                 token_count,
@@ -2417,36 +2938,37 @@ impl Agent {
 
                                                     let mut summarizer_guard =
                                                         self.thinking_summarizer.lock().await;
-                                                    summarizer_guard.add_thinking_chunk(to_send).await;
+                                                    summarizer_guard
+                                                        .add_thinking_chunk(to_send)
+                                                        .await;
                                                     for (summary, token_count, chunk_count) in
                                                         summarizer_guard.get_new_summaries()
                                                     {
-                                                        let _ = tx.send(AgentMessage::ThinkingSummary(
-                                                            format!(
+                                                        let _ = tx.send(
+                                                            AgentMessage::ThinkingSummary(format!(
                                                                 "{}|{}|{}",
                                                                 summary, token_count, chunk_count
-                                                            ),
-                                                        ));
+                                                            )),
+                                                        );
                                                         check_cancel!();
                                                     }
 
-                                                    thinking_buffer = thinking_buffer[byte_idx..].to_string();
+                                                    thinking_buffer =
+                                                        thinking_buffer[byte_idx..].to_string();
                                                 }
                                             }
                                         }
                                     } else {
                                         let chunk_has_visible = has_visible_text(&chunk_content);
                                         if !final_response_started && !chunk_has_visible {
-                                            pending_agent_response_prefix
-                                                .push_str(&chunk_content);
+                                            pending_agent_response_prefix.push_str(&chunk_content);
                                             check_cancel!();
                                             continue;
                                         }
 
                                         let mut outbound = String::new();
                                         if !pending_agent_response_prefix.is_empty() {
-                                            outbound
-                                                .push_str(&pending_agent_response_prefix);
+                                            outbound.push_str(&pending_agent_response_prefix);
                                             pending_agent_response_prefix.clear();
                                         }
                                         outbound.push_str(&chunk_content);
@@ -2457,7 +2979,10 @@ impl Agent {
                                             first_token_time = Some(std::time::Instant::now());
                                         }
                                         total_generated_tokens += token_count;
-                                        let _ = tx.send(AgentMessage::AgentResponse(outbound.clone(), token_count));
+                                        let _ = tx.send(AgentMessage::AgentResponse(
+                                            outbound.clone(),
+                                            token_count,
+                                        ));
                                         if chunk_has_visible {
                                             final_response_started = true;
                                         }
@@ -2520,12 +3045,17 @@ impl Agent {
                                         in_thinking = false;
                                     }
 
-                                    accumulated_tool_calls.extend(tool_calls.clone());
                                     for tool_call in tool_calls {
-                                        let _ = tx.send(AgentMessage::ToolCallStarted(
-                                            tool_call.function.name.clone(),
-                                            tool_call.function.arguments.clone(),
-                                        ));
+                                        let is_new =
+                                            !accumulated_tool_calls.contains_key(&tool_call.index);
+                                        accumulated_tool_calls
+                                            .insert(tool_call.index, tool_call.clone());
+                                        if is_new {
+                                            let _ = tx.send(AgentMessage::ToolCallStarted(
+                                                tool_call.function.name.clone(),
+                                                tool_call.function.arguments.clone(),
+                                            ));
+                                        }
                                     }
                                 }
                                 _ => {}
@@ -2586,7 +3116,10 @@ impl Agent {
                     first_token_time = Some(std::time::Instant::now());
                 }
                 total_generated_tokens += token_count;
-                let _ = tx.send(AgentMessage::AgentResponse(pending_prefix.clone(), token_count));
+                let _ = tx.send(AgentMessage::AgentResponse(
+                    pending_prefix.clone(),
+                    token_count,
+                ));
             }
 
             // After stream ends, if still in thinking (no </think> found), flush residual
@@ -2629,9 +3162,9 @@ impl Agent {
 
             if !accumulated_tool_calls.is_empty() {
                 has_more_tool_calls = true;
-                for tool_call in accumulated_tool_calls {
+                for tool_call in accumulated_tool_calls.values().cloned() {
                     // Execute tool call and handle errors gracefully
-                    let tool_result = match execute_tool_call(&tool_call, tx.clone()).await {
+                    let tool_result = match execute_tool_call(self, &tool_call, tx.clone()).await {
                         Ok(result) => {
                             let _ = tx.send(AgentMessage::ToolCallCompleted(
                                 tool_call.function.name.clone(),
@@ -2684,11 +3217,8 @@ impl Agent {
                                 tool: tool_call.function.name.clone(),
                                 status: "failed".to_string(),
                             };
-                            let error_msg = serde_yaml::to_string(&error_obj)
-                                .unwrap_or_else(|_| "error: Failed to serialize error".to_string());
-                            let _ =
-                                tx.send(AgentMessage::Error(format!("Tool call failed: {}", e)));
-                            error_msg
+                            serde_yaml::to_string(&error_obj)
+                                .unwrap_or_else(|_| "error: Failed to serialize error".to_string())
                         }
                     };
 
@@ -2743,6 +3273,7 @@ fn build_summary(task: &Task, artifact_override: Option<&[String]>) -> TaskSumma
             status: VerificationStatus::Pending,
             feedback: vec![],
         },
+        worktree: None,
     }
 }
 
@@ -2764,11 +3295,10 @@ fn gather_git_changes() -> Vec<String> {
                     if trimmed.is_empty() {
                         return None;
                     }
-                    let path = if trimmed.len() > 3 {
-                        trimmed[3..].trim()
-                    } else {
-                        trimmed
-                    };
+                    // git status --short format: XY filename
+                    // Skip the first 3 characters (status indicators) safely
+                    let path: String = trimmed.chars().skip(3).collect::<String>();
+                    let path = path.trim();
                     if path.is_empty() {
                         None
                     } else {
@@ -2782,8 +3312,7 @@ fn gather_git_changes() -> Vec<String> {
 }
 
 fn extract_tool_commands(task: &Task) -> Vec<String> {
-    task
-        .metadata
+    task.metadata
         .as_ref()
         .and_then(|metadata| metadata.extra.get("toolLog"))
         .and_then(|value| value.as_array())
@@ -2815,8 +3344,7 @@ fn extract_tool_commands(task: &Task) -> Vec<String> {
 }
 
 fn extract_agent_message(task: &Task) -> String {
-    task
-        .messages
+    task.messages
         .iter()
         .rev()
         .find(|message| message.role == Role::Agent)
@@ -2859,6 +3387,9 @@ fn build_split_spec(step: &SpecStep) -> Result<SpecSheet> {
             required_tools: Vec::new(),
             constraints: Vec::new(),
             dependencies: Vec::new(),
+            is_parallel: false,
+            requires_verification: true,
+            max_parallelism: None,
             status: StepStatus::Pending,
             sub_spec: None,
             completed_at: None,
@@ -2874,6 +3405,9 @@ fn build_split_spec(step: &SpecStep) -> Result<SpecSheet> {
             required_tools: Vec::new(),
             constraints: Vec::new(),
             dependencies: Vec::new(),
+            is_parallel: false,
+            requires_verification: true,
+            max_parallelism: None,
             status: StepStatus::Pending,
             sub_spec: None,
             completed_at: None,
@@ -2910,6 +3444,7 @@ fn build_split_summary(task: &Task, step: &SpecStep, child: &SpecSheet) -> TaskS
             status: VerificationStatus::Pending,
             feedback: vec![],
         },
+        worktree: None,
     }
 }
 
@@ -2935,6 +3470,9 @@ fn decompose_goal_into_steps(goal: &str) -> Vec<SpecStep> {
             required_tools: Vec::new(),
             constraints: Vec::new(),
             dependencies: deps.iter().map(|d| d.to_string()).collect(),
+            is_parallel: false,
+            requires_verification: true,
+            max_parallelism: None,
             status: StepStatus::Pending,
             sub_spec: None,
             completed_at: None,
@@ -2962,7 +3500,11 @@ fn decompose_goal_into_steps(goal: &str) -> Vec<SpecStep> {
     let mut next_idx = 3;
 
     // Step 3: Storage/persistence layer (if mentioned)
-    if goal_lower.contains("sqlite") || goal_lower.contains("database") || goal_lower.contains("storage") || goal_lower.contains("persist") {
+    if goal_lower.contains("sqlite")
+        || goal_lower.contains("database")
+        || goal_lower.contains("storage")
+        || goal_lower.contains("persist")
+    {
         steps.push(make_step(
             next_idx,
             "Implement storage layer",
@@ -2984,8 +3526,15 @@ fn decompose_goal_into_steps(goal: &str) -> Vec<SpecStep> {
     next_idx += 1;
 
     // CLI/UI layer (if CLI app)
-    if goal_lower.contains("cli") || goal_lower.contains("command") || goal_lower.contains("terminal") {
-        let colored = if goal_lower.contains("color") { " with colored output" } else { "" };
+    if goal_lower.contains("cli")
+        || goal_lower.contains("command")
+        || goal_lower.contains("terminal")
+    {
+        let colored = if goal_lower.contains("color") {
+            " with colored output"
+        } else {
+            ""
+        };
         steps.push(make_step(
             next_idx,
             "Build CLI interface",
@@ -3009,7 +3558,10 @@ fn decompose_goal_into_steps(goal: &str) -> Vec<SpecStep> {
     }
 
     // Documentation (if mentioned)
-    if goal_lower.contains("readme") || goal_lower.contains("documentation") || goal_lower.contains("doc") {
+    if goal_lower.contains("readme")
+        || goal_lower.contains("documentation")
+        || goal_lower.contains("doc")
+    {
         steps.push(make_step(
             next_idx,
             "Create documentation",
@@ -3025,7 +3577,11 @@ fn decompose_goal_into_steps(goal: &str) -> Vec<SpecStep> {
         next_idx,
         "Final integration and polish",
         "Ensure all components work together. Run full test suite, fix any issues, clean up code.",
-        vec!["All tests pass", "cargo clippy has no warnings", "Application works end-to-end"],
+        vec![
+            "All tests pass",
+            "cargo clippy has no warnings",
+            "Application works end-to-end",
+        ],
         vec![next_idx - 1],
     ));
 
@@ -3057,6 +3613,9 @@ fn build_spec_from_goal(goal: &str) -> Result<SpecSheet> {
             required_tools: Vec::new(),
             constraints: Vec::new(),
             dependencies: Vec::new(),
+            is_parallel: false,
+            requires_verification: true,
+            max_parallelism: None,
             status: StepStatus::Pending,
             sub_spec: None,
             completed_at: None,
@@ -3081,6 +3640,9 @@ fn build_spec_from_goal(goal: &str) -> Result<SpecSheet> {
                 } else {
                     Vec::new()
                 },
+                is_parallel: false,
+                requires_verification: true,
+                max_parallelism: None,
                 status: StepStatus::Pending,
                 sub_spec: None,
                 completed_at: None,
@@ -3108,12 +3670,31 @@ fn build_spec_from_goal(goal: &str) -> Result<SpecSheet> {
     Ok(spec)
 }
 
-/// Truncate a string to a maximum length, adding "..." if truncated.
-fn truncate_title(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+/// Truncate a string to a maximum number of characters, adding "..." if truncated.
+/// This is UTF-8 safe - it counts characters, not bytes.
+fn truncate_title(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
+        format!("{}...", truncated)
+    }
+}
+
+/// Truncate a string to a maximum number of characters, adding suffix if truncated.
+/// This is UTF-8 safe - it counts characters, not bytes.
+pub(crate) fn truncate_string(s: &str, max_chars: usize, suffix: &str) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        s.to_string()
+    } else {
+        let suffix_len = suffix.chars().count();
+        let truncated: String = s
+            .chars()
+            .take(max_chars.saturating_sub(suffix_len))
+            .collect();
+        format!("{}{}", truncated, suffix)
     }
 }
 
@@ -3133,9 +3714,7 @@ mod summary_tests {
         task.messages.push(agent_msg);
 
         let mut metadata = TaskMetadata::default();
-        metadata
-            .extra
-            .insert("stepIndex".to_string(), json!("1"));
+        metadata.extra.insert("stepIndex".to_string(), json!("1"));
         metadata
             .extra
             .insert("stepInstructions".to_string(), json!("Implement feature"));

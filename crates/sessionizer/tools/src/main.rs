@@ -9,12 +9,24 @@ use std::path::{Path, PathBuf};
 use strum_macros::Display;
 use walkdir::WalkDir;
 
+const MAX_FILE_LIST_LIMIT: usize = 200;
+
 #[derive(Debug, Serialize)]
 struct FileEntry {
     name: String,
     e_type: String,
     length: u64,
     modified: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FileListResult {
+    status: String,
+    files: Vec<FileEntry>,
+    total: usize,
+    remaining: usize,
+    limit: usize,
+    offset: usize,
 }
 
 #[derive(Debug, Display)]
@@ -193,9 +205,11 @@ fn get_files_recursive(
     path: &PathBuf,
     include_patterns: Option<&[String]>,
     exclude_patterns: Option<&[String]>,
-    limit: Option<usize>,
-) -> Vec<FileEntry> {
+    limit: usize,
+    offset: usize,
+) -> (Vec<FileEntry>, usize) {
     let mut entries = Vec::new();
+    let mut matched = 0;
 
     let mut include_builder = GlobSetBuilder::new();
     if let Some(patterns) = include_patterns {
@@ -229,17 +243,7 @@ fn get_files_recursive(
 
     let has_include_patterns = include_patterns.map_or(false, |patterns| !patterns.is_empty());
 
-    for entry in WalkDir::new(path)
-        .into_iter()
-        .filter_map(Result::ok)
-        .take(limit.unwrap_or(usize::MAX))
-    {
-        if let Some(lim) = limit {
-            if entries.len() >= lim {
-                break;
-            }
-        }
-
+    for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
         let entry_path = entry.path();
         if !entry_path.exists() {
             continue;
@@ -259,6 +263,14 @@ fn get_files_recursive(
         let exclude_match = !exclude_set.is_match(&path_str);
 
         if include_match && exclude_match {
+            matched += 1;
+            if matched <= offset {
+                continue;
+            }
+            if entries.len() >= limit {
+                continue;
+            }
+
             let name = entry_path.display().to_string();
             let meta = entry.metadata();
 
@@ -282,7 +294,7 @@ fn get_files_recursive(
         }
     }
 
-    entries
+    (entries, matched)
 }
 
 fn search_files_with_regex(
@@ -304,7 +316,9 @@ fn search_files_with_regex(
         Err(e) => return Err(format!("Invalid regex pattern: {}", e)),
     };
 
-    let files = get_files_recursive(path, include_patterns, exclude_patterns, limit);
+    let list_limit = limit.unwrap_or(usize::MAX);
+    let (files, _total) =
+        get_files_recursive(path, include_patterns, exclude_patterns, list_limit, 0);
     let mut results = Vec::new();
     let mut count = 0;
 
@@ -353,12 +367,19 @@ fn get_mod_string(mres: std::io::Result<std::time::SystemTime>) -> String {
     }
 }
 
-fn read_file(
-    target_file: &Path,
-    should_read_entire_file: bool,
-    start_byte_one_indexed: Option<usize>,
-    end_byte_one_indexed: Option<usize>,
-) -> ReadResult {
+enum ReadSpan {
+    Entire,
+    Bytes {
+        start_byte_one_indexed: Option<usize>,
+        end_byte_one_indexed: Option<usize>,
+    },
+    Lines {
+        offset: i64,
+        limit: Option<usize>,
+    },
+}
+
+fn read_file(target_file: &Path, span: ReadSpan) -> ReadResult {
     if !target_file.exists() {
         return ReadResult {
             path: target_file.display().to_string(),
@@ -380,23 +401,31 @@ fn read_file(
     let data = fs::read(target_file);
     match data {
         Ok(bytes) => {
-            let final_content = if should_read_entire_file {
-                String::from_utf8_lossy(&bytes).into_owned()
-            } else {
-                let start = start_byte_one_indexed.unwrap_or(1).saturating_sub(1);
-                let end = end_byte_one_indexed.unwrap_or(bytes.len());
+            let final_content = match span {
+                ReadSpan::Entire => String::from_utf8_lossy(&bytes).into_owned(),
+                ReadSpan::Bytes {
+                    start_byte_one_indexed,
+                    end_byte_one_indexed,
+                } => {
+                    let start = start_byte_one_indexed.unwrap_or(1).saturating_sub(1);
+                    let end = end_byte_one_indexed.unwrap_or(bytes.len());
 
-                if start >= bytes.len() || end < start {
-                    return ReadResult {
-                        path: target_file.display().to_string(),
-                        status: ReadStatus::Failure,
-                        message: Some("Invalid byte range".to_string()),
-                        content: None,
-                    };
+                    if start >= bytes.len() || end < start {
+                        return ReadResult {
+                            path: target_file.display().to_string(),
+                            status: ReadStatus::Failure,
+                            message: Some("Invalid byte range".to_string()),
+                            content: None,
+                        };
+                    }
+
+                    let end = end.min(bytes.len());
+                    String::from_utf8_lossy(&bytes[start..end]).into_owned()
                 }
-
-                let end = end.min(bytes.len());
-                String::from_utf8_lossy(&bytes[start..end]).into_owned()
+                ReadSpan::Lines { offset, limit } => {
+                    let content = String::from_utf8_lossy(&bytes).into_owned();
+                    slice_lines(&content, offset, limit)
+                }
             };
 
             ReadResult {
@@ -413,6 +442,38 @@ fn read_file(
             content: None,
         },
     }
+}
+
+fn slice_lines(content: &str, offset: i64, limit: Option<usize>) -> String {
+    if content.is_empty() {
+        return String::new();
+    }
+
+    let segments: Vec<&str> = content.split_inclusive('\n').collect();
+    let total_lines = segments.len();
+    if total_lines == 0 {
+        return String::new();
+    }
+
+    let start = if offset >= 0 {
+        (offset as usize).min(total_lines)
+    } else {
+        let abs = offset
+            .checked_abs()
+            .unwrap_or(i64::MAX)
+            .min(total_lines as i64) as usize;
+        total_lines.saturating_sub(abs)
+    };
+
+    let mut end = total_lines;
+    if let Some(limit) = limit {
+        if limit == 0 {
+            return String::new();
+        }
+        end = start.saturating_add(limit).min(total_lines);
+    }
+
+    segments[start..end].concat()
 }
 
 fn edit_file(target_file: &Path, old_string: &str, new_string: &str) -> EditResult {
@@ -519,7 +580,11 @@ fn edit_file(target_file: &Path, old_string: &str, new_string: &str) -> EditResu
 }
 
 fn semantic_search(query: &str) -> Result<Vec<SemanticSearchHit>, Box<dyn std::error::Error>> {
-    let client = Client::new();
+    // Build client with a 30 second timeout to avoid hanging indefinitely
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()?;
 
     let request_body = SemanticSearchRequest {
         query: query.to_string(),
@@ -564,29 +629,121 @@ fn main() {
         "get_files_recursive" => {
             if args.len() < 3 {
                 eprintln!(
-                    "Usage: tools get_files_recursive <path> [limit] [include_patterns...] [--exclude exclude_patterns...]"
+                    "Usage: tools get_files_recursive <path> [limit] [offset] [include_patterns...] [--exclude exclude_patterns...]"
                 );
                 std::process::exit(1);
             }
             let path = PathBuf::from(&args[2]);
-            let limit = args.get(3).and_then(|s| s.parse::<usize>().ok());
+            let mut index = 3;
 
-            // Parse include/exclude patterns (simplified for now)
-            let files = get_files_recursive(&path, None, None, limit);
-            println!("{}", serde_yaml::to_string(&files).unwrap());
+            let mut limit = args
+                .get(index)
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(MAX_FILE_LIST_LIMIT);
+            if args
+                .get(index)
+                .and_then(|s| s.parse::<usize>().ok())
+                .is_some()
+            {
+                index += 1;
+            }
+            let offset = args
+                .get(index)
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
+            if args
+                .get(index)
+                .and_then(|s| s.parse::<usize>().ok())
+                .is_some()
+            {
+                index += 1;
+            }
+            limit = limit.min(MAX_FILE_LIST_LIMIT);
+
+            let mut include_patterns = Vec::new();
+            let mut exclude_patterns = Vec::new();
+            let mut seen_exclude = false;
+            for arg in args.iter().skip(index) {
+                if arg == "--exclude" {
+                    seen_exclude = true;
+                    continue;
+                }
+                if seen_exclude {
+                    exclude_patterns.push(arg.clone());
+                } else {
+                    include_patterns.push(arg.clone());
+                }
+            }
+
+            let include = if include_patterns.is_empty() {
+                None
+            } else {
+                Some(include_patterns.as_slice())
+            };
+            let exclude = if exclude_patterns.is_empty() {
+                None
+            } else {
+                Some(exclude_patterns.as_slice())
+            };
+
+            let (files, total) = get_files_recursive(&path, include, exclude, limit, offset);
+            let remaining = total.saturating_sub(offset + files.len());
+            let result = FileListResult {
+                status: "Success".to_string(),
+                files,
+                total,
+                remaining,
+                limit,
+                offset,
+            };
+            println!("{}", serde_yaml::to_string(&result).unwrap());
         }
 
         "read_file" => {
             if args.len() < 3 {
-                eprintln!("Usage: tools read_file <path> [entire|start end]");
+                eprintln!(
+                    "Usage: tools read_file <path> [entire|lines <offset> <limit>|<start_byte> <end_byte>]"
+                );
                 std::process::exit(1);
             }
             let path = PathBuf::from(&args[2]);
-            let should_read_entire = args.get(3).map(|s| s == "entire").unwrap_or(true);
-            let start = args.get(4).and_then(|s| s.parse::<usize>().ok());
-            let end = args.get(5).and_then(|s| s.parse::<usize>().ok());
+            let span = match args.get(3) {
+                None => ReadSpan::Entire,
+                Some(mode) if mode == "entire" => ReadSpan::Entire,
+                Some(mode) if mode == "lines" => {
+                    let offset = args.get(4).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                    let raw_limit = args.get(5).and_then(|s| s.parse::<i64>().ok()).unwrap_or(-1);
+                    let limit = if raw_limit <= 0 {
+                        None
+                    } else {
+                        Some(raw_limit as usize)
+                    };
+                    ReadSpan::Lines { offset, limit }
+                }
+                Some(mode) if mode == "bytes" => {
+                    let start = args.get(4).and_then(|s| s.parse::<usize>().ok());
+                    let end = args.get(5).and_then(|s| s.parse::<usize>().ok());
+                    ReadSpan::Bytes {
+                        start_byte_one_indexed: start,
+                        end_byte_one_indexed: end,
+                    }
+                }
+                Some(potential_start) => {
+                    // Backwards compatibility with the old CLI format that passed start/end directly
+                    let start = potential_start.parse::<usize>().ok();
+                    let end = args.get(4).and_then(|s| s.parse::<usize>().ok());
+                    if start.is_some() || end.is_some() {
+                        ReadSpan::Bytes {
+                            start_byte_one_indexed: start,
+                            end_byte_one_indexed: end,
+                        }
+                    } else {
+                        ReadSpan::Entire
+                    }
+                }
+            };
 
-            let result = read_file(&path, should_read_entire, start, end);
+            let result = read_file(&path, span);
             println!("{}", serde_yaml::to_string(&result).unwrap());
         }
 

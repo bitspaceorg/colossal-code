@@ -10,6 +10,64 @@ use ratatui::{
 };
 use std::path::PathBuf;
 
+/// Format elapsed seconds into a human-readable string using largest units first.
+/// Shows up to 4 non-zero units: y, mo, w, d, h, m, s
+fn format_elapsed_time(elapsed_secs: u64) -> String {
+    const SECS_PER_MIN: u64 = 60;
+    const SECS_PER_HOUR: u64 = 60 * SECS_PER_MIN;
+    const SECS_PER_DAY: u64 = 24 * SECS_PER_HOUR;
+    const SECS_PER_WEEK: u64 = 7 * SECS_PER_DAY;
+    const SECS_PER_MONTH: u64 = 30 * SECS_PER_DAY;
+    const SECS_PER_YEAR: u64 = 365 * SECS_PER_DAY;
+
+    let mut remaining = elapsed_secs;
+    let mut parts: Vec<String> = Vec::new();
+
+    let years = remaining / SECS_PER_YEAR;
+    remaining %= SECS_PER_YEAR;
+    if years > 0 {
+        parts.push(format!("{}y", years));
+    }
+
+    let months = remaining / SECS_PER_MONTH;
+    remaining %= SECS_PER_MONTH;
+    if months > 0 {
+        parts.push(format!("{}mo", months));
+    }
+
+    let weeks = remaining / SECS_PER_WEEK;
+    remaining %= SECS_PER_WEEK;
+    if weeks > 0 {
+        parts.push(format!("{}w", weeks));
+    }
+
+    let days = remaining / SECS_PER_DAY;
+    remaining %= SECS_PER_DAY;
+    if days > 0 {
+        parts.push(format!("{}d", days));
+    }
+
+    let hours = remaining / SECS_PER_HOUR;
+    remaining %= SECS_PER_HOUR;
+    if hours > 0 {
+        parts.push(format!("{}h", hours));
+    }
+
+    let mins = remaining / SECS_PER_MIN;
+    remaining %= SECS_PER_MIN;
+    if mins > 0 {
+        parts.push(format!("{}m", mins));
+    }
+
+    let secs = remaining;
+    if secs > 0 || parts.is_empty() {
+        parts.push(format!("{}s", secs));
+    }
+
+    parts.truncate(4);
+    parts.join(" ")
+}
+
 /// Context for expanding thinking animation placeholders
 pub struct ThinkingContext {
     pub snowflake_frame: &'static str,
@@ -196,7 +254,8 @@ pub fn create_rich_content_from_messages(
                 } else {
                     String::new()
                 };
-                text = format!("{} [Esc to interrupt | {}s{}]", text, elapsed, token_info);
+                let time_str = format_elapsed_time(elapsed);
+                text = format!("{} [Esc to interrupt | {}{}]", text, time_str, token_info);
             }
 
             content.push(Line::from(vec![Span::raw(format!(" {}", text))]));
@@ -420,7 +479,8 @@ pub fn create_plain_content_for_editor(
                 } else {
                     String::new()
                 };
-                text = format!("{} [Esc to interrupt | {}s{}]", text, elapsed, token_info);
+                let time_str = format_elapsed_time(elapsed);
+                text = format!("{} [Esc to interrupt | {}{}]", text, time_str, token_info);
             }
 
             content.push(format!(" {}", text));

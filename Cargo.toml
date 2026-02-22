@@ -1,10 +1,10 @@
 [package]
-name = "nite"
+name = "cocode"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "nite"
+name = "cocode"
 path = "src/main.rs"
 
 [dependencies]
@@ -26,6 +26,8 @@ dirs = "5.0"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 async-trait = "0.1"
 anyhow = "1.0"
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls", "macros", "chrono"] }
+chrono = "0.4"
 
 [dev-dependencies]
 chrono = "0.4"
