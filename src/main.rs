@@ -187,7 +187,7 @@ impl HelpTab {
 
 #[cfg(test)]
 mod tests {
-    use super::UiMessageEvent;
+    use super::{MessageState, MessageType, SubAgentContext, UiMessageEvent};
 
     #[test]
     fn parses_thinking_animation_event() {
@@ -232,6 +232,34 @@ mod tests {
                 result,
             }) if tool_name == "bash" && args == "ls -la" && result == "ok"
         ));
+    }
+
+    #[test]
+    fn sub_agent_context_uses_typed_ui_messages() {
+        let mut context = SubAgentContext::new("1".to_string(), "step".to_string());
+
+        context.add_user_message("hi".to_string());
+        context.add_agent_text("hello".to_string());
+
+        assert_eq!(context.messages.len(), 2);
+        assert_eq!(context.messages[0].content, "hi");
+        assert_eq!(context.messages[0].message_type, MessageType::User);
+        assert_eq!(context.messages[0].message_state, MessageState::Sent);
+        assert_eq!(context.messages[1].content, "hello");
+        assert_eq!(context.messages[1].message_type, MessageType::Agent);
+        assert_eq!(context.messages[1].message_state, MessageState::Sent);
+    }
+
+    #[test]
+    fn sub_agent_context_drops_thinking_placeholder_before_agent_text() {
+        let mut context = SubAgentContext::new("1".to_string(), "step".to_string());
+
+        context.start_thinking("".to_string());
+        context.add_agent_text("done".to_string());
+
+        assert_eq!(context.messages.len(), 1);
+        assert_eq!(context.messages[0].content, "done");
+        assert_eq!(context.messages[0].message_type, MessageType::Agent);
     }
 }
 
@@ -506,9 +534,7 @@ pub struct StepToolCallEntry {
 pub struct SubAgentContext {
     pub prefix: String,
     pub step_title: String,
-    pub messages: Vec<String>,
-    pub message_types: Vec<MessageType>,
-    pub message_states: Vec<MessageState>,
+    pub messages: Vec<UiMessage>,
     pub thinking_indicator_active: bool,
     pub is_thinking: bool,
     pub thinking_elapsed_secs: u64,
@@ -532,8 +558,6 @@ impl SubAgentContext {
             prefix,
             step_title,
             messages: Vec::new(),
-            message_types: Vec::new(),
-            message_states: Vec::new(),
             thinking_indicator_active: false,
             is_thinking: false,
             thinking_elapsed_secs: 0,
@@ -553,9 +577,9 @@ impl SubAgentContext {
     }
 
     fn push_message(&mut self, content: String, message_type: MessageType) {
-        self.messages.push(content);
-        self.message_types.push(message_type);
-        self.message_states.push(MessageState::Sent);
+        self
+            .messages
+            .push(UiMessage::new(content, message_type, MessageState::Sent));
     }
 
     pub fn add_user_message(&mut self, content: String) {
@@ -566,10 +590,10 @@ impl SubAgentContext {
         // Remove thinking placeholder before showing agent text
         self.remove_thinking_placeholder();
 
-        let append_to_last = if let Some(MessageType::Agent) = self.message_types.last() {
-            if let Some(last) = self.messages.last() {
+        let append_to_last = if let Some(last) = self.messages.last() {
+            if matches!(last.message_type, MessageType::Agent) {
                 !matches!(
-                    UiMessageEvent::parse(last),
+                    UiMessageEvent::parse(&last.content),
                     Some(UiMessageEvent::ToolCallStarted { .. })
                         | Some(UiMessageEvent::ToolCallCompleted { .. })
                 )
@@ -582,7 +606,7 @@ impl SubAgentContext {
 
         if append_to_last {
             if let Some(last) = self.messages.last_mut() {
-                last.push_str(&content);
+                last.content.push_str(&content);
                 return;
             }
         }
@@ -594,9 +618,9 @@ impl SubAgentContext {
         if !self
             .messages
             .last()
-            .map(|m| {
+            .map(|message| {
                 matches!(
-                    UiMessageEvent::parse(m),
+                    UiMessageEvent::parse(&message.content),
                     Some(UiMessageEvent::ThinkingAnimation)
                 )
             })
@@ -628,14 +652,12 @@ impl SubAgentContext {
     }
 
     fn remove_thinking_placeholder(&mut self) {
-        if let Some(last) = self.messages.last() {
+        if let Some(last) = self.messages.last().map(|message| &message.content) {
             if matches!(
                 UiMessageEvent::parse(last),
                 Some(UiMessageEvent::ThinkingAnimation)
             ) {
                 self.messages.pop();
-                self.message_types.pop();
-                self.message_states.pop();
             }
         }
         self.thinking_indicator_active = false;
@@ -653,16 +675,16 @@ impl SubAgentContext {
     }
 
     pub fn complete_tool_call(&mut self, tool_name: &str, formatted_result: String) {
-        for msg in self.messages.iter_mut().rev() {
+        for message in self.messages.iter_mut().rev() {
             let Some(UiMessageEvent::ToolCallStarted {
                 tool_name: started_tool,
                 args,
-            }) = UiMessageEvent::parse(msg)
+            }) = UiMessageEvent::parse(&message.content)
             else {
                 continue;
             };
             if started_tool == tool_name {
-                *msg = format!(
+                message.content = format!(
                     "[TOOL_CALL_COMPLETED:{}|{}|{}]",
                     tool_name, args, formatted_result
                 );
@@ -698,9 +720,17 @@ impl SubAgentContext {
         };
 
         AppSnapshot {
-            messages: self.messages.clone(),
-            message_types: self.message_types.clone(),
-            message_states: self.message_states.clone(),
+            messages: self.messages.iter().map(|message| message.content.clone()).collect(),
+            message_types: self
+                .messages
+                .iter()
+                .map(|message| message.message_type.clone())
+                .collect(),
+            message_states: self
+                .messages
+                .iter()
+                .map(|message| message.message_state)
+                .collect(),
             is_thinking: self.is_thinking,
             thinking_indicator_active: self.thinking_indicator_active,
             thinking_elapsed_secs: elapsed_secs,
@@ -726,7 +756,7 @@ impl SubAgentContext {
 
         let has_marker = self.messages.iter().rev().take(6).any(|msg| {
             matches!(
-                UiMessageEvent::parse(msg),
+                UiMessageEvent::parse(&msg.content),
                 Some(UiMessageEvent::GenerationStats { .. })
             )
         });
@@ -736,12 +766,7 @@ impl SubAgentContext {
         }
 
         if let Some(stats) = self.generation_stats.clone() {
-            App::push_generation_stats_message(
-                &mut self.messages,
-                &mut self.message_types,
-                &mut self.message_states,
-                &stats,
-            );
+            self.push_message(App::encode_generation_stats_message(&stats), MessageType::Agent);
             self.generation_stats_rendered = true;
         }
     }
@@ -801,11 +826,28 @@ enum AgentConnector {
     End,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum MessageState {
     Sent,        // Normal sent message
     Queued,      // Message queued, waiting to be sent
     Interrupted, // Message generation was interrupted (partial)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiMessage {
+    pub content: String,
+    pub message_type: MessageType,
+    pub message_state: MessageState,
+}
+
+impl UiMessage {
+    fn new(content: String, message_type: MessageType, message_state: MessageState) -> Self {
+        Self {
+            content,
+            message_type,
+            message_state,
+        }
+    }
 }
 
 /// Saved conversation data structure
@@ -10698,11 +10740,17 @@ Let me analyze the conversation chronologically:
                 Style::default().fg(Color::DarkGray),
             )));
         } else {
+            let message_types: Vec<MessageType> = context
+                .messages
+                .iter()
+                .map(|message| message.message_type.clone())
+                .collect();
+
             for (idx, message) in context.messages.iter().enumerate() {
-                let is_agent = matches!(context.message_types.get(idx), Some(MessageType::Agent));
-                let connector = self.agent_connector_for_index(&context.message_types, idx);
+                let is_agent = matches!(message.message_type, MessageType::Agent);
+                let connector = self.agent_connector_for_index(&message_types, idx);
                 let rendered = self
-                    .render_message_with_max_width(message, max_width, None, is_agent, connector);
+                    .render_message_with_max_width(&message.content, max_width, None, is_agent, connector);
                 lines.extend(rendered.lines);
             }
 
