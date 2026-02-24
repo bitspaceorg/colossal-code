@@ -118,4 +118,26 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed.get("vim-keybind"), Some(&"true".to_string()));
     }
+
+    #[test]
+    fn load_config_value_trims_requested_key() {
+        let content = " model = expected\n";
+
+        let value = load_config_value_from_content(content, "  model  ");
+
+        assert_eq!(value.as_deref(), Some("expected"));
+    }
+
+    #[test]
+    fn parse_config_map_uses_last_value_and_preserves_equals_in_values() {
+        let content = "api-url = https://example.test/query?a=b\nmodel = first\nmodel = second\n";
+
+        let parsed = parse_config_map_from_content(content);
+
+        assert_eq!(
+            parsed.get("api-url"),
+            Some(&"https://example.test/query?a=b".to_string())
+        );
+        assert_eq!(parsed.get("model"), Some(&"second".to_string()));
+    }
 }

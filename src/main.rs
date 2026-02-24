@@ -190,7 +190,7 @@ impl HelpTab {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentState, AssistantMode, HelpTab, MessageState, MessageType, PersistenceState,
+        AgentState, App, AssistantMode, HelpTab, MessageState, MessageType, PersistenceState,
         QueueChoiceAction, SafetyState, SubAgentContext, UiMessageEvent, UiState,
         parse_queue_choice,
     };
@@ -392,6 +392,34 @@ mod tests {
         assert_eq!(parse_queue_choice("4"), None);
         assert_eq!(parse_queue_choice("interrupt"), None);
         assert_eq!(parse_queue_choice(" 2 "), Some(QueueChoiceAction::Interrupt));
+    }
+
+    #[test]
+    fn extract_parameter_count_parses_common_model_sizes() {
+        assert_eq!(
+            App::extract_parameter_count("Qwen2.5-7b-Instruct-Q4_K_M.gguf"),
+            Some("7B".to_string())
+        );
+        assert_eq!(
+            App::extract_parameter_count("TinyLlama-1.5B-Chat-v1.0.gguf"),
+            Some("1.5B".to_string())
+        );
+        assert_eq!(
+            App::extract_parameter_count("Meta-Llama-3.1-70B-Instruct.Q8_0.gguf"),
+            Some("70B".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_parameter_count_avoids_partial_number_matches() {
+        assert_eq!(
+            App::extract_parameter_count("example-130B-instruct.gguf"),
+            None
+        );
+        assert_eq!(
+            App::extract_parameter_count("example-314b-chat.gguf"),
+            None
+        );
     }
 }
 
@@ -1694,24 +1722,37 @@ impl App {
     fn extract_parameter_count(filename: &str) -> Option<String> {
         // Extract parameter count from filename (e.g., 7B, 13B, 70B, 0.5B)
         let patterns = [
-            (r"0.5[bB]", "0.5B"),
-            (r"1.5[bB]", "1.5B"),
-            (r"3[bB]", "3B"),
-            (r"4[bB]", "4B"),
-            (r"7[bB]", "7B"),
-            (r"8[bB]", "8B"),
-            (r"13[bB]", "13B"),
-            (r"14[bB]", "14B"),
-            (r"30[bB]", "30B"),
-            (r"34[bB]", "34B"),
-            (r"70[bB]", "70B"),
+            ("0.5b", "0.5B"),
+            ("1.5b", "1.5B"),
+            ("3b", "3B"),
+            ("4b", "4B"),
+            ("7b", "7B"),
+            ("8b", "8B"),
+            ("13b", "13B"),
+            ("14b", "14B"),
+            ("30b", "30B"),
+            ("34b", "34B"),
+            ("70b", "70B"),
         ];
 
+        let normalized = filename.to_ascii_lowercase();
+
         for (pattern, value) in patterns {
-            if filename.contains(pattern)
-                || filename.to_uppercase().contains(&pattern.to_uppercase())
-            {
-                return Some(value.to_string());
+            let mut search_start = 0;
+            while let Some(relative_index) = normalized[search_start..].find(pattern) {
+                let start = search_start + relative_index;
+                let end = start + pattern.len();
+
+                let before_ok = start == 0
+                    || !normalized.as_bytes()[start - 1].is_ascii_alphanumeric();
+                let after_ok = end == normalized.len()
+                    || !normalized.as_bytes()[end].is_ascii_alphanumeric();
+
+                if before_ok && after_ok {
+                    return Some(value.to_string());
+                }
+
+                search_start = start + 1;
             }
         }
         None
