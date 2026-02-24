@@ -24,3 +24,27 @@ fn root_dependencies_do_not_include_removed_crates() {
     assert!(!dependencies.contains("sqlx"));
     assert!(!dependencies.contains("chrono"));
 }
+
+#[test]
+fn root_lockfile_is_not_ignored() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let lockfile_path = repo_root.join("Cargo.lock");
+    let gitignore_path = repo_root.join(".gitignore");
+
+    assert!(
+        lockfile_path.exists(),
+        "Cargo.lock should exist at the repository root"
+    );
+
+    let gitignore = fs::read_to_string(gitignore_path).expect(".gitignore should be readable");
+    let ignores_root_lockfile = gitignore
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .any(|line| line == "Cargo.lock" || line == "/Cargo.lock");
+
+    assert!(
+        !ignores_root_lockfile,
+        ".gitignore should not ignore the repository root Cargo.lock"
+    );
+}
