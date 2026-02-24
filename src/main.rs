@@ -41,11 +41,12 @@ use survey::{Survey, SurveyQuestion};
 mod session_manager;
 pub use session_manager::{OrchestratorEntry, Session, SessionManager, SessionRole, SessionStatus};
 mod commands;
+mod git_ops;
 mod model_context;
 mod persistence;
 mod spec_cli;
 mod ui;
-use commands::{ReviewOptions, ReviewType, SlashCommandDispatch, dispatch_slash_command};
+use commands::{ReviewOptions, SlashCommandDispatch, dispatch_slash_command};
 use spec_cli::{MessageLog, SpecAgentBridge, SpecCliContext, SpecCliHandler, SpecCommandResult};
 pub mod spec_ui;
 
@@ -3873,177 +3874,6 @@ impl App {
         })
     }
 
-    /// Execute git commands based on review options and return context
-    async fn execute_review_git_commands(&self, options: &ReviewOptions) -> Result<String> {
-        use tokio::process::Command;
-
-        let mut context = String::new();
-
-        // Get current branch
-        let branch_output = Command::new("git")
-            .args(["branch", "--show-current"])
-            .output()
-            .await?;
-        let current_branch = String::from_utf8_lossy(&branch_output.stdout)
-            .trim()
-            .to_string();
-        context.push_str(&format!("Current branch: {}\n\n", current_branch));
-
-        // Get git status
-        let status_output = Command::new("git")
-            .args(["status", "--short"])
-            .output()
-            .await?;
-        let status = String::from_utf8_lossy(&status_output.stdout);
-        if !status.is_empty() {
-            context.push_str(&format!("Git status:\n```\n{}```\n\n", status));
-        }
-
-        // Build diff command based on options
-        match options.review_type {
-            ReviewType::All => {
-                // Show both staged and unstaged changes
-                if let Some(ref base) = options.base_branch {
-                    // Compare against base branch
-                    let diff_output = Command::new("git")
-                        .args(["diff", &format!("{}...HEAD", base)])
-                        .output()
-                        .await?;
-                    let diff = String::from_utf8_lossy(&diff_output.stdout);
-                    context.push_str(&format!(
-                        "Changes compared to '{}':\n```diff\n{}```\n\n",
-                        base, diff
-                    ));
-
-                    // Also show commits
-                    let log_output = Command::new("git")
-                        .args(["log", "--oneline", &format!("{}..HEAD", base)])
-                        .output()
-                        .await?;
-                    let log = String::from_utf8_lossy(&log_output.stdout);
-                    if !log.is_empty() {
-                        context
-                            .push_str(&format!("Commits since '{}':\n```\n{}```\n\n", base, log));
-                    }
-                } else if let Some(ref commit) = options.base_commit {
-                    // Compare against specific commit
-                    let diff_output = Command::new("git")
-                        .args(["diff", &format!("{}..HEAD", commit)])
-                        .output()
-                        .await?;
-                    let diff = String::from_utf8_lossy(&diff_output.stdout);
-                    context.push_str(&format!(
-                        "Changes since commit '{}':\n```diff\n{}```\n\n",
-                        commit, diff
-                    ));
-
-                    // Also show commits
-                    let log_output = Command::new("git")
-                        .args(["log", "--oneline", &format!("{}..HEAD", commit)])
-                        .output()
-                        .await?;
-                    let log = String::from_utf8_lossy(&log_output.stdout);
-                    if !log.is_empty() {
-                        context
-                            .push_str(&format!("Commits since '{}':\n```\n{}```\n\n", commit, log));
-                    }
-                } else {
-                    // Default: show all uncommitted changes (staged + unstaged)
-                    let diff_output = Command::new("git").args(["diff", "HEAD"]).output().await?;
-                    let diff = String::from_utf8_lossy(&diff_output.stdout);
-                    if !diff.is_empty() {
-                        context
-                            .push_str(&format!("Uncommitted changes:\n```diff\n{}```\n\n", diff));
-                    } else {
-                        context.push_str("No uncommitted changes.\n\n");
-                    }
-                }
-            }
-            ReviewType::Committed => {
-                // Show only committed changes
-                if let Some(ref base) = options.base_branch {
-                    let diff_output = Command::new("git")
-                        .args(["diff", &format!("{}...HEAD", base)])
-                        .output()
-                        .await?;
-                    let diff = String::from_utf8_lossy(&diff_output.stdout);
-                    context.push_str(&format!(
-                        "Committed changes compared to '{}':\n```diff\n{}```\n\n",
-                        base, diff
-                    ));
-
-                    let log_output = Command::new("git")
-                        .args(["log", "--oneline", &format!("{}..HEAD", base)])
-                        .output()
-                        .await?;
-                    let log = String::from_utf8_lossy(&log_output.stdout);
-                    if !log.is_empty() {
-                        context.push_str(&format!("Commits:\n```\n{}```\n\n", log));
-                    }
-                } else if let Some(ref commit) = options.base_commit {
-                    let diff_output = Command::new("git")
-                        .args(["diff", &format!("{}..HEAD", commit)])
-                        .output()
-                        .await?;
-                    let diff = String::from_utf8_lossy(&diff_output.stdout);
-                    context.push_str(&format!(
-                        "Committed changes since '{}':\n```diff\n{}```\n\n",
-                        commit, diff
-                    ));
-
-                    let log_output = Command::new("git")
-                        .args(["log", "--oneline", &format!("{}..HEAD", commit)])
-                        .output()
-                        .await?;
-                    let log = String::from_utf8_lossy(&log_output.stdout);
-                    if !log.is_empty() {
-                        context.push_str(&format!("Commits:\n```\n{}```\n\n", log));
-                    }
-                } else {
-                    // Default: show recent commits on current branch
-                    let log_output = Command::new("git")
-                        .args(["log", "--oneline", "-10"])
-                        .output()
-                        .await?;
-                    let log = String::from_utf8_lossy(&log_output.stdout);
-                    context.push_str(&format!("Recent commits:\n```\n{}```\n\n", log));
-
-                    // Show diff of last commit
-                    let diff_output = Command::new("git")
-                        .args(["diff", "HEAD~1..HEAD"])
-                        .output()
-                        .await?;
-                    let diff = String::from_utf8_lossy(&diff_output.stdout);
-                    if !diff.is_empty() {
-                        context.push_str(&format!("Last commit diff:\n```diff\n{}```\n\n", diff));
-                    }
-                }
-            }
-            ReviewType::Uncommitted => {
-                // Show only uncommitted changes (staged + unstaged)
-                let diff_output = Command::new("git").args(["diff", "HEAD"]).output().await?;
-                let diff = String::from_utf8_lossy(&diff_output.stdout);
-                if !diff.is_empty() {
-                    context.push_str(&format!("Uncommitted changes:\n```diff\n{}```\n\n", diff));
-                } else {
-                    context.push_str("No uncommitted changes.\n\n");
-                }
-
-                // Show staged changes separately
-                let staged_output = Command::new("git")
-                    .args(["diff", "--cached"])
-                    .output()
-                    .await?;
-                let staged = String::from_utf8_lossy(&staged_output.stdout);
-                if !staged.is_empty() {
-                    context.push_str(&format!("Staged changes:\n```diff\n{}```\n\n", staged));
-                }
-            }
-        }
-
-        Ok(context)
-    }
-
     /// Build review prompt with context and options
     fn build_review_prompt(&self, options: &ReviewOptions, context: &str) -> String {
         let mut prompt = String::new();
@@ -6593,7 +6423,7 @@ Let me analyze the conversation chronologically:
             // Handle pending code review
             if let Some(options) = self.review_pending.take() {
                 // Execute git commands based on options
-                let git_context = self.execute_review_git_commands(&options).await;
+                let git_context = git_ops::build_review_git_context(&options).await;
 
                 match git_context {
                     Ok(context) => {
