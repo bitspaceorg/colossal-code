@@ -188,8 +188,8 @@ pub struct ExecCommandSession {
     writer_tx: mpsc::Sender<Vec<u8>>,
     output_tx: broadcast::Sender<Vec<u8>>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
-    reader_handle: JoinHandle<()>,
-    writer_handle: JoinHandle<()>,
+    _reader_handle: JoinHandle<()>,
+    _writer_handle: JoinHandle<()>,
     wait_handle: JoinHandle<Result<i32, std::io::Error>>,
     sandbox_policy: SandboxPolicy,
     cwd: PathBuf,
@@ -200,8 +200,8 @@ pub struct PersistentShellSession {
     writer_tx: mpsc::Sender<Vec<u8>>,
     output_tx: broadcast::Sender<Vec<u8>>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
-    reader_handle: JoinHandle<()>,
-    writer_handle: JoinHandle<()>,
+    _reader_handle: JoinHandle<()>,
+    _writer_handle: JoinHandle<()>,
     wait_handle: JoinHandle<Result<i32, std::io::Error>>,
     shell_path: String,
     // Shared session state
@@ -232,11 +232,11 @@ pub struct SemanticSearchSession {
     // File watcher task handle - processes file events in the background
     file_watcher_handle: Option<JoinHandle<()>>,
     // Debounce map to track last modification time of files
-    debounce_map: Arc<Mutex<HashMap<PathBuf, u64>>>,
+    _debounce_map: Arc<Mutex<HashMap<PathBuf, u64>>>,
     // Debounce delay in milliseconds
-    debounce_delay: u64,
+    _debounce_delay: u64,
     // File content cache to track old content for diff calculation
-    file_content_cache: Arc<Mutex<HashMap<PathBuf, String>>>,
+    _file_content_cache: Arc<Mutex<HashMap<PathBuf, String>>>,
     // Sandbox policy for this session (used by file watcher and indexing)
     sandbox_policy: SandboxPolicy,
 }
@@ -266,8 +266,8 @@ impl ExecCommandSession {
             writer_tx,
             output_tx,
             killer,
-            reader_handle,
-            writer_handle,
+            _reader_handle: reader_handle,
+            _writer_handle: writer_handle,
             wait_handle,
             sandbox_policy,
             cwd,
@@ -325,8 +325,8 @@ impl PersistentShellSession {
             writer_tx,
             output_tx,
             killer,
-            reader_handle,
-            writer_handle,
+            _reader_handle: reader_handle,
+            _writer_handle: writer_handle,
             wait_handle,
             shell_path,
             shared_state,
@@ -504,7 +504,7 @@ impl SemanticSearchSession {
                         _ => {}
                     }
                 }
-                Err(e) => {
+                Err(_e) => {
                     // eprintln!("File watcher error: {:?}", e);
                 }
             }
@@ -517,7 +517,7 @@ impl SemanticSearchSession {
                 }
                 Some(watcher)
             }
-            Err(e) => {
+            Err(_e) => {
                 // eprintln!("Failed to create file watcher: {:?}", e);
                 None
             }
@@ -535,7 +535,7 @@ impl SemanticSearchSession {
             let handle = tokio::spawn(async move {
                 // Apply sandbox to this file watcher task
                 #[cfg(target_os = "linux")]
-                if let Err(e) = crate::landlock::apply_sandbox_policy_to_current_thread(&sandbox_policy_clone, &cwd_clone) {
+                if let Err(_e) = crate::landlock::apply_sandbox_policy_to_current_thread(&sandbox_policy_clone, &cwd_clone) {
                     // eprintln!("Failed to apply sandbox to file watcher task: {}", e);
                     return;
                 }
@@ -566,9 +566,9 @@ impl SemanticSearchSession {
             collection_name,
             file_watcher,
             file_watcher_handle,
-            debounce_map: Arc::new(Mutex::new(HashMap::new())),
-            debounce_delay: 1000, // 1 second debounce delay
-            file_content_cache: Arc::new(Mutex::new(HashMap::new())),
+            _debounce_map: Arc::new(Mutex::new(HashMap::new())),
+            _debounce_delay: 1000, // 1 second debounce delay
+            _file_content_cache: Arc::new(Mutex::new(HashMap::new())),
             sandbox_policy,
         })
     }
@@ -589,14 +589,14 @@ impl SemanticSearchSession {
         if let Some(ref watcher) = self.file_watcher {
             if let Ok(mut watcher_guard) = watcher.lock() {
                 // Unwatch the old directory
-                if let Err(e) = watcher_guard.unwatch(&old_cwd) {
+                if let Err(_e) = watcher_guard.unwatch(&old_cwd) {
                     // eprintln!("  - Failed to unwatch old directory {}: {}", old_cwd.display(), e);
                 } else {
                     // eprintln!("  - Unwatched old directory: {}", old_cwd.display());
                 }
 
                 // Watch the new directory
-                if let Err(e) = watcher_guard.watch(&new_cwd, notify::RecursiveMode::Recursive) {
+                if let Err(_e) = watcher_guard.watch(&new_cwd, notify::RecursiveMode::Recursive) {
                     // eprintln!("  - Failed to watch new directory {}: {}", new_cwd.display(), e);
                 } else {
                     // eprintln!("  - Now watching new directory: {}", new_cwd.display());
@@ -659,7 +659,7 @@ impl SemanticSearchSession {
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
-                if let Err(e) = client.delete_collection(&collection_name).await {
+                if let Err(_e) = client.delete_collection(&collection_name).await {
                     // eprintln!("  - Failed to delete Qdrant collection '{}': {}", collection_name, e);
                 } else {
                     // eprintln!("  - Deleted Qdrant collection '{}'", collection_name);
@@ -750,7 +750,7 @@ impl SemanticSearchSession {
         // Read the file content
         let content = match std::fs::read_to_string(path) {
             Ok(content) => content,
-            Err(e) => {
+            Err(_e) => {
                 // eprintln!("Failed to read file {}: {}", path.display(), e);
                 return;
             }
@@ -765,7 +765,7 @@ impl SemanticSearchSession {
         // Use the chunker crate to parse the file
         let chunks = match chunker::chunk_file(path.to_str().unwrap()) {
             Ok(chunks) => chunks,
-            Err(e) => {
+            Err(_e) => {
                 // eprintln!("Failed to chunk file {}: {}", path.display(), e);
                 return;
             }
@@ -820,7 +820,7 @@ impl SemanticSearchSession {
         // Read the new file content
         let new_content = match std::fs::read_to_string(path) {
             Ok(content) => content,
-            Err(e) => {
+            Err(_e) => {
                 // eprintln!("Failed to read file {}: {}", path.display(), e);
                 return;
             }

@@ -4,10 +4,6 @@ use tokio::process::Child;
 use crate::error::ColossalErr;
 use crate::protocol::SandboxPolicy;
 use crate::spawn::{COLOSSAL_SANDBOX_ENV_VAR, StdioPolicy, spawn_child_async};
-use std::process::Command;
-use tempfile::NamedTempFile;
-use std::io::Write;
-use std::os::unix::ffi::OsStrExt;
 
 const MACOS_SEATBELT_BASE_POLICY: &str = include_str!("seatbelt_base_policy.sbpl");
 const MACOS_PATH_TO_SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
@@ -40,10 +36,8 @@ pub fn apply_sandbox_policy(
     cwd: &Path,
 ) -> Result<(), ColossalErr> {
     use std::process::Command;
-    use std::fs::File;
     use std::io::Write;
     use tempfile::NamedTempFile;
-    use std::os::unix::ffi::OsStrExt;
 
     // Create a temporary seatbelt profile
     let mut profile = String::from("(version 1)\n");
@@ -231,7 +225,7 @@ mod tests {
     use crate::protocol::{SandboxPolicy, WritableRoot};
     use pretty_assertions::assert_eq;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
     #[test]
@@ -272,10 +266,9 @@ mod tests {
         );
         let expected_policy = format!(
             r#"{MACOS_SEATBELT_BASE_POLICY}
-; allow read-only file operations
-(allow file-read*)
+
 (allow file-write*
-(require-all (subpath (param "WRITABLE_ROOT_0")) (require-not (subpath (param "WRITABLE_ROOT_0_RO_0"))) ) (subpath (param "WRITABLE_ROOT_1")) (subpath (param "WRITABLE_ROOT_2"))
+(require-all (subpath (param "WRITABLE_ROOT_0")) (require-not (subpath (param "WRITABLE_ROOT_0_RO_0"))) ) (subpath (param "WRITABLE_ROOT_1")) (require-all (subpath (param "WRITABLE_ROOT_2")) (require-not (subpath (param "WRITABLE_ROOT_2_RO_0"))) )
 )
 "#,
         );
@@ -295,6 +288,7 @@ mod tests {
                 root_without_git_canon.to_string_lossy()
             ),
             format!("-DWRITABLE_ROOT_2={}", cwd.to_string_lossy()),
+            format!("-DWRITABLE_ROOT_2_RO_0={}", cwd.join(".git").to_string_lossy()),
         ];
         expected_args.extend(vec![
             "--".to_string(),
@@ -339,8 +333,7 @@ mod tests {
         };
         let expected_policy = format!(
             r#"{MACOS_SEATBELT_BASE_POLICY}
-; allow read-only file operations
-(allow file-read*)
+
 (allow file-write*
 (require-all (subpath (param "WRITABLE_ROOT_0")) (require-not (subpath (param "WRITABLE_ROOT_0_RO_0"))) ) (subpath (param "WRITABLE_ROOT_1")){tempdir_policy_entry}
 )
@@ -374,6 +367,34 @@ mod tests {
             "hello".to_string(),
         ]);
         assert_eq!(expected_args, args);
+    }
+
+    #[test]
+    fn create_seatbelt_args_for_full_access_policy() {
+        if cfg!(target_os = "windows") {
+            return;
+        }
+        let cwd = PathBuf::from("/");
+        let args = create_seatbelt_command_args(
+            vec!["/bin/echo".to_string(), "hello".to_string()],
+            &SandboxPolicy::DangerFullAccess,
+            &cwd,
+        );
+        let expected_policy = format!(
+            r#"{MACOS_SEATBELT_BASE_POLICY}
+; allow read-only file operations
+(allow file-read*)
+(allow file-write* (regex #"^/"))
+(allow network-outbound)
+(allow network-inbound)
+(allow system-socket)"#,
+        );
+
+        assert_eq!(args[0], "-p");
+        assert_eq!(args[1], expected_policy);
+        assert_eq!(args[2], "--");
+        assert_eq!(args[3], "/bin/echo");
+        assert_eq!(args[4], "hello");
     }
 
     struct PopulatedTmp {

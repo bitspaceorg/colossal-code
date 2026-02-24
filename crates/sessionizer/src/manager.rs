@@ -504,7 +504,7 @@ impl SessionManager {
         }
         let cap_bytes = params.max_output_tokens.saturating_mul(4) as usize;
         let mut stdout_buf = Vec::with_capacity(8192.min(cap_bytes));
-        let mut stderr_buf = Vec::with_capacity(8192.min(cap_bytes));
+        let stderr_buf = Vec::with_capacity(8192.min(cap_bytes));
         let mut aggregated_buf = Vec::with_capacity(8192.min(cap_bytes));
         let start_time = Instant::now();
         let deadline = start_time + Duration::from_millis(params.yield_time_ms);
@@ -744,7 +744,7 @@ impl SessionManager {
         session_id: SessionId,
         command: String,
         timeout_ms: Option<u64>,
-        max_output_tokens: u32,
+        _max_output_tokens: u32,
         ask_for_approval: Option<crate::safety::AskForApproval>,
     ) -> Result<ExecCommandOutput, ColossalErr> {
         let start_time = Instant::now();
@@ -1224,7 +1224,7 @@ impl SessionManager {
         }
         
         // Semantic search sessions
-        for (session_id, session) in semantic_search_sessions.iter() {
+        for (session_id, _) in semantic_search_sessions.iter() {
             if let Some(metadata) = metadata_map.get(session_id) {
                 let age = Instant::now().duration_since(metadata.created_at);
                 let inactive_time = Instant::now().duration_since(metadata.last_activity);

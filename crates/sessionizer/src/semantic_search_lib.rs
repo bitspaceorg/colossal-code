@@ -1,10 +1,8 @@
 use futures::stream::{self, StreamExt};
-use glob::glob;
 use qdrant_client::qdrant::{
     PointStruct, SearchParamsBuilder, SearchPointsBuilder, UpsertPointsBuilder,
 };
 use qdrant_client::{Payload, Qdrant};
-use rayon::prelude::*;
 use reqwest;
 use serde::Serialize;
 use serde_json;
@@ -92,25 +90,6 @@ fn is_likely_text(data: &[u8]) -> bool {
 
 // Re-export Chunk from chunker crate for backward compatibility
 pub use chunker::Chunk;
-
-fn expand_globs(patterns: &[String]) -> Vec<String> {
-    let mut files = Vec::new();
-    for pattern in patterns {
-        match glob(pattern) {
-            Ok(paths) => {
-                for entry in paths.filter_map(Result::ok) {
-                    if entry.is_file() {
-                        files.push(entry.to_string_lossy().to_string());
-                    }
-                }
-            }
-            Err(e) => {
-                // eprintln!("Invalid glob pattern {}: {}", pattern, e);
-            }
-        }
-    }
-    files
-}
 
 /// Calculate the difference between two strings and return the byte range of the change
 /// This is a simplified implementation that finds the first and last differing bytes
@@ -237,7 +216,7 @@ pub async fn index_codebase(
                     if is_likely_text(&data) {
                         match chunker::chunk_file(path.to_str().unwrap()) {
                             Ok(chunks) => Some(chunks),
-                            Err(e) => {
+                            Err(_e) => {
                                 // eprintln!("Failed to chunk file {}: {}", path.display(), e);
                                 None
                             }
@@ -246,7 +225,7 @@ pub async fn index_codebase(
                         None
                     }
                 }
-                Err(e) => {
+                Err(_e) => {
                     // eprintln!("Failed to read file {}: {}", path.display(), e);
                     None
                 }
@@ -344,7 +323,7 @@ pub async fn update_affected_chunks(
     file_name: &str,
     start_byte: u64,
     end_byte: u64,
-    new_content: &str,
+    _new_content: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!(
         "Updating affected chunks for file: {} in range {}-{}",
