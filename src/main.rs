@@ -189,7 +189,10 @@ impl HelpTab {
 
 #[cfg(test)]
 mod tests {
-    use super::{MessageState, MessageType, SubAgentContext, UiMessageEvent};
+    use super::{
+        AgentState, AssistantMode, HelpTab, MessageState, MessageType, PersistenceState,
+        SafetyState, SubAgentContext, UiMessageEvent, UiState,
+    };
 
     #[test]
     fn parses_thinking_animation_event() {
@@ -286,6 +289,41 @@ mod tests {
         assert_eq!(context.messages.len(), 1);
         assert_eq!(context.messages[0].content, "done");
         assert_eq!(context.messages[0].message_type, MessageType::Agent);
+    }
+
+    #[test]
+    fn grouped_ui_state_defaults_match_previous_behavior() {
+        let ui = UiState::default();
+
+        assert!(!ui.show_help);
+        assert!(!ui.show_resume);
+        assert!(matches!(ui.help_tab, HelpTab::General));
+    }
+
+    #[test]
+    fn grouped_agent_safety_and_persistence_defaults_are_empty() {
+        let agent = AgentState::default();
+        let safety = SafetyState::default();
+        let persistence = PersistenceState::default();
+
+        assert!(!agent.agent_processing);
+        assert!(!agent.agent_interrupted);
+        assert!(!agent.is_compacting);
+        assert!(!agent.agent_response_started);
+        assert!(agent.interrupt_pending.is_none());
+
+        assert!(matches!(safety.assistant_mode, AssistantMode::None));
+        assert!(!safety.show_approval_prompt);
+        assert!(!safety.show_sandbox_prompt);
+        assert!(!safety.sandbox_enabled);
+        assert!(safety.approval_prompt_content.is_empty());
+        assert!(safety.sandbox_blocked_path.is_empty());
+
+        assert!(!persistence.save_pending);
+        assert!(persistence.current_conversation_id.is_none());
+        assert!(persistence.current_conversation_path.is_none());
+        assert!(persistence.current_forked_from.is_none());
+        assert!(persistence.current_forked_at.is_none());
     }
 }
 
@@ -1122,6 +1160,76 @@ struct AppSnapshot {
     generation_stats_rendered: bool,
 }
 
+#[derive(Clone)]
+struct UiState {
+    show_help: bool,
+    help_tab: HelpTab,
+    show_resume: bool,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            show_help: false,
+            help_tab: HelpTab::General,
+            show_resume: false,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AgentState {
+    agent_processing: bool,
+    agent_interrupted: bool,
+    is_compacting: bool,
+    agent_response_started: bool,
+    interrupt_pending: Option<String>,
+}
+
+impl Default for AgentState {
+    fn default() -> Self {
+        Self {
+            agent_processing: false,
+            agent_interrupted: false,
+            is_compacting: false,
+            agent_response_started: false,
+            interrupt_pending: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SafetyState {
+    assistant_mode: AssistantMode,
+    show_approval_prompt: bool,
+    approval_prompt_content: String,
+    show_sandbox_prompt: bool,
+    sandbox_blocked_path: String,
+    sandbox_enabled: bool,
+}
+
+impl Default for SafetyState {
+    fn default() -> Self {
+        Self {
+            assistant_mode: AssistantMode::None,
+            show_approval_prompt: false,
+            approval_prompt_content: String::new(),
+            show_sandbox_prompt: false,
+            sandbox_blocked_path: String::new(),
+            sandbox_enabled: false,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct PersistenceState {
+    save_pending: bool,
+    current_conversation_id: Option<String>,
+    current_conversation_path: Option<std::path::PathBuf>,
+    current_forked_from: Option<String>,
+    current_forked_at: Option<SystemTime>,
+}
+
 /// Application state for the TUI
 struct App {
     input: String,
@@ -1163,18 +1271,15 @@ struct App {
     // Survey manager
     survey: Survey,
     // Assistant mode (cycled with Shift+Tab)
-    assistant_mode: AssistantMode,
+    safety_state: SafetyState,
     // Agent integration
     agent: Option<Arc<Agent>>,
     agent_tx: Option<mpsc::UnboundedSender<AgentMessage>>,
     agent_rx: Option<mpsc::UnboundedReceiver<AgentMessage>>,
-    agent_processing: bool,
-    agent_interrupted: bool, // Flag to block processing agent messages after interrupt
-    is_compacting: bool,     // Flag indicating we're in compaction mode
+    agent_state: AgentState,
     // Thinking animation state
     is_thinking: bool,
     thinking_indicator_active: bool,
-    agent_response_started: bool, // Track if we're streaming an agent response
     thinking_loader_frame: usize,
     thinking_last_update: Instant,
     thinking_snowflake_frames: Vec<&'static str>,
@@ -1203,11 +1308,6 @@ struct App {
     editing_queue_index: Option<usize>, // Index of queue message being edited (if any)
     show_queue_choice: bool,      // Show the queue choice popup
     queue_choice_input: String,   // Collect user choice for queue
-    show_approval_prompt: bool,   // Show approval request popup
-    approval_prompt_content: String, // Content of approval request
-    show_sandbox_prompt: bool,    // Show sandbox permission prompt
-    sandbox_blocked_path: String, // Path that was blocked by sandbox
-    interrupt_pending: Option<String>, // Message waiting to send after cancel completes
     export_pending: bool,         // Flag to trigger export in async context
     review_pending: Option<ReviewOptions>, // Flag to trigger code review in async context
     spec_pending: Option<String>, // Flag to trigger /spec command in async context
@@ -1225,7 +1325,7 @@ struct App {
     compaction_history: Vec<CompactionEntry>,
     show_summary_history: bool,
     summary_history_selected: usize,
-    save_pending: bool, // Flag to trigger save conversation in async context
+    persistence_state: PersistenceState,
     // Navigation mode snapshot - frozen UI state while nav mode is active
     nav_snapshot: Option<AppSnapshot>,
     // Session manager window
@@ -1235,7 +1335,6 @@ struct App {
     autocomplete_suggestions: Vec<(String, String)>, // (command, description)
     autocomplete_selected_index: usize,
     // Sandbox toggle
-    sandbox_enabled: bool,
     // Vim keybindings toggle
     vim_mode_enabled: bool,
     vim_input_editor: RichEditor,
@@ -1246,11 +1345,9 @@ struct App {
     // Background task viewer
     viewing_task: Option<(String, String, String, std::time::Instant)>, // (session_id, command, log_file, start_time)
     // Help panel state
-    show_help: bool,
-    help_tab: HelpTab,
+    ui_state: UiState,
     help_commands_selected: usize,
     // Resume panel state
-    show_resume: bool,
     resume_conversations: Vec<ConversationMetadata>,
     resume_selected: usize,
     resume_load_pending: bool,
@@ -1258,11 +1355,7 @@ struct App {
     // Todos panel state
     show_todos: bool,
     // Conversation tracking (for update vs create)
-    current_conversation_id: Option<String>,
-    current_conversation_path: Option<std::path::PathBuf>,
-    // Fork metadata for current conversation
-    current_forked_from: Option<String>,
-    current_forked_at: Option<SystemTime>,
+    // Conversation persistence state
     // Model selection panel state
     show_model_selection: bool,
     available_models: Vec<ModelInfo>,
@@ -1714,13 +1807,13 @@ impl App {
     /// Ensure conversation ID exists, generating one if needed
     /// This should be called when the first real message is sent
     fn ensure_conversation_id(&mut self) -> Result<()> {
-        if self.current_conversation_id.is_none() {
+        if self.persistence_state.current_conversation_id.is_none() {
             // Generate new conversation ID
             let new_id = uuid::Uuid::new_v4().to_string();
             persistence::conversations::ensure_conversation_workspace(&new_id)?;
 
             // Set conversation ID and path (path will be set later during save)
-            self.current_conversation_id = Some(new_id);
+            self.persistence_state.current_conversation_id = Some(new_id);
         }
         Ok(())
     }
@@ -2190,16 +2283,13 @@ impl App {
             flash_highlight: None,
             ctrl_c_pressed: None,
             survey: Survey::new(10, 0.33), // Show survey after 10 messages with 33% chance
-            assistant_mode: AssistantMode::None,
+            safety_state: SafetyState::default(),
             agent: Some(agent_arc),
             agent_tx: Some(input_tx),
             agent_rx: Some(output_rx),
-            agent_processing: false,
-            agent_interrupted: false,
-            is_compacting: false,
+            agent_state: AgentState::default(),
             is_thinking: false,
             thinking_indicator_active: false,
-            agent_response_started: false,
             thinking_loader_frame: 0,
             thinking_last_update: Instant::now(),
             // thinking_snowflake_frames: vec!["✽", "✻", "✹", "❆", "❅"],
@@ -2361,11 +2451,6 @@ impl App {
             editing_queue_index: None,
             show_queue_choice: false,
             queue_choice_input: String::new(),
-            show_approval_prompt: false,
-            approval_prompt_content: String::new(),
-            show_sandbox_prompt: false,
-            sandbox_blocked_path: String::new(),
-            interrupt_pending: None,
             export_pending: false,
             review_pending: None,
             spec_pending: None,
@@ -2383,33 +2468,26 @@ impl App {
             compaction_history: Vec::new(),
             show_summary_history: false,
             summary_history_selected: 0,
-            save_pending: false,
+            persistence_state: PersistenceState::default(),
             nav_snapshot: None,
             session_manager: SessionManager::new(),
             autocomplete_active: false,
             autocomplete_suggestions: Vec::new(),
             autocomplete_selected_index: 0,
             thinking_raw_content: String::new(),
-            sandbox_enabled: false, // Default to sandbox disabled (no restrictions)
             vim_mode_enabled: Self::load_vim_mode_setting(),
             vim_input_editor: RichEditor::new(),
             show_background_tasks: false,
             background_tasks: Vec::new(),
             background_tasks_selected: 0,
             viewing_task: None,
-            show_help: false,
-            help_tab: HelpTab::General,
+            ui_state: UiState::default(),
             help_commands_selected: 0,
-            show_resume: false,
             resume_conversations: Vec::new(),
             resume_selected: 0,
             resume_load_pending: false,
             is_fork_mode: false,
             show_todos: false,
-            current_conversation_id: None,
-            current_conversation_path: None,
-            current_forked_from: None,
-            current_forked_at: None,
             show_model_selection: false,
             available_models: Vec::new(),
             model_selected_index: 0,
@@ -3685,6 +3763,7 @@ impl App {
     fn save_todos(&self, todos: &[TodoItem]) -> Result<()> {
         let json = serde_json::to_string_pretty(todos)?;
         let conversation_id = self
+            .persistence_state
             .current_conversation_id
             .as_ref()
             .ok_or_else(|| color_eyre::eyre::eyre!("No active conversation"))?;
@@ -3695,6 +3774,7 @@ impl App {
     /// Load todos from the conversation-specific todos.json file
     fn load_todos(&self) -> Result<Vec<TodoItem>> {
         let conversation_id = self
+            .persistence_state
             .current_conversation_id
             .as_ref()
             .ok_or_else(|| color_eyre::eyre::eyre!("No active conversation"))?;
@@ -4127,8 +4207,8 @@ Let me analyze the conversation chronologically:
         // Check if we're updating existing conversation or creating new one
         let (conversation_id, created_at, file_path, forked_from, forked_at) =
             if let (Some(id), Some(path)) = (
-                &self.current_conversation_id,
-                &self.current_conversation_path,
+                &self.persistence_state.current_conversation_id,
+                &self.persistence_state.current_conversation_path,
             ) {
                 // UPDATE EXISTING - preserve ID, created_at, and fork metadata
                 let (existing_created_at, existing_forked_from, existing_forked_at) =
@@ -4168,8 +4248,8 @@ Let me analyze the conversation chronologically:
                     new_id,
                     now,
                     new_path,
-                    self.current_forked_from.clone(),
-                    self.current_forked_at,
+                    self.persistence_state.current_forked_from.clone(),
+                    self.persistence_state.current_forked_at,
                 )
             };
 
@@ -4200,8 +4280,8 @@ Let me analyze the conversation chronologically:
         persistence::conversations::write_conversation_file(&file_path, &json)?;
 
         // Track this conversation for future updates
-        self.current_conversation_id = Some(conversation_id);
-        self.current_conversation_path = Some(file_path);
+        self.persistence_state.current_conversation_id = Some(conversation_id);
+        self.persistence_state.current_conversation_path = Some(file_path);
 
         Ok(())
     }
@@ -4285,13 +4365,13 @@ Let me analyze the conversation chronologically:
         if self.is_fork_mode {
             // In fork mode: don't track the ID/path so a new conversation is created on save
             // Fork metadata is already set in the 'f' key handler
-            self.current_conversation_id = None;
-            self.current_conversation_path = None;
+            self.persistence_state.current_conversation_id = None;
+            self.persistence_state.current_conversation_path = None;
             // Reset fork mode flag
             self.is_fork_mode = false;
 
             // Close resume panel and show fork confirmation
-            self.show_resume = false;
+            self.ui_state.show_resume = false;
             self.messages.push(format!(
                 " ⎇ conversation forked from '{}'",
                 metadata.preview
@@ -4300,10 +4380,10 @@ Let me analyze the conversation chronologically:
             self.message_states.push(MessageState::Sent);
 
             // Trigger immediate save to create the fork
-            self.save_pending = true;
+            self.persistence_state.save_pending = true;
         } else {
-            self.current_conversation_id = Some(metadata.id.clone());
-            self.current_conversation_path = Some(metadata.file_path.clone());
+            self.persistence_state.current_conversation_id = Some(metadata.id.clone());
+            self.persistence_state.current_conversation_path = Some(metadata.file_path.clone());
         }
 
         Ok(())
@@ -4829,7 +4909,7 @@ Let me analyze the conversation chronologically:
         match dispatch_slash_command(&command) {
             SlashCommandDispatch::Clear => {
                 // Trigger save before clearing
-                self.save_pending = true;
+                self.persistence_state.save_pending = true;
 
                 // Clear all messages except the command itself
                 let command_msg = self.messages.pop().unwrap();
@@ -4872,7 +4952,7 @@ Let me analyze the conversation chronologically:
                 self.message_states.push(MessageState::Sent);
 
                 // Trigger save before exit
-                self.save_pending = true;
+                self.persistence_state.save_pending = true;
 
                 // Set exit flag
                 self.exit = true;
@@ -4908,8 +4988,8 @@ Let me analyze the conversation chronologically:
             }
             SlashCommandDispatch::Help => {
                 // Open help panel
-                self.show_help = true;
-                self.help_tab = HelpTab::General; // Start on general tab
+                self.ui_state.show_help = true;
+                self.ui_state.help_tab = HelpTab::General; // Start on general tab
                 self.help_commands_selected = 0; // Reset selection
                 // Early return to avoid adding command to messages
                 return;
@@ -4922,7 +5002,7 @@ Let me analyze the conversation chronologically:
                     self.message_types.push(MessageType::Agent);
                     self.message_states.push(MessageState::Sent);
                 } else {
-                    self.show_resume = true;
+                    self.ui_state.show_resume = true;
                     self.is_fork_mode = false; // Normal resume
                     self.resume_selected = 0; // Reset selection
                 }
@@ -4951,7 +5031,7 @@ Let me analyze the conversation chronologically:
                     self.message_types.push(MessageType::Agent);
                     self.message_states.push(MessageState::Sent);
                 } else {
-                    self.show_resume = true; // Use same UI
+                    self.ui_state.show_resume = true; // Use same UI
                     self.is_fork_mode = true; // Fork mode - don't track ID
                     self.resume_selected = 0; // Reset selection
                 }
@@ -5035,21 +5115,21 @@ Let me analyze the conversation chronologically:
                                 agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
                             config.set_mode(agent_core::safety_config::SafetyMode::Yolo);
                             let _ = config.save();
-                            self.assistant_mode = AssistantMode::Yolo;
+                            self.safety_state.assistant_mode = AssistantMode::Yolo;
                         }
                         "regular" => {
                             let mut config =
                                 agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
                             config.set_mode(agent_core::safety_config::SafetyMode::Regular);
                             let _ = config.save();
-                            self.assistant_mode = AssistantMode::None;
+                            self.safety_state.assistant_mode = AssistantMode::None;
                         }
                         "readonly" | "read-only" => {
                             let mut config =
                                 agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
                             config.set_mode(agent_core::safety_config::SafetyMode::ReadOnly);
                             let _ = config.save();
-                            self.assistant_mode = AssistantMode::ReadOnly;
+                            self.safety_state.assistant_mode = AssistantMode::ReadOnly;
                         }
                         "permissions" | "perms" => {
                             let mut config =
@@ -5062,7 +5142,7 @@ Let me analyze the conversation chronologically:
                                 agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
                             config.toggle_sandbox();
                             let _ = config.save();
-                            self.sandbox_enabled = config.sandbox_enabled;
+                            self.safety_state.sandbox_enabled = config.sandbox_enabled;
                         }
                         _ => {}
                     }
@@ -5135,7 +5215,7 @@ Let me analyze the conversation chronologically:
                         }
 
                         // Store message to send after cancel completes
-                        self.interrupt_pending = Some(self.queue_choice_input.clone());
+                        self.agent_state.interrupt_pending = Some(self.queue_choice_input.clone());
 
                         // Clear UI state immediately
                         if let Some(last_msg) = self.messages.last() {
@@ -5178,7 +5258,7 @@ Let me analyze the conversation chronologically:
             }
 
             // Check if we're in approval prompt mode
-            if self.show_approval_prompt {
+            if self.safety_state.show_approval_prompt {
                 let choice = self.input.trim();
                 match choice {
                     "0" => {
@@ -5222,19 +5302,20 @@ Let me analyze the conversation chronologically:
                 self.input.clear();
                 self.reset_cursor();
                 self.input_modified = false;
-                self.show_approval_prompt = false;
-                self.approval_prompt_content.clear();
+                self.safety_state.show_approval_prompt = false;
+                self.safety_state.approval_prompt_content.clear();
                 return;
             }
 
             // Check if we're in sandbox permission prompt mode
-            if self.show_sandbox_prompt {
+            if self.safety_state.show_sandbox_prompt {
                 let choice = self.input.trim();
                 match choice {
                     "0" => {
                         // Accept - add path to writable roots dynamically
-                        let path = std::path::PathBuf::from(&self.sandbox_blocked_path);
-                        let path_display = self.sandbox_blocked_path.clone();
+                        let path =
+                            std::path::PathBuf::from(&self.safety_state.sandbox_blocked_path);
+                        let path_display = self.safety_state.sandbox_blocked_path.clone();
 
                         // Add the root in an async context
                         tokio::spawn(async move {
@@ -5282,8 +5363,8 @@ Let me analyze the conversation chronologically:
                 self.input.clear();
                 self.reset_cursor();
                 self.input_modified = false;
-                self.show_sandbox_prompt = false;
-                self.sandbox_blocked_path.clear();
+                self.safety_state.show_sandbox_prompt = false;
+                self.safety_state.sandbox_blocked_path.clear();
                 return;
             }
 
@@ -5305,7 +5386,7 @@ Let me analyze the conversation chronologically:
                 if !is_dismiss {
                     self.survey.show_thank_you();
                 }
-            } else if self.agent_processing || self.thinking_indicator_active {
+            } else if self.agent_state.agent_processing || self.thinking_indicator_active {
                 // Agent is currently processing - show queue options popup
                 let user_message = self.input.clone();
 
@@ -5353,7 +5434,7 @@ Let me analyze the conversation chronologically:
                 }
 
                 // Reset agent response tracking for new conversation turn
-                self.agent_response_started = false;
+                self.agent_state.agent_response_started = false;
 
                 // Save to history
                 self.save_to_history(&user_message);
@@ -5372,8 +5453,8 @@ Let me analyze the conversation chronologically:
 
                 // Send message to agent if available - processing happens in background task
                 if let Some(tx) = &self.agent_tx {
-                    self.agent_processing = true;
-                    self.agent_interrupted = false; // Reset interrupted flag for new message
+                    self.agent_state.agent_processing = true;
+                    self.agent_state.agent_interrupted = false; // Reset interrupted flag for new message
                     let _ = tx.send(AgentMessage::UserInput(user_message.clone()));
                 }
 
@@ -5409,7 +5490,7 @@ Let me analyze the conversation chronologically:
             if let Some(rx) = &mut self.agent_rx {
                 while let Ok(msg) = rx.try_recv() {
                     // Skip processing agent messages if we've interrupted
-                    if self.agent_interrupted {
+                    if self.agent_state.agent_interrupted {
                         match msg {
                             AgentMessage::GenerationStats(stats) => {
                                 Self::record_generation_stats_fields(
@@ -5419,7 +5500,7 @@ Let me analyze the conversation chronologically:
                                 );
                             }
                             AgentMessage::Done => {
-                                self.agent_interrupted = false;
+                                self.agent_state.agent_interrupted = false;
                                 // Still check for auto-summarization even after interruption
                                 // If context is low, we should summarize regardless
                                 check_auto_summarize = true;
@@ -5452,7 +5533,9 @@ Let me analyze the conversation chronologically:
 
                     match msg {
                         AgentMessage::ThinkingContent(thinking, token_count) => {
-                            if self.limit_thinking_to_first_token && self.agent_response_started {
+                            if self.limit_thinking_to_first_token
+                                && self.agent_state.agent_response_started
+                            {
                                 continue;
                             }
                             // Add or maintain thinking animation placeholder
@@ -5485,7 +5568,7 @@ Let me analyze the conversation chronologically:
 
                             // Check for mid-stream auto-summarize (inlined to avoid borrow conflict)
                             // Only check if not already compacting/triggered and no queued messages
-                            if !self.is_compacting
+                            if !self.agent_state.is_compacting
                                 && !self.is_auto_summarize
                                 && self.queued_messages.is_empty()
                             {
@@ -5575,7 +5658,7 @@ Let me analyze the conversation chronologically:
 
                             // Check for mid-stream auto-summarize (inlined to avoid borrow conflict)
                             // Only check if not already compacting/triggered and no queued messages
-                            if !self.is_compacting
+                            if !self.agent_state.is_compacting
                                 && !self.is_auto_summarize
                                 && self.queued_messages.is_empty()
                             {
@@ -5630,7 +5713,7 @@ Let me analyze the conversation chronologically:
                                 .map(|msg| msg.starts_with("├── ") || msg.starts_with("└── "))
                                 .unwrap_or(false);
 
-                            let should_create_new = if !self.agent_response_started {
+                            let should_create_new = if !self.agent_state.agent_response_started {
                                 // First chunk of agent response - always create new message
                                 true
                             } else if last_is_thinking_tree {
@@ -5647,7 +5730,7 @@ Let me analyze the conversation chronologically:
                             if should_create_new {
                                 self.messages.push(text);
                                 self.message_types.push(MessageType::Agent);
-                                self.agent_response_started = true;
+                                self.agent_state.agent_response_started = true;
                             } else {
                                 // Append to existing agent response
                                 if let Some(last_msg) = self.messages.last_mut() {
@@ -5796,9 +5879,9 @@ Let me analyze the conversation chronologically:
                                                     || potential_path.starts_with('.')
                                                 {
                                                     // Show sandbox permission prompt
-                                                    self.sandbox_blocked_path =
+                                                    self.safety_state.sandbox_blocked_path =
                                                         potential_path.to_string();
-                                                    self.show_sandbox_prompt = true;
+                                                    self.safety_state.show_sandbox_prompt = true;
                                                 }
                                             }
                                         }
@@ -5902,8 +5985,8 @@ Let me analyze the conversation chronologically:
                             }
                         }
                         AgentMessage::RequestApproval(content) => {
-                            self.show_approval_prompt = true;
-                            self.approval_prompt_content = content;
+                            self.safety_state.show_approval_prompt = true;
+                            self.safety_state.approval_prompt_content = content;
                         }
                         AgentMessage::ThinkingComplete(_residual_tokens) => {
                             // Thinking content has stopped streaming, but keep the indicator
@@ -5923,12 +6006,12 @@ Let me analyze the conversation chronologically:
                             // Add the error message
                             self.messages.push(format!("[Error: {}]", err));
                             self.message_types.push(MessageType::Agent);
-                            self.agent_processing = false;
+                            self.agent_state.agent_processing = false;
                             self.is_thinking = false;
                             self.thinking_indicator_active = false;
                             self.thinking_start_time = None;
                             self.thinking_token_count = 0;
-                            self.agent_response_started = false;
+                            self.agent_state.agent_response_started = false;
                         }
                         AgentMessage::GenerationStats(stats) => {
                             // Store the generation stats
@@ -5981,16 +6064,16 @@ Let me analyze the conversation chronologically:
                                 ));
                                 self.message_types.push(MessageType::Agent);
                             }
-                            self.agent_processing = false;
+                            self.agent_state.agent_processing = false;
                             self.is_thinking = false;
                             self.thinking_indicator_active = false;
                             self.thinking_start_time = None;
                             self.thinking_token_count = 0;
                             self.streaming_completion_tokens = 0; // Reset for next turn
-                            self.agent_response_started = false;
+                            self.agent_state.agent_response_started = false;
 
                             // Handle compaction completion
-                            if self.is_compacting {
+                            if self.agent_state.is_compacting {
                                 let was_auto_summarize = self.is_auto_summarize;
 
                                 // Find the summary (last agent message that's not a marker)
@@ -6015,7 +6098,7 @@ Let me analyze the conversation chronologically:
                                 // Check if we got a valid summary before clearing anything
                                 if summary.is_empty() {
                                     // Compaction failed - preserve conversation state
-                                    self.is_compacting = false;
+                                    self.agent_state.is_compacting = false;
                                     self.is_auto_summarize = false;
                                     self.compaction_resume_prompt = None;
                                     self.compaction_resume_ready = false;
@@ -6037,7 +6120,7 @@ Let me analyze the conversation chronologically:
                                 }
 
                                 // Valid summary - now safe to clear and proceed
-                                self.is_compacting = false;
+                                self.agent_state.is_compacting = false;
                                 self.is_auto_summarize = false;
 
                                 // Capture a rewind point before wiping the transcript
@@ -6132,7 +6215,7 @@ Let me analyze the conversation chronologically:
                             }
 
                             // Check for interrupt pending FIRST
-                            if let Some(interrupt_msg) = self.interrupt_pending.take() {
+                            if let Some(interrupt_msg) = self.agent_state.interrupt_pending.take() {
                                 // Mark last message (interrupted one) as Interrupted
                                 {
                                     if let Some(last_state) = self.message_states.last_mut() {
@@ -6250,7 +6333,7 @@ Let me analyze the conversation chronologically:
 
                     // Send to agent
                     if let Some(tx) = &self.agent_tx {
-                        self.agent_processing = true;
+                        self.agent_state.agent_processing = true;
                         let _ = tx.send(AgentMessage::UserInput(user_message));
                     }
                 }
@@ -6365,7 +6448,7 @@ Let me analyze the conversation chronologically:
                         self.thinking_raw_content.clear();
 
                         if let Some(tx) = &self.agent_tx {
-                            self.agent_processing = true;
+                            self.agent_state.agent_processing = true;
                             let _ = tx.send(AgentMessage::UserInput(queued_msg));
                         }
                     }
@@ -6447,7 +6530,7 @@ Let me analyze the conversation chronologically:
 
                         // Send to agent
                         if let Some(tx) = &self.agent_tx {
-                            self.agent_processing = true;
+                            self.agent_state.agent_processing = true;
                             let _ = tx.send(AgentMessage::UserInput(prompt));
                         }
                     }
@@ -6507,12 +6590,12 @@ Let me analyze the conversation chronologically:
                 self.thinking_raw_content.clear();
 
                 // Set compaction flag
-                self.is_compacting = true;
+                self.agent_state.is_compacting = true;
 
                 // Send to agent
                 if let Some(tx) = &self.agent_tx {
-                    self.agent_processing = true;
-                    self.agent_interrupted = false;
+                    self.agent_state.agent_processing = true;
+                    self.agent_state.agent_interrupted = false;
                     let _ = tx.send(AgentMessage::UserInput(prompt));
                 }
             }
@@ -6523,7 +6606,9 @@ Let me analyze the conversation chronologically:
 
                 if self.resume_selected < self.resume_conversations.len() {
                     // Auto-save current conversation before loading a new one
-                    if self.current_conversation_id.is_some() && !self.messages.is_empty() {
+                    if self.persistence_state.current_conversation_id.is_some()
+                        && !self.messages.is_empty()
+                    {
                         if let Err(e) = self.save_conversation().await {
                             self.messages.push(format!(
                                 " ⎿ Warning: Failed to auto-save before resume: {}",
@@ -6541,11 +6626,11 @@ Let me analyze the conversation chronologically:
                         Ok(_) => {
                             // If fork mode, reset conversation ID (next save will create new file)
                             if is_fork {
-                                self.current_conversation_id = None;
-                                self.current_conversation_path = None;
+                                self.persistence_state.current_conversation_id = None;
+                                self.persistence_state.current_conversation_path = None;
                             }
                             // Close resume panel
-                            self.show_resume = false;
+                            self.ui_state.show_resume = false;
                         }
                         Err(e) => {
                             self.messages
@@ -6558,8 +6643,8 @@ Let me analyze the conversation chronologically:
             }
 
             // Handle save pending (auto-save on /clear or /exit)
-            if self.save_pending {
-                self.save_pending = false;
+            if self.persistence_state.save_pending {
+                self.persistence_state.save_pending = false;
                 if let Err(e) = self.save_conversation().await {
                     // eprintln!("[ERROR] Failed to save conversation: {}", e);
                 }
@@ -6577,7 +6662,7 @@ Let me analyze the conversation chronologically:
             let poll_duration = match self.phase {
                 Phase::Ascii | Phase::Tips => Duration::from_millis(30),
                 Phase::Input => {
-                    if self.agent_processing || self.thinking_indicator_active {
+                    if self.agent_state.agent_processing || self.thinking_indicator_active {
                         Duration::from_millis(16) // ~60fps when agent is responding or thinking
                     } else {
                         Duration::from_millis(50) // Responsive but not too aggressive
@@ -6590,7 +6675,7 @@ Let me analyze the conversation chronologically:
                         if self.phase == Phase::Input
                             && self.mode == Mode::Normal
                             && !self.show_background_tasks
-                            && !self.show_help
+                            && !self.ui_state.show_help
                             && self.viewing_task.is_none() =>
                     {
                         // Handle paste for both vim and normal mode
@@ -6730,10 +6815,10 @@ Let me analyze the conversation chronologically:
                                 }
 
                                 // Help panel key handlers (highest priority)
-                                if self.show_help {
+                                if self.ui_state.show_help {
                                     match key.code {
                                         KeyCode::Esc => {
-                                            self.show_help = false;
+                                            self.ui_state.show_help = false;
                                             self.messages
                                                 .push(" ⎿ help dialog dismissed".to_string());
                                             self.message_types.push(MessageType::Agent);
@@ -6741,17 +6826,21 @@ Let me analyze the conversation chronologically:
                                             continue;
                                         }
                                         KeyCode::Tab => {
-                                            self.help_tab = self.help_tab.next();
+                                            self.ui_state.help_tab = self.ui_state.help_tab.next();
                                             self.help_commands_selected = 0; // Reset selection when switching tabs
                                             continue;
                                         }
-                                        KeyCode::Up if self.help_tab == HelpTab::Commands => {
+                                        KeyCode::Up
+                                            if self.ui_state.help_tab == HelpTab::Commands =>
+                                        {
                                             if self.help_commands_selected > 0 {
                                                 self.help_commands_selected -= 1;
                                             }
                                             continue;
                                         }
-                                        KeyCode::Down if self.help_tab == HelpTab::Commands => {
+                                        KeyCode::Down
+                                            if self.ui_state.help_tab == HelpTab::Commands =>
+                                        {
                                             if self.help_commands_selected
                                                 < SLASH_COMMANDS.len().saturating_sub(1)
                                             {
@@ -6767,10 +6856,10 @@ Let me analyze the conversation chronologically:
                                 }
 
                                 // Resume panel key handlers
-                                if self.show_resume {
+                                if self.ui_state.show_resume {
                                     match key.code {
                                         KeyCode::Esc => {
-                                            self.show_resume = false;
+                                            self.ui_state.show_resume = false;
                                             self.messages
                                                 .push(" ⎿ resume dialog dismissed".to_string());
                                             self.message_types.push(MessageType::Agent);
@@ -6828,7 +6917,7 @@ Let me analyze the conversation chronologically:
                                                     }
                                                     // Close panel if no conversations left
                                                     if self.resume_conversations.is_empty() {
-                                                        self.show_resume = false;
+                                                        self.ui_state.show_resume = false;
                                                         self.messages.push(
                                                             " ⎿ conversation deleted".to_string(),
                                                         );
@@ -6849,9 +6938,10 @@ Let me analyze the conversation chronologically:
                                                     [self.resume_selected]
                                                     .clone();
                                                 // Set fork metadata
-                                                self.current_forked_from =
+                                                self.persistence_state.current_forked_from =
                                                     Some(metadata.id.clone());
-                                                self.current_forked_at = Some(SystemTime::now());
+                                                self.persistence_state.current_forked_at =
+                                                    Some(SystemTime::now());
                                                 // Set is_fork_mode and trigger load
                                                 self.is_fork_mode = true;
                                                 self.resume_load_pending = true;
@@ -7036,10 +7126,12 @@ Let me analyze the conversation chronologically:
                                 if key.modifiers.contains(KeyModifiers::SHIFT)
                                     && key.code == KeyCode::BackTab
                                 {
-                                    self.assistant_mode = self.assistant_mode.next();
+                                    self.safety_state.assistant_mode =
+                                        self.safety_state.assistant_mode.next();
 
                                     // Sync to safety config
-                                    if let Some(safety_mode) = self.assistant_mode.to_safety_mode()
+                                    if let Some(safety_mode) =
+                                        self.safety_state.assistant_mode.to_safety_mode()
                                     {
                                         let mut config =
                                             agent_core::safety_config::SafetyConfig::load()
@@ -7066,11 +7158,12 @@ Let me analyze the conversation chronologically:
                                 if key.modifiers.contains(KeyModifiers::CONTROL)
                                     && key.code == KeyCode::Char('s')
                                 {
-                                    self.sandbox_enabled = !self.sandbox_enabled;
+                                    self.safety_state.sandbox_enabled =
+                                        !self.safety_state.sandbox_enabled;
 
                                     // Set/unset SAFE_MODE environment variable
                                     unsafe {
-                                        if self.sandbox_enabled {
+                                        if self.safety_state.sandbox_enabled {
                                             std::env::set_var("SAFE_MODE", "1");
                                         } else {
                                             std::env::remove_var("SAFE_MODE");
@@ -7136,7 +7229,8 @@ Let me analyze the conversation chronologically:
 
                                 // Handle Esc to interrupt agent processing
                                 if key.code == KeyCode::Esc
-                                    && (self.agent_processing || self.thinking_indicator_active)
+                                    && (self.agent_state.agent_processing
+                                        || self.thinking_indicator_active)
                                 {
                                     // If we have a current thinking summary, convert it to static tree line FIRST
                                     if let Some((current_summary, token_count, chunk_count)) =
@@ -7183,7 +7277,7 @@ Let me analyze the conversation chronologically:
                                     }
 
                                     // Set interrupted flag to block any further agent message processing
-                                    self.agent_interrupted = true;
+                                    self.agent_state.agent_interrupted = true;
 
                                     // Send cancel message to agent
                                     if let Some(tx) = &self.agent_tx {
@@ -7216,7 +7310,7 @@ Let me analyze the conversation chronologically:
                                     self.thinking_start_time = None;
                                     self.thinking_token_count = 0;
                                     self.thinking_position = 0;
-                                    self.agent_processing = false;
+                                    self.agent_state.agent_processing = false;
                                     continue;
                                 }
 
@@ -7376,8 +7470,8 @@ Let me analyze the conversation chronologically:
                                             if key.modifiers.contains(KeyModifiers::CONTROL) =>
                                         {
                                             // Check if any UI panels are open and dismiss them first
-                                            if self.show_help {
-                                                self.show_help = false;
+                                            if self.ui_state.show_help {
+                                                self.ui_state.show_help = false;
                                                 self.messages
                                                     .push(" ⎿ help dialog dismissed".to_string());
                                                 self.message_types.push(MessageType::Agent);
@@ -7394,8 +7488,8 @@ Let me analyze the conversation chronologically:
                                                     .push(" ⎿ shells dialog dismissed".to_string());
                                                 self.message_types.push(MessageType::Agent);
                                                 self.message_states.push(MessageState::Sent);
-                                            } else if self.show_resume {
-                                                self.show_resume = false;
+                                            } else if self.ui_state.show_resume {
+                                                self.ui_state.show_resume = false;
                                                 self.messages
                                                     .push(" ⎿ resume dialog dismissed".to_string());
                                                 self.message_types.push(MessageType::Agent);
@@ -7427,7 +7521,7 @@ Let me analyze the conversation chronologically:
                                                 if let Some(last_press) = self.ctrl_c_pressed {
                                                     if last_press.elapsed().as_millis() < 1000 {
                                                         // Second Ctrl+C within 1 second - exit
-                                                        self.save_pending = true; // Auto-save before exit
+                                                        self.persistence_state.save_pending = true; // Auto-save before exit
                                                         self.exit = true;
                                                     } else {
                                                         // Pressed too late, reset timer
@@ -8009,7 +8103,7 @@ Let me analyze the conversation chronologically:
         }
 
         // Save conversation on exit if pending (for Ctrl+C exits)
-        if self.save_pending {
+        if self.persistence_state.save_pending {
             if let Err(e) = self.save_conversation().await {
                 // eprintln!("[ERROR] Failed to save conversation on exit: {}", e);
             }
@@ -8518,7 +8612,7 @@ Let me analyze the conversation chronologically:
 
                 // During streaming: estimate using streaming tokens + thinking tokens
                 // Use last known prompt_tokens from frozen stats if available
-                if self.agent_processing {
+                if self.agent_state.agent_processing {
                     let streaming_tokens =
                         self.streaming_completion_tokens + self.thinking_token_count;
                     if streaming_tokens > 0 {
@@ -8602,7 +8696,7 @@ Let me analyze the conversation chronologically:
 
         // Set interrupted flag to block any further agent message processing
         // until the cancel is acknowledged
-        self.agent_interrupted = true;
+        self.agent_state.agent_interrupted = true;
 
         // Clear thinking UI state
         if let Some(last_msg) = self.messages.last() {
@@ -8661,11 +8755,11 @@ Let me analyze the conversation chronologically:
         self.thinking_start_time = Some(Instant::now());
         self.thinking_token_count = 0;
         self.thinking_raw_content.clear();
-        self.agent_response_started = false;
+        self.agent_state.agent_response_started = false;
 
         if let Some(tx) = &self.agent_tx {
-            self.agent_processing = true;
-            self.agent_interrupted = false;
+            self.agent_state.agent_processing = true;
+            self.agent_state.agent_interrupted = false;
             let _ = tx.send(AgentMessage::UserInput(prompt));
         }
     }
@@ -9160,7 +9254,7 @@ Let me analyze the conversation chronologically:
             Span::styled("● ", Style::default().fg(Color::Red)),
             Span::raw("Add "),
             Span::styled(
-                &self.sandbox_blocked_path,
+                &self.safety_state.sandbox_blocked_path,
                 Style::default().fg(Color::Yellow),
             ),
             Span::raw(" to writable roots?"),
@@ -9187,7 +9281,7 @@ Let me analyze the conversation chronologically:
         // First line: question with content
         lines.push(Line::from(vec![
             Span::styled("● ", Style::default().fg(Color::Yellow)),
-            Span::raw(&self.approval_prompt_content),
+            Span::raw(&self.safety_state.approval_prompt_content),
         ]));
 
         // Second line: options
@@ -9696,7 +9790,7 @@ Let me analyze the conversation chronologically:
         // Create tab header
         let tab_spans: Vec<Span> = vec![
             Span::styled("  ", Style::default()),
-            if self.help_tab == HelpTab::General {
+            if self.ui_state.help_tab == HelpTab::General {
                 Span::styled(
                     "general",
                     Style::default()
@@ -9707,7 +9801,7 @@ Let me analyze the conversation chronologically:
                 Span::styled("general", Style::default().fg(Color::DarkGray))
             },
             Span::styled("   ", Style::default()),
-            if self.help_tab == HelpTab::Commands {
+            if self.ui_state.help_tab == HelpTab::Commands {
                 Span::styled(
                     "commands",
                     Style::default()
@@ -9718,7 +9812,7 @@ Let me analyze the conversation chronologically:
                 Span::styled("commands", Style::default().fg(Color::DarkGray))
             },
             Span::styled("   ", Style::default()),
-            if self.help_tab == HelpTab::CustomCommands {
+            if self.ui_state.help_tab == HelpTab::CustomCommands {
                 Span::styled(
                     "custom-commands",
                     Style::default()
@@ -9755,7 +9849,7 @@ Let me analyze the conversation chronologically:
         };
 
         // Render content based on active tab
-        match self.help_tab {
+        match self.ui_state.help_tab {
             HelpTab::General => {
                 let content = vec![
                     Line::from(""),
@@ -10373,7 +10467,7 @@ Let me analyze the conversation chronologically:
                 ]
             }
             Mode::Normal => {
-                if self.sandbox_enabled {
+                if self.safety_state.sandbox_enabled {
                     vec![
                         Span::styled("sandbox ", Style::default().fg(Color::Green)),
                         Span::styled("(ctrl + s to cycle)", Style::default().fg(Color::DarkGray)),
@@ -10667,8 +10761,16 @@ Let me analyze the conversation chronologically:
                 };
                 // Add space for queue choice popup, survey, autocomplete, and infobar if active
                 let queue_choice_height = if self.show_queue_choice { 2 } else { 0 };
-                let approval_prompt_height = if self.show_approval_prompt { 2 } else { 0 };
-                let sandbox_prompt_height = if self.show_sandbox_prompt { 2 } else { 0 };
+                let approval_prompt_height = if self.safety_state.show_approval_prompt {
+                    2
+                } else {
+                    0
+                };
+                let sandbox_prompt_height = if self.safety_state.show_sandbox_prompt {
+                    2
+                } else {
+                    0
+                };
                 let survey_height = self.survey.get_height();
                 let autocomplete_height = if self.autocomplete_active && self.mode == Mode::Normal {
                     self.autocomplete_suggestions.len().min(10) as u16
@@ -10682,12 +10784,12 @@ Let me analyze the conversation chronologically:
                 } else {
                     0
                 };
-                let help_height = if self.show_help {
+                let help_height = if self.ui_state.show_help {
                     25 // Fixed height for help panel
                 } else {
                     0
                 };
-                let resume_height = if self.show_resume {
+                let resume_height = if self.ui_state.show_resume {
                     25 // Fixed height for resume panel
                 } else {
                     0
@@ -10804,8 +10906,8 @@ Let me analyze the conversation chronologically:
         let status_area = areas[areas.len() - 1];
         // Determine area indices based on whether queue choice popup, sandbox prompt, survey/thank_you and infobar are active
         let has_queue_choice = self.show_queue_choice;
-        let has_approval_prompt = self.show_approval_prompt;
-        let has_sandbox_prompt = self.show_sandbox_prompt;
+        let has_approval_prompt = self.safety_state.show_approval_prompt;
+        let has_sandbox_prompt = self.safety_state.show_sandbox_prompt;
         let has_survey_or_thanks = self.survey.is_active() || self.survey.has_thank_you();
         let has_infobar = self.ctrl_c_pressed.is_some() || !self.queued_messages.is_empty();
         let has_autocomplete = self.autocomplete_active && self.mode == Mode::Normal;
@@ -10867,14 +10969,14 @@ Let me analyze the conversation chronologically:
         } else {
             None
         };
-        let help_area_idx = if self.show_help {
+        let help_area_idx = if self.ui_state.show_help {
             let i = idx;
             idx += 1;
             Some(i)
         } else {
             None
         };
-        let resume_area_idx = if self.show_resume {
+        let resume_area_idx = if self.ui_state.show_resume {
             let i = idx;
             idx += 1;
             Some(i)
@@ -11751,7 +11853,7 @@ Let me analyze the conversation chronologically:
                 // Render cursor if it's visible in the viewport
                 // In Navigation mode, always show cursor (frozen state), otherwise only show if not thinking
                 let should_show_cursor = self.nav_snapshot.is_some()
-                    || (!self.agent_processing && !self.thinking_indicator_active);
+                    || (!self.agent_state.agent_processing && !self.thinking_indicator_active);
                 if should_show_cursor
                     && cursor_row >= scroll_offset
                     && cursor_row < scroll_offset + visible_lines
@@ -11837,7 +11939,9 @@ Let me analyze the conversation chronologically:
                         current_x += 1;
                     }
                 }
-            } else if let Some((mode_text, mode_color)) = self.assistant_mode.to_display() {
+            } else if let Some((mode_text, mode_color)) =
+                self.safety_state.assistant_mode.to_display()
+            {
                 // Render assistant mode indicator
                 let full_text = format!("{} (shift + tab to cycle)", mode_text);
 
