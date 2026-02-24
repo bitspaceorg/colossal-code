@@ -10,3 +10,11 @@ P1-03: Extracted slash command parsing/dispatch into `src/commands/*`.
 - Moved `ReviewType`/`ReviewOptions` definitions out of `main.rs` into the command module.
 - Removed unreachable duplicate `/fork` branch during dispatch extraction.
 - Ran `cargo test` (pass) and `cargo clippy --all-targets` (pass with existing warnings).
+
+P1-04 - Extract persistence into src/persistence/*
+
+- Added `src/persistence/` modules for config, history, conversations, and todos IO.
+- Moved config/history/conversation/todo filesystem read-write logic in `src/main.rs` to use the new persistence APIs.
+- Added unit tests for new persistence modules (`config`, `history`, `conversations`).
+- Ran `cargo test` (pass), `cargo fmt --check` (pass), and `cargo clippy --all-targets` (pass with existing warnings).
+- Note: `cargo clippy --all-targets --all-features` fails in this environment due CUDA toolchain/compiler incompatibility (nvcc + gcc version mismatch).

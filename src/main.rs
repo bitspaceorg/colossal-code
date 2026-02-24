@@ -24,7 +24,6 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::{
     collections::HashMap,
@@ -43,6 +42,7 @@ mod session_manager;
 pub use session_manager::{OrchestratorEntry, Session, SessionManager, SessionRole, SessionStatus};
 mod commands;
 mod model_context;
+mod persistence;
 mod spec_cli;
 use commands::{ParsedSlashCommand, ReviewOptions, ReviewType, parse_slash_command};
 use spec_cli::{MessageLog, SpecAgentBridge, SpecCliContext, SpecCliHandler, SpecCommandResult};
@@ -1198,32 +1198,12 @@ struct App {
     rendering_sub_agent_prefix: Option<String>,
 }
 impl App {
-    fn get_config_file_path() -> Result<std::path::PathBuf> {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .map_err(|_| color_eyre::eyre::eyre!("Could not determine home directory"))?;
-        let config_dir = std::path::Path::new(&home).join(".config").join(".nite");
-        std::fs::create_dir_all(&config_dir)?;
-        Ok(config_dir.join("nite.conf"))
-    }
-
     fn models_directory_path() -> Option<std::path::PathBuf> {
         dirs::home_dir().map(|home| home.join(".config").join(".nite").join("models"))
     }
 
     fn load_config_value(key: &str) -> Option<String> {
-        if let Ok(config_path) = Self::get_config_file_path() {
-            if let Ok(content) = std::fs::read_to_string(config_path) {
-                for line in content.lines() {
-                    if line.starts_with(key) {
-                        if let Some(value) = line.split('=').nth(1) {
-                            return Some(value.trim().to_string());
-                        }
-                    }
-                }
-            }
-        }
-        None
+        persistence::config::load_config_value(key)
     }
 
     fn load_vim_mode_setting() -> bool {
@@ -1286,19 +1266,7 @@ impl App {
     }
 
     fn save_config(&self) -> Result<()> {
-        let config_path = Self::get_config_file_path()?;
-
-        // Read existing config to preserve other settings
-        let mut config_map = std::collections::HashMap::new();
-        if let Ok(content) = std::fs::read_to_string(&config_path) {
-            for line in content.lines() {
-                if let Some(idx) = line.find('=') {
-                    let key = line[..idx].trim();
-                    let value = line[idx + 1..].trim();
-                    config_map.insert(key.to_string(), value.to_string());
-                }
-            }
-        }
+        let mut config_map = persistence::config::load_config_map();
 
         // Update with current values
         config_map.insert("vim-keybind".to_string(), self.vim_mode_enabled.to_string());
@@ -1314,12 +1282,7 @@ impl App {
             AUTO_SUMMARIZE_THRESHOLD_VERSION.to_string(),
         );
 
-        // Write back to file
-        let mut content = String::new();
-        for (key, value) in config_map.iter() {
-            content.push_str(&format!("{} = {}\n", key, value));
-        }
-        std::fs::write(config_path, content)?;
+        persistence::config::write_config_map(&config_map)?;
         Ok(())
     }
 
@@ -1580,22 +1543,11 @@ impl App {
     }
 
     fn initialize_config_file() -> Result<()> {
-        let config_path = Self::get_config_file_path()?;
-        // Only create if it doesn't exist
-        if !config_path.exists() {
-            let default_content = "vim-keybind = false\n";
-            std::fs::write(config_path, default_content)?;
-        }
-        Ok(())
+        persistence::config::initialize_default_file("vim-keybind = false\n")
     }
 
     fn initialize_conversations_dir() -> Result<()> {
-        let conversations_dir = Self::get_conversations_dir()?;
-        // Create the conversations directory if it doesn't exist
-        if !conversations_dir.exists() {
-            std::fs::create_dir_all(&conversations_dir)?;
-        }
-        Ok(())
+        persistence::conversations::initialize_conversations_dir()
     }
 
     // Helper method to add a message with full metadata tracking
@@ -1614,60 +1566,12 @@ impl App {
     }
 
     fn get_history_file_path() -> Result<std::path::PathBuf> {
-        // Get current working directory
         let cwd = std::env::current_dir()?;
-        let cwd_str = cwd.to_string_lossy();
-
-        // Hash the path with SHA256
-        let mut hasher = Sha256::new();
-        hasher.update(cwd_str.as_bytes());
-        let hash = hasher.finalize();
-        let hash_str = format!("{:x}", hash);
-
-        // Get config dir (~/.config/.nite/history/)
-        let mut history_dir = dirs::config_dir()
-            .ok_or_else(|| color_eyre::eyre::eyre!("Could not find config directory"))?;
-        history_dir.push(".nite");
-        history_dir.push("history");
-
-        // Create directory if it doesn't exist
-        std::fs::create_dir_all(&history_dir)?;
-
-        // Return path to history file
-        history_dir.push(hash_str);
-        Ok(history_dir)
+        persistence::history::history_file_path_for_cwd(&cwd)
     }
 
     fn load_history(history_file: &std::path::Path) -> Vec<String> {
-        if let Ok(contents) = std::fs::read_to_string(history_file) {
-            let history: Vec<String> = contents
-                .lines()
-                .map(|s| {
-                    // Unescape newlines: \n becomes actual newline
-                    s.replace("\\n", "\n").replace("\\\\", "\\") // Handle escaped backslashes
-                })
-                .collect();
-
-            // Remove consecutive duplicates
-            Self::deduplicate_history(history)
-        } else {
-            Vec::new()
-        }
-    }
-
-    /// Remove consecutive duplicate entries from history
-    fn deduplicate_history(history: Vec<String>) -> Vec<String> {
-        let mut deduplicated = Vec::new();
-        let mut last_entry: Option<&String> = None;
-
-        for entry in &history {
-            if Some(entry) != last_entry {
-                deduplicated.push(entry.clone());
-                last_entry = Some(entry);
-            }
-        }
-
-        deduplicated
+        persistence::history::load_history(history_file)
     }
 
     fn save_to_history(&mut self, command: &str) {
@@ -1692,16 +1596,7 @@ impl App {
         }
 
         // Write to file - escape newlines and backslashes
-        let escaped_history: Vec<String> = self
-            .command_history
-            .iter()
-            .map(|cmd| {
-                // Escape backslashes first, then newlines
-                cmd.replace("\\", "\\\\").replace("\n", "\\n")
-            })
-            .collect();
-        let contents = escaped_history.join("\n");
-        let _ = std::fs::write(&self.history_file_path, contents);
+        let _ = persistence::history::save_history(&self.history_file_path, &self.command_history);
     }
 
     /// Ensure conversation ID exists, generating one if needed
@@ -1710,13 +1605,7 @@ impl App {
         if self.current_conversation_id.is_none() {
             // Generate new conversation ID
             let new_id = uuid::Uuid::new_v4().to_string();
-
-            // Get conversations directory
-            let conversations_dir = Self::get_conversations_dir()?;
-
-            // Create conversation-specific directory
-            let conversation_dir = conversations_dir.join(&new_id);
-            std::fs::create_dir_all(&conversation_dir)?;
+            persistence::conversations::ensure_conversation_workspace(&new_id)?;
 
             // Set conversation ID and path (path will be set later during save)
             self.current_conversation_id = Some(new_id);
@@ -3677,117 +3566,70 @@ impl App {
 
     // Conversation persistence functions
     fn get_conversations_dir() -> Result<std::path::PathBuf> {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .map_err(|_| color_eyre::eyre::eyre!("Could not determine home directory"))?;
-        let conversations_dir = std::path::Path::new(&home)
-            .join(".config")
-            .join(".nite")
-            .join("conversations");
-        Ok(conversations_dir)
-    }
-
-    /// Get the path to the todos.json file for the current conversation
-    fn get_todos_path(&self) -> Result<std::path::PathBuf> {
-        if let Some(conversation_id) = &self.current_conversation_id {
-            let conversations_dir = Self::get_conversations_dir()?;
-            let conversation_dir = conversations_dir.join(conversation_id);
-            Ok(conversation_dir.join("todos.json"))
-        } else {
-            Err(color_eyre::eyre::eyre!("No active conversation"))
-        }
+        persistence::conversations::conversations_dir()
     }
 
     /// Save todos to the conversation-specific todos.json file
     fn save_todos(&self, todos: &[TodoItem]) -> Result<()> {
-        let todos_path = self.get_todos_path()?;
         let json = serde_json::to_string_pretty(todos)?;
-        std::fs::write(todos_path, json)?;
+        let conversation_id = self
+            .current_conversation_id
+            .as_ref()
+            .ok_or_else(|| color_eyre::eyre::eyre!("No active conversation"))?;
+        persistence::todos::write_todos_json(conversation_id, &json)?;
         Ok(())
     }
 
     /// Load todos from the conversation-specific todos.json file
     fn load_todos(&self) -> Result<Vec<TodoItem>> {
-        let todos_path = self.get_todos_path()?;
-        if todos_path.exists() {
-            let content = std::fs::read_to_string(todos_path)?;
-            let todos: Vec<TodoItem> = serde_json::from_str(&content)?;
-            Ok(todos)
-        } else {
-            Ok(Vec::new())
-        }
+        let conversation_id = self
+            .current_conversation_id
+            .as_ref()
+            .ok_or_else(|| color_eyre::eyre::eyre!("No active conversation"))?;
+        let Some(content) = persistence::todos::read_todos_json(conversation_id)? else {
+            return Ok(Vec::new());
+        };
+        let todos: Vec<TodoItem> = serde_json::from_str(&content)?;
+        Ok(todos)
     }
 
     fn get_current_git_branch() -> Option<String> {
-        let current_dir = std::env::current_dir().ok()?;
-        let mut git_dir = current_dir.clone();
-
-        loop {
-            if git_dir.join(".git").exists() {
-                let head_path = git_dir.join(".git").join("HEAD");
-                if let Ok(head_content) = std::fs::read_to_string(&head_path) {
-                    if head_content.starts_with("ref: refs/heads/") {
-                        let branch = head_content
-                            .trim_start_matches("ref: refs/heads/")
-                            .trim()
-                            .to_string();
-                        return Some(branch);
-                    }
-                }
-                break;
-            }
-            if !git_dir.pop() {
-                break;
-            }
-        }
-        None
+        persistence::conversations::current_git_branch()
     }
 
     fn load_conversations_list(&mut self) -> Result<()> {
-        let conversations_dir = Self::get_conversations_dir()?;
-
-        if !conversations_dir.exists() {
-            self.resume_conversations.clear();
-            return Ok(());
-        }
-
         let mut conversations = Vec::new();
 
-        for entry in std::fs::read_dir(conversations_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    // Try enhanced format first, fall back to old format
-                    if let Ok(conv) = serde_json::from_str::<EnhancedSavedConversation>(&content) {
-                        conversations.push(ConversationMetadata {
-                            time_ago_str: ConversationMetadata::calculate_time_ago(conv.updated_at),
-                            id: conv.id,
-                            created_at: conv.created_at,
-                            updated_at: conv.updated_at,
-                            git_branch: conv.git_branch,
-                            message_count: conv.message_count,
-                            preview: conv.preview,
-                            file_path: path.clone(),
-                            forked_from: conv.forked_from,
-                            forked_at: conv.forked_at,
-                        });
-                    } else if let Ok(conv) = serde_json::from_str::<SavedConversation>(&content) {
-                        // Support old format
-                        conversations.push(ConversationMetadata {
-                            time_ago_str: ConversationMetadata::calculate_time_ago(conv.updated_at),
-                            id: conv.id,
-                            created_at: conv.created_at,
-                            updated_at: conv.updated_at,
-                            git_branch: conv.git_branch,
-                            message_count: conv.message_count,
-                            preview: conv.preview,
-                            file_path: path.clone(),
-                            forked_from: conv.forked_from,
-                            forked_at: conv.forked_at,
-                        });
-                    }
+        for path in persistence::conversations::list_conversation_files()? {
+            if let Ok(content) = persistence::conversations::read_conversation_file(&path) {
+                // Try enhanced format first, fall back to old format
+                if let Ok(conv) = serde_json::from_str::<EnhancedSavedConversation>(&content) {
+                    conversations.push(ConversationMetadata {
+                        time_ago_str: ConversationMetadata::calculate_time_ago(conv.updated_at),
+                        id: conv.id,
+                        created_at: conv.created_at,
+                        updated_at: conv.updated_at,
+                        git_branch: conv.git_branch,
+                        message_count: conv.message_count,
+                        preview: conv.preview,
+                        file_path: path.clone(),
+                        forked_from: conv.forked_from,
+                        forked_at: conv.forked_at,
+                    });
+                } else if let Ok(conv) = serde_json::from_str::<SavedConversation>(&content) {
+                    // Support old format
+                    conversations.push(ConversationMetadata {
+                        time_ago_str: ConversationMetadata::calculate_time_ago(conv.updated_at),
+                        id: conv.id,
+                        created_at: conv.created_at,
+                        updated_at: conv.updated_at,
+                        git_branch: conv.git_branch,
+                        message_count: conv.message_count,
+                        preview: conv.preview,
+                        file_path: path.clone(),
+                        forked_from: conv.forked_from,
+                        forked_at: conv.forked_at,
+                    });
                 }
             }
         }
@@ -3800,7 +3642,7 @@ impl App {
     }
 
     fn delete_conversation(&mut self, metadata: &ConversationMetadata) -> Result<()> {
-        std::fs::remove_file(&metadata.file_path)?;
+        persistence::conversations::remove_conversation_file(&metadata.file_path)?;
         Ok(())
     }
 
@@ -4349,7 +4191,7 @@ Let me analyze the conversation chronologically:
             ) {
                 // UPDATE EXISTING - preserve ID, created_at, and fork metadata
                 let (existing_created_at, existing_forked_from, existing_forked_at) =
-                    if let Ok(content) = std::fs::read_to_string(path) {
+                    if let Ok(content) = persistence::conversations::read_conversation_file(path) {
                         if let Ok(existing) =
                             serde_json::from_str::<EnhancedSavedConversation>(&content)
                         {
@@ -4374,8 +4216,8 @@ Let me analyze the conversation chronologically:
                 )
             } else {
                 // CREATE NEW - generate new ID
+                persistence::conversations::initialize_conversations_dir()?;
                 let conversations_dir = Self::get_conversations_dir()?;
-                std::fs::create_dir_all(&conversations_dir)?;
 
                 let new_id = uuid::Uuid::new_v4().to_string();
                 let new_path = conversations_dir.join(format!("{}.json", new_id));
@@ -4410,12 +4252,11 @@ Let me analyze the conversation chronologically:
         };
 
         // Ensure directory exists
-        let conversations_dir = Self::get_conversations_dir()?;
-        std::fs::create_dir_all(&conversations_dir)?;
+        persistence::conversations::initialize_conversations_dir()?;
 
         // Save to file
         let json = serde_json::to_string_pretty(&conversation)?;
-        std::fs::write(&file_path, json)?;
+        persistence::conversations::write_conversation_file(&file_path, &json)?;
 
         // Track this conversation for future updates
         self.current_conversation_id = Some(conversation_id);
@@ -4426,7 +4267,7 @@ Let me analyze the conversation chronologically:
 
     async fn load_conversation(&mut self, metadata: &ConversationMetadata) -> Result<()> {
         // Read the conversation file
-        let content = std::fs::read_to_string(&metadata.file_path)?;
+        let content = persistence::conversations::read_conversation_file(&metadata.file_path)?;
 
         // Try to load as enhanced format first, fall back to old format
         let (ui_messages, agent_conversation) =
@@ -4495,7 +4336,7 @@ Let me analyze the conversation chronologically:
             if let Ok(mut enhanced) = serde_json::from_str::<EnhancedSavedConversation>(&content) {
                 enhanced.updated_at = SystemTime::now();
                 let json = serde_json::to_string_pretty(&enhanced)?;
-                std::fs::write(&metadata.file_path, json)?;
+                persistence::conversations::write_conversation_file(&metadata.file_path, &json)?;
             }
         }
 
