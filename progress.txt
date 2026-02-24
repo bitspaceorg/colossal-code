@@ -3,3 +3,10 @@ P1-02 Replace string sentinels with typed message/event enums
 - Migrated sentinel checks in rendering and transcript flow to use typed event matching instead of ad-hoc string prefix/equality checks.
 - Added unit tests for parsing thinking, generation stats, and tool-call events.
 - Ran `cargo test` (pass) and `cargo clippy -p cocode --tests -- -A clippy::ifs_same_cond -A clippy::never_loop` (pass with existing warnings).
+
+P1-03: Extracted slash command parsing/dispatch into `src/commands/*`.
+- Added `src/commands/slash.rs` with command parser, review option parser, and unit tests.
+- Added `src/commands/mod.rs` exports and wired `src/main.rs` to use parsed command variants in both command handlers.
+- Moved `ReviewType`/`ReviewOptions` definitions out of `main.rs` into the command module.
+- Removed unreachable duplicate `/fork` branch during dispatch extraction.
+- Ran `cargo test` (pass) and `cargo clippy --all-targets` (pass with existing warnings).

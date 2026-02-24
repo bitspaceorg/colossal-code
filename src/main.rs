@@ -41,8 +41,10 @@ mod survey;
 use survey::{Survey, SurveyQuestion};
 mod session_manager;
 pub use session_manager::{OrchestratorEntry, Session, SessionManager, SessionRole, SessionStatus};
+mod commands;
 mod model_context;
 mod spec_cli;
+use commands::{ParsedSlashCommand, ReviewOptions, ReviewType, parse_slash_command};
 use spec_cli::{MessageLog, SpecAgentBridge, SpecCliContext, SpecCliHandler, SpecCommandResult};
 pub mod spec_ui;
 
@@ -922,34 +924,6 @@ struct FileChange {
     path: String,
     insertions: usize,
     deletions: usize,
-}
-
-/// Review type for /review command
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum ReviewType {
-    All,         // Both committed and uncommitted changes
-    Committed,   // Only committed changes (compared to base)
-    Uncommitted, // Only uncommitted changes (working tree)
-}
-
-/// Options for /review command
-#[derive(Debug, Clone)]
-struct ReviewOptions {
-    review_type: ReviewType,
-    base_branch: Option<String>, // --base <branch>
-    base_commit: Option<String>, // --base-commit <commit>
-    no_tool: bool,               // --no-tool flag
-}
-
-impl Default for ReviewOptions {
-    fn default() -> Self {
-        Self {
-            review_type: ReviewType::All,
-            base_branch: None,
-            base_commit: None,
-            no_tool: false,
-        }
-    }
 }
 
 /// Options for /summarize command
@@ -4726,121 +4700,140 @@ Let me analyze the conversation chronologically:
         }
 
         // Parse and execute command
-        let cmd_lower = command.to_lowercase();
-        if cmd_lower == "/clear" {
-            // Save conversation before clearing
-            if let Err(e) = self.save_conversation().await {
-                // eprintln!("[ERROR] Failed to save conversation before /clear: {}", e);
+        match parse_slash_command(&command) {
+            ParsedSlashCommand::Clear => {
+                // Save conversation before clearing
+                if let Err(e) = self.save_conversation().await {
+                    // eprintln!("[ERROR] Failed to save conversation before /clear: {}", e);
+                }
+
+                // Reset conversation tracking AFTER save (start fresh next time)
+                self.current_conversation_id = None;
+                self.current_conversation_path = None;
+
+                // Clear all messages except the command itself
+                let command_msg = self.messages.pop().unwrap();
+                let command_type = self.message_types.pop().unwrap();
+                let command_state = self.message_states.pop();
+                let command_metadata = self.message_metadata.pop();
+                let command_timestamp = self.message_timestamps.pop();
+
+                self.messages.clear();
+                self.message_types.clear();
+                self.message_states.clear();
+                self.message_metadata.clear();
+                self.message_timestamps.clear();
+
+                // Add back the command
+                self.messages.push(command_msg);
+                self.message_types.push(command_type);
+                if let Some(state) = command_state {
+                    self.message_states.push(state);
+                }
+                self.message_metadata.push(command_metadata.flatten());
+                self.message_timestamps
+                    .push(command_timestamp.unwrap_or_else(SystemTime::now));
+
+                // Add confirmation message
+                self.messages
+                    .push("[COMMAND: Conversation history cleared]".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+                self.message_metadata.push(None);
+                self.message_timestamps.push(SystemTime::now());
+
+                // Clear agent conversation too
+                if let Some(agent) = &self.agent {
+                    agent.clear_conversation().await;
+                }
+
+                // Clear previous generation stats
+                self.clear_generation_stats();
+                self.streaming_completion_tokens = 0;
             }
-
-            // Reset conversation tracking AFTER save (start fresh next time)
-            self.current_conversation_id = None;
-            self.current_conversation_path = None;
-
-            // Clear all messages except the command itself
-            let command_msg = self.messages.pop().unwrap();
-            let command_type = self.message_types.pop().unwrap();
-            let command_state = self.message_states.pop();
-            let command_metadata = self.message_metadata.pop();
-            let command_timestamp = self.message_timestamps.pop();
-
-            self.messages.clear();
-            self.message_types.clear();
-            self.message_states.clear();
-            self.message_metadata.clear();
-            self.message_timestamps.clear();
-
-            // Add back the command
-            self.messages.push(command_msg);
-            self.message_types.push(command_type);
-            if let Some(state) = command_state {
-                self.message_states.push(state);
+            ParsedSlashCommand::Exit => {
+                self.messages.push("[COMMAND: Exiting...]".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+                // Trigger save before exit
+                self.save_pending = true;
+                self.exit = true;
             }
-            self.message_metadata.push(command_metadata.flatten());
-            self.message_timestamps
-                .push(command_timestamp.unwrap_or_else(SystemTime::now));
+            ParsedSlashCommand::Export => {
+                // Try to export from agent first
+                if let Some(agent) = &self.agent {
+                    if let Some(json_string) = agent.export_conversation().await {
+                        // Try to copy to clipboard
+                        use clipboard::{ClipboardContext, ClipboardProvider};
+                        let clipboard_result: Result<(), Box<dyn std::error::Error>> =
+                            ClipboardContext::new()
+                                .and_then(|mut ctx| ctx.set_contents(json_string));
 
-            // Add confirmation message
-            self.messages
-                .push("[COMMAND: Conversation history cleared]".to_string());
-            self.message_types.push(MessageType::Agent);
-            self.message_states.push(MessageState::Sent);
-            self.message_metadata.push(None);
-            self.message_timestamps.push(SystemTime::now());
-
-            // Clear agent conversation too
-            if let Some(agent) = &self.agent {
-                agent.clear_conversation().await;
-            }
-
-            // Clear previous generation stats
-            self.clear_generation_stats();
-            self.streaming_completion_tokens = 0;
-        } else if cmd_lower == "/exit" {
-            self.messages.push("[COMMAND: Exiting...]".to_string());
-            self.message_types.push(MessageType::Agent);
-            self.message_states.push(MessageState::Sent);
-            // Trigger save before exit
-            self.save_pending = true;
-            self.exit = true;
-        } else if cmd_lower == "/export" {
-            // Try to export from agent first
-            if let Some(agent) = &self.agent {
-                if let Some(json_string) = agent.export_conversation().await {
-                    // Try to copy to clipboard
-                    use clipboard::{ClipboardContext, ClipboardProvider};
-                    let clipboard_result: Result<(), Box<dyn std::error::Error>> =
-                        ClipboardContext::new().and_then(|mut ctx| ctx.set_contents(json_string));
-
-                    if clipboard_result.is_ok() {
-                        self.messages
-                            .push("[COMMAND: Conversation exported to clipboard]".to_string());
-                    } else {
-                        self.messages
-                            .push("[COMMAND: Failed to copy to clipboard]".to_string());
+                        if clipboard_result.is_ok() {
+                            self.messages
+                                .push("[COMMAND: Conversation exported to clipboard]".to_string());
+                        } else {
+                            self.messages
+                                .push("[COMMAND: Failed to copy to clipboard]".to_string());
+                        }
+                        self.message_types.push(MessageType::Agent);
+                        self.message_states.push(MessageState::Sent);
+                        return;
                     }
-                    self.message_types.push(MessageType::Agent);
-                    self.message_states.push(MessageState::Sent);
+                }
+
+                // Fallback to old export if agent export not available
+                self.messages
+                    .push("[COMMAND: No conversation history available]".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
+            ParsedSlashCommand::AutoSummarize { command } => {
+                if self.handle_auto_summarize_threshold_command(&command) {
                     return;
                 }
             }
+            ParsedSlashCommand::Vim => {
+                // Toggle vim mode
+                self.vim_mode_enabled = !self.vim_mode_enabled;
 
-            // Fallback to old export if agent export not available
-            self.messages
-                .push("[COMMAND: No conversation history available]".to_string());
-            self.message_types.push(MessageType::Agent);
-            self.message_states.push(MessageState::Sent);
-        } else if cmd_lower.starts_with("/autosummarize") {
-            if self.handle_auto_summarize_threshold_command(&command) {
-                return;
+                // Sync current input to vim editor when enabling
+                if self.vim_mode_enabled {
+                    self.sync_input_to_vim();
+                }
+
+                let _ = self.save_vim_mode_setting();
+
+                let status = if self.vim_mode_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                self.messages
+                    .push(format!("[COMMAND: Vim keybindings {}]", status));
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
             }
-        } else if cmd_lower == "/vim" {
-            // Toggle vim mode
-            self.vim_mode_enabled = !self.vim_mode_enabled;
-
-            // Sync current input to vim editor when enabling
-            if self.vim_mode_enabled {
-                self.sync_input_to_vim();
+            ParsedSlashCommand::Spec { command } => {
+                self.handle_spec_command(&command).await;
             }
-
-            let _ = self.save_vim_mode_setting();
-
-            let status = if self.vim_mode_enabled {
-                "enabled"
-            } else {
-                "disabled"
-            };
-            self.messages
-                .push(format!("[COMMAND: Vim keybindings {}]", status));
-            self.message_types.push(MessageType::Agent);
-            self.message_states.push(MessageState::Sent);
-        } else if cmd_lower.starts_with("/spec") {
-            self.handle_spec_command(&command).await;
-        } else {
-            self.messages
-                .push(format!("[COMMAND: Unknown command '{}']", command));
-            self.message_types.push(MessageType::Agent);
-            self.message_states.push(MessageState::Sent);
+            ParsedSlashCommand::Unknown { command } => {
+                self.messages
+                    .push(format!("[COMMAND: Unknown command '{}']", command));
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
+            ParsedSlashCommand::Invalid { message } => {
+                self.messages.push(format!(" ⎿ {}", message));
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
+            _ => {
+                self.messages
+                    .push(format!("[COMMAND: Unknown command '{}']", command));
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
         }
     }
 
@@ -5209,356 +5202,268 @@ Let me analyze the conversation chronologically:
         }
 
         // Parse and execute command
-        let cmd_lower = command.to_lowercase();
-        if cmd_lower == "/clear" {
-            // Trigger save before clearing
-            self.save_pending = true;
-
-            // Clear all messages except the command itself
-            let command_msg = self.messages.pop().unwrap();
-            let command_type = self.message_types.pop().unwrap();
-            let command_state = self.message_states.pop();
-
-            self.messages.clear();
-            self.message_types.clear();
-            self.message_states.clear();
-
-            // Add back the command
-            self.messages.push(command_msg);
-            self.message_types.push(command_type);
-            if let Some(state) = command_state {
-                self.message_states.push(state);
-            }
-
-            // Add confirmation message
-            self.messages
-                .push("[COMMAND: Conversation history cleared]".to_string());
-            self.message_types.push(MessageType::Agent);
-            self.message_states.push(MessageState::Sent);
-
-            // Reset generation stats
-            self.clear_generation_stats();
-            self.streaming_completion_tokens = 0;
-
-            // Clear agent context
-            if let Some(tx) = &self.agent_tx {
-                let _ = tx.send(AgentMessage::ClearContext);
-            }
-        } else if cmd_lower == "/exit" {
-            // Add confirmation message
-            self.messages.push("[COMMAND: Exiting...]".to_string());
-            self.message_types.push(MessageType::Agent);
-            self.message_states.push(MessageState::Sent);
-
-            // Trigger save before exit
-            self.save_pending = true;
-
-            // Set exit flag
-            self.exit = true;
-        } else if cmd_lower == "/export" {
-            // Export needs async, so we'll set a flag and handle it in the event loop
-            self.export_pending = true;
-        } else if cmd_lower.starts_with("/summarize") {
-            // Parse optional custom instructions after /summarize
-            let custom_instructions = if command.len() > 8 {
-                let rest = command[8..].trim();
-                if !rest.is_empty() {
-                    Some(rest.to_string())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            // Need at least one prior message (besides the command itself)
-            if self.messages.len() <= 1 {
-                self.messages
-                    .push(" ⎿ Nothing to summarize - conversation is empty".to_string());
-                self.message_types.push(MessageType::Agent);
-                self.message_states.push(MessageState::Sent);
-                return;
-            }
-
-            // Set pending to trigger async compaction
-            self.compaction_resume_prompt = None;
-            self.compaction_resume_ready = false;
-            self.compact_pending = Some(CompactOptions {
-                custom_instructions,
-            });
-            return;
-        } else if cmd_lower.starts_with("/autosummarize") {
-            if self.handle_auto_summarize_threshold_command(&command) {
-                return;
-            }
-        } else if cmd_lower == "/help" {
-            // Open help panel
-            self.show_help = true;
-            self.help_tab = HelpTab::General; // Start on general tab
-            self.help_commands_selected = 0; // Reset selection
-            // Early return to avoid adding command to messages
-            return;
-        } else if cmd_lower == "/resume" {
-            // Open resume panel and load conversations
-            if let Err(e) = self.load_conversations_list() {
-                self.messages
-                    .push(format!(" ⎿ Error loading conversations: {}", e));
-                self.message_types.push(MessageType::Agent);
-                self.message_states.push(MessageState::Sent);
-            } else {
-                self.show_resume = true;
-                self.is_fork_mode = false; // Normal resume
-                self.resume_selected = 0; // Reset selection
-            }
-            // Early return to avoid adding command to messages
-            return;
-        } else if cmd_lower == "/rewind" {
-            // Open rewind panel to restore to previous conversation state
-            if self.rewind_points.is_empty() {
-                self.messages
-                    .push(" ⎿ No rewind points available yet".to_string());
-                self.message_types.push(MessageType::Agent);
-                self.message_states.push(MessageState::Sent);
-            } else {
-                self.show_rewind = true;
-                self.rewind_selected = self.rewind_points.len().saturating_sub(1); // Start at most recent
-            }
-            // Early return to avoid adding command to messages
-            return;
-        } else if cmd_lower == "/fork" {
-            // Fork (copy) a conversation - same UI but creates new ID
-            if let Err(e) = self.load_conversations_list() {
-                self.messages
-                    .push(format!(" ⎿ Error loading conversations: {}", e));
-                self.message_types.push(MessageType::Agent);
-                self.message_states.push(MessageState::Sent);
-            } else {
-                self.show_resume = true; // Use same UI
-                self.is_fork_mode = true; // Fork mode - don't track ID
-                self.resume_selected = 0; // Reset selection
-            }
-            // Early return to avoid adding command to messages
-            return;
-        } else if cmd_lower == "/vim" {
-            // Toggle vim mode
-            self.vim_mode_enabled = !self.vim_mode_enabled;
-
-            // Sync current input to vim editor when enabling
-            if self.vim_mode_enabled {
-                self.sync_input_to_vim();
-            }
-
-            let _ = self.save_vim_mode_setting();
-
-            let status = if self.vim_mode_enabled {
-                "enabled"
-            } else {
-                "disabled"
-            };
-            self.messages
-                .push(format!("[COMMAND: Vim keybindings {}]", status));
-            self.message_types.push(MessageType::Agent);
-            self.message_states.push(MessageState::Sent);
-        } else if cmd_lower == "/todos" {
-            // Toggle todos panel
-            if self.show_todos {
-                // Closing the panel - add dismissal message
-                self.messages.push(" ⎿ todos dialog dismissed".to_string());
-                self.message_types.push(MessageType::Agent);
-                self.message_states.push(MessageState::Sent);
-            }
-            self.show_todos = !self.show_todos;
-            // Early return to avoid adding command to messages
-            return;
-        } else if cmd_lower == "/shells" {
-            // Toggle background tasks panel
-            if self.show_background_tasks {
-                // Closing the panel - add dismissal message
-                self.messages.push(" ⎿ shells dialog dismissed".to_string());
-                self.message_types.push(MessageType::Agent);
-                self.message_states.push(MessageState::Sent);
-            }
-            self.show_background_tasks = !self.show_background_tasks;
-            // Early return to avoid adding command to messages
-            return;
-        } else if cmd_lower == "/fork" {
-            // Fork current conversation immediately
-            if self.current_conversation_id.is_some() {
-                // Set fork metadata
-                self.current_forked_from = self.current_conversation_id.clone();
-                self.current_forked_at = Some(SystemTime::now());
-
-                // Clear conversation ID/path to create new conversation on next save
-                let parent_id = self.current_conversation_id.take().unwrap();
-                self.current_conversation_path = None;
-
-                // Trigger immediate save to create the fork
+        match parse_slash_command(&command) {
+            ParsedSlashCommand::Clear => {
+                // Trigger save before clearing
                 self.save_pending = true;
 
-                self.messages
-                    .push(format!(" ⎇ conversation forked from '{}'", parent_id));
-                self.message_types.push(MessageType::Agent);
-                self.message_states.push(MessageState::Sent);
-            } else {
-                self.messages
-                    .push(" ⎿ no conversation to fork (conversation not saved yet)".to_string());
-                self.message_types.push(MessageType::Agent);
-                self.message_states.push(MessageState::Sent);
-            }
-            return;
-        } else if cmd_lower == "/model" {
-            // Open model selection panel
-            if let Err(e) = self.load_models() {
-                self.messages
-                    .push(format!(" ⎿ Error loading models: {}", e));
-                self.message_types.push(MessageType::Agent);
-                self.message_states.push(MessageState::Sent);
-            } else {
-                self.show_model_selection = true;
-                self.model_selected_index = 0;
-            }
-            // Early return to avoid adding command to messages
-            return;
-        } else if cmd_lower.starts_with("/safety") {
-            // Parse safety command arguments
-            let parts: Vec<&str> = command.split_whitespace().collect();
+                // Clear all messages except the command itself
+                let command_msg = self.messages.pop().unwrap();
+                let command_type = self.message_types.pop().unwrap();
+                let command_state = self.message_states.pop();
 
-            if parts.len() == 1 {
-                // No args - show current status (no UI spam)
-                if let Ok(config) = agent_core::safety_config::SafetyConfig::load() {
+                self.messages.clear();
+                self.message_types.clear();
+                self.message_states.clear();
+
+                // Add back the command
+                self.messages.push(command_msg);
+                self.message_types.push(command_type);
+                if let Some(state) = command_state {
+                    self.message_states.push(state);
+                }
+
+                // Add confirmation message
+                self.messages
+                    .push("[COMMAND: Conversation history cleared]".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+
+                // Reset generation stats
+                self.clear_generation_stats();
+                self.streaming_completion_tokens = 0;
+
+                // Clear agent context
+                if let Some(tx) = &self.agent_tx {
+                    let _ = tx.send(AgentMessage::ClearContext);
+                }
+            }
+            ParsedSlashCommand::Exit => {
+                // Add confirmation message
+                self.messages.push("[COMMAND: Exiting...]".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+
+                // Trigger save before exit
+                self.save_pending = true;
+
+                // Set exit flag
+                self.exit = true;
+            }
+            ParsedSlashCommand::Export => {
+                // Export needs async, so we'll set a flag and handle it in the event loop
+                self.export_pending = true;
+            }
+            ParsedSlashCommand::Summarize {
+                custom_instructions,
+            } => {
+                // Need at least one prior message (besides the command itself)
+                if self.messages.len() <= 1 {
                     self.messages
-                        .push(format!("[SAFETY] {}", config.status_string()));
+                        .push(" ⎿ Nothing to summarize - conversation is empty".to_string());
+                    self.message_types.push(MessageType::Agent);
+                    self.message_states.push(MessageState::Sent);
+                    return;
+                }
+
+                // Set pending to trigger async compaction
+                self.compaction_resume_prompt = None;
+                self.compaction_resume_ready = false;
+                self.compact_pending = Some(CompactOptions {
+                    custom_instructions,
+                });
+                return;
+            }
+            ParsedSlashCommand::AutoSummarize { command } => {
+                if self.handle_auto_summarize_threshold_command(&command) {
+                    return;
+                }
+            }
+            ParsedSlashCommand::Help => {
+                // Open help panel
+                self.show_help = true;
+                self.help_tab = HelpTab::General; // Start on general tab
+                self.help_commands_selected = 0; // Reset selection
+                // Early return to avoid adding command to messages
+                return;
+            }
+            ParsedSlashCommand::Resume => {
+                // Open resume panel and load conversations
+                if let Err(e) = self.load_conversations_list() {
+                    self.messages
+                        .push(format!(" ⎿ Error loading conversations: {}", e));
+                    self.message_types.push(MessageType::Agent);
+                    self.message_states.push(MessageState::Sent);
+                } else {
+                    self.show_resume = true;
+                    self.is_fork_mode = false; // Normal resume
+                    self.resume_selected = 0; // Reset selection
+                }
+                // Early return to avoid adding command to messages
+                return;
+            }
+            ParsedSlashCommand::Rewind => {
+                // Open rewind panel to restore to previous conversation state
+                if self.rewind_points.is_empty() {
+                    self.messages
+                        .push(" ⎿ No rewind points available yet".to_string());
+                    self.message_types.push(MessageType::Agent);
+                    self.message_states.push(MessageState::Sent);
+                } else {
+                    self.show_rewind = true;
+                    self.rewind_selected = self.rewind_points.len().saturating_sub(1); // Start at most recent
+                }
+                // Early return to avoid adding command to messages
+                return;
+            }
+            ParsedSlashCommand::Fork => {
+                // Fork (copy) a conversation - same UI but creates new ID
+                if let Err(e) = self.load_conversations_list() {
+                    self.messages
+                        .push(format!(" ⎿ Error loading conversations: {}", e));
+                    self.message_types.push(MessageType::Agent);
+                    self.message_states.push(MessageState::Sent);
+                } else {
+                    self.show_resume = true; // Use same UI
+                    self.is_fork_mode = true; // Fork mode - don't track ID
+                    self.resume_selected = 0; // Reset selection
+                }
+                // Early return to avoid adding command to messages
+                return;
+            }
+            ParsedSlashCommand::Vim => {
+                // Toggle vim mode
+                self.vim_mode_enabled = !self.vim_mode_enabled;
+
+                // Sync current input to vim editor when enabling
+                if self.vim_mode_enabled {
+                    self.sync_input_to_vim();
+                }
+
+                let _ = self.save_vim_mode_setting();
+
+                let status = if self.vim_mode_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                self.messages
+                    .push(format!("[COMMAND: Vim keybindings {}]", status));
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
+            ParsedSlashCommand::Todos => {
+                // Toggle todos panel
+                if self.show_todos {
+                    // Closing the panel - add dismissal message
+                    self.messages.push(" ⎿ todos dialog dismissed".to_string());
                     self.message_types.push(MessageType::Agent);
                     self.message_states.push(MessageState::Sent);
                 }
-            } else {
-                // Handle subcommands (silently update, sync with assistant_mode)
-                match parts[1].to_lowercase().as_str() {
-                    "yolo" => {
-                        let mut config =
-                            agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
-                        config.set_mode(agent_core::safety_config::SafetyMode::Yolo);
-                        let _ = config.save();
-                        self.assistant_mode = AssistantMode::Yolo;
-                    }
-                    "regular" => {
-                        let mut config =
-                            agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
-                        config.set_mode(agent_core::safety_config::SafetyMode::Regular);
-                        let _ = config.save();
-                        self.assistant_mode = AssistantMode::None;
-                    }
-                    "readonly" | "read-only" => {
-                        let mut config =
-                            agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
-                        config.set_mode(agent_core::safety_config::SafetyMode::ReadOnly);
-                        let _ = config.save();
-                        self.assistant_mode = AssistantMode::ReadOnly;
-                    }
-                    "permissions" | "perms" => {
-                        let mut config =
-                            agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
-                        config.toggle_ask_permission();
-                        let _ = config.save();
-                    }
-                    "sandbox" => {
-                        let mut config =
-                            agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
-                        config.toggle_sandbox();
-                        let _ = config.save();
-                        self.sandbox_enabled = config.sandbox_enabled;
-                    }
-                    _ => {}
-                }
+                self.show_todos = !self.show_todos;
+                // Early return to avoid adding command to messages
+                return;
             }
-            return;
-        } else if cmd_lower.starts_with("/review") {
-            // Parse /review command options
-            // Options: -t <all|committed|uncommitted>, --base <branch>, --base-commit <commit>, --no-tool
-            let parts: Vec<&str> = command.split_whitespace().collect();
-            let mut options = ReviewOptions::default();
-
-            let mut i = 1;
-            while i < parts.len() {
-                match parts[i] {
-                    "-t" | "--type" => {
-                        if i + 1 < parts.len() {
-                            match parts[i + 1].to_lowercase().as_str() {
-                                "all" => options.review_type = ReviewType::All,
-                                "committed" => options.review_type = ReviewType::Committed,
-                                "uncommitted" => options.review_type = ReviewType::Uncommitted,
-                                _ => {
-                                    self.messages.push(format!(
-                                        " ⎿ Invalid review type '{}'. Use: all, committed, uncommitted",
-                                        parts[i + 1]
-                                    ));
-                                    self.message_types.push(MessageType::Agent);
-                                    self.message_states.push(MessageState::Sent);
-                                    return;
-                                }
-                            }
-                            i += 2;
-                        } else {
-                            self.messages
-                                .push(" ⎿ Missing value for -t/--type".to_string());
-                            self.message_types.push(MessageType::Agent);
-                            self.message_states.push(MessageState::Sent);
-                            return;
-                        }
-                    }
-                    "--base" => {
-                        if i + 1 < parts.len() {
-                            options.base_branch = Some(parts[i + 1].to_string());
-                            i += 2;
-                        } else {
-                            self.messages
-                                .push(" ⎿ Missing value for --base".to_string());
-                            self.message_types.push(MessageType::Agent);
-                            self.message_states.push(MessageState::Sent);
-                            return;
-                        }
-                    }
-                    "--base-commit" => {
-                        if i + 1 < parts.len() {
-                            options.base_commit = Some(parts[i + 1].to_string());
-                            i += 2;
-                        } else {
-                            self.messages
-                                .push(" ⎿ Missing value for --base-commit".to_string());
-                            self.message_types.push(MessageType::Agent);
-                            self.message_states.push(MessageState::Sent);
-                            return;
-                        }
-                    }
-                    "--no-tool" => {
-                        options.no_tool = true;
-                        i += 1;
-                    }
-                    _ => {
-                        self.messages.push(format!(
-                            " ⎿ Unknown option '{}'. Use: -t <type>, --base <branch>, --base-commit <commit>, --no-tool",
-                            parts[i]
-                        ));
+            ParsedSlashCommand::Shells => {
+                // Toggle background tasks panel
+                if self.show_background_tasks {
+                    // Closing the panel - add dismissal message
+                    self.messages.push(" ⎿ shells dialog dismissed".to_string());
+                    self.message_types.push(MessageType::Agent);
+                    self.message_states.push(MessageState::Sent);
+                }
+                self.show_background_tasks = !self.show_background_tasks;
+                // Early return to avoid adding command to messages
+                return;
+            }
+            ParsedSlashCommand::Model => {
+                // Open model selection panel
+                if let Err(e) = self.load_models() {
+                    self.messages
+                        .push(format!(" ⎿ Error loading models: {}", e));
+                    self.message_types.push(MessageType::Agent);
+                    self.message_states.push(MessageState::Sent);
+                } else {
+                    self.show_model_selection = true;
+                    self.model_selected_index = 0;
+                }
+                // Early return to avoid adding command to messages
+                return;
+            }
+            ParsedSlashCommand::Safety { args } => {
+                if args.is_empty() {
+                    // No args - show current status (no UI spam)
+                    if let Ok(config) = agent_core::safety_config::SafetyConfig::load() {
+                        self.messages
+                            .push(format!("[SAFETY] {}", config.status_string()));
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
-                        return;
+                    }
+                } else {
+                    // Handle subcommands (silently update, sync with assistant_mode)
+                    match args[0].as_str() {
+                        "yolo" => {
+                            let mut config =
+                                agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
+                            config.set_mode(agent_core::safety_config::SafetyMode::Yolo);
+                            let _ = config.save();
+                            self.assistant_mode = AssistantMode::Yolo;
+                        }
+                        "regular" => {
+                            let mut config =
+                                agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
+                            config.set_mode(agent_core::safety_config::SafetyMode::Regular);
+                            let _ = config.save();
+                            self.assistant_mode = AssistantMode::None;
+                        }
+                        "readonly" | "read-only" => {
+                            let mut config =
+                                agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
+                            config.set_mode(agent_core::safety_config::SafetyMode::ReadOnly);
+                            let _ = config.save();
+                            self.assistant_mode = AssistantMode::ReadOnly;
+                        }
+                        "permissions" | "perms" => {
+                            let mut config =
+                                agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
+                            config.toggle_ask_permission();
+                            let _ = config.save();
+                        }
+                        "sandbox" => {
+                            let mut config =
+                                agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
+                            config.toggle_sandbox();
+                            let _ = config.save();
+                            self.sandbox_enabled = config.sandbox_enabled;
+                        }
+                        _ => {}
                     }
                 }
+                return;
             }
-
-            // Set pending to trigger async review in event loop
-            self.review_pending = Some(options);
-            return;
-        } else if cmd_lower.starts_with("/spec") {
-            // Set pending to trigger async spec command in event loop
-            self.spec_pending = Some(command.clone());
-            return;
-        } else {
-            // Unknown command
-            self.messages
-                .push(format!("[COMMAND: Unknown command '{}']", command));
-            self.message_types.push(MessageType::Agent);
-            self.message_states.push(MessageState::Sent);
+            ParsedSlashCommand::Review { options } => {
+                // Set pending to trigger async review in event loop
+                self.review_pending = Some(options);
+                return;
+            }
+            ParsedSlashCommand::Spec { command } => {
+                // Set pending to trigger async spec command in event loop
+                self.spec_pending = Some(command);
+                return;
+            }
+            ParsedSlashCommand::Invalid { message } => {
+                self.messages.push(format!(" ⎿ {}", message));
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+                return;
+            }
+            ParsedSlashCommand::Unknown { command } => {
+                // Unknown command
+                self.messages
+                    .push(format!("[COMMAND: Unknown command '{}']", command));
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
         }
     }
 
@@ -8802,8 +8707,8 @@ Let me analyze the conversation chronologically:
             return AgentConnector::None;
         }
 
-        for next in idx + 1..message_types.len() {
-            match message_types[next] {
+        if let Some(next) = message_types.get(idx + 1) {
+            match next {
                 MessageType::Agent => return AgentConnector::Continue,
                 MessageType::User => return AgentConnector::End,
             }
