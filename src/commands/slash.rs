@@ -172,7 +172,7 @@ fn parse_review_options(command: &str) -> Result<ReviewOptions, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ParsedSlashCommand, ReviewType, parse_slash_command};
+    use super::{parse_slash_command, ParsedSlashCommand, ReviewType};
 
     #[test]
     fn parses_review_options() {
@@ -227,6 +227,28 @@ mod tests {
                 assert_eq!(args, vec!["readonly"]);
             }
             _ => panic!("expected safety command"),
+        }
+    }
+
+    #[test]
+    fn parses_spec_subcommand_as_spec_command() {
+        let parsed = parse_slash_command("/spec status");
+        match parsed {
+            ParsedSlashCommand::Spec { command } => {
+                assert_eq!(command, "/spec status");
+            }
+            _ => panic!("expected spec command"),
+        }
+    }
+
+    #[test]
+    fn parses_unknown_command() {
+        let parsed = parse_slash_command("/not-a-command");
+        match parsed {
+            ParsedSlashCommand::Unknown { command } => {
+                assert_eq!(command, "/not-a-command");
+            }
+            _ => panic!("expected unknown command"),
         }
     }
 }
