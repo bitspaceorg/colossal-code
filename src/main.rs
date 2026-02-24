@@ -44,7 +44,7 @@ mod commands;
 mod model_context;
 mod persistence;
 mod spec_cli;
-use commands::{ParsedSlashCommand, ReviewOptions, ReviewType, parse_slash_command};
+use commands::{ReviewOptions, ReviewType, SlashCommandDispatch, dispatch_slash_command};
 use spec_cli::{MessageLog, SpecAgentBridge, SpecCliContext, SpecCliHandler, SpecCommandResult};
 pub mod spec_ui;
 
@@ -4995,8 +4995,8 @@ Let me analyze the conversation chronologically:
         }
 
         // Parse and execute command
-        match parse_slash_command(&command) {
-            ParsedSlashCommand::Clear => {
+        match dispatch_slash_command(&command) {
+            SlashCommandDispatch::Clear => {
                 // Trigger save before clearing
                 self.save_pending = true;
 
@@ -5033,7 +5033,7 @@ Let me analyze the conversation chronologically:
                     let _ = tx.send(AgentMessage::ClearContext);
                 }
             }
-            ParsedSlashCommand::Exit => {
+            SlashCommandDispatch::Exit => {
                 // Add confirmation message
                 self.messages
                     .push(UiMessageEvent::Command("Exiting...".to_string()).to_message());
@@ -5046,11 +5046,11 @@ Let me analyze the conversation chronologically:
                 // Set exit flag
                 self.exit = true;
             }
-            ParsedSlashCommand::Export => {
+            SlashCommandDispatch::Export => {
                 // Export needs async, so we'll set a flag and handle it in the event loop
                 self.export_pending = true;
             }
-            ParsedSlashCommand::Summarize {
+            SlashCommandDispatch::Summarize {
                 custom_instructions,
             } => {
                 // Need at least one prior message (besides the command itself)
@@ -5070,12 +5070,12 @@ Let me analyze the conversation chronologically:
                 });
                 return;
             }
-            ParsedSlashCommand::AutoSummarize { command } => {
+            SlashCommandDispatch::AutoSummarize { command } => {
                 if self.handle_auto_summarize_threshold_command(&command) {
                     return;
                 }
             }
-            ParsedSlashCommand::Help => {
+            SlashCommandDispatch::Help => {
                 // Open help panel
                 self.show_help = true;
                 self.help_tab = HelpTab::General; // Start on general tab
@@ -5083,7 +5083,7 @@ Let me analyze the conversation chronologically:
                 // Early return to avoid adding command to messages
                 return;
             }
-            ParsedSlashCommand::Resume => {
+            SlashCommandDispatch::Resume => {
                 // Open resume panel and load conversations
                 if let Err(e) = self.load_conversations_list() {
                     self.messages
@@ -5098,7 +5098,7 @@ Let me analyze the conversation chronologically:
                 // Early return to avoid adding command to messages
                 return;
             }
-            ParsedSlashCommand::Rewind => {
+            SlashCommandDispatch::Rewind => {
                 // Open rewind panel to restore to previous conversation state
                 if self.rewind_points.is_empty() {
                     self.messages
@@ -5112,7 +5112,7 @@ Let me analyze the conversation chronologically:
                 // Early return to avoid adding command to messages
                 return;
             }
-            ParsedSlashCommand::Fork => {
+            SlashCommandDispatch::Fork => {
                 // Fork (copy) a conversation - same UI but creates new ID
                 if let Err(e) = self.load_conversations_list() {
                     self.messages
@@ -5127,7 +5127,7 @@ Let me analyze the conversation chronologically:
                 // Early return to avoid adding command to messages
                 return;
             }
-            ParsedSlashCommand::Vim => {
+            SlashCommandDispatch::Vim => {
                 // Toggle vim mode
                 self.vim_mode_enabled = !self.vim_mode_enabled;
 
@@ -5149,7 +5149,7 @@ Let me analyze the conversation chronologically:
                 self.message_types.push(MessageType::Agent);
                 self.message_states.push(MessageState::Sent);
             }
-            ParsedSlashCommand::Todos => {
+            SlashCommandDispatch::Todos => {
                 // Toggle todos panel
                 if self.show_todos {
                     // Closing the panel - add dismissal message
@@ -5161,7 +5161,7 @@ Let me analyze the conversation chronologically:
                 // Early return to avoid adding command to messages
                 return;
             }
-            ParsedSlashCommand::Shells => {
+            SlashCommandDispatch::Shells => {
                 // Toggle background tasks panel
                 if self.show_background_tasks {
                     // Closing the panel - add dismissal message
@@ -5173,7 +5173,7 @@ Let me analyze the conversation chronologically:
                 // Early return to avoid adding command to messages
                 return;
             }
-            ParsedSlashCommand::Model => {
+            SlashCommandDispatch::Model => {
                 // Open model selection panel
                 if let Err(e) = self.load_models() {
                     self.messages
@@ -5187,7 +5187,7 @@ Let me analyze the conversation chronologically:
                 // Early return to avoid adding command to messages
                 return;
             }
-            ParsedSlashCommand::Safety { args } => {
+            SlashCommandDispatch::Safety { args } => {
                 if args.is_empty() {
                     // No args - show current status (no UI spam)
                     if let Ok(config) = agent_core::safety_config::SafetyConfig::load() {
@@ -5238,23 +5238,23 @@ Let me analyze the conversation chronologically:
                 }
                 return;
             }
-            ParsedSlashCommand::Review { options } => {
+            SlashCommandDispatch::Review { options } => {
                 // Set pending to trigger async review in event loop
                 self.review_pending = Some(options);
                 return;
             }
-            ParsedSlashCommand::Spec { command } => {
+            SlashCommandDispatch::Spec { command } => {
                 // Set pending to trigger async spec command in event loop
                 self.spec_pending = Some(command);
                 return;
             }
-            ParsedSlashCommand::Invalid { message } => {
+            SlashCommandDispatch::Invalid { message } => {
                 self.messages.push(format!(" ⎿ {}", message));
                 self.message_types.push(MessageType::Agent);
                 self.message_states.push(MessageState::Sent);
                 return;
             }
-            ParsedSlashCommand::Unknown { command } => {
+            SlashCommandDispatch::Unknown { command } => {
                 // Unknown command
                 self.messages.push(
                     UiMessageEvent::Command(format!("Unknown command '{}'", command)).to_message(),
