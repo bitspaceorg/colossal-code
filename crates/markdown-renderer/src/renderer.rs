@@ -1,7 +1,7 @@
 use crate::citation::rewrite_file_citations_with_scheme;
 use crate::line_utils::line_to_static;
-use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_line;
+use crate::wrapping::RtOptions;
 use pulldown_cmark::CodeBlockKind;
 use pulldown_cmark::CowStr;
 use pulldown_cmark::Event;
@@ -15,7 +15,6 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::text::Text;
-use std::borrow::Cow;
 use std::path::Path;
 
 #[derive(Clone, Debug)]
@@ -323,7 +322,8 @@ where
             let mut content = line.to_string();
             if !self.in_code_block {
                 if let (Some(scheme), Some(cwd)) = (&self.scheme, &self.cwd) {
-                    let cow = rewrite_file_citations_with_scheme(&content, Some(scheme.as_str()), cwd);
+                    let cow =
+                        rewrite_file_citations_with_scheme(&content, Some(scheme.as_str()), cwd);
                     if let std::borrow::Cow::Owned(s) = cow {
                         content = s;
                     }
@@ -589,7 +589,8 @@ where
     }
 
     fn end_table_cell(&mut self) {
-        self.current_table_row.push(self.current_cell_content.clone());
+        self.current_table_row
+            .push(self.current_cell_content.clone());
         self.current_cell_content.clear();
     }
 
@@ -636,18 +637,21 @@ where
             // Format: "│ cell1 │ cell2 │ cell3 │"
             let separators_width = (num_cols - 1) * 3; // " │ " between columns
             let borders_width = 4; // "│ " at start and " │" at end
-            let total_width: usize = col_widths.iter().sum::<usize>() + separators_width + borders_width;
+            let total_width: usize =
+                col_widths.iter().sum::<usize>() + separators_width + borders_width;
 
             if total_width > max_width {
                 // Table is too wide, need to constrain column widths
-                let available_for_cells = max_width.saturating_sub(separators_width + borders_width);
+                let available_for_cells =
+                    max_width.saturating_sub(separators_width + borders_width);
 
                 // Distribute available width proportionally, but ensure minimum width of 3 chars
                 let total_desired: usize = col_widths.iter().sum();
                 if total_desired > 0 {
                     for width in &mut col_widths {
                         let proportion = (*width as f64) / (total_desired as f64);
-                        let new_width = ((available_for_cells as f64) * proportion).floor() as usize;
+                        let new_width =
+                            ((available_for_cells as f64) * proportion).floor() as usize;
                         *width = new_width.max(3); // Minimum 3 chars per column
                     }
                 }

@@ -35,25 +35,28 @@ pub fn is_blank_line_spaces_only(line: &Line<'_>) -> bool {
         .all(|s| s.content.is_empty() || s.content.chars().all(|c| c == ' '))
 }
 
-/// Prefix each line with `initial_prefix` for the first line and
-/// `subsequent_prefix` for following lines. Returns a new Vec of owned lines.
-pub fn prefix_lines(
-    lines: Vec<Line<'static>>,
-    initial_prefix: Span<'static>,
-    subsequent_prefix: Span<'static>,
-) -> Vec<Line<'static>> {
-    lines
-        .into_iter()
-        .enumerate()
-        .map(|(i, l)| {
-            let mut spans = Vec::with_capacity(l.spans.len() + 1);
-            spans.push(if i == 0 {
-                initial_prefix.clone()
-            } else {
-                subsequent_prefix.clone()
-            });
-            spans.extend(l.spans);
-            Line::from(spans).style(l.style)
-        })
-        .collect()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_to_static_copies_content() {
+        let input = Line::from("hello");
+        let output = line_to_static(&input);
+
+        assert_eq!(output.spans.len(), 1);
+        assert_eq!(output.spans[0].content.as_ref(), "hello");
+        assert!(matches!(
+            output.spans[0].content,
+            std::borrow::Cow::Owned(_)
+        ));
+    }
+
+    #[test]
+    fn blank_line_check_only_treats_spaces_as_blank() {
+        assert!(is_blank_line_spaces_only(&Line::from("")));
+        assert!(is_blank_line_spaces_only(&Line::from("   ")));
+        assert!(!is_blank_line_spaces_only(&Line::from("\t")));
+        assert!(!is_blank_line_spaces_only(&Line::from("text")));
+    }
 }
