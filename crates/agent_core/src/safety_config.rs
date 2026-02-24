@@ -234,4 +234,42 @@ mod tests {
             SafetyMode::ReadOnly
         );
     }
+
+    #[test]
+    fn test_mode_transitions_reset_permissions_and_sandbox() {
+        let mut config = SafetyConfig::from_mode(SafetyMode::Yolo);
+
+        config.toggle_ask_permission();
+        config.toggle_sandbox();
+        assert!(config.ask_permission);
+        assert!(config.sandbox_enabled);
+
+        config.set_mode(SafetyMode::Regular);
+        assert_eq!(config.mode, SafetyMode::Regular);
+        assert!(config.ask_permission);
+        assert!(config.sandbox_enabled);
+
+        config.set_mode(SafetyMode::ReadOnly);
+        assert_eq!(config.mode, SafetyMode::ReadOnly);
+        assert!(!config.ask_permission);
+        assert!(config.sandbox_enabled);
+
+        config.set_mode(SafetyMode::Yolo);
+        assert_eq!(config.mode, SafetyMode::Yolo);
+        assert!(!config.ask_permission);
+        assert!(!config.sandbox_enabled);
+    }
+
+    #[test]
+    fn test_sandbox_toggle_transitions_are_reversible() {
+        let mut config = SafetyConfig::from_mode(SafetyMode::Regular);
+        assert!(config.sandbox_enabled);
+
+        config.toggle_sandbox();
+        assert!(!config.sandbox_enabled);
+
+        config.toggle_sandbox();
+        assert!(config.sandbox_enabled);
+        assert_eq!(config.mode, SafetyMode::Regular);
+    }
 }

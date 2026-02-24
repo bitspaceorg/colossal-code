@@ -193,6 +193,7 @@ mod tests {
         AgentState, AssistantMode, HelpTab, MessageState, MessageType, PersistenceState,
         SafetyState, SubAgentContext, UiMessageEvent, UiState,
     };
+    use agent_core::safety_config::SafetyMode;
 
     #[test]
     fn parses_thinking_animation_event() {
@@ -324,6 +325,57 @@ mod tests {
         assert!(persistence.current_conversation_path.is_none());
         assert!(persistence.current_forked_from.is_none());
         assert!(persistence.current_forked_at.is_none());
+    }
+
+    #[test]
+    fn assistant_mode_cycles_through_expected_order() {
+        let mut mode = AssistantMode::None;
+
+        mode = mode.next();
+        assert!(matches!(mode, AssistantMode::Yolo));
+
+        mode = mode.next();
+        assert!(matches!(mode, AssistantMode::Plan));
+
+        mode = mode.next();
+        assert!(matches!(mode, AssistantMode::AutoAccept));
+
+        mode = mode.next();
+        assert!(matches!(mode, AssistantMode::ReadOnly));
+
+        mode = mode.next();
+        assert!(matches!(mode, AssistantMode::None));
+    }
+
+    #[test]
+    fn assistant_mode_to_safety_mode_preserves_expected_policy() {
+        assert_eq!(AssistantMode::None.to_safety_mode(), Some(SafetyMode::Regular));
+        assert_eq!(AssistantMode::Yolo.to_safety_mode(), Some(SafetyMode::Yolo));
+        assert_eq!(AssistantMode::Plan.to_safety_mode(), Some(SafetyMode::Regular));
+        assert_eq!(
+            AssistantMode::AutoAccept.to_safety_mode(),
+            Some(SafetyMode::Regular)
+        );
+        assert_eq!(
+            AssistantMode::ReadOnly.to_safety_mode(),
+            Some(SafetyMode::ReadOnly)
+        );
+    }
+
+    #[test]
+    fn assistant_mode_from_safety_mode_matches_ui_defaults() {
+        assert!(matches!(
+            AssistantMode::from_safety_mode(SafetyMode::Yolo),
+            AssistantMode::Yolo
+        ));
+        assert!(matches!(
+            AssistantMode::from_safety_mode(SafetyMode::Regular),
+            AssistantMode::None
+        ));
+        assert!(matches!(
+            AssistantMode::from_safety_mode(SafetyMode::ReadOnly),
+            AssistantMode::ReadOnly
+        ));
     }
 }
 
