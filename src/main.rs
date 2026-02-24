@@ -44,6 +44,7 @@ mod commands;
 mod model_context;
 mod persistence;
 mod spec_cli;
+mod ui;
 use commands::{ReviewOptions, ReviewType, SlashCommandDispatch, dispatch_slash_command};
 use spec_cli::{MessageLog, SpecAgentBridge, SpecCliContext, SpecCliHandler, SpecCommandResult};
 pub mod spec_ui;
@@ -9417,99 +9418,11 @@ Let me analyze the conversation chronologically:
     }
 
     fn render_history_panel(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
-        if area.height < 4 {
-            return;
-        }
-
-        let outer = Block::default()
-            .title(" Spec history (Esc to close) ")
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded);
-        frame.render_widget(outer.clone(), area);
-        let inner = outer.inner(area);
-
-        if self.orchestrator_history.is_empty() {
-            frame.render_widget(
-                Paragraph::new("No task history yet.")
-                    .block(Block::default())
-                    .wrap(Wrap { trim: true }),
-                inner,
-            );
-            return;
-        }
-
-        let chunks =
-            Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(inner);
-        let mut items: Vec<ListItem> = Vec::new();
-        for summary in &self.orchestrator_history {
-            let status_icon = match summary.verification.status {
-                VerificationStatus::Passed => "✓",
-                VerificationStatus::Failed => "✗",
-                VerificationStatus::Pending => "○",
-            };
-            items.push(ListItem::new(format!(
-                "{} Step {} · {}",
-                status_icon, summary.step_index, summary.summary_text
-            )));
-        }
-        let mut state = ListState::default();
-        let max_index = self.orchestrator_history.len().saturating_sub(1);
-        state.select(Some(self.history_panel_selected.min(max_index)));
-        let list = List::new(items)
-            .block(Block::default())
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-        frame.render_stateful_widget(list, chunks[0], &mut state);
-
-        let mut detail_lines: Vec<Line> = Vec::new();
-        if let Some(summary) = self
-            .orchestrator_history
-            .get(self.history_panel_selected.min(max_index))
-        {
-            detail_lines.push(Line::from(format!("Step {}", summary.step_index)));
-            detail_lines.push(Line::from(summary.summary_text.clone()));
-            if !summary.tests_run.is_empty() {
-                let tests = summary
-                    .tests_run
-                    .iter()
-                    .map(|test| format!("{}({:?})", test.name, test.result))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                detail_lines.push(Line::from(format!("Tests: {}", tests)));
-            }
-            if !summary.artifacts_touched.is_empty() {
-                detail_lines.push(Line::from(format!(
-                    "Artifacts: {}",
-                    summary.artifacts_touched.join(", ")
-                )));
-            }
-            detail_lines.push(Line::from(format!(
-                "Verification: {:?}",
-                summary.verification.status
-            )));
-            if !summary.verification.feedback.is_empty() {
-                for feedback in &summary.verification.feedback {
-                    detail_lines.push(Line::from(format!(
-                        "{}: {}",
-                        feedback.author, feedback.message
-                    )));
-                }
-            }
-        }
-
-        if detail_lines.is_empty() {
-            detail_lines.push(Line::from("Select an entry to inspect details."));
-        }
-
-        frame.render_widget(
-            Paragraph::new(detail_lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::TOP)
-                        .title(" Details ")
-                        .border_type(BorderType::Plain),
-                )
-                .wrap(Wrap { trim: true }),
-            chunks[1],
+        ui::history_panel::render_history_panel(
+            frame,
+            area,
+            &self.orchestrator_history,
+            self.history_panel_selected,
         );
     }
 
@@ -9520,59 +9433,12 @@ Let me analyze the conversation chronologically:
         area
     }
     fn render_autocomplete(&self, frame: &mut Frame, autocomplete_area: ratatui::layout::Rect) {
-        // Calculate scroll offset to keep selected item visible
-        let visible_height = autocomplete_area.height as usize;
-        let total_items = self.autocomplete_suggestions.len();
-        let selected = self.autocomplete_selected_index;
-
-        // Calculate scroll offset to center the selected item
-        let scroll_offset = if total_items <= visible_height {
-            0
-        } else if selected < visible_height / 2 {
-            0
-        } else if selected >= total_items.saturating_sub(visible_height / 2) {
-            total_items.saturating_sub(visible_height)
-        } else {
-            selected.saturating_sub(visible_height / 2)
-        };
-
-        // Create lines with command highlighted and description in gray
-        let lines: Vec<Line> = self
-            .autocomplete_suggestions
-            .iter()
-            .enumerate()
-            .map(|(idx, (cmd, desc))| {
-                let is_selected = idx == self.autocomplete_selected_index;
-
-                // Format: "  /command                         description"
-                let cmd_style = if is_selected {
-                    Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(ratatui::style::Modifier::BOLD) // Same as directory color
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-
-                let desc_style = if is_selected {
-                    Style::default().fg(Color::Blue) // Same as directory color
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-
-                // Pad command to align descriptions (find max command length)
-                let max_cmd_len = 35; // Fixed width for alignment
-                let padded_cmd = format!("{:width$}", cmd, width = max_cmd_len);
-
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(padded_cmd, cmd_style),
-                    Span::styled(desc.clone(), desc_style),
-                ])
-            })
-            .collect();
-
-        let paragraph = Paragraph::new(lines).scroll((scroll_offset as u16, 0));
-        frame.render_widget(paragraph, autocomplete_area);
+        ui::autocomplete::render_autocomplete(
+            frame,
+            autocomplete_area,
+            &self.autocomplete_suggestions,
+            self.autocomplete_selected_index,
+        );
     }
 
     fn render_background_tasks(&self, frame: &mut Frame, task_area: ratatui::layout::Rect) {
