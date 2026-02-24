@@ -12,7 +12,6 @@ color-eyre = "0.6.5"
 ratatui = "0.29.0"
 unicode-width = "0.1.13"
 edtui = {path= "./crates/edtui"}
-cli-clipboard = "0.4.0"
 rand = "0.8"
 clipboard = "0.5.0"
 agent_core = {path = "./crates/agent_core"}
@@ -26,8 +25,6 @@ dirs = "5.0"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 async-trait = "0.1"
 anyhow = "1.0"
-sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls", "macros", "chrono"] }
-chrono = "0.4"
 
 [dev-dependencies]
 chrono = "0.4"
