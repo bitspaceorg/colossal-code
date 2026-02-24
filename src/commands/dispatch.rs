@@ -59,6 +59,30 @@ pub(crate) fn dispatch_slash_command(command: &str) -> SlashCommandDispatch {
 #[cfg(test)]
 mod tests {
     use super::{dispatch_slash_command, SlashCommandDispatch};
+    use crate::commands::ReviewType;
+
+    #[test]
+    fn dispatches_clear_command() {
+        let dispatch = dispatch_slash_command("/clear");
+        assert!(matches!(dispatch, SlashCommandDispatch::Clear));
+    }
+
+    #[test]
+    fn dispatches_shells_command() {
+        let dispatch = dispatch_slash_command("/shells");
+        assert!(matches!(dispatch, SlashCommandDispatch::Shells));
+    }
+
+    #[test]
+    fn dispatches_safety_command_with_args() {
+        let dispatch = dispatch_slash_command("/safety ReadOnly permissions");
+        match dispatch {
+            SlashCommandDispatch::Safety { args } => {
+                assert_eq!(args, vec!["readonly", "permissions"]);
+            }
+            _ => panic!("expected safety dispatch"),
+        }
+    }
 
     #[test]
     fn dispatches_review_command() {
@@ -67,6 +91,7 @@ mod tests {
         );
         match dispatch {
             SlashCommandDispatch::Review { options } => {
+                assert_eq!(options.review_type, ReviewType::Committed);
                 assert_eq!(options.base_branch.as_deref(), Some("main"));
                 assert_eq!(options.base_commit.as_deref(), Some("abc123"));
                 assert!(options.no_tool);

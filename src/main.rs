@@ -191,7 +191,8 @@ impl HelpTab {
 mod tests {
     use super::{
         AgentState, AssistantMode, HelpTab, MessageState, MessageType, PersistenceState,
-        SafetyState, SubAgentContext, UiMessageEvent, UiState,
+        QueueChoiceAction, SafetyState, SubAgentContext, UiMessageEvent, UiState,
+        parse_queue_choice,
     };
     use agent_core::safety_config::SafetyMode;
 
@@ -377,6 +378,21 @@ mod tests {
             AssistantMode::ReadOnly
         ));
     }
+
+    #[test]
+    fn parses_queue_choice_actions() {
+        assert_eq!(parse_queue_choice("1"), Some(QueueChoiceAction::Queue));
+        assert_eq!(parse_queue_choice("2"), Some(QueueChoiceAction::Interrupt));
+        assert_eq!(parse_queue_choice("3"), Some(QueueChoiceAction::Cancel));
+    }
+
+    #[test]
+    fn rejects_invalid_queue_choice_actions() {
+        assert_eq!(parse_queue_choice("0"), None);
+        assert_eq!(parse_queue_choice("4"), None);
+        assert_eq!(parse_queue_choice("interrupt"), None);
+        assert_eq!(parse_queue_choice(" 2 "), Some(QueueChoiceAction::Interrupt));
+    }
 }
 
 /// AI Assistant modes (cycled with Shift+Tab)
@@ -456,6 +472,22 @@ fn parse_arg_value(args: &[String], flag: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueChoiceAction {
+    Queue,
+    Interrupt,
+    Cancel,
+}
+
+fn parse_queue_choice(choice: &str) -> Option<QueueChoiceAction> {
+    match choice.trim() {
+        "1" => Some(QueueChoiceAction::Queue),
+        "2" => Some(QueueChoiceAction::Interrupt),
+        "3" => Some(QueueChoiceAction::Cancel),
+        _ => None,
+    }
 }
 
 #[tokio::main]
@@ -5251,15 +5283,14 @@ Let me analyze the conversation chronologically:
 
             // Check if we're in queue choice mode
             if self.show_queue_choice {
-                let choice = self.input.trim();
-                match choice {
-                    "1" => {
+                match parse_queue_choice(&self.input) {
+                    Some(QueueChoiceAction::Queue) => {
                         // Queue message - add to queue
                         let user_message = self.queue_choice_input.clone();
                         self.save_to_history(&user_message); // Save to file history
                         self.queued_messages.push(user_message);
                     }
-                    "2" => {
+                    Some(QueueChoiceAction::Interrupt) => {
                         // Interrupt & send new message
                         // Send cancel message to agent first
                         if let Some(tx) = &self.agent_tx {
@@ -5290,10 +5321,10 @@ Let me analyze the conversation chronologically:
                         self.thinking_position = 0;
                         self.thinking_raw_content.clear();
                     }
-                    "3" => {
+                    Some(QueueChoiceAction::Cancel) => {
                         // Cancel - discard message
                     }
-                    _ => {
+                    None => {
                         // Invalid choice, keep the popup
                         self.input.clear();
                         self.reset_cursor();
