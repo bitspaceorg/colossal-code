@@ -233,67 +233,61 @@ pub fn create_rich_content_from_messages(
 
         let is_agent = matches!(message_types.get(i), Some(crate::MessageType::Agent));
 
-        // Handle thinking animation
-        if message == "[THINKING_ANIMATION]" {
-            let text_with_dots = if let Some((summary, token_count, chunk_count)) =
-                &thinking_context.current_summary
-            {
-                if *token_count > 0 {
-                    format!("{} ({}rt {}ct)...", summary, token_count, chunk_count)
-                } else {
-                    format!("{}...", summary)
+        // Handle typed transcript events
+        if let Some(event) = crate::UiMessageEvent::parse(message) {
+            match event {
+                crate::UiMessageEvent::ThinkingAnimation => {
+                    let text_with_dots = if let Some((summary, token_count, chunk_count)) =
+                        &thinking_context.current_summary
+                    {
+                        if *token_count > 0 {
+                            format!("{} ({}rt {}ct)...", summary, token_count, chunk_count)
+                        } else {
+                            format!("{}...", summary)
+                        }
+                    } else {
+                        format!("{}...", thinking_context.current_word)
+                    };
+
+                    let mut text =
+                        format!("{} {}", thinking_context.snowflake_frame, text_with_dots);
+                    if let Some(elapsed) = thinking_context.elapsed_secs {
+                        let token_info = if thinking_context.token_count > 0 {
+                            format!(" | ↓ {} tokens", thinking_context.token_count)
+                        } else {
+                            String::new()
+                        };
+                        let time_str = format_elapsed_time(elapsed);
+                        text = format!("{} [Esc to interrupt | {}{}]", text, time_str, token_info);
+                    }
+
+                    content.push(Line::from(vec![Span::raw(format!(" {}", text))]));
+                    continue;
                 }
-            } else {
-                format!("{}...", thinking_context.current_word)
-            };
-
-            let mut text = format!("{} {}", thinking_context.snowflake_frame, text_with_dots);
-            if let Some(elapsed) = thinking_context.elapsed_secs {
-                let token_info = if thinking_context.token_count > 0 {
-                    format!(" | ↓ {} tokens", thinking_context.token_count)
-                } else {
-                    String::new()
-                };
-                let time_str = format_elapsed_time(elapsed);
-                text = format!("{} [Esc to interrupt | {}{}]", text, time_str, token_info);
-            }
-
-            content.push(Line::from(vec![Span::raw(format!(" {}", text))]));
-            continue;
-        }
-
-        // Handle tool calls
-        if message.starts_with("[TOOL_CALL_COMPLETED:") {
-            let parts: Vec<&str> = message
-                .trim_start_matches("[TOOL_CALL_COMPLETED:")
-                .trim_end_matches("]")
-                .splitn(3, '|')
-                .collect();
-            if parts.len() >= 3 {
-                let tool_name = parts[0];
-                let args = parts[1];
-                let result = parts[2];
-                content.push(Line::from(vec![Span::raw(format!(
-                    " ● {}({})",
-                    tool_name, args
-                ))]));
-                content.push(Line::from(vec![Span::raw(format!(" │ ⎿  {}", result))]));
-                continue;
-            }
-        } else if message.starts_with("[TOOL_CALL_STARTED:") {
-            let parts: Vec<&str> = message
-                .trim_start_matches("[TOOL_CALL_STARTED:")
-                .trim_end_matches("]")
-                .splitn(2, '|')
-                .collect();
-            if parts.len() >= 2 {
-                let tool_name = parts[0];
-                let args = parts[1];
-                content.push(Line::from(vec![Span::raw(format!(
-                    " ● {}({})",
-                    tool_name, args
-                ))]));
-                continue;
+                crate::UiMessageEvent::ToolCallCompleted {
+                    tool_name,
+                    args,
+                    result,
+                } => {
+                    content.push(Line::from(vec![Span::raw(format!(
+                        " ● {}({})",
+                        tool_name, args
+                    ))]));
+                    content.push(Line::from(vec![Span::raw(format!(" │ ⎿  {}", result))]));
+                    continue;
+                }
+                crate::UiMessageEvent::ToolCallStarted { tool_name, args } => {
+                    content.push(Line::from(vec![Span::raw(format!(
+                        " ● {}({})",
+                        tool_name, args
+                    ))]));
+                    continue;
+                }
+                crate::UiMessageEvent::Command(_)
+                | crate::UiMessageEvent::GenerationStats { .. } => {
+                    content.push(Line::from(vec![Span::raw(format!(" {}", message))]));
+                    continue;
+                }
             }
         }
 
@@ -307,10 +301,7 @@ pub fn create_rich_content_from_messages(
         }
 
         // Handle other special cases
-        if message == "● Interrupted"
-            || message.starts_with("[COMMAND:")
-            || message.starts_with("├── ")
-            || message.contains("tok/sec")
+        if message == "● Interrupted" || message.starts_with("├── ") || message.contains("tok/sec")
         {
             // Generation stats
             content.push(Line::from(vec![Span::raw(format!(" {}", message))]));
@@ -458,67 +449,60 @@ pub fn create_plain_content_for_editor(
     for (i, message) in messages.iter().enumerate() {
         let is_agent = matches!(message_types.get(i), Some(crate::MessageType::Agent));
 
-        // Handle thinking animation
-        if message == "[THINKING_ANIMATION]" {
-            let text_with_dots = if let Some((summary, token_count, chunk_count)) =
-                &thinking_context.current_summary
-            {
-                if *token_count > 0 {
-                    format!("{} ({}rt {}ct)...", summary, token_count, chunk_count)
-                } else {
-                    format!("{}...", summary)
+        // Handle typed transcript events
+        if let Some(event) = crate::UiMessageEvent::parse(message) {
+            match event {
+                crate::UiMessageEvent::ThinkingAnimation => {
+                    let text_with_dots = if let Some((summary, token_count, chunk_count)) =
+                        &thinking_context.current_summary
+                    {
+                        if *token_count > 0 {
+                            format!("{} ({}rt {}ct)...", summary, token_count, chunk_count)
+                        } else {
+                            format!("{}...", summary)
+                        }
+                    } else {
+                        format!("{}...", thinking_context.current_word)
+                    };
+
+                    let mut text =
+                        format!("{} {}", thinking_context.snowflake_frame, text_with_dots);
+                    if let Some(elapsed) = thinking_context.elapsed_secs {
+                        let token_info = if thinking_context.token_count > 0 {
+                            format!(" | ↓ {} tokens", thinking_context.token_count)
+                        } else {
+                            String::new()
+                        };
+                        let time_str = format_elapsed_time(elapsed);
+                        text = format!("{} [Esc to interrupt | {}{}]", text, time_str, token_info);
+                    }
+
+                    content.push(format!(" {}", text));
+                    continue;
                 }
-            } else {
-                format!("{}...", thinking_context.current_word)
-            };
-
-            let mut text = format!("{} {}", thinking_context.snowflake_frame, text_with_dots);
-            if let Some(elapsed) = thinking_context.elapsed_secs {
-                let token_info = if thinking_context.token_count > 0 {
-                    format!(" | ↓ {} tokens", thinking_context.token_count)
-                } else {
-                    String::new()
-                };
-                let time_str = format_elapsed_time(elapsed);
-                text = format!("{} [Esc to interrupt | {}{}]", text, time_str, token_info);
-            }
-
-            content.push(format!(" {}", text));
-            continue;
-        }
-
-        // Handle tool calls
-        if message.starts_with("[TOOL_CALL_COMPLETED:") {
-            let parts: Vec<&str> = message
-                .trim_start_matches("[TOOL_CALL_COMPLETED:")
-                .trim_end_matches("]")
-                .splitn(3, '|')
-                .collect();
-            if parts.len() >= 3 {
-                let tool_name = parts[0];
-                let args = parts[1];
-                let result = parts[2];
-                content.push(format!(" ● {}({})", tool_name, args));
-                content.push(format!(" │ ⎿  {}", result));
-                continue;
-            }
-        } else if message.starts_with("[TOOL_CALL_STARTED:") {
-            let parts: Vec<&str> = message
-                .trim_start_matches("[TOOL_CALL_STARTED:")
-                .trim_end_matches("]")
-                .splitn(2, '|')
-                .collect();
-            if parts.len() >= 2 {
-                let tool_name = parts[0];
-                let args = parts[1];
-                content.push(format!(" ● {}({})", tool_name, args));
-                continue;
+                crate::UiMessageEvent::ToolCallCompleted {
+                    tool_name,
+                    args,
+                    result,
+                } => {
+                    content.push(format!(" ● {}({})", tool_name, args));
+                    content.push(format!(" │ ⎿  {}", result));
+                    continue;
+                }
+                crate::UiMessageEvent::ToolCallStarted { tool_name, args } => {
+                    content.push(format!(" ● {}({})", tool_name, args));
+                    continue;
+                }
+                crate::UiMessageEvent::Command(_)
+                | crate::UiMessageEvent::GenerationStats { .. } => {
+                    content.push(format!(" {}", message));
+                    continue;
+                }
             }
         }
 
         // Handle other special cases (plain text version doesn't support colors)
         if message == "● Interrupted"
-            || message.starts_with("[COMMAND:")
             || message.starts_with(" ⎿ ")
             || message.starts_with("├── ")
             || message.contains("tok/sec")

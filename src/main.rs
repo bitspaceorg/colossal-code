@@ -235,6 +235,30 @@ mod tests {
     }
 
     #[test]
+    fn ui_message_event_roundtrips_command_and_generation_stats() {
+        let command = UiMessageEvent::Command("Vim keybindings enabled".to_string()).to_message();
+        assert_eq!(
+            UiMessageEvent::parse(&command),
+            Some(UiMessageEvent::Command(
+                "Vim keybindings enabled".to_string()
+            ))
+        );
+
+        let stats = UiMessageEvent::GenerationStats {
+            tokens_per_sec: 2.5,
+            completion_tokens: 12,
+            prompt_tokens: 34,
+            time_to_first_token_sec: 0.75,
+            stop_reason: "stop|sequence".to_string(),
+        }
+        .to_message();
+        assert!(matches!(
+            UiMessageEvent::parse(&stats),
+            Some(UiMessageEvent::GenerationStats { stop_reason, .. }) if stop_reason == "stop|sequence"
+        ));
+    }
+
+    #[test]
     fn sub_agent_context_uses_typed_ui_messages() {
         let mut context = SubAgentContext::new("1".to_string(), "step".to_string());
 
@@ -414,7 +438,7 @@ pub enum ToolCallStatus {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum UiMessageEvent {
+pub(crate) enum UiMessageEvent {
     ThinkingAnimation,
     Command(String),
     GenerationStats {
@@ -436,7 +460,7 @@ enum UiMessageEvent {
 }
 
 impl UiMessageEvent {
-    fn parse(message: &str) -> Option<Self> {
+    pub(crate) fn parse(message: &str) -> Option<Self> {
         if message == "[THINKING_ANIMATION]" {
             return Some(Self::ThinkingAnimation);
         }
@@ -517,6 +541,35 @@ impl UiMessageEvent {
 
         None
     }
+
+    pub(crate) fn to_message(&self) -> String {
+        match self {
+            Self::ThinkingAnimation => "[THINKING_ANIMATION]".to_string(),
+            Self::Command(content) => format!("[COMMAND: {}]", content),
+            Self::GenerationStats {
+                tokens_per_sec,
+                completion_tokens,
+                prompt_tokens,
+                time_to_first_token_sec,
+                stop_reason,
+            } => format!(
+                "[GEN_STATS:{:.6}|{}|{}|{:.6}|{}]",
+                tokens_per_sec,
+                completion_tokens,
+                prompt_tokens,
+                time_to_first_token_sec,
+                stop_reason.replace('|', "\\u{007C}")
+            ),
+            Self::ToolCallStarted { tool_name, args } => {
+                format!("[TOOL_CALL_STARTED:{}|{}]", tool_name, args)
+            }
+            Self::ToolCallCompleted {
+                tool_name,
+                args,
+                result,
+            } => format!("[TOOL_CALL_COMPLETED:{}|{}|{}]", tool_name, args, result),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -577,8 +630,7 @@ impl SubAgentContext {
     }
 
     fn push_message(&mut self, content: String, message_type: MessageType) {
-        self
-            .messages
+        self.messages
             .push(UiMessage::new(content, message_type, MessageState::Sent));
     }
 
@@ -626,7 +678,10 @@ impl SubAgentContext {
             })
             .unwrap_or(false)
         {
-            self.push_message("[THINKING_ANIMATION]".to_string(), MessageType::Agent);
+            self.push_message(
+                UiMessageEvent::ThinkingAnimation.to_message(),
+                MessageType::Agent,
+            );
         }
         self.thinking_indicator_active = true;
         self.is_thinking = true;
@@ -669,7 +724,11 @@ impl SubAgentContext {
             self.started_orchestration = true;
         }
         self.push_message(
-            format!("[TOOL_CALL_STARTED:{}|{}]", tool_name, formatted_args),
+            UiMessageEvent::ToolCallStarted {
+                tool_name: tool_name.to_string(),
+                args: formatted_args,
+            }
+            .to_message(),
             MessageType::Agent,
         );
     }
@@ -684,10 +743,12 @@ impl SubAgentContext {
                 continue;
             };
             if started_tool == tool_name {
-                message.content = format!(
-                    "[TOOL_CALL_COMPLETED:{}|{}|{}]",
-                    tool_name, args, formatted_result
-                );
+                message.content = UiMessageEvent::ToolCallCompleted {
+                    tool_name: tool_name.to_string(),
+                    args,
+                    result: formatted_result,
+                }
+                .to_message();
                 break;
             }
         }
@@ -720,7 +781,11 @@ impl SubAgentContext {
         };
 
         AppSnapshot {
-            messages: self.messages.iter().map(|message| message.content.clone()).collect(),
+            messages: self
+                .messages
+                .iter()
+                .map(|message| message.content.clone())
+                .collect(),
             message_types: self
                 .messages
                 .iter()
@@ -766,7 +831,10 @@ impl SubAgentContext {
         }
 
         if let Some(stats) = self.generation_stats.clone() {
-            self.push_message(App::encode_generation_stats_message(&stats), MessageType::Agent);
+            self.push_message(
+                App::encode_generation_stats_message(&stats),
+                MessageType::Agent,
+            );
             self.generation_stats_rendered = true;
         }
     }
@@ -4949,8 +5017,10 @@ Let me analyze the conversation chronologically:
                 }
 
                 // Add confirmation message
-                self.messages
-                    .push("[COMMAND: Conversation history cleared]".to_string());
+                self.messages.push(
+                    UiMessageEvent::Command("Conversation history cleared".to_string())
+                        .to_message(),
+                );
                 self.message_types.push(MessageType::Agent);
                 self.message_states.push(MessageState::Sent);
 
@@ -4965,7 +5035,8 @@ Let me analyze the conversation chronologically:
             }
             ParsedSlashCommand::Exit => {
                 // Add confirmation message
-                self.messages.push("[COMMAND: Exiting...]".to_string());
+                self.messages
+                    .push(UiMessageEvent::Command("Exiting...".to_string()).to_message());
                 self.message_types.push(MessageType::Agent);
                 self.message_states.push(MessageState::Sent);
 
@@ -5072,8 +5143,9 @@ Let me analyze the conversation chronologically:
                 } else {
                     "disabled"
                 };
-                self.messages
-                    .push(format!("[COMMAND: Vim keybindings {}]", status));
+                self.messages.push(
+                    UiMessageEvent::Command(format!("Vim keybindings {}", status)).to_message(),
+                );
                 self.message_types.push(MessageType::Agent);
                 self.message_states.push(MessageState::Sent);
             }
@@ -5184,8 +5256,9 @@ Let me analyze the conversation chronologically:
             }
             ParsedSlashCommand::Unknown { command } => {
                 // Unknown command
-                self.messages
-                    .push(format!("[COMMAND: Unknown command '{}']", command));
+                self.messages.push(
+                    UiMessageEvent::Command(format!("Unknown command '{}'", command)).to_message(),
+                );
                 self.message_types.push(MessageType::Agent);
                 self.message_states.push(MessageState::Sent);
             }
@@ -5455,7 +5528,8 @@ Let me analyze the conversation chronologically:
                 self.save_to_history(&user_message);
 
                 // Show thinking animation immediately
-                self.messages.push("[THINKING_ANIMATION]".to_string());
+                self.messages
+                    .push(UiMessageEvent::ThinkingAnimation.to_message());
                 self.message_types.push(MessageType::Agent);
                 self.is_thinking = true;
                 self.thinking_indicator_active = true;
@@ -5561,7 +5635,8 @@ Let me analyze the conversation chronologically:
                             };
 
                             if should_add_thinking {
-                                self.messages.push("[THINKING_ANIMATION]".to_string());
+                                self.messages
+                                    .push(UiMessageEvent::ThinkingAnimation.to_message());
                                 self.message_types.push(MessageType::Agent);
                                 self.thinking_indicator_active = true;
                             }
@@ -5781,10 +5856,13 @@ Let me analyze the conversation chronologically:
                             // Format arguments for display
                             let formatted_args =
                                 Self::format_tool_arguments(&tool_name, &arguments);
-                            self.messages.push(format!(
-                                "[TOOL_CALL_STARTED:{}|{}]",
-                                tool_name, formatted_args
-                            ));
+                            self.messages.push(
+                                UiMessageEvent::ToolCallStarted {
+                                    tool_name: tool_name.clone(),
+                                    args: formatted_args,
+                                }
+                                .to_message(),
+                            );
                             self.message_types.push(MessageType::Agent);
                             self.thinking_indicator_active = true;
 
@@ -5971,10 +6049,12 @@ Let me analyze the conversation chronologically:
                                 if started_tool == tool_name {
                                     let formatted_result =
                                         Self::format_tool_result(&tool_name, &result);
-                                    *msg = format!(
-                                        "[TOOL_CALL_COMPLETED:{}|{}|{}]",
-                                        tool_name, args, formatted_result
-                                    );
+                                    *msg = UiMessageEvent::ToolCallCompleted {
+                                        tool_name: tool_name.clone(),
+                                        args,
+                                        result: formatted_result,
+                                    }
+                                    .to_message();
                                     break;
                                 }
                             }
@@ -6326,7 +6406,8 @@ Let me analyze the conversation chronologically:
                     self.save_to_history(&user_message);
 
                     // Show thinking animation immediately
-                    self.messages.push("[THINKING_ANIMATION]".to_string());
+                    self.messages
+                        .push(UiMessageEvent::ThinkingAnimation.to_message());
                     self.message_types.push(MessageType::Agent);
                     self.is_thinking = true;
                     self.thinking_indicator_active = true;
@@ -6441,7 +6522,8 @@ Let me analyze the conversation chronologically:
                         // Don't save_to_history here - already saved when queued
 
                         // Show thinking animation immediately
-                        self.messages.push("[THINKING_ANIMATION]".to_string());
+                        self.messages
+                            .push(UiMessageEvent::ThinkingAnimation.to_message());
                         self.message_types.push(MessageType::Agent);
                         self.is_thinking = true;
                         self.thinking_indicator_active = true;
@@ -6473,23 +6555,35 @@ Let me analyze the conversation chronologically:
                                 .and_then(|mut ctx| ctx.set_contents(json_string));
 
                         if clipboard_result.is_ok() {
-                            self.messages
-                                .push("[COMMAND: Conversation exported to clipboard]".to_string());
+                            self.messages.push(
+                                UiMessageEvent::Command(
+                                    "Conversation exported to clipboard".to_string(),
+                                )
+                                .to_message(),
+                            );
                         } else {
-                            self.messages
-                                .push("[COMMAND: Failed to copy to clipboard]".to_string());
+                            self.messages.push(
+                                UiMessageEvent::Command("Failed to copy to clipboard".to_string())
+                                    .to_message(),
+                            );
                         }
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
                     } else {
-                        self.messages
-                            .push("[COMMAND: No conversation history available]".to_string());
+                        self.messages.push(
+                            UiMessageEvent::Command(
+                                "No conversation history available".to_string(),
+                            )
+                            .to_message(),
+                        );
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
                     }
                 } else {
-                    self.messages
-                        .push("[COMMAND: No conversation history available]".to_string());
+                    self.messages.push(
+                        UiMessageEvent::Command("No conversation history available".to_string())
+                            .to_message(),
+                    );
                     self.message_types.push(MessageType::Agent);
                     self.message_states.push(MessageState::Sent);
                 }
@@ -6511,7 +6605,8 @@ Let me analyze the conversation chronologically:
                         self.message_states.push(MessageState::Sent);
 
                         // Show thinking animation
-                        self.messages.push("[THINKING_ANIMATION]".to_string());
+                        self.messages
+                            .push(UiMessageEvent::ThinkingAnimation.to_message());
                         self.message_types.push(MessageType::Agent);
                         self.is_thinking = true;
                         self.thinking_indicator_active = true;
@@ -6571,7 +6666,8 @@ Let me analyze the conversation chronologically:
                 let prompt = self.build_compact_prompt(&options);
 
                 // Show thinking animation (command already recorded as a user message)
-                self.messages.push("[THINKING_ANIMATION]".to_string());
+                self.messages
+                    .push(UiMessageEvent::ThinkingAnimation.to_message());
                 self.message_types.push(MessageType::Agent);
                 self.is_thinking = true;
                 self.thinking_indicator_active = true;
@@ -8208,14 +8304,14 @@ Let me analyze the conversation chronologically:
     }
 
     fn encode_generation_stats_message(stats: &AgentGenerationStats) -> String {
-        format!(
-            "[GEN_STATS:{:.6}|{}|{}|{:.6}|{}]",
-            stats.avg_completion_tok_per_sec,
-            stats.completion_tokens,
-            stats.prompt_tokens,
-            stats.time_to_first_token_sec,
-            stats.stop_reason.replace('|', "\\u{007C}")
-        )
+        UiMessageEvent::GenerationStats {
+            tokens_per_sec: stats.avg_completion_tok_per_sec,
+            completion_tokens: stats.completion_tokens,
+            prompt_tokens: stats.prompt_tokens,
+            time_to_first_token_sec: stats.time_to_first_token_sec,
+            stop_reason: stats.stop_reason.clone(),
+        }
+        .to_message()
     }
 
     fn push_generation_stats_message(
@@ -8518,7 +8614,7 @@ Let me analyze the conversation chronologically:
         messages: &mut Vec<String>,
         message_types: &mut Vec<MessageType>,
     ) {
-        messages.push("[THINKING_ANIMATION]".to_string());
+        messages.push(UiMessageEvent::ThinkingAnimation.to_message());
         message_types.push(MessageType::Agent);
     }
     /// Ensure the thinking animation placeholder is the last visible entry if the indicator is active.
@@ -8726,7 +8822,8 @@ Let me analyze the conversation chronologically:
         self.message_metadata.push(None);
         self.message_timestamps.push(SystemTime::now());
 
-        self.messages.push("[THINKING_ANIMATION]".to_string());
+        self.messages
+            .push(UiMessageEvent::ThinkingAnimation.to_message());
         self.message_types.push(MessageType::Agent);
         self.is_thinking = true;
         self.thinking_indicator_active = true;
@@ -10749,8 +10846,13 @@ Let me analyze the conversation chronologically:
             for (idx, message) in context.messages.iter().enumerate() {
                 let is_agent = matches!(message.message_type, MessageType::Agent);
                 let connector = self.agent_connector_for_index(&message_types, idx);
-                let rendered = self
-                    .render_message_with_max_width(&message.content, max_width, None, is_agent, connector);
+                let rendered = self.render_message_with_max_width(
+                    &message.content,
+                    max_width,
+                    None,
+                    is_agent,
+                    connector,
+                );
                 lines.extend(rendered.lines);
             }
 
