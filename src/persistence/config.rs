@@ -26,33 +26,55 @@ pub fn initialize_default_file(default_content: &str) -> Result<()> {
 pub fn load_config_value(key: &str) -> Option<String> {
     let config_path = config_file_path().ok()?;
     let content = std::fs::read_to_string(config_path).ok()?;
-    for line in content.lines() {
-        if line.starts_with(key) {
-            if let Some(value) = line.split('=').nth(1) {
-                return Some(value.trim().to_string());
-            }
-        }
-    }
-    None
+    load_config_value_from_content(&content, key)
 }
 
 pub fn load_config_map() -> HashMap<String, String> {
-    let mut config_map = HashMap::new();
     let Ok(config_path) = config_file_path() else {
-        return config_map;
+        return HashMap::new();
     };
     let Ok(content) = std::fs::read_to_string(config_path) else {
-        return config_map;
+        return HashMap::new();
     };
 
+    parse_config_map_from_content(&content)
+}
+
+fn load_config_value_from_content(content: &str, key: &str) -> Option<String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+
+    content.lines().find_map(|line| {
+        let (parsed_key, parsed_value) = parse_config_line(line)?;
+        (parsed_key == key).then(|| parsed_value.to_string())
+    })
+}
+
+fn parse_config_map_from_content(content: &str) -> HashMap<String, String> {
+    let mut config_map = HashMap::new();
     for line in content.lines() {
-        if let Some(idx) = line.find('=') {
-            let key = line[..idx].trim();
-            let value = line[idx + 1..].trim();
+        if let Some((key, value)) = parse_config_line(line) {
             config_map.insert(key.to_string(), value.to_string());
         }
     }
     config_map
+}
+
+fn parse_config_line(line: &str) -> Option<(&str, &str)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+
+    let (raw_key, raw_value) = trimmed.split_once('=')?;
+    let key = raw_key.trim();
+    if key.is_empty() {
+        return None;
+    }
+
+    Some((key, raw_value.trim()))
 }
 
 pub fn write_config_map(config_map: &HashMap<String, String>) -> Result<()> {
@@ -71,27 +93,29 @@ mod tests {
 
     #[test]
     fn load_config_map_parses_key_values() {
-        let mut map = HashMap::new();
-        map.insert("model".to_string(), "foo".to_string());
-        map.insert("vim-keybind".to_string(), "true".to_string());
-        let mut rendered = String::new();
-        for (k, v) in &map {
-            rendered.push_str(&format!("{} = {}\n", k, v));
-        }
-
-        let parsed = rendered
-            .lines()
-            .filter_map(|line| {
-                line.find('=').map(|idx| {
-                    (
-                        line[..idx].trim().to_string(),
-                        line[idx + 1..].trim().to_string(),
-                    )
-                })
-            })
-            .collect::<HashMap<_, _>>();
+        let rendered = "model = foo\nvim-keybind = true\n";
+        let parsed = parse_config_map_from_content(rendered);
 
         assert_eq!(parsed.get("model"), Some(&"foo".to_string()));
+        assert_eq!(parsed.get("vim-keybind"), Some(&"true".to_string()));
+    }
+
+    #[test]
+    fn load_config_value_uses_exact_key_matching() {
+        let content = "model-extra = should-not-match\nmodel = expected\n";
+
+        let value = load_config_value_from_content(content, "model");
+
+        assert_eq!(value.as_deref(), Some("expected"));
+    }
+
+    #[test]
+    fn parse_config_map_ignores_comments_and_malformed_lines() {
+        let content = "\n# full-line comment\n=missing-key\nno-delimiter\nvim-keybind = true\n";
+
+        let parsed = parse_config_map_from_content(content);
+
+        assert_eq!(parsed.len(), 1);
         assert_eq!(parsed.get("vim-keybind"), Some(&"true".to_string()));
     }
 }
