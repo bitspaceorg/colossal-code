@@ -1,0 +1,5 @@
+P1-02 Replace string sentinels with typed message/event enums
+- Added typed `UiMessageEvent` enum in `src/main.rs` to centralize parsing of special transcript events.
+- Migrated sentinel checks in rendering and transcript flow to use typed event matching instead of ad-hoc string prefix/equality checks.
+- Added unit tests for parsing thinking, generation stats, and tool-call events.
+- Ran `cargo test` (pass) and `cargo clippy -p cocode --tests -- -A clippy::ifs_same_cond -A clippy::never_loop` (pass with existing warnings).

@@ -183,6 +183,56 @@ impl HelpTab {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::UiMessageEvent;
+
+    #[test]
+    fn parses_thinking_animation_event() {
+        let parsed = UiMessageEvent::parse("[THINKING_ANIMATION]");
+        assert!(matches!(parsed, Some(UiMessageEvent::ThinkingAnimation)));
+    }
+
+    #[test]
+    fn parses_generation_stats_event() {
+        let parsed = UiMessageEvent::parse("[GEN_STATS:1.500000|7|11|0.250000|end_turn]");
+        assert!(matches!(
+            parsed,
+            Some(UiMessageEvent::GenerationStats {
+                tokens_per_sec,
+                completion_tokens,
+                prompt_tokens,
+                time_to_first_token_sec,
+                stop_reason,
+            }) if (tokens_per_sec - 1.5).abs() < f32::EPSILON
+                && completion_tokens == 7
+                && prompt_tokens == 11
+                && (time_to_first_token_sec - 0.25).abs() < f32::EPSILON
+                && stop_reason == "end_turn"
+        ));
+    }
+
+    #[test]
+    fn parses_tool_call_events() {
+        let started = UiMessageEvent::parse("[TOOL_CALL_STARTED:bash|ls -la]");
+        assert!(matches!(
+            started,
+            Some(UiMessageEvent::ToolCallStarted { tool_name, args })
+                if tool_name == "bash" && args == "ls -la"
+        ));
+
+        let completed = UiMessageEvent::parse("[TOOL_CALL_COMPLETED:bash|ls -la|ok]");
+        assert!(matches!(
+            completed,
+            Some(UiMessageEvent::ToolCallCompleted {
+                tool_name,
+                args,
+                result,
+            }) if tool_name == "bash" && args == "ls -la" && result == "ok"
+        ));
+    }
+}
+
 /// AI Assistant modes (cycled with Shift+Tab)
 #[derive(Clone, Copy, PartialEq)]
 enum AssistantMode {
@@ -333,6 +383,112 @@ pub enum ToolCallStatus {
     Error,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum UiMessageEvent {
+    ThinkingAnimation,
+    Command(String),
+    GenerationStats {
+        tokens_per_sec: f32,
+        completion_tokens: usize,
+        prompt_tokens: usize,
+        time_to_first_token_sec: f32,
+        stop_reason: String,
+    },
+    ToolCallStarted {
+        tool_name: String,
+        args: String,
+    },
+    ToolCallCompleted {
+        tool_name: String,
+        args: String,
+        result: String,
+    },
+}
+
+impl UiMessageEvent {
+    fn parse(message: &str) -> Option<Self> {
+        if message == "[THINKING_ANIMATION]" {
+            return Some(Self::ThinkingAnimation);
+        }
+
+        if message.starts_with("[COMMAND:") {
+            let content = message
+                .trim_start_matches("[COMMAND:")
+                .trim_end_matches(']')
+                .trim()
+                .to_string();
+            return Some(Self::Command(content));
+        }
+
+        if message.starts_with("[GEN_STATS:") {
+            let mut parts = message
+                .trim_start_matches("[GEN_STATS:")
+                .trim_end_matches(']')
+                .splitn(5, '|');
+            if let (Some(tps), Some(comp), Some(prompt), Some(ttft), Some(reason)) = (
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+            ) {
+                if let (
+                    Ok(tokens_per_sec),
+                    Ok(completion_tokens),
+                    Ok(prompt_tokens),
+                    Ok(time_to_first_token_sec),
+                ) = (
+                    tps.parse::<f32>(),
+                    comp.parse::<usize>(),
+                    prompt.parse::<usize>(),
+                    ttft.parse::<f32>(),
+                ) {
+                    return Some(Self::GenerationStats {
+                        tokens_per_sec,
+                        completion_tokens,
+                        prompt_tokens,
+                        time_to_first_token_sec,
+                        stop_reason: reason.replace("\\u{007C}", "|"),
+                    });
+                }
+            }
+            return None;
+        }
+
+        if message.starts_with("[TOOL_CALL_COMPLETED:") {
+            let parts: Vec<&str> = message
+                .trim_start_matches("[TOOL_CALL_COMPLETED:")
+                .trim_end_matches(']')
+                .splitn(3, '|')
+                .collect();
+            if parts.len() == 3 {
+                return Some(Self::ToolCallCompleted {
+                    tool_name: parts[0].to_string(),
+                    args: parts[1].to_string(),
+                    result: parts[2].to_string(),
+                });
+            }
+            return None;
+        }
+
+        if message.starts_with("[TOOL_CALL_STARTED:") {
+            let parts: Vec<&str> = message
+                .trim_start_matches("[TOOL_CALL_STARTED:")
+                .trim_end_matches(']')
+                .splitn(2, '|')
+                .collect();
+            if parts.len() == 2 {
+                return Some(Self::ToolCallStarted {
+                    tool_name: parts[0].to_string(),
+                    args: parts[1].to_string(),
+                });
+            }
+        }
+
+        None
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct StepToolCallEntry {
     pub id: u64,
@@ -410,8 +566,11 @@ impl SubAgentContext {
 
         let append_to_last = if let Some(MessageType::Agent) = self.message_types.last() {
             if let Some(last) = self.messages.last() {
-                !(last.starts_with("[TOOL_CALL_STARTED:")
-                    || last.starts_with("[TOOL_CALL_COMPLETED:"))
+                !matches!(
+                    UiMessageEvent::parse(last),
+                    Some(UiMessageEvent::ToolCallStarted { .. })
+                        | Some(UiMessageEvent::ToolCallCompleted { .. })
+                )
             } else {
                 false
             }
@@ -433,7 +592,12 @@ impl SubAgentContext {
         if !self
             .messages
             .last()
-            .map(|m| m == "[THINKING_ANIMATION]")
+            .map(|m| {
+                matches!(
+                    UiMessageEvent::parse(m),
+                    Some(UiMessageEvent::ThinkingAnimation)
+                )
+            })
             .unwrap_or(false)
         {
             self.push_message("[THINKING_ANIMATION]".to_string(), MessageType::Agent);
@@ -463,7 +627,10 @@ impl SubAgentContext {
 
     fn remove_thinking_placeholder(&mut self) {
         if let Some(last) = self.messages.last() {
-            if last == "[THINKING_ANIMATION]" {
+            if matches!(
+                UiMessageEvent::parse(last),
+                Some(UiMessageEvent::ThinkingAnimation)
+            ) {
                 self.messages.pop();
                 self.message_types.pop();
                 self.message_states.pop();
@@ -485,11 +652,14 @@ impl SubAgentContext {
 
     pub fn complete_tool_call(&mut self, tool_name: &str, formatted_result: String) {
         for msg in self.messages.iter_mut().rev() {
-            if msg.starts_with(&format!("[TOOL_CALL_STARTED:{}|", tool_name)) {
-                let args = msg
-                    .trim_start_matches(&format!("[TOOL_CALL_STARTED:{}|", tool_name))
-                    .trim_end_matches(']')
-                    .to_string();
+            let Some(UiMessageEvent::ToolCallStarted {
+                tool_name: started_tool,
+                args,
+            }) = UiMessageEvent::parse(msg)
+            else {
+                continue;
+            };
+            if started_tool == tool_name {
                 *msg = format!(
                     "[TOOL_CALL_COMPLETED:{}|{}|{}]",
                     tool_name, args, formatted_result
@@ -552,12 +722,12 @@ impl SubAgentContext {
             return;
         }
 
-        let has_marker = self
-            .messages
-            .iter()
-            .rev()
-            .take(6)
-            .any(|msg| msg.starts_with("[GEN_STATS:"));
+        let has_marker = self.messages.iter().rev().take(6).any(|msg| {
+            matches!(
+                UiMessageEvent::parse(msg),
+                Some(UiMessageEvent::GenerationStats { .. })
+            )
+        });
         if has_marker {
             self.generation_stats_rendered = true;
             return;
@@ -4091,9 +4261,10 @@ Let me analyze the conversation chronologically:
         // Add messages while bounding the payload to the current context budget
         let mut entries: Vec<(String, String)> = Vec::new();
         for (msg, msg_type) in self.messages.iter().zip(self.message_types.iter()) {
-            if msg.starts_with("[THINKING_ANIMATION]")
-                || msg.starts_with("[COMMAND:")
-                || msg.starts_with(" ⎿")
+            if matches!(
+                UiMessageEvent::parse(msg),
+                Some(UiMessageEvent::ThinkingAnimation) | Some(UiMessageEvent::Command(_))
+            ) || msg.starts_with(" ⎿")
             {
                 continue;
             }
@@ -5434,7 +5605,10 @@ Let me analyze the conversation chronologically:
 
                         // Clear UI state immediately
                         if let Some(last_msg) = self.messages.last() {
-                            if last_msg == "[THINKING_ANIMATION]" {
+                            if matches!(
+                                UiMessageEvent::parse(last_msg),
+                                Some(UiMessageEvent::ThinkingAnimation)
+                            ) {
                                 self.messages.pop();
                                 self.message_types.pop();
                                 self.message_states.pop();
@@ -5748,8 +5922,10 @@ Let me analyze the conversation chronologically:
                             }
                             // Add or maintain thinking animation placeholder
                             let should_add_thinking = if let Some(last_msg) = self.messages.last() {
-                                // Only add if last message is not already a thinking animation
-                                last_msg != "[THINKING_ANIMATION]"
+                                !matches!(
+                                    UiMessageEvent::parse(last_msg),
+                                    Some(UiMessageEvent::ThinkingAnimation)
+                                )
                             } else {
                                 true
                             };
@@ -6155,14 +6331,14 @@ Let me analyze the conversation chronologically:
 
                             // Find and replace the started message with completed
                             for msg in self.messages.iter_mut().rev() {
-                                if msg.starts_with(&format!("[TOOL_CALL_STARTED:{}|", tool_name)) {
-                                    // Extract args: everything between first | and final ]
-                                    let args = msg
-                                        .trim_start_matches(&format!(
-                                            "[TOOL_CALL_STARTED:{}|",
-                                            tool_name
-                                        ))
-                                        .trim_end_matches("]");
+                                let Some(UiMessageEvent::ToolCallStarted {
+                                    tool_name: started_tool,
+                                    args,
+                                }) = UiMessageEvent::parse(msg)
+                                else {
+                                    continue;
+                                };
+                                if started_tool == tool_name {
                                     let formatted_result =
                                         Self::format_tool_result(&tool_name, &result);
                                     *msg = format!(
@@ -7411,7 +7587,10 @@ Let me analyze the conversation chronologically:
                                     {
                                         // Remove thinking animation
                                         if let Some(last_msg) = self.messages.last() {
-                                            if last_msg == "[THINKING_ANIMATION]" {
+                                            if matches!(
+                                                UiMessageEvent::parse(last_msg),
+                                                Some(UiMessageEvent::ThinkingAnimation)
+                                            ) {
                                                 self.messages.pop();
                                                 self.message_types.pop();
                                                 if !self.message_states.is_empty() {
@@ -7432,7 +7611,10 @@ Let me analyze the conversation chronologically:
                                     } else {
                                         // No summary, just remove thinking animation if present
                                         if let Some(last_msg) = self.messages.last() {
-                                            if last_msg == "[THINKING_ANIMATION]" {
+                                            if matches!(
+                                                UiMessageEvent::parse(last_msg),
+                                                Some(UiMessageEvent::ThinkingAnimation)
+                                            ) {
                                                 self.messages.pop();
                                                 self.message_types.pop();
                                                 if !self.message_states.is_empty() {
@@ -8474,11 +8656,12 @@ Let me analyze the conversation chronologically:
             return;
         }
 
-        let has_marker = messages
-            .iter()
-            .rev()
-            .take(6)
-            .any(|msg| msg.starts_with("[GEN_STATS:"));
+        let has_marker = messages.iter().rev().take(6).any(|msg| {
+            matches!(
+                UiMessageEvent::parse(msg),
+                Some(UiMessageEvent::GenerationStats { .. })
+            )
+        });
         if has_marker {
             *rendered_flag = true;
             return;
@@ -8688,10 +8871,12 @@ Let me analyze the conversation chronologically:
         messages: &mut Vec<String>,
         message_types: &mut Vec<MessageType>,
     ) -> bool {
-        if let Some(idx) = messages
-            .iter()
-            .rposition(|msg| msg == "[THINKING_ANIMATION]")
-        {
+        if let Some(idx) = messages.iter().rposition(|msg| {
+            matches!(
+                UiMessageEvent::parse(msg),
+                Some(UiMessageEvent::ThinkingAnimation)
+            )
+        }) {
             messages.remove(idx);
             message_types.remove(idx);
             return true;
@@ -8718,7 +8903,12 @@ Let me analyze the conversation chronologically:
 
         let has_placeholder = messages
             .last()
-            .map(|msg| msg == "[THINKING_ANIMATION]")
+            .map(|msg| {
+                matches!(
+                    UiMessageEvent::parse(msg),
+                    Some(UiMessageEvent::ThinkingAnimation)
+                )
+            })
             .unwrap_or(false);
 
         if !has_placeholder {
@@ -8859,7 +9049,10 @@ Let me analyze the conversation chronologically:
 
         // Clear thinking UI state
         if let Some(last_msg) = self.messages.last() {
-            if last_msg == "[THINKING_ANIMATION]" {
+            if matches!(
+                UiMessageEvent::parse(last_msg),
+                Some(UiMessageEvent::ThinkingAnimation)
+            ) {
                 self.messages.pop();
                 self.message_types.pop();
                 if !self.message_states.is_empty() {
@@ -8996,60 +9189,44 @@ Let me analyze the conversation chronologically:
             }
         }
 
+        let parsed_event = UiMessageEvent::parse(message);
+
         // Check for command execution feedback
-        if message.starts_with("[COMMAND:") {
-            let content = message
-                .trim_start_matches("[COMMAND:")
-                .trim_end_matches(']')
-                .trim()
-                .to_string();
+        if let Some(UiMessageEvent::Command(content)) = parsed_event.as_ref() {
             let mut lines = Vec::new();
             lines.push(Line::from(vec![
                 Self::connector_prefix(connector, true),
                 Span::styled("● ", Style::default().fg(Color::Green)), // Green circle for command
-                Span::styled(content, Style::default().fg(Color::Green)),
+                Span::styled(content.clone(), Style::default().fg(Color::Green)),
             ]));
             return Text::from(lines);
         }
 
-        if message.starts_with("[GEN_STATS:") {
-            let mut parts = message
-                .trim_start_matches("[GEN_STATS:")
-                .trim_end_matches(']')
-                .splitn(5, '|');
-            if let (Some(tps), Some(comp), Some(prompt), Some(ttft), Some(reason)) = (
-                parts.next(),
-                parts.next(),
-                parts.next(),
-                parts.next(),
-                parts.next(),
-            ) {
-                if let (Ok(tps), Ok(comp), Ok(prompt), Ok(ttft)) = (
-                    tps.parse::<f32>(),
-                    comp.parse::<usize>(),
-                    prompt.parse::<usize>(),
-                    ttft.parse::<f32>(),
-                ) {
-                    let reason = reason.replace("\\u{007C}", "|");
-                    let stats_text = format!(
-                        " {:.2} tok/sec • {} completion • {} prompt • {:.2}s to first token • Stop reason: {}",
-                        tps,
-                        self.format_compact_number(comp),
-                        self.format_compact_number(prompt),
-                        ttft,
-                        reason
-                    );
-                    return Text::from(vec![Line::from(vec![
-                        Self::connector_prefix(connector, true),
-                        Span::styled(
-                            stats_text,
-                            Style::default()
-                                .fg(Color::DarkGray)
-                                .add_modifier(ratatui::style::Modifier::ITALIC),
-                        ),
-                    ])]);
-                }
-            }
+        if let Some(UiMessageEvent::GenerationStats {
+            tokens_per_sec,
+            completion_tokens,
+            prompt_tokens,
+            time_to_first_token_sec,
+            stop_reason,
+        }) = parsed_event.as_ref()
+        {
+            let stats_text = format!(
+                " {:.2} tok/sec • {} completion • {} prompt • {:.2}s to first token • Stop reason: {}",
+                tokens_per_sec,
+                self.format_compact_number(*completion_tokens),
+                self.format_compact_number(*prompt_tokens),
+                time_to_first_token_sec,
+                stop_reason
+            );
+            return Text::from(vec![Line::from(vec![
+                Self::connector_prefix(connector, true),
+                Span::styled(
+                    stats_text,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(ratatui::style::Modifier::ITALIC),
+                ),
+            ])]);
         }
 
         // Check for "What should Nite do instead?" prompt (only for agent messages)
@@ -9074,7 +9251,7 @@ Let me analyze the conversation chronologically:
             return self.render_agent_message_with_bullet(message, max_width, connector);
         }
         // Check if this is a thinking animation placeholder
-        if message == "[THINKING_ANIMATION]" {
+        if matches!(parsed_event, Some(UiMessageEvent::ThinkingAnimation)) {
             let mut lines = Vec::new();
 
             // Get current animation frame (from snapshot if in nav mode)
@@ -9134,89 +9311,84 @@ Let me analyze the conversation chronologically:
         }
 
         // Check if this is a tool call message
-        if message.starts_with("[TOOL_CALL_COMPLETED:") {
-            // Format: [TOOL_CALL_COMPLETED:tool_name|args|result]
-            let parts: Vec<&str> = message
-                .trim_start_matches("[TOOL_CALL_COMPLETED:")
-                .trim_end_matches("]")
-                .splitn(3, '|')
-                .collect();
+        if let Some(UiMessageEvent::ToolCallCompleted {
+            tool_name,
+            args,
+            result,
+        }) = parsed_event.as_ref()
+        {
+            let trimmed = result.trim().to_ascii_lowercase();
+            let success = !(trimmed.starts_with("error") || trimmed == "failed");
+            let bullet_color = if success { Color::Green } else { Color::Red };
 
-            if parts.len() >= 3 {
-                let tool_name = parts[0].to_string();
-                let args = parts[1].to_string();
-                let result = parts[2].to_string();
-                let trimmed = result.trim().to_ascii_lowercase();
-                let success = !(trimmed.starts_with("error") || trimmed == "failed");
-                let bullet_color = if success { Color::Green } else { Color::Red };
+            let mut lines = Vec::new();
 
-                let mut lines = Vec::new();
+            // First line: connector prefix + ● ToolName(args)
+            let mut line1_spans = Vec::new();
+            line1_spans.push(Self::connector_prefix(connector, true));
+            line1_spans.push(Span::styled("● ", Style::default().fg(bullet_color)));
+            line1_spans.push(Span::styled(
+                tool_name.clone(),
+                Style::default().fg(Color::Cyan),
+            ));
+            line1_spans.push(Span::raw("("));
+            line1_spans.push(Span::styled(
+                args.clone(),
+                Style::default().fg(Color::Yellow),
+            ));
+            line1_spans.push(Span::raw(")"));
+            lines.push(Line::from(line1_spans));
 
-                // First line: connector prefix + ● ToolName(args)
-                let mut line1_spans = Vec::new();
-                line1_spans.push(Self::connector_prefix(connector, true));
-                line1_spans.push(Span::styled("● ", Style::default().fg(bullet_color)));
-                line1_spans.push(Span::styled(tool_name, Style::default().fg(Color::Cyan)));
-                line1_spans.push(Span::raw("("));
-                line1_spans.push(Span::styled(args, Style::default().fg(Color::Yellow)));
-                line1_spans.push(Span::raw(")"));
-                lines.push(Line::from(line1_spans));
-
-                // Show result lines with tree connector
-                let result_color = if success { Color::Green } else { Color::Red };
-                let mut result_iter = result.lines();
-                if let Some(first_line) = result_iter.next() {
-                    let mut line2_spans = Vec::new();
-                    line2_spans.push(Self::connector_prefix(connector, false));
-                    line2_spans.push(Span::styled("  ⎿  ", Style::default().fg(Color::DarkGray)));
-                    line2_spans.push(Span::styled(
-                        first_line.to_string(),
-                        Style::default().fg(result_color),
-                    ));
-                    lines.push(Line::from(line2_spans));
-                }
-                for extra_line in result_iter {
-                    let mut extra_spans = Vec::new();
-                    extra_spans.push(Self::connector_prefix(connector, false));
-                    extra_spans.push(Span::styled("     ", Style::default().fg(Color::DarkGray)));
-                    extra_spans.push(Span::styled(
-                        extra_line.to_string(),
-                        Style::default().fg(result_color),
-                    ));
-                    lines.push(Line::from(extra_spans));
-                }
-
-                return Text::from(lines);
-            }
-        } else if message.starts_with("[TOOL_CALL_STARTED:") {
-            // Format: [TOOL_CALL_STARTED:tool_name|args]
-            let parts: Vec<&str> = message
-                .trim_start_matches("[TOOL_CALL_STARTED:")
-                .trim_end_matches("]")
-                .splitn(2, '|')
-                .collect();
-
-            if parts.len() >= 2 {
-                let tool_name = parts[0].to_string();
-                let args = parts[1].to_string();
-
-                let mut lines = Vec::new();
-
-                // Single line: connector prefix + ● ToolName(args)
-                let mut line_spans = Vec::new();
-                line_spans.push(Self::connector_prefix(connector, true));
-                line_spans.push(Span::styled(
-                    "● ".to_string(),
-                    Style::default().fg(Color::Blue),
+            // Show result lines with tree connector
+            let result_color = if success { Color::Green } else { Color::Red };
+            let mut result_iter = result.lines();
+            if let Some(first_line) = result_iter.next() {
+                let mut line2_spans = Vec::new();
+                line2_spans.push(Self::connector_prefix(connector, false));
+                line2_spans.push(Span::styled("  ⎿  ", Style::default().fg(Color::DarkGray)));
+                line2_spans.push(Span::styled(
+                    first_line.to_string(),
+                    Style::default().fg(result_color),
                 ));
-                line_spans.push(Span::styled(tool_name, Style::default().fg(Color::Cyan)));
-                line_spans.push(Span::raw("(".to_string()));
-                line_spans.push(Span::styled(args, Style::default().fg(Color::Yellow)));
-                line_spans.push(Span::raw(")".to_string()));
-                lines.push(Line::from(line_spans));
-
-                return Text::from(lines);
+                lines.push(Line::from(line2_spans));
             }
+            for extra_line in result_iter {
+                let mut extra_spans = Vec::new();
+                extra_spans.push(Self::connector_prefix(connector, false));
+                extra_spans.push(Span::styled("     ", Style::default().fg(Color::DarkGray)));
+                extra_spans.push(Span::styled(
+                    extra_line.to_string(),
+                    Style::default().fg(result_color),
+                ));
+                lines.push(Line::from(extra_spans));
+            }
+
+            return Text::from(lines);
+        } else if let Some(UiMessageEvent::ToolCallStarted { tool_name, args }) =
+            parsed_event.as_ref()
+        {
+            let mut lines = Vec::new();
+
+            // Single line: connector prefix + ● ToolName(args)
+            let mut line_spans = Vec::new();
+            line_spans.push(Self::connector_prefix(connector, true));
+            line_spans.push(Span::styled(
+                "● ".to_string(),
+                Style::default().fg(Color::Blue),
+            ));
+            line_spans.push(Span::styled(
+                tool_name.clone(),
+                Style::default().fg(Color::Cyan),
+            ));
+            line_spans.push(Span::raw("(".to_string()));
+            line_spans.push(Span::styled(
+                args.clone(),
+                Style::default().fg(Color::Yellow),
+            ));
+            line_spans.push(Span::raw(")".to_string()));
+            lines.push(Line::from(line_spans));
+
+            return Text::from(lines);
         }
 
         // Check if this is a user message (not agent, not special marker)
