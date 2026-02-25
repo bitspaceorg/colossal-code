@@ -15,10 +15,10 @@ pub fn detect_context_length(models_dir: Option<&Path>, identifier: &str) -> Opt
         return None;
     }
 
-    if let Some(base) = models_dir {
-        if let Some(length) = detect_from_filesystem(base, identifier) {
-            return Some(length);
-        }
+    if let Some(base) = models_dir
+        && let Some(length) = detect_from_filesystem(base, identifier)
+    {
+        return Some(length);
     }
 
     let candidates = candidate_model_names(identifier);
@@ -98,22 +98,17 @@ pub fn context_length_from_gguf(path: &Path) -> Option<usize> {
 
 fn detect_from_filesystem(base: &Path, identifier: &str) -> Option<usize> {
     let joined = sanitize_path(base, identifier);
-    if joined.is_file() {
-        if joined
+    if joined.is_file()
+        && joined
             .extension()
-            .map(|ext| ext.eq_ignore_ascii_case("gguf"))
-            .unwrap_or(false)
-        {
-            if let Some(length) = context_length_from_gguf(&joined) {
-                return Some(length);
-            }
-        }
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+        && let Some(length) = context_length_from_gguf(&joined)
+    {
+        return Some(length);
     }
 
-    if joined.is_dir() {
-        if let Some(length) = context_length_from_hf_dir(&joined) {
-            return Some(length);
-        }
+    if joined.is_dir() && let Some(length) = context_length_from_hf_dir(&joined) {
+        return Some(length);
     }
 
     None
@@ -132,14 +127,13 @@ fn context_length_from_hf_dir(dir: &Path) -> Option<usize> {
 
 fn context_length_from_configs(candidates: &[String]) -> Option<usize> {
     for name in candidates {
-        if let Ok(cfg) = ModelConfig::from_model_name(name) {
-            if let Some(length) = cfg
+        if let Ok(cfg) = ModelConfig::from_model_name(name)
+            && let Some(length) = cfg
                 .metadata_overrides
                 .as_ref()
                 .and_then(|m| m.context_lengths.iter().copied().max())
-            {
-                return usize::try_from(length).ok();
-            }
+        {
+            return usize::try_from(length).ok();
         }
     }
     None
@@ -155,10 +149,8 @@ fn candidate_model_names(identifier: &str) -> Vec<String> {
         push_candidate(&mut ordered, &mut seen, stem.to_string());
     }
 
-    if let Some(last) = identifier.split('/').last() {
-        if last != identifier {
-            push_candidate(&mut ordered, &mut seen, last.to_string());
-        }
+    if let Some(last) = identifier.split('/').next_back() && last != identifier {
+        push_candidate(&mut ordered, &mut seen, last.to_string());
     }
 
     let base_candidates = ordered.clone();
@@ -246,15 +238,11 @@ fn value_as_usize(value: &Value) -> Option<usize> {
     if let Some(num) = value.as_u64() {
         return usize::try_from(num).ok();
     }
-    if let Some(num) = value.as_i64() {
-        if num >= 0 {
-            return usize::try_from(num as u64).ok();
-        }
+    if let Some(num) = value.as_i64() && num >= 0 {
+        return usize::try_from(num as u64).ok();
     }
-    if let Some(num) = value.as_f64() {
-        if num.is_finite() && num > 0.0 {
-            return usize::try_from(num.round() as u64).ok();
-        }
+    if let Some(num) = value.as_f64() && num.is_finite() && num > 0.0 {
+        return usize::try_from(num.round() as u64).ok();
     }
     None
 }
@@ -266,7 +254,7 @@ fn env_context_length() -> Option<usize> {
 }
 
 fn sanitize_path(base: &Path, identifier: &str) -> PathBuf {
-    let mut buf = PathBuf::from(identifier);
+    let buf = PathBuf::from(identifier);
     if buf.is_relative() {
         base.join(buf)
     } else {
@@ -369,7 +357,7 @@ fn skip_value<R: Read + Seek>(reader: &mut R, value_type: u32) -> io::Result<()>
     match value_type {
         0 | 1 | 7 => skip_bytes(reader, 1),
         2 | 3 => skip_bytes(reader, 2),
-        4 | 5 | 6 => skip_bytes(reader, 4),
+        4..=6 => skip_bytes(reader, 4),
         8 => {
             let len = read_u64(reader)?;
             skip_bytes(reader, len)
@@ -382,7 +370,7 @@ fn skip_value<R: Read + Seek>(reader: &mut R, value_type: u32) -> io::Result<()>
             }
             Ok(())
         }
-        10 | 11 | 12 => skip_bytes(reader, 8),
+        10..=12 => skip_bytes(reader, 8),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unknown metadata value type {value_type}"),
@@ -404,3 +392,36 @@ trait ReadExt: Read {
 }
 
 impl<T: Read> ReadExt for T {}
+
+#[cfg(test)]
+mod tests {
+    use super::{candidate_model_names, context_length_from_config_json, value_as_usize};
+    use serde_json::json;
+
+    #[test]
+    fn candidate_names_include_path_leaf_and_normalized_forms() {
+        let names = candidate_model_names("Mistral_7B-Q4/model.gguf");
+
+        assert!(names.contains(&"Mistral_7B-Q4/model.gguf".to_string()));
+        assert!(names.contains(&"model".to_string()));
+        assert!(names.contains(&"mistral-7b-q4/model.gguf".to_string()));
+    }
+
+    #[test]
+    fn context_length_reads_rope_scaling_max_position_embeddings() {
+        let cfg = json!({
+            "rope_scaling": {
+                "max_position_embeddings": 8192
+            }
+        });
+
+        assert_eq!(context_length_from_config_json(&cfg), Some(8192));
+    }
+
+    #[test]
+    fn value_as_usize_rejects_negative_values() {
+        assert_eq!(value_as_usize(&json!(-1)), None);
+        assert_eq!(value_as_usize(&json!(-1.0)), None);
+        assert_eq!(value_as_usize(&json!(1024.4)), Some(1024));
+    }
+}
