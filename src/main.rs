@@ -290,16 +290,18 @@ mod tests {
     }
 
     #[test]
-    fn sub_agent_context_snapshot_preserves_message_states() {
+    fn sub_agent_context_snapshot_preserves_typed_messages() {
         let mut context = SubAgentContext::new("1".to_string(), "step".to_string());
 
         context.add_user_message("queued question".to_string());
         context.add_agent_text("answer".to_string());
 
         let snapshot = context.to_snapshot();
-        assert_eq!(snapshot.message_states.len(), 2);
-        assert_eq!(snapshot.message_states[0], MessageState::Sent);
-        assert_eq!(snapshot.message_states[1], MessageState::Sent);
+        assert_eq!(snapshot.messages.len(), 2);
+        assert_eq!(
+            snapshot.message_types,
+            vec![MessageType::User, MessageType::Agent]
+        );
     }
 
     #[test]
@@ -958,12 +960,6 @@ impl SubAgentContext {
                 .iter()
                 .map(|message| message.message_type.clone())
                 .collect(),
-            message_states: self
-                .messages
-                .iter()
-                .map(|message| message.message_state)
-                .collect(),
-            is_thinking: self.is_thinking,
             thinking_indicator_active: self.thinking_indicator_active,
             thinking_elapsed_secs: elapsed_secs,
             thinking_token_count: self.thinking_token_count,
@@ -972,7 +968,6 @@ impl SubAgentContext {
             thinking_loader_frame: self.thinking_loader_frame,
             thinking_current_word: self.thinking_current_word.clone(),
             generation_stats: self.generation_stats.clone(),
-            generation_stats_rendered: self.generation_stats_rendered,
         }
     }
 
@@ -1214,7 +1209,6 @@ struct CompactOptions {
 #[derive(Debug, Clone)]
 struct CompactionEntry {
     summary: String,
-    timestamp: SystemTime,
 }
 
 /// Rewind point capturing conversation state at a specific moment
@@ -1235,15 +1229,13 @@ struct RewindPoint {
 #[derive(Debug, Clone)]
 struct ConversationMetadata {
     id: String,
-    created_at: SystemTime,
     updated_at: SystemTime,
     git_branch: Option<String>,
     message_count: usize,
     preview: String,
     file_path: std::path::PathBuf,
-    time_ago_str: String,          // Static string calculated once
-    forked_from: Option<String>,   // Parent conversation ID if this is a fork
-    forked_at: Option<SystemTime>, // When the fork was created
+    time_ago_str: String,        // Static string calculated once
+    forked_from: Option<String>, // Parent conversation ID if this is a fork
 }
 
 impl ConversationMetadata {
@@ -1274,8 +1266,6 @@ impl ConversationMetadata {
 struct AppSnapshot {
     messages: Vec<String>,
     message_types: Vec<MessageType>,
-    message_states: Vec<MessageState>,
-    is_thinking: bool,
     thinking_indicator_active: bool,
     thinking_elapsed_secs: u64, // Frozen elapsed time in seconds
     thinking_token_count: usize,
@@ -1284,7 +1274,6 @@ struct AppSnapshot {
     thinking_loader_frame: usize,
     thinking_current_word: String,
     generation_stats: Option<AgentGenerationStats>, // Frozen generation stats
-    generation_stats_rendered: bool,
 }
 
 #[derive(Clone)]
@@ -3939,28 +3928,24 @@ impl App {
                     conversations.push(ConversationMetadata {
                         time_ago_str: ConversationMetadata::calculate_time_ago(conv.updated_at),
                         id: conv.id,
-                        created_at: conv.created_at,
                         updated_at: conv.updated_at,
                         git_branch: conv.git_branch,
                         message_count: conv.message_count,
                         preview: conv.preview,
                         file_path: path.clone(),
                         forked_from: conv.forked_from,
-                        forked_at: conv.forked_at,
                     });
                 } else if let Ok(conv) = serde_json::from_str::<SavedConversation>(&content) {
                     // Support old format
                     conversations.push(ConversationMetadata {
                         time_ago_str: ConversationMetadata::calculate_time_ago(conv.updated_at),
                         id: conv.id,
-                        created_at: conv.created_at,
                         updated_at: conv.updated_at,
                         git_branch: conv.git_branch,
                         message_count: conv.message_count,
                         preview: conv.preview,
                         file_path: path.clone(),
                         forked_from: conv.forked_from,
-                        forked_at: conv.forked_at,
                     });
                 }
             }
@@ -6298,10 +6283,7 @@ Let me analyze the conversation chronologically:
                                 // Add the summary as the new context (summary is guaranteed non-empty here)
                                 self.last_compacted_summary = Some(summary.clone());
 
-                                self.compaction_history.push(CompactionEntry {
-                                    summary,
-                                    timestamp: SystemTime::now(),
-                                });
+                                self.compaction_history.push(CompactionEntry { summary });
                                 if self.compaction_history.len() > MAX_COMPACTION_HISTORY {
                                     self.compaction_history.remove(0);
                                 }
@@ -7509,32 +7491,21 @@ Let me analyze the conversation chronologically:
                                                 0
                                             };
 
-                                        let (snapshot_messages, snapshot_types, snapshot_states) =
-                                            if self.show_summary_history {
-                                                let overlay_messages =
-                                                    self.summary_history_virtual_messages();
-                                                let overlay_types = vec![
-                                                    MessageType::Agent;
-                                                    overlay_messages.len()
-                                                ];
-                                                let overlay_states = vec![
-                                                    MessageState::Sent;
-                                                    overlay_messages.len()
-                                                ];
-                                                (overlay_messages, overlay_types, overlay_states)
-                                            } else {
-                                                (
-                                                    self.messages.clone(),
-                                                    self.message_types.clone(),
-                                                    self.message_states.clone(),
-                                                )
-                                            };
+                                        let (snapshot_messages, snapshot_types) = if self
+                                            .show_summary_history
+                                        {
+                                            let overlay_messages =
+                                                self.summary_history_virtual_messages();
+                                            let overlay_types =
+                                                vec![MessageType::Agent; overlay_messages.len()];
+                                            (overlay_messages, overlay_types)
+                                        } else {
+                                            (self.messages.clone(), self.message_types.clone())
+                                        };
 
                                         snapshot = Some(AppSnapshot {
                                             messages: snapshot_messages,
                                             message_types: snapshot_types,
-                                            message_states: snapshot_states,
-                                            is_thinking: self.is_thinking,
                                             thinking_indicator_active: self
                                                 .thinking_indicator_active,
                                             thinking_elapsed_secs: elapsed_secs,
@@ -7548,8 +7519,6 @@ Let me analyze the conversation chronologically:
                                                 .thinking_current_word
                                                 .clone(),
                                             generation_stats: self.generation_stats.clone(),
-                                            generation_stats_rendered: self
-                                                .generation_stats_rendered,
                                         });
                                     }
 
@@ -8504,20 +8473,6 @@ Let me analyze the conversation chronologically:
         messages.push(banner_line);
 
         messages
-    }
-
-    fn format_summary_history_time(&self, timestamp: SystemTime) -> String {
-        match SystemTime::now().duration_since(timestamp) {
-            Ok(duration) => {
-                let elapsed = self.format_elapsed_time(duration.as_secs());
-                if elapsed == "0s" {
-                    "just now".to_string()
-                } else {
-                    format!("{} ago", elapsed)
-                }
-            }
-            Err(_) => "just now".to_string(),
-        }
     }
 
     fn render_summary_banner(label: Option<&str>, width: usize) -> Text<'static> {
