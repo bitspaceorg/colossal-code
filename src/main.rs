@@ -2,7 +2,7 @@ use agent_core::{
     Agent, AgentMessage, GenerationStats as AgentGenerationStats, SpecSheet, SpecStep, StepStatus,
     TaskSummary, VerificationStatus,
     orchestrator::{
-        Orchestrator, OrchestratorAgent, OrchestratorControl, OrchestratorEvent, StepRole,
+        Orchestrator, OrchestratorAgent, OrchestratorControl, OrchestratorEvent,
         SubAgentMessage,
     },
     set_workspace_root_override,
@@ -40,6 +40,7 @@ mod commands;
 mod git_ops;
 mod model_context;
 mod persistence;
+mod session_lifecycle;
 mod spec_cli;
 mod ui;
 mod ui_message_event;
@@ -2434,76 +2435,6 @@ impl App {
         matches!(token, "&&" | "||" | "|" | ";") || token.starts_with('>') || token.starts_with('<')
     }
 
-    fn update_session_for_step(
-        &mut self,
-        spec_id: &str,
-        spec_title: &str,
-        prefix: &str,
-        step_index: &str,
-        step_title: &str,
-        status: StepStatus,
-        role: StepRole,
-    ) {
-        let session_role = Self::session_role_from_step_role(role);
-        let entry = self
-            .orchestrator_sessions
-            .entry(prefix.to_string())
-            .or_insert_with(|| session_manager::OrchestratorEntry {
-                spec_id: spec_id.to_string(),
-                spec_title: spec_title.to_string(),
-                prefix: prefix.to_string(),
-                step_index: step_index.to_string(),
-                step_title: step_title.to_string(),
-                role: session_role.clone(),
-                status: SessionStatus::Pending,
-                started_at: None,
-                completed_at: None,
-                worktree_branch: None,
-                worktree_path: None,
-            });
-
-        entry.role = session_role;
-
-        entry.status = match status {
-            StepStatus::Pending => SessionStatus::Pending,
-            StepStatus::InProgress => SessionStatus::InProgress,
-            StepStatus::Completed => SessionStatus::Completed,
-            StepStatus::Failed => SessionStatus::Failed,
-        };
-
-        match status {
-            StepStatus::InProgress => {
-                if entry.started_at.is_none() {
-                    entry.started_at = Some(Instant::now());
-                }
-                entry.completed_at = None;
-            }
-            StepStatus::Completed | StepStatus::Failed => {
-                if entry.started_at.is_none() {
-                    entry.started_at = Some(Instant::now());
-                }
-                entry.completed_at = Some(Instant::now());
-            }
-            StepStatus::Pending => {
-                entry.started_at = None;
-                entry.completed_at = None;
-            }
-        }
-
-        let snapshot: Vec<session_manager::OrchestratorEntry> =
-            self.orchestrator_sessions.values().cloned().collect();
-        self.session_manager.update_from_orchestrator(snapshot);
-    }
-
-    fn session_role_from_step_role(role: StepRole) -> SessionRole {
-        match role {
-            StepRole::Implementor => SessionRole::Implementor,
-            StepRole::Summarizer => SessionRole::Summarizer,
-            StepRole::Verifier => SessionRole::Verifier,
-            StepRole::Merge => SessionRole::Merge,
-        }
-    }
-
     /// Load a spec from a path or goal string and store it in app state.
     /// This should be called after App::new() when --spec flag is used.
     pub fn load_spec(&mut self, path_or_goal: &str) -> Result<()> {
@@ -4176,7 +4107,9 @@ Let me analyze the conversation chronologically:
                     }
                 }
 
-                self.update_session_for_step(
+                session_lifecycle::update_session_for_step(
+                    &mut self.orchestrator_sessions,
+                    &mut self.session_manager,
                     &spec_id,
                     &spec_title,
                     &prefix,
