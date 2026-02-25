@@ -9,21 +9,17 @@ use agent_core::{
 };
 use color_eyre::Result;
 use edtui::clipboard::ClipboardTrait;
-use markdown_renderer;
 use ratatui::{
     DefaultTerminal, Frame,
-    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     layout::{Constraint, Layout, Position},
-    prelude::Alignment,
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span, Text},
-    widgets::{
-        Block, BorderType, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
-    },
+    widgets::{Block, BorderType, Borders, List, Paragraph, Wrap},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::{
     collections::HashMap,
@@ -2018,7 +2014,7 @@ impl App {
     fn get_cursor_col(&self) -> usize {
         let lines: Vec<&str> = self.input.lines().collect();
         let mut char_count = 0;
-        for (row, line) in lines.iter().enumerate() {
+        for line in &lines {
             let line_len = line.chars().count() + 1; // +1 for newline
             if char_count + line_len > self.character_index {
                 // Found the line, calculate column
@@ -3305,7 +3301,7 @@ impl App {
 
     /// Returns true when we should show the full-screen spec plan tree view.
     /// This is now only used for Alt+W session window's constrained area check.
-    fn should_render_spec_tree(&self, constrained_area: Option<ratatui::layout::Rect>) -> bool {
+    fn should_render_spec_tree(&self, _constrained_area: Option<ratatui::layout::Rect>) -> bool {
         // No longer used to replace messages - plan tree is now integrated into message stream
         false
     }
@@ -3969,7 +3965,7 @@ impl App {
         Ok(())
     }
 
-    fn track_file_change(&mut self, tool_name: &str, arguments: &str, result: &str) {
+    fn track_file_change(&mut self, tool_name: &str, arguments: &str, _result: &str) {
         // Only track Write and Edit tool calls
         if tool_name != "Write" && tool_name != "Edit" {
             return;
@@ -4796,7 +4792,7 @@ Let me analyze the conversation chronologically:
 
             OrchestratorEvent::ChildSpecPushed {
                 parent_step_index,
-                child_spec_id,
+                child_spec_id: _,
                 child_step_count,
             } => {
                 self.status_message = Some(format!(
@@ -5449,7 +5445,7 @@ Let me analyze the conversation chronologically:
 
                         // Add the root in an async context
                         tokio::spawn(async move {
-                            if let Err(e) = agent_core::add_writable_root(path).await {
+                            if let Err(_e) = agent_core::add_writable_root(path).await {
                                 // eprintln!("Failed to add writable root: {}", e);
                             }
                         });
@@ -5539,7 +5535,7 @@ Let me analyze the conversation chronologically:
                 let user_message = self.input.clone();
 
                 // Ensure conversation ID exists (generate if this is the first message)
-                if let Err(e) = self.ensure_conversation_id() {
+                if let Err(_e) = self.ensure_conversation_id() {
                     // eprintln!("[ERROR] Failed to generate conversation ID: {}", e);
                 }
 
@@ -6471,7 +6467,7 @@ Let me analyze the conversation chronologically:
 
             // Save pending todos if any (after rx borrow is dropped)
             if let Some(todos) = pending_todos {
-                if let Err(e) = self.save_todos(&todos) {
+                if let Err(_e) = self.save_todos(&todos) {
                     // eprintln!("[ERROR] Failed to save todos: {}", e);
                 }
             }
@@ -6775,7 +6771,7 @@ Let me analyze the conversation chronologically:
             // Handle save pending (auto-save on /clear or /exit)
             if self.persistence_state.save_pending {
                 self.persistence_state.save_pending = false;
-                if let Err(e) = self.save_conversation().await {
+                if let Err(_e) = self.save_conversation().await {
                     // eprintln!("[ERROR] Failed to save conversation: {}", e);
                 }
             }
@@ -8234,7 +8230,7 @@ Let me analyze the conversation chronologically:
 
         // Save conversation on exit if pending (for Ctrl+C exits)
         if self.persistence_state.save_pending {
-            if let Err(e) = self.save_conversation().await {
+            if let Err(_e) = self.save_conversation().await {
                 // eprintln!("[ERROR] Failed to save conversation on exit: {}", e);
             }
         }
@@ -8920,7 +8916,7 @@ Let me analyze the conversation chronologically:
             .unwrap_or(UNITS.len() - 1);
 
         let mut parts = Vec::new();
-        for (idx, (unit_secs, label)) in UNITS.iter().enumerate().skip(start_idx) {
+        for (unit_secs, label) in UNITS.iter().skip(start_idx) {
             let value = if *unit_secs == 1 {
                 remaining
             } else {
@@ -9515,7 +9511,7 @@ Let me analyze the conversation chronologically:
             .background_tasks
             .iter()
             .enumerate()
-            .map(|(idx, (session_id, command, _log_file, _start_time))| {
+            .map(|(idx, (_session_id, command, _log_file, _start_time))| {
                 let is_selected = idx == self.background_tasks_selected;
 
                 // Truncate command if too long
@@ -11282,7 +11278,7 @@ Let me analyze the conversation chronologically:
                 || self.mode == Mode::SessionWindow
             {
                 let max_width = messages_area.width.saturating_sub(4) as usize; // Account for: 1 space margin + bullet + space
-                let mut message_lines = {
+                let message_lines = {
                     let mut lines = Vec::new();
                     let tips = self.render_tips();
                     lines.extend(tips.clone());
@@ -11776,11 +11772,9 @@ Let me analyze the conversation chronologically:
                 // Render search match highlighting FIRST (so visual selection can overwrite it)
                 if !self.editor.state.search_matches().is_empty() {
                     let pattern_len = self.editor.state.search_pattern_len();
-                    let selected_match_index = self.editor.state.search_selected_index();
+                    let _selected_match_index = self.editor.state.search_selected_index();
                     let cursor_pos = self.editor.state.cursor;
-                    for (match_idx, &match_pos) in
-                        self.editor.state.search_matches().iter().enumerate()
-                    {
+                    for &match_pos in self.editor.state.search_matches() {
                         let row = match_pos.row;
                         let col = match_pos.col;
                         // Only render if visible in viewport
@@ -12048,7 +12042,7 @@ Let me analyze the conversation chronologically:
                 && !self.editor.state.search_matches().is_empty()
             {
                 let num_results = self.editor.state.search_matches().len();
-                let current_match_idx = self.editor.state.search_selected_index();
+                let _current_match_idx = self.editor.state.search_selected_index();
                 let cursor_pos = self.editor.state.cursor;
                 let current_line = cursor_pos.row + 1; // Convert to 1-indexed
                 let total_lines = self.editor.state.lines.len();

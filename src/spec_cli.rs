@@ -388,7 +388,6 @@ impl<'a> SpecCliHandler<'a> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
 
     use agent_core::{StepStatus, TaskSummary, TaskVerification, TestRun, VerificationStatus};
     use agent_protocol::types::spec::TestResult;

@@ -1,6 +1,6 @@
 //! A rich editor that combines edtui navigation with rich formatting
 use edtui::{EditorEventHandler, EditorState, EditorTheme, EditorView};
-use markdown_renderer::{RendererConfig, render_markdown_text};
+use markdown_renderer::render_markdown_text;
 use ratatui::{
     buffer::Buffer,
     crossterm::event::Event,
@@ -8,8 +8,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::Widget,
 };
-use std::path::PathBuf;
-
 /// Format elapsed seconds into a human-readable string using largest units first.
 /// Shows up to 4 non-zero units: y, mo, w, d, h, m, s
 fn format_elapsed_time(elapsed_secs: u64) -> String {
@@ -311,7 +309,7 @@ pub fn create_rich_content_from_messages(
         // Check if this is an agent message with bullet (no borders)
         if is_agent && !message.starts_with('[') {
             // Agent messages with bullet - NO BORDERS
-            let markdown_width = Some(wrap_width.saturating_sub(4));
+            let _markdown_width = Some(wrap_width.saturating_sub(4));
             let markdown_lines = render_markdown_text(message);
 
             for (idx, md_line) in markdown_lines.lines.iter().enumerate() {
@@ -430,7 +428,7 @@ pub fn create_plain_content_for_editor(
     message_types: &[crate::MessageType],
     tips: &[&str],
     visible_tips: usize,
-    wrap_width: usize,
+    _wrap_width: usize,
     thinking_context: &ThinkingContext,
 ) -> String {
     let mut content = Vec::new();
@@ -591,4 +589,20 @@ pub fn create_plain_content_for_editor(
     }
 
     content.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_elapsed_time;
+
+    #[test]
+    fn format_elapsed_time_returns_seconds_when_under_minute() {
+        assert_eq!(format_elapsed_time(59), "59s");
+    }
+
+    #[test]
+    fn format_elapsed_time_limits_to_four_units() {
+        let total = 365 * 24 * 60 * 60 + 30 * 24 * 60 * 60 + 7 * 24 * 60 * 60 + 24 * 60 * 60 + 1;
+        assert_eq!(format_elapsed_time(total), "1y 1mo 1w 1d");
+    }
 }
