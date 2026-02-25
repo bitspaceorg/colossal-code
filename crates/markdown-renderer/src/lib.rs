@@ -59,11 +59,7 @@ pub fn append_markdown_with_settings(
     scheme: Option<&str>,
     cwd: &Path,
 ) {
-    let rendered = renderer::render_markdown_text_with_citations(
-        markdown_source,
-        width,
-        scheme,
-        cwd,
-    );
+    let rendered =
+        renderer::render_markdown_text_with_citations(markdown_source, width, scheme, cwd);
     line_utils::push_owned_lines(&rendered.lines, lines);
 }

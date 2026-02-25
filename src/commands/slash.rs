@@ -172,7 +172,7 @@ fn parse_review_options(command: &str) -> Result<ReviewOptions, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_slash_command, ParsedSlashCommand, ReviewType};
+    use super::{ParsedSlashCommand, ReviewType, parse_slash_command};
 
     #[test]
     fn parses_review_options() {

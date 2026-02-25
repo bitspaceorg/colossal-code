@@ -1,7 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
-use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecCommandParams {
@@ -42,7 +42,7 @@ impl SessionId {
     pub fn new(id: String) -> Self {
         SessionId(id)
     }
-    
+
     /// Get the string representation of the SessionId
     pub fn as_str(&self) -> &str {
         &self.0

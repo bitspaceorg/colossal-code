@@ -4,24 +4,24 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::process::Child;
 
-pub mod seatbelt;
+pub mod error;
+pub mod hash_id;
 #[cfg(target_os = "linux")]
 pub mod landlock;
 pub mod manager;
 pub mod protocol;
+pub mod pty;
+pub mod safety;
+pub mod search_results;
+pub mod seatbelt;
+pub mod semantic_search;
+pub mod semantic_search_lib;
 pub mod session;
 pub mod shell;
 pub mod spawn;
-pub mod types;
-pub mod error;
-pub mod safety;
 pub mod tools;
+pub mod types;
 pub mod utils;
-pub mod pty;
-pub mod semantic_search;
-pub mod semantic_search_lib;
-pub mod search_results;
-pub mod hash_id;
 
 /// Execute tools binary with the given sandbox policy applied
 pub async fn execute_tools_with_sandbox(
@@ -51,26 +51,29 @@ pub async fn spawn_sandboxed_command(
     }
     #[cfg(target_os = "linux")]
     {
-        use tokio::process::Command;
-        use std::process::Stdio;
         use crate::landlock::apply_sandbox_policy_to_current_thread;
-        
+        use std::process::Stdio;
+        use tokio::process::Command;
+
         let shell = shell::default_user_shell().await;
-        let formatted_command = shell.format_default_shell_invocation(command.clone(), false)
-            .ok_or_else(|| ColossalErr::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Failed to format command for shell",
-            )))?;
-            
+        let formatted_command = shell
+            .format_default_shell_invocation(command.clone(), false)
+            .ok_or_else(|| {
+                ColossalErr::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Failed to format command for shell",
+                ))
+            })?;
+
         let (program, args) = formatted_command.split_first().ok_or_else(|| {
             ColossalErr::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "command args are empty",
             ))
         })?;
-        
+
         apply_sandbox_policy_to_current_thread(sandbox_policy, &cwd)?;
-        
+
         let mut cmd = Command::new(program);
         cmd.args(args)
             .current_dir(&cwd)
@@ -78,16 +81,18 @@ pub async fn spawn_sandboxed_command(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::piped());
-            
+
         cmd.spawn().map_err(|e| ColossalErr::Io(e))
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         spawn::spawn_child_async(
-            PathBuf::from(command.get(0).ok_or_else(|| ColossalErr::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Empty command",
-            )))?),
+            PathBuf::from(command.get(0).ok_or_else(|| {
+                ColossalErr::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Empty command",
+                ))
+            })?),
             command[1..].to_vec(),
             None,
             cwd,

@@ -1,11 +1,11 @@
 use anyhow::Result;
 use colossal_linux_sandbox::manager::SessionManager;
-use colossal_linux_sandbox::protocol::{SandboxPolicy, WritableRoot, NetworkAccess};
-use colossal_linux_sandbox::shell;
+use colossal_linux_sandbox::protocol::{NetworkAccess, SandboxPolicy, WritableRoot};
 use colossal_linux_sandbox::session::SharedSessionState;
+use colossal_linux_sandbox::shell;
 use colossal_linux_sandbox::tools::execute_tools_with_sandbox;
-use std::sync::Arc;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -18,7 +18,10 @@ async fn main() -> Result<()> {
         std::env::set_current_dir(&test_workspace)?;
         eprintln!("Changed CWD to: {:?}\n", std::env::current_dir()?);
     } else {
-        eprintln!("Test workspace doesn't exist, using current directory: {:?}\n", std::env::current_dir()?);
+        eprintln!(
+            "Test workspace doesn't exist, using current directory: {:?}\n",
+            std::env::current_dir()?
+        );
     }
 
     // Set up sandbox policy
@@ -58,51 +61,57 @@ async fn main() -> Result<()> {
     // Create shell session
     let shell = shell::default_user_shell().await;
     let manager = Arc::new(SessionManager::default());
-    let shared_state = Arc::new(SharedSessionState::new(
-        std::env::current_dir().unwrap()
-    ));
+    let shared_state = Arc::new(SharedSessionState::new(std::env::current_dir().unwrap()));
 
     eprintln!("Creating persistent shell session...");
-    let session_id = manager.create_persistent_shell_session(
-        shell.path().to_string_lossy().to_string(),
-        false,
-        sandbox_policy.clone(),
-        shared_state,
-        None,
-    ).await?;
+    let session_id = manager
+        .create_persistent_shell_session(
+            shell.path().to_string_lossy().to_string(),
+            false,
+            sandbox_policy.clone(),
+            shared_state,
+            None,
+        )
+        .await?;
     eprintln!("Shell session created: {}\n", session_id.as_str());
 
     // Ensure shell is in the correct working directory
     let cwd = std::env::current_dir()?;
     eprintln!("=== Step 0: cd to {} ===", cwd.display());
-    let result = manager.exec_command_in_shell_session(
-        session_id.clone(),
-        format!("cd {}", cwd.display()),
-        Some(5000),
-        1000,
-    ).await?;
+    let result = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            format!("cd {}", cwd.display()),
+            Some(5000),
+            1000,
+        )
+        .await?;
     eprintln!("Exit status: {:?}", result.exit_status);
     eprintln!("Output: '{}'\n", result.stdout);
 
     // Step 1: Activate virtual environment (agent's first command)
     eprintln!("=== Step 1: Activate virtual environment ===");
-    let result = manager.exec_command_in_shell_session(
-        session_id.clone(),
-        "source /home/wise/arsenal/env/bin/activate".to_string(),
-        Some(10000),
-        1000,
-    ).await?;
+    let result = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "source /home/wise/arsenal/env/bin/activate".to_string(),
+            Some(10000),
+            1000,
+        )
+        .await?;
     eprintln!("Exit status: {:?}", result.exit_status);
     eprintln!("Output: '{}'\n", result.stdout);
 
     // Step 2: Find entrypoint files (agent's second command)
     eprintln!("=== Step 2: Find entrypoint files ===");
-    let result = manager.exec_command_in_shell_session(
-        session_id.clone(),
-        "find /home/wise/arsenal/age -type f -name \"main.py\" -o -name \"app.py\"".to_string(),
-        Some(10000),
-        1000,
-    ).await?;
+    let result = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "find /home/wise/arsenal/age -type f -name \"main.py\" -o -name \"app.py\"".to_string(),
+            Some(10000),
+            1000,
+        )
+        .await?;
     eprintln!("Exit status: {:?}", result.exit_status);
     eprintln!("Output: '{}'\n", result.stdout);
 
@@ -114,10 +123,14 @@ async fn main() -> Result<()> {
         "50".to_string(),
     ];
 
-    eprintln!("Calling tools binary with args (relative path): {:?}", args_relative);
+    eprintln!(
+        "Calling tools binary with args (relative path): {:?}",
+        args_relative
+    );
     eprintln!("CWD for tools: {:?}", std::env::current_dir()?);
 
-    match execute_tools_with_sandbox(args_relative, &sandbox_policy, std::env::current_dir()?).await {
+    match execute_tools_with_sandbox(args_relative, &sandbox_policy, std::env::current_dir()?).await
+    {
         Ok(output) => {
             eprintln!("Tools exit status: {:?}", output.status);
             eprintln!("Tools stdout: {}", String::from_utf8_lossy(&output.stdout));
@@ -138,9 +151,13 @@ async fn main() -> Result<()> {
         "50".to_string(),
     ];
 
-    eprintln!("Calling tools binary with args (absolute path): {:?}", args_absolute);
+    eprintln!(
+        "Calling tools binary with args (absolute path): {:?}",
+        args_absolute
+    );
 
-    match execute_tools_with_sandbox(args_absolute, &sandbox_policy, std::env::current_dir()?).await {
+    match execute_tools_with_sandbox(args_absolute, &sandbox_policy, std::env::current_dir()?).await
+    {
         Ok(output) => {
             eprintln!("Tools exit status: {:?}", output.status);
             eprintln!("Tools stdout: {}", String::from_utf8_lossy(&output.stdout));

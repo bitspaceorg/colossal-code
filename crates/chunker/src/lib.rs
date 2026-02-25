@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
 
+pub mod javascript;
 pub mod python;
 pub mod rust;
-pub mod javascript;
 pub mod typescript;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -41,7 +41,13 @@ pub trait Chunker: Send + Sync {
     fn chunk_file(&self, file_path: &str, source_code: &str) -> Result<Vec<Chunk>, ChunkerError>;
 
     /// Parse a specific region of a file into chunks
-    fn chunk_region(&self, file_path: &str, source_code: &str, start_byte: usize, end_byte: usize) -> Result<Vec<Chunk>, ChunkerError> {
+    fn chunk_region(
+        &self,
+        file_path: &str,
+        source_code: &str,
+        start_byte: usize,
+        end_byte: usize,
+    ) -> Result<Vec<Chunk>, ChunkerError> {
         // Default implementation: chunk the whole file and filter by byte range
         let chunks = self.chunk_file(file_path, source_code)?;
         Ok(chunks
@@ -101,7 +107,11 @@ pub fn chunk_file(file_path: &str) -> Result<Vec<Chunk>, ChunkerError> {
 }
 
 /// Chunk a specific region of a file
-pub fn chunk_region(file_path: &str, start_byte: usize, end_byte: usize) -> Result<Vec<Chunk>, ChunkerError> {
+pub fn chunk_region(
+    file_path: &str,
+    start_byte: usize,
+    end_byte: usize,
+) -> Result<Vec<Chunk>, ChunkerError> {
     let path = Path::new(file_path);
     let chunker = ChunkerFactory::get_chunker(path)?;
     let source_code = std::fs::read_to_string(file_path)?;

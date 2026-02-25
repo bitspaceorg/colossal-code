@@ -98,7 +98,10 @@ pub(crate) fn max_col_visual(lines: &Lines, index: &Index2) -> usize {
     if lines.is_empty() {
         return 0;
     }
-    lines.len_col(index.row).unwrap_or_default().saturating_sub(1)
+    lines
+        .len_col(index.row)
+        .unwrap_or_default()
+        .saturating_sub(1)
 }
 
 /// Returns the maximum permissible column value. In normal or visual

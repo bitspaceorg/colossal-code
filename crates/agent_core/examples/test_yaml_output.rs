@@ -15,7 +15,9 @@ async fn main() -> anyhow::Result<()> {
 
     let tx_clone = tx.clone();
     tokio::spawn(async move {
-        let _ = agent.process_message(test_message.to_string(), tx_clone).await;
+        let _ = agent
+            .process_message(test_message.to_string(), tx_clone)
+            .await;
     });
 
     // Collect tool results
@@ -27,17 +29,17 @@ async fn main() -> anyhow::Result<()> {
             match msg {
                 AgentMessage::ToolCallStarted(tool_name) => {
                     println!("Tool called: {}", tool_name);
-                },
+                }
                 AgentMessage::ToolCallCompleted(tool_name, result) => {
                     println!("\nTool: {}", tool_name);
                     println!("Result format check:");
 
                     // Check if it's YAML (starts with '-' or has key: value patterns)
-                    let is_yaml = result.contains(":\n") ||
-                                  result.starts_with('-') ||
-                                  result.contains("- name:") ||
-                                  result.contains("status:") ||
-                                  (result.contains(':') && result.contains('\n'));
+                    let is_yaml = result.contains(":\n")
+                        || result.starts_with('-')
+                        || result.contains("- name:")
+                        || result.contains("status:")
+                        || (result.contains(':') && result.contains('\n'));
 
                     // Check if it's JSON (starts with '{' or '[')
                     let is_json = result.trim().starts_with('{') || result.trim().starts_with('[');
@@ -55,15 +57,15 @@ async fn main() -> anyhow::Result<()> {
                     println!("\n{}", "=".repeat(60));
 
                     tool_results.push((tool_name, result));
-                },
+                }
                 AgentMessage::Done => {
                     done = true;
                     println!("\n✅ Agent finished processing");
-                },
+                }
                 AgentMessage::Error(err) => {
                     println!("❌ Error: {}", err);
                     done = true;
-                },
+                }
                 _ => {}
             }
         }

@@ -7,15 +7,15 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use futures::stream::{Stream, StreamExt};
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest_eventsource::{Event as SseEvent, EventSource};
 
+use crate::AGENT_CARD_PATH;
 use crate::error::{A2AError, A2AResult};
 use crate::jsonrpc::{JsonRpcRequest, JsonRpcResponse, RequestId, StreamEvent};
 use crate::types::agent_card::AgentCard;
 use crate::types::message::Message;
 use crate::types::task::Task;
-use crate::AGENT_CARD_PATH;
 
 /// A2A Client for communicating with other agents
 pub struct A2AClient {
@@ -130,7 +130,9 @@ impl A2AClientBuilder {
 
         let rpc_url = agent_card
             .jsonrpc_url()
-            .ok_or_else(|| A2AError::InvalidAgentCard("No JSON-RPC endpoint in agent card".to_string()))?
+            .ok_or_else(|| {
+                A2AError::InvalidAgentCard("No JSON-RPC endpoint in agent card".to_string())
+            })?
             .to_string();
 
         Ok(A2AClient {
@@ -164,7 +166,9 @@ impl A2AClient {
     pub fn from_card(card: AgentCard) -> A2AResult<Self> {
         let rpc_url = card
             .jsonrpc_url()
-            .ok_or_else(|| A2AError::InvalidAgentCard("No JSON-RPC endpoint in agent card".to_string()))?
+            .ok_or_else(|| {
+                A2AError::InvalidAgentCard("No JSON-RPC endpoint in agent card".to_string())
+            })?
             .to_string();
 
         Ok(Self {
@@ -376,7 +380,11 @@ impl MultiAgentClient {
     }
 
     /// Add an agent by URL
-    pub async fn add_agent(&mut self, name: impl Into<String>, url: impl Into<String>) -> A2AResult<()> {
+    pub async fn add_agent(
+        &mut self,
+        name: impl Into<String>,
+        url: impl Into<String>,
+    ) -> A2AResult<()> {
         let client = A2AClient::from_url(url).await?;
         self.agents.insert(name.into(), client);
         Ok(())
@@ -409,10 +417,9 @@ impl MultiAgentClient {
 
     /// Send a message to a specific agent
     pub async fn send_to(&self, agent_name: &str, message: Message) -> A2AResult<Task> {
-        let client = self
-            .agents
-            .get(agent_name)
-            .ok_or_else(|| A2AError::ConnectionError(format!("Agent '{}' not found", agent_name)))?;
+        let client = self.agents.get(agent_name).ok_or_else(|| {
+            A2AError::ConnectionError(format!("Agent '{}' not found", agent_name))
+        })?;
 
         client.send_message(message).await
     }

@@ -245,9 +245,8 @@ impl JsonRpcRequest {
     /// Parse params as a specific type
     pub fn parse_params<T: for<'de> Deserialize<'de>>(&self) -> Result<T, A2AError> {
         match &self.params {
-            Some(params) => {
-                serde_json::from_value(params.clone()).map_err(|e| A2AError::InvalidParams(e.to_string()))
-            }
+            Some(params) => serde_json::from_value(params.clone())
+                .map_err(|e| A2AError::InvalidParams(e.to_string())),
             None => Err(A2AError::InvalidParams("Missing params".to_string())),
         }
     }
@@ -299,9 +298,8 @@ impl JsonRpcResponse {
     /// Parse result as a specific type
     pub fn parse_result<T: for<'de> Deserialize<'de>>(&self) -> Result<T, A2AError> {
         match &self.result {
-            Some(result) => {
-                serde_json::from_value(result.clone()).map_err(|e| A2AError::ParseError(e.to_string()))
-            }
+            Some(result) => serde_json::from_value(result.clone())
+                .map_err(|e| A2AError::ParseError(e.to_string())),
             None => {
                 if let Some(err) = &self.error {
                     Err(A2AError::InternalError(err.message.clone()))

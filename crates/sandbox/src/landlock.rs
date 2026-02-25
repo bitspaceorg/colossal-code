@@ -2,10 +2,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::error::{Result, ColossalErr as SandboxError, SandboxErr};
+use crate::error::{ColossalErr as SandboxError, Result, SandboxErr};
 use crate::protocol::SandboxPolicy;
 
-use landlock::ABI;
 use landlock::Access;
 use landlock::AccessFs;
 use landlock::CompatLevel;
@@ -13,7 +12,11 @@ use landlock::Compatible;
 use landlock::Ruleset;
 use landlock::RulesetAttr;
 use landlock::RulesetCreatedAttr;
+use landlock::ABI;
+use seccompiler::apply_filter;
+use seccompiler::BackendError;
 use seccompiler::BpfProgram;
+use seccompiler::Error as SeccompError;
 use seccompiler::SeccompAction;
 use seccompiler::SeccompCmpArgLen;
 use seccompiler::SeccompCmpOp;
@@ -21,9 +24,6 @@ use seccompiler::SeccompCondition;
 use seccompiler::SeccompFilter;
 use seccompiler::SeccompRule;
 use seccompiler::TargetArch;
-use seccompiler::apply_filter;
-use seccompiler::BackendError;
-use seccompiler::Error as SeccompError;
 
 /// Apply sandbox policies inside this thread so only the child inherits
 /// them, not the entire CLI process.
@@ -129,7 +129,9 @@ fn install_network_seccomp_filter_on_current_thread() -> std::result::Result<(),
         SeccompCmpArgLen::Dword,
         SeccompCmpOp::Ne,
         libc::AF_UNIX as u64,
-    ).map_err(|e: BackendError| SandboxError::SeccompBackend(e.into()))?]).map_err(|e: BackendError| SandboxError::SeccompBackend(e.into()))?;
+    )
+    .map_err(|e: BackendError| SandboxError::SeccompBackend(e.into()))?])
+    .map_err(|e: BackendError| SandboxError::SeccompBackend(e.into()))?;
 
     rules.insert(libc::SYS_socket, vec![unix_only_rule.clone()]);
     rules.insert(libc::SYS_socketpair, vec![unix_only_rule]); // always deny (Unix can use socketpair but fine, keep open?)
@@ -147,9 +149,12 @@ fn install_network_seccomp_filter_on_current_thread() -> std::result::Result<(),
         SeccompAction::Allow,                     // default – allow
         SeccompAction::Errno(libc::EPERM as u32), // when rule matches – return EPERM
         target_arch,
-    ).map_err(|e: BackendError| SandboxError::SeccompBackend(e.into()))?;
+    )
+    .map_err(|e: BackendError| SandboxError::SeccompBackend(e.into()))?;
 
-    let prog: BpfProgram = filter.try_into().map_err(|e: BackendError| SandboxError::SeccompBackend(e.into()))?;
+    let prog: BpfProgram = filter
+        .try_into()
+        .map_err(|e: BackendError| SandboxError::SeccompBackend(e.into()))?;
 
     apply_filter(&prog).map_err(|e: SeccompError| SandboxError::Seccomp(e.into()))?;
 

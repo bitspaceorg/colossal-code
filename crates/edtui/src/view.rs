@@ -199,7 +199,10 @@ impl Widget for EditorView<'_, '_> {
                 // Create selection for current match (highest priority)
                 if let Some(selected_idx) = self.state.search.selected_index {
                     if let Some(&match_pos) = self.state.search.matches.get(selected_idx) {
-                        let end = Index2::new(match_pos.row, match_pos.col + pattern_len.saturating_sub(1));
+                        let end = Index2::new(
+                            match_pos.row,
+                            match_pos.col + pattern_len.saturating_sub(1),
+                        );
                         current_search_selection = Some(Selection::new(match_pos, end));
                     }
                 }
@@ -207,7 +210,10 @@ impl Widget for EditorView<'_, '_> {
                 // Create selections for all other matches
                 for (i, &match_pos) in self.state.search.matches.iter().enumerate() {
                     if Some(i) != self.state.search.selected_index {
-                        let end = Index2::new(match_pos.row, match_pos.col + pattern_len.saturating_sub(1));
+                        let end = Index2::new(
+                            match_pos.row,
+                            match_pos.col + pattern_len.saturating_sub(1),
+                        );
                         search_matches.push(Some(Selection::new(match_pos, end)));
                     }
                 }

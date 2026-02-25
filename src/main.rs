@@ -350,9 +350,15 @@ mod tests {
 
     #[test]
     fn assistant_mode_to_safety_mode_preserves_expected_policy() {
-        assert_eq!(AssistantMode::None.to_safety_mode(), Some(SafetyMode::Regular));
+        assert_eq!(
+            AssistantMode::None.to_safety_mode(),
+            Some(SafetyMode::Regular)
+        );
         assert_eq!(AssistantMode::Yolo.to_safety_mode(), Some(SafetyMode::Yolo));
-        assert_eq!(AssistantMode::Plan.to_safety_mode(), Some(SafetyMode::Regular));
+        assert_eq!(
+            AssistantMode::Plan.to_safety_mode(),
+            Some(SafetyMode::Regular)
+        );
         assert_eq!(
             AssistantMode::AutoAccept.to_safety_mode(),
             Some(SafetyMode::Regular)
@@ -391,7 +397,10 @@ mod tests {
         assert_eq!(parse_queue_choice("0"), None);
         assert_eq!(parse_queue_choice("4"), None);
         assert_eq!(parse_queue_choice("interrupt"), None);
-        assert_eq!(parse_queue_choice(" 2 "), Some(QueueChoiceAction::Interrupt));
+        assert_eq!(
+            parse_queue_choice(" 2 "),
+            Some(QueueChoiceAction::Interrupt)
+        );
     }
 
     #[test]
@@ -416,10 +425,7 @@ mod tests {
             App::extract_parameter_count("example-130B-instruct.gguf"),
             None
         );
-        assert_eq!(
-            App::extract_parameter_count("example-314b-chat.gguf"),
-            None
-        );
+        assert_eq!(App::extract_parameter_count("example-314b-chat.gguf"), None);
     }
 }
 
@@ -1743,10 +1749,10 @@ impl App {
                 let start = search_start + relative_index;
                 let end = start + pattern.len();
 
-                let before_ok = start == 0
-                    || !normalized.as_bytes()[start - 1].is_ascii_alphanumeric();
-                let after_ok = end == normalized.len()
-                    || !normalized.as_bytes()[end].is_ascii_alphanumeric();
+                let before_ok =
+                    start == 0 || !normalized.as_bytes()[start - 1].is_ascii_alphanumeric();
+                let after_ok =
+                    end == normalized.len() || !normalized.as_bytes()[end].is_ascii_alphanumeric();
 
                 if before_ok && after_ok {
                     return Some(value.to_string());

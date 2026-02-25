@@ -257,7 +257,7 @@ pub(crate) fn into_spans_with_selections<'a>(
     highlight_style: &Style,
 ) -> Vec<Span<'a>> {
     let mut spans = Vec::new();
-    
+
     // Handle empty lines specially - they might still be selected
     if line.is_empty() {
         // For empty lines, check if the line should be selected
@@ -266,7 +266,7 @@ pub(crate) fn into_spans_with_selections<'a>(
             .iter()
             .filter_map(|selection| selection.as_ref())
             .any(|selection| selection.contains_row(row_index));
-        
+
         // Create a single span for the empty line with appropriate styling
         let style = if is_selected {
             highlight_style
@@ -276,14 +276,14 @@ pub(crate) fn into_spans_with_selections<'a>(
         spans.push(Span::styled("", *style));
         return spans;
     }
-    
+
     // When col_skips is beyond line length, just return empty spans based on selection
     if col_skips >= line.len() {
         let is_selected = selections
             .iter()
             .filter_map(|selection| selection.as_ref())
             .any(|selection| selection.contains_row(row_index));
-        
+
         let style = if is_selected {
             highlight_style
         } else {

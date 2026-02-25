@@ -1,7 +1,7 @@
-use std::collections::HashSet;
 use crate::protocol::SandboxPolicy;
+use std::collections::HashSet;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum SandboxType {
@@ -19,8 +19,8 @@ pub enum SafetyCheck {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum AskForApproval {
-    OnRequest,  // Used for safe mode - requires user approval
-    Never,      // Used for YOLO mode - no approval required (default)
+    OnRequest, // Used for safe mode - requires user approval
+    Never,     // Used for YOLO mode - no approval required (default)
 }
 
 pub fn assess_command_safety(

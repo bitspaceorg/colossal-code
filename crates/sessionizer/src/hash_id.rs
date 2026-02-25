@@ -44,12 +44,12 @@ use uuid::Uuid;
 pub fn generate_hash_id_from_path(path: &Path) -> String {
     // Create a UUID for additional uniqueness
     let uuid = Uuid::new_v4();
-    
+
     // Hash the path
     let mut hasher = DefaultHasher::new();
     path.hash(&mut hasher);
     let path_hash = hasher.finish();
-    
+
     // Combine UUID and path hash to create a unique identifier
     format!("{}_{}", uuid.to_string().replace("-", ""), path_hash)
 }
@@ -69,9 +69,9 @@ pub fn generate_hash_id_from_path(path: &Path) -> String {
 /// True if the hash ID already exists, false otherwise
 pub fn hash_id_exists<T>(sessions: &[(crate::types::SessionId, T)], hash_id: &str) -> bool {
     // Check if any existing session has this hash ID
-    sessions.iter().any(|(session_id, _)| {
-        session_id.as_str() == hash_id
-    })
+    sessions
+        .iter()
+        .any(|(session_id, _)| session_id.as_str() == hash_id)
 }
 
 #[cfg(test)]
@@ -83,51 +83,51 @@ mod tests {
     fn test_generate_hash_id_from_path() {
         let path = PathBuf::from("/home/user/project");
         let hash_id = generate_hash_id_from_path(&path);
-        
+
         // Check that the hash ID is not empty
         assert!(!hash_id.is_empty());
-        
+
         // Check that the hash ID contains both UUID and path hash parts
         assert!(hash_id.contains("_"));
-        
+
         // Split the hash ID and verify parts
         let parts: Vec<&str> = hash_id.split("_").collect();
         assert_eq!(parts.len(), 2);
-        
+
         // Check that the UUID part is 32 characters (without dashes)
         assert_eq!(parts[0].len(), 32);
-        
+
         // Check that the path hash part is a valid number
         assert!(parts[1].parse::<u64>().is_ok());
-        
+
         // Generate another ID with the same path - should be different due to UUID
         let hash_id2 = generate_hash_id_from_path(&path);
         assert_ne!(hash_id, hash_id2);
-        
+
         // But the path hash part should be the same
         let parts1: Vec<&str> = hash_id.split("_").collect();
         let parts2: Vec<&str> = hash_id2.split("_").collect();
         assert_eq!(parts1[1], parts2[1]);
     }
-    
+
     #[test]
     fn test_generate_hash_id_from_different_paths() {
         let path1 = PathBuf::from("/home/user/project1");
         let path2 = PathBuf::from("/home/user/project2");
-        
+
         let hash_id1 = generate_hash_id_from_path(&path1);
         let hash_id2 = generate_hash_id_from_path(&path2);
-        
+
         // Hash IDs should be different for different paths
         assert_ne!(hash_id1, hash_id2);
-        
+
         // Split the hash IDs and verify parts
         let parts1: Vec<&str> = hash_id1.split("_").collect();
         let parts2: Vec<&str> = hash_id2.split("_").collect();
-        
+
         // The UUID parts should be different
         assert_ne!(parts1[0], parts2[0]);
-        
+
         // The path hash parts should be different
         assert_ne!(parts1[1], parts2[1]);
     }

@@ -16,3 +16,7 @@
 
 # TODO directory for tracking issues
 .cargo-local/
+
+# Local Ralphy runtime artifacts
+.ralphy-worktrees/
+.checkpoints/

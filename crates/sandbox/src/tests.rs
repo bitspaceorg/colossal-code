@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use crate::protocol::{SandboxPolicy, NetworkAccess};
     use crate::landlock::apply_sandbox_policy_to_current_thread;
+    use crate::protocol::{NetworkAccess, SandboxPolicy};
+    use std::path::PathBuf;
 
     #[test]
     fn test_sandbox_library_usage() {
@@ -26,7 +26,7 @@ mod tests {
         // Note: This test might fail in environments that don't support Landlock
         // or when running in a container without proper capabilities.
         let result = apply_sandbox_policy_to_current_thread(&policy, &cwd);
-        
+
         // We just verify that the function can be called without panicking
         // The actual sandboxing might not work in all environments
         assert!(result.is_ok() || result.is_err());

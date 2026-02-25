@@ -3,9 +3,9 @@
 //! After the policy is applied, any code executed in this thread (or its children)
 //! will be subject to the sandbox policy.
 
-use std::path::PathBuf;
-use sessionizer_sandbox::protocol::{SandboxPolicy, NetworkAccess, WritableRoot};
 use sessionizer_sandbox::landlock::apply_sandbox_policy_to_current_thread;
+use sessionizer_sandbox::protocol::{NetworkAccess, SandboxPolicy, WritableRoot};
+use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the policy

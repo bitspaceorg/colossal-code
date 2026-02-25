@@ -71,8 +71,7 @@ impl TaskMetadata {
 
     /// Access the spec sheet as a strongly typed `SpecSheet`
     pub fn spec_sheet(&self) -> serde_json::Result<Option<SpecSheet>> {
-        self
-            .spec_sheet
+        self.spec_sheet
             .clone()
             .map(serde_json::from_value)
             .transpose()
@@ -80,11 +79,7 @@ impl TaskMetadata {
 
     /// Access the task summary as a strongly typed `TaskSummary`
     pub fn summary(&self) -> serde_json::Result<Option<TaskSummary>> {
-        self
-            .summary
-            .clone()
-            .map(serde_json::from_value)
-            .transpose()
+        self.summary.clone().map(serde_json::from_value).transpose()
     }
 }
 
@@ -293,7 +288,10 @@ impl Task {
 
     /// Mark task as cancelled
     pub fn cancel(&mut self) {
-        self.set_state(TaskState::Cancelled, Some("Task cancelled by user".to_string()));
+        self.set_state(
+            TaskState::Cancelled,
+            Some("Task cancelled by user".to_string()),
+        );
     }
 
     /// Mark task as requiring input
@@ -338,8 +336,8 @@ impl Default for Task {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_task_lifecycle() {
@@ -435,6 +433,9 @@ mod tests {
         assert_eq!(typed_spec.title, "Implement feature");
 
         let typed_summary = metadata.summary().unwrap().unwrap();
-        assert_eq!(typed_summary.summary_text, "Initial implementation complete");
+        assert_eq!(
+            typed_summary.summary_text,
+            "Initial implementation complete"
+        );
     }
 }

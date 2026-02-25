@@ -1,8 +1,8 @@
 use anyhow::Result;
 use colossal_linux_sandbox::manager::SessionManager;
-use colossal_linux_sandbox::protocol::{SandboxPolicy, WritableRoot, NetworkAccess};
-use std::sync::Arc;
+use colossal_linux_sandbox::protocol::{NetworkAccess, SandboxPolicy, WritableRoot};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -38,41 +38,50 @@ async fn main() -> Result<()> {
     let manager = Arc::new(SessionManager::default());
 
     eprintln!("Creating persistent tools daemon session...");
-    let session_id = manager.create_persistent_tools_session(
-        sandbox_policy.clone(),
-        std::env::current_dir()?,
-        None,
-    ).await?;
+    let session_id = manager
+        .create_persistent_tools_session(sandbox_policy.clone(), std::env::current_dir()?, None)
+        .await?;
     eprintln!("Tools session created: {}\n", session_id.as_str());
 
     // Test 1: get_files
     eprintln!("=== Test 1: get_files ===");
-    let result = manager.execute_tool_in_session(
-        session_id.clone(),
-        "get_files".to_string(),
-        vec![".".to_string(), "10".to_string()],
-    ).await?;
+    let result = manager
+        .execute_tool_in_session(
+            session_id.clone(),
+            "get_files".to_string(),
+            vec![".".to_string(), "10".to_string()],
+        )
+        .await?;
     eprintln!("Result: {}\n", result);
 
     // Test 2: get_files_recursive
     eprintln!("=== Test 2: get_files_recursive ===");
-    let result = manager.execute_tool_in_session(
-        session_id.clone(),
-        "get_files_recursive".to_string(),
-        vec![".".to_string(), "10".to_string()],
-    ).await?;
+    let result = manager
+        .execute_tool_in_session(
+            session_id.clone(),
+            "get_files_recursive".to_string(),
+            vec![".".to_string(), "10".to_string()],
+        )
+        .await?;
     eprintln!("Result: {}\n", result);
 
     // Test 3: read_file
     eprintln!("=== Test 3: read_file ===");
-    let result = manager.execute_tool_in_session(
-        session_id.clone(),
-        "read_file".to_string(),
-        vec!["Cargo.toml".to_string(), "entire".to_string()],
-    ).await?;
-    eprintln!("Result (truncated): {}...\n", &result[..result.len().min(200)]);
+    let result = manager
+        .execute_tool_in_session(
+            session_id.clone(),
+            "read_file".to_string(),
+            vec!["Cargo.toml".to_string(), "entire".to_string()],
+        )
+        .await?;
+    eprintln!(
+        "Result (truncated): {}...\n",
+        &result[..result.len().min(200)]
+    );
 
     eprintln!("=== All Tests Passed ===");
-    eprintln!("\nNote: Check stderr above - Landlock messages should appear ONLY ONCE at the start!");
+    eprintln!(
+        "\nNote: Check stderr above - Landlock messages should appear ONLY ONCE at the start!"
+    );
     Ok(())
 }

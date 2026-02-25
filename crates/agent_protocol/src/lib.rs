@@ -33,27 +33,27 @@
 //! let task = client.send_message("Hello!").await?;
 //! ```
 
-pub mod types;
-pub mod jsonrpc;
-pub mod server;
 pub mod client;
 pub mod error;
+pub mod jsonrpc;
+pub mod server;
+pub mod types;
 
 // Re-export main types
-pub use types::agent_card::{
-    AgentCard, AgentCardBuilder, AgentCardSignature, AgentExtension, Skill, SecurityScheme,
-};
-pub use types::task::{Task, TaskError, TaskMetadata, TaskState, TaskStatus};
-pub use types::message::{Message, MessagePart, Role};
-pub use types::artifact::Artifact;
-pub use types::spec::{
-    FeedbackEntry, SpecSheet, SpecStep, SpecStepRef, SpecValidationError, StepStatus,
-    TaskSummary, TaskVerification, TestResult, TestRun, VerificationStatus,
-};
-pub use jsonrpc::{JsonRpcRequest, JsonRpcResponse, A2AMethod};
-pub use server::A2AServer;
 pub use client::A2AClient;
 pub use error::{A2AError, A2AResult};
+pub use jsonrpc::{A2AMethod, JsonRpcRequest, JsonRpcResponse};
+pub use server::A2AServer;
+pub use types::agent_card::{
+    AgentCard, AgentCardBuilder, AgentCardSignature, AgentExtension, SecurityScheme, Skill,
+};
+pub use types::artifact::Artifact;
+pub use types::message::{Message, MessagePart, Role};
+pub use types::spec::{
+    FeedbackEntry, SpecSheet, SpecStep, SpecStepRef, SpecValidationError, StepStatus, TaskSummary,
+    TaskVerification, TestResult, TestRun, VerificationStatus,
+};
+pub use types::task::{Task, TaskError, TaskMetadata, TaskState, TaskStatus};
 
 /// Protocol version supported by this implementation
 pub const PROTOCOL_VERSION: &str = "0.3.0";

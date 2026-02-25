@@ -1,5 +1,5 @@
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NetworkAccess {
@@ -41,7 +41,9 @@ impl SandboxPolicy {
     pub fn has_full_network_access(&self) -> bool {
         match self {
             SandboxPolicy::ReadOnly => false, // Restrict network in read-only mode
-            SandboxPolicy::WorkspaceWrite { network_access, .. } => matches!(network_access, NetworkAccess::Enabled),
+            SandboxPolicy::WorkspaceWrite { network_access, .. } => {
+                matches!(network_access, NetworkAccess::Enabled)
+            }
             SandboxPolicy::DangerFullAccess => true,
         }
     }

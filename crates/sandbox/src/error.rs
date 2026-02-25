@@ -1,12 +1,12 @@
 use reqwest::StatusCode;
+use seccompiler::BackendError as SeccompilerBackendError;
+use seccompiler::Error as SeccompilerError;
 use serde_json;
 use std::io;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::task::JoinError;
 use uuid::Uuid;
-use seccompiler::Error as SeccompilerError;
-use seccompiler::BackendError as SeccompilerBackendError;
 
 pub type Result<T> = std::result::Result<T, ColossalErr>;
 
@@ -81,9 +81,7 @@ pub enum ColossalErr {
     #[error("{0}")]
     UsageLimitReached(UsageLimitReachedError),
 
-    #[error(
-        "To use Colossal, upgrade to Plus: https://colossal.com/nite/pricing."
-    )]
+    #[error("To use Colossal, upgrade to Plus: https://colossal.com/nite/pricing.")]
     UsageNotIncluded,
 
     #[error("We're currently experiencing high demand, which may cause temporary errors.")]
@@ -154,10 +152,7 @@ impl std::fmt::Display for UsageLimitReachedError {
         };
 
         if is_plus_plan {
-            write!(
-                f,
-                "You've hit your usage limit. try again later"
-            )?;
+            write!(f, "You've hit your usage limit. try again later")?;
             if let Some(secs) = self.resets_in_seconds {
                 let reset_duration = format_reset_duration(secs);
                 write!(f, " in {reset_duration}.")?;

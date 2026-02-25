@@ -347,7 +347,12 @@ impl AgentCardBuilder {
     }
 
     /// Add a skill
-    pub fn skill(mut self, id: impl Into<String>, name: impl Into<String>, description: Option<String>) -> Self {
+    pub fn skill(
+        mut self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        description: Option<String>,
+    ) -> Self {
         self.skills.push(Skill {
             id: id.into(),
             name: name.into(),
@@ -399,10 +404,7 @@ impl AgentCardBuilder {
 
     /// Attach a capability extension advertised by this agent
     pub fn add_extension(mut self, extension: AgentExtension) -> Self {
-        let extensions = self
-            .capabilities
-            .extensions
-            .get_or_insert_with(Vec::new);
+        let extensions = self.capabilities.extensions.get_or_insert_with(Vec::new);
         extensions.push(extension);
         self
     }
@@ -454,9 +456,7 @@ impl AgentCardBuilder {
             self.output_modes
         };
 
-        let preferred_transport = self
-            .preferred_transport
-            .unwrap_or(ProtocolBinding::JsonRpc);
+        let preferred_transport = self.preferred_transport.unwrap_or(ProtocolBinding::JsonRpc);
 
         let mut interfaces = Vec::with_capacity(1 + self.additional_interfaces.len());
         interfaces.push(SupportedInterface {
@@ -585,11 +585,16 @@ mod tests {
                 }
             })),
             openid_connect_url: None,
-            metadata_url: Some("https://example.com/.well-known/oauth-authorization-server".to_string()),
+            metadata_url: Some(
+                "https://example.com/.well-known/oauth-authorization-server".to_string(),
+            ),
         };
 
         let json_value = serde_json::to_value(&scheme).unwrap();
-        assert_eq!(json_value["metadataUrl"], "https://example.com/.well-known/oauth-authorization-server");
+        assert_eq!(
+            json_value["metadataUrl"],
+            "https://example.com/.well-known/oauth-authorization-server"
+        );
         assert_eq!(json_value["type"], "oAuth2");
     }
 

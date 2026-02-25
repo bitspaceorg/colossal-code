@@ -2,7 +2,6 @@
 ///
 /// This demonstrates how to create different tool configurations
 /// for different contexts (e.g., "tools mode" with limited tools)
-
 use std::collections::HashMap;
 
 // This would normally come from the tools module
@@ -28,18 +27,12 @@ fn main() {
 
     // Example 2: Tools mode (limited to safe tools only)
     println!("2. Tools mode (safe read-only tools):");
-    let tools_mode = vec![
-        ToolName::ReadFile,
-        ToolName::SemanticSearch,
-    ];
+    let tools_mode = vec![ToolName::ReadFile, ToolName::SemanticSearch];
     println!("   Tools: {:?}\n", tools_mode);
 
     // Example 3: Custom selection based on user preference
     println!("3. Custom tool selection:");
-    let custom_tools = vec![
-        ToolName::ExecCommand,
-        ToolName::ReadFile,
-    ];
+    let custom_tools = vec![ToolName::ExecCommand, ToolName::ReadFile];
     println!("   Tools: {:?}\n", custom_tools);
 
     println!("\n=== How to Use ===");

@@ -1,15 +1,18 @@
 use crate::actions::cpaste::PasteOverSelection;
 use crate::actions::delete::DeleteToEndOfLine;
-use crate::actions::motion::{FindCharBackward, FindCharForward, MoveHalfPageDown, MoveToFirstRow, MoveToLastRow, TillCharBackward, TillCharForward};
+use crate::actions::motion::{
+    FindCharBackward, FindCharForward, MoveHalfPageDown, MoveToFirstRow, MoveToLastRow,
+    TillCharBackward, TillCharForward,
+};
 use crate::actions::search::StartSearch;
 use crate::actions::{
-    Action, Append, AppendCharToSearch, ChangeInnerBetween, ChangeInnerWord,
-    ChangeSelection, Composed, CopyLine, CopySelection, DeleteChar, DeleteLine, DeleteSelection,
-    Execute, FindNext, FindPrevious, InsertChar, JoinLineWithLineBelow, LineBreak,
-    MoveBackward, MoveDown, MoveForward, MoveHalfPageUp, MoveToEndOfLine, MoveToFirst,
-    MoveToMatchinBracket, MoveToStartOfLine, MoveUp, MoveWordBackward,
-    MoveWordForward, MoveWordForwardToEndOfWord, Paste, Redo, RemoveChar, RemoveCharFromSearch, SelectInnerBetween,
-    SelectInnerWord, SelectLine, StopSearch, SwitchMode, TriggerSearch, Undo,
+    Action, Append, AppendCharToSearch, ChangeInnerBetween, ChangeInnerWord, ChangeSelection,
+    Composed, CopyLine, CopySelection, DeleteChar, DeleteLine, DeleteSelection, Execute, FindNext,
+    FindPrevious, InsertChar, JoinLineWithLineBelow, LineBreak, MoveBackward, MoveDown,
+    MoveForward, MoveHalfPageUp, MoveToEndOfLine, MoveToFirst, MoveToMatchinBracket,
+    MoveToStartOfLine, MoveUp, MoveWordBackward, MoveWordForward, MoveWordForwardToEndOfWord,
+    Paste, Redo, RemoveChar, RemoveCharFromSearch, SelectInnerBetween, SelectInnerWord, SelectLine,
+    StopSearch, SwitchMode, TriggerSearch, Undo,
 };
 use crate::{EditorMode, EditorState};
 use ratatui::crossterm::event::{KeyCode, KeyEvent as CTKeyEvent, KeyModifiers};
@@ -105,7 +108,8 @@ impl Default for KeyEventHandler {
                 Composed(vec![
                     MoveToEndOfLine().into(),
                     SwitchMode(EditorMode::Insert).into(),
-                ]).into(),
+                ])
+                .into(),
             ),
             // 'o' creates a newline AFTER current line and enters insert mode
             (
@@ -114,7 +118,8 @@ impl Default for KeyEventHandler {
                     SwitchMode(EditorMode::Insert).into(),
                     MoveToEndOfLine().into(),
                     LineBreak(1).into(),
-                ]).into(),
+                ])
+                .into(),
             ),
             // 'O' creates a newline BEFORE current line and enters insert mode
             (
@@ -123,7 +128,8 @@ impl Default for KeyEventHandler {
                     SwitchMode(EditorMode::Insert).into(),
                     MoveToFirst().into(),
                     LineBreak(1).into(),
-                ]).into(),
+                ])
+                .into(),
             ),
             // Goes into search mode and starts of a new search.
             (
@@ -416,15 +422,17 @@ impl Default for KeyEventHandler {
                     SelectInnerWord.into(),
                     MoveWordForward(1).into(),
                     DeleteSelection.into(),
-                ]).into(),
+                ])
+                .into(),
             ),
             // Delete inner word with diw
             (
-                KeyEventRegister::n(vec![KeyEvent::Char('d'), KeyEvent::Char('i'), KeyEvent::Char('w')]),
-                Composed(vec![
-                    SelectInnerWord.into(),
-                    DeleteSelection.into(),
-                ]).into(),
+                KeyEventRegister::n(vec![
+                    KeyEvent::Char('d'),
+                    KeyEvent::Char('i'),
+                    KeyEvent::Char('w'),
+                ]),
+                Composed(vec![SelectInnerWord.into(), DeleteSelection.into()]).into(),
             ),
             // Paste
             (KeyEventRegister::n(vec![KeyEvent::Char('p')]), Paste.into()),
@@ -433,22 +441,17 @@ impl Default for KeyEventHandler {
                 PasteOverSelection.into(),
             ),
             // Undo with u
-            (
-                KeyEventRegister::n(vec![KeyEvent::Char('u')]),
-                Undo.into(),
-            ),
+            (KeyEventRegister::n(vec![KeyEvent::Char('u')]), Undo.into()),
             // Redo with Ctrl+R
-            (
-                KeyEventRegister::n(vec![KeyEvent::Ctrl('r')]),
-                Redo.into(),
-            ),
+            (KeyEventRegister::n(vec![KeyEvent::Ctrl('r')]), Redo.into()),
             // Insert at first non-blank character with I
             (
                 KeyEventRegister::n(vec![KeyEvent::Char('I')]),
                 Composed(vec![
                     MoveToFirst().into(),
                     SwitchMode(EditorMode::Insert).into(),
-                ]).into(),
+                ])
+                .into(),
             ),
             // Join lines with J
             (
@@ -457,47 +460,83 @@ impl Default for KeyEventHandler {
             ),
             // Change inner word with ciw
             (
-                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char('w')]),
+                KeyEventRegister::n(vec![
+                    KeyEvent::Char('c'),
+                    KeyEvent::Char('i'),
+                    KeyEvent::Char('w'),
+                ]),
                 ChangeInnerWord.into(),
             ),
             // Change inner double quotes with ci"
             (
-                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char('"')]),
+                KeyEventRegister::n(vec![
+                    KeyEvent::Char('c'),
+                    KeyEvent::Char('i'),
+                    KeyEvent::Char('"'),
+                ]),
                 ChangeInnerBetween::new('"', '"').into(),
             ),
             // Change inner single quotes with ci'
             (
-                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char('\'')]),
+                KeyEventRegister::n(vec![
+                    KeyEvent::Char('c'),
+                    KeyEvent::Char('i'),
+                    KeyEvent::Char('\''),
+                ]),
                 ChangeInnerBetween::new('\'', '\'').into(),
             ),
             // Change inner parentheses with ci(
             (
-                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char('(')]),
+                KeyEventRegister::n(vec![
+                    KeyEvent::Char('c'),
+                    KeyEvent::Char('i'),
+                    KeyEvent::Char('('),
+                ]),
                 ChangeInnerBetween::new('(', ')').into(),
             ),
             // Change inner parentheses with ci)
             (
-                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char(')')]),
+                KeyEventRegister::n(vec![
+                    KeyEvent::Char('c'),
+                    KeyEvent::Char('i'),
+                    KeyEvent::Char(')'),
+                ]),
                 ChangeInnerBetween::new('(', ')').into(),
             ),
             // Change inner braces with ci{
             (
-                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char('{')]),
+                KeyEventRegister::n(vec![
+                    KeyEvent::Char('c'),
+                    KeyEvent::Char('i'),
+                    KeyEvent::Char('{'),
+                ]),
                 ChangeInnerBetween::new('{', '}').into(),
             ),
             // Change inner braces with ci}
             (
-                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char('}')]),
+                KeyEventRegister::n(vec![
+                    KeyEvent::Char('c'),
+                    KeyEvent::Char('i'),
+                    KeyEvent::Char('}'),
+                ]),
                 ChangeInnerBetween::new('{', '}').into(),
             ),
             // Change inner brackets with ci[
             (
-                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char('[')]),
+                KeyEventRegister::n(vec![
+                    KeyEvent::Char('c'),
+                    KeyEvent::Char('i'),
+                    KeyEvent::Char('['),
+                ]),
                 ChangeInnerBetween::new('[', ']').into(),
             ),
             // Change inner brackets with ci]
             (
-                KeyEventRegister::n(vec![KeyEvent::Char('c'), KeyEvent::Char('i'), KeyEvent::Char(']')]),
+                KeyEventRegister::n(vec![
+                    KeyEvent::Char('c'),
+                    KeyEvent::Char('i'),
+                    KeyEvent::Char(']'),
+                ]),
                 ChangeInnerBetween::new('[', ']').into(),
             ),
             // Delete selection in visual mode with d

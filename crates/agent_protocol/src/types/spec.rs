@@ -333,7 +333,10 @@ mod tests {
             steps: vec![],
             ..build_spec(1)
         };
-        assert!(matches!(spec.validate(), Err(SpecValidationError::EmptySteps)));
+        assert!(matches!(
+            spec.validate(),
+            Err(SpecValidationError::EmptySteps)
+        ));
     }
 
     #[test]

@@ -28,7 +28,18 @@ impl Chunker for RustChunker {
         let mut cursor = root.walk();
         for child in root.children(&mut cursor) {
             let kind = child.kind();
-            if matches!(kind, "function_item" | "struct_item" | "enum_item" | "impl_item" | "trait_item" | "mod_item" | "const_item" | "static_item" | "type_item") {
+            if matches!(
+                kind,
+                "function_item"
+                    | "struct_item"
+                    | "enum_item"
+                    | "impl_item"
+                    | "trait_item"
+                    | "mod_item"
+                    | "const_item"
+                    | "static_item"
+                    | "type_item"
+            ) {
                 let text = child
                     .utf8_text(source_code.as_bytes())
                     .unwrap_or("[invalid]")

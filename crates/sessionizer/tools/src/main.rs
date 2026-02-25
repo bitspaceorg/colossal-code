@@ -712,7 +712,10 @@ fn main() {
                 Some(mode) if mode == "entire" => ReadSpan::Entire,
                 Some(mode) if mode == "lines" => {
                     let offset = args.get(4).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-                    let raw_limit = args.get(5).and_then(|s| s.parse::<i64>().ok()).unwrap_or(-1);
+                    let raw_limit = args
+                        .get(5)
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(-1);
                     let limit = if raw_limit <= 0 {
                         None
                     } else {

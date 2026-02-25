@@ -1,11 +1,11 @@
-use std::io::Write;
-use std::sync::Arc;
-use std::time::Duration;
 use anyhow::Result;
+use colossal_linux_sandbox::manager::SessionManager;
 use colossal_linux_sandbox::protocol::{NetworkAccess, SandboxPolicy, WritableRoot};
 use colossal_linux_sandbox::shell::default_user_shell;
 use colossal_linux_sandbox::types::StreamEvent;
-use colossal_linux_sandbox::manager::SessionManager;
+use std::io::Write;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,30 +28,42 @@ async fn main() -> Result<()> {
 
     // Test 1: Creating persistent shell session with semantic search
     println!("1. Creating persistent shell session with semantic search...");
-    let shared_state = Arc::new(colossal_linux_sandbox::session::SharedSessionState::new(cwd.clone()));
-    
-    let shell_session_id = manager.create_persistent_shell_session(
-        shell.path().to_string_lossy().to_string(),
-        false, // login shell
-        sandbox_policy.clone(),
-        shared_state.clone(),
-        Some(Duration::from_secs(1800)), // 30 minutes timeout
-    ).await?;
-    
-    let semantic_search_session_id = manager.create_semantic_search_session(
-        shared_state.get_cwd(),
-        sandbox_policy.clone(),
-        Some(Duration::from_secs(1800)), // 30 minutes timeout
-    ).await?;
-    
-    println!("Persistent shell session created with ID: {}", shell_session_id.as_str());
-    println!("Semantic search session created with ID: {}", semantic_search_session_id.as_str());
+    let shared_state = Arc::new(colossal_linux_sandbox::session::SharedSessionState::new(
+        cwd.clone(),
+    ));
+
+    let shell_session_id = manager
+        .create_persistent_shell_session(
+            shell.path().to_string_lossy().to_string(),
+            false, // login shell
+            sandbox_policy.clone(),
+            shared_state.clone(),
+            Some(Duration::from_secs(1800)), // 30 minutes timeout
+        )
+        .await?;
+
+    let semantic_search_session_id = manager
+        .create_semantic_search_session(
+            shared_state.get_cwd(),
+            sandbox_policy.clone(),
+            Some(Duration::from_secs(1800)), // 30 minutes timeout
+        )
+        .await?;
+
+    println!(
+        "Persistent shell session created with ID: {}",
+        shell_session_id.as_str()
+    );
+    println!(
+        "Semantic search session created with ID: {}",
+        semantic_search_session_id.as_str()
+    );
     println!();
 
     // Test 2: Waiting for initial semantic indexing to complete
     println!("2. Waiting for initial semantic indexing to complete...");
     tokio::time::sleep(Duration::from_secs(2)).await;
-    
+
     match manager.get_semantic_search_session_status(semantic_search_session_id.clone()) {
         Ok(status) => {
             println!("Indexing Status: {}", status.state);
@@ -66,7 +78,7 @@ async fn main() -> Result<()> {
     // Test 3: Testing STREAMING command execution
     println!("3. Testing STREAMING command execution:");
     println!("Command: echo 'Hello from integrated session!'\n");
-    
+
     let params = colossal_linux_sandbox::types::ExecCommandParams {
         command: vec![
             "bash".to_string(),
@@ -82,7 +94,7 @@ async fn main() -> Result<()> {
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;
-    
+
     println!("Streaming Output:");
     let mut buffer = String::new();
     while let Ok(event) = stream.recv().await {
@@ -127,8 +139,10 @@ async fn main() -> Result<()> {
 
     // Test 4: Creating a test Python file for semantic search
     println!("4. Creating a test Python file for semantic search:");
-    println!("Command: echo 'def hello_world():\\n    print(\"Hello, World!\")\\n\\ndef add_numbers(a, b):\\n    return a + b' > test_script.py\n");
-    
+    println!(
+        "Command: echo 'def hello_world():\\n    print(\"Hello, World!\")\\n\\ndef add_numbers(a, b):\\n    return a + b' > test_script.py\n"
+    );
+
     let params = colossal_linux_sandbox::types::ExecCommandParams {
         command: vec![
             "bash".to_string(),
@@ -144,7 +158,7 @@ async fn main() -> Result<()> {
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;
-    
+
     println!("Streaming Output:");
     let mut buffer = String::new();
     while let Ok(event) = stream.recv().await {
@@ -190,7 +204,7 @@ async fn main() -> Result<()> {
     // Test 5: Waiting for file to be indexed
     println!("5. Waiting for file to be indexed...");
     tokio::time::sleep(Duration::from_secs(2)).await;
-    
+
     match manager.get_semantic_search_session_status(semantic_search_session_id.clone()) {
         Ok(status) => {
             println!("Indexing Status: {}", status.state);
@@ -205,7 +219,7 @@ async fn main() -> Result<()> {
     // Test 6: Testing STREAMING command execution with proper streaming
     println!("6. Testing STREAMING command execution with proper streaming:");
     println!("Command: for i in $(seq 1 5); do echo Number: $i; sleep 2; done\n");
-    
+
     let params = colossal_linux_sandbox::types::ExecCommandParams {
         command: vec![
             "bash".to_string(),
@@ -267,12 +281,14 @@ async fn main() -> Result<()> {
     // Test 7: Environment variable persistence
     println!("7. Testing environment variable persistence:");
     println!("Setting environment variable: INTEGRATION_TEST=Success");
-    manager.set_env_in_shell_session(
-        shell_session_id.clone(),
-        "INTEGRATION_TEST".to_string(),
-        "Success".to_string(),
-    ).await?;
-    
+    manager
+        .set_env_in_shell_session(
+            shell_session_id.clone(),
+            "INTEGRATION_TEST".to_string(),
+            "Success".to_string(),
+        )
+        .await?;
+
     println!("Retrieving environment variable:");
     let params = colossal_linux_sandbox::types::ExecCommandParams {
         command: vec![
@@ -289,7 +305,7 @@ async fn main() -> Result<()> {
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;
-    
+
     println!("Streaming Output:");
     let mut buffer = String::new();
     while let Ok(event) = stream.recv().await {
@@ -350,7 +366,7 @@ async fn main() -> Result<()> {
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;
-    
+
     println!("Streaming Output:");
     let mut buffer = String::new();
     while let Ok(event) = stream.recv().await {
@@ -404,23 +420,33 @@ async fn main() -> Result<()> {
 
     // Test 10: Session information
     println!("10. Session information:");
-    if let Some((session_type, age, inactive_time, current_cwd)) = manager.get_session_info(shell_session_id.clone()) {
+    if let Some((session_type, age, inactive_time, current_cwd)) =
+        manager.get_session_info(shell_session_id.clone())
+    {
         println!("Shell Session Type: {}", session_type);
         println!("Session Age: {:.2}s", age.as_secs_f64());
-        println!("Time Since Last Activity: {:.2}s", inactive_time.as_secs_f64());
+        println!(
+            "Time Since Last Activity: {:.2}s",
+            inactive_time.as_secs_f64()
+        );
         if let Some(cwd) = current_cwd {
             println!("Current Working Directory: {}", cwd.display());
         }
     }
-    
-    if let Some((session_type, age, inactive_time, current_cwd)) = manager.get_session_info(semantic_search_session_id.clone()) {
+
+    if let Some((session_type, age, inactive_time, current_cwd)) =
+        manager.get_session_info(semantic_search_session_id.clone())
+    {
         println!("Semantic Search Session Type: {}", session_type);
         println!("Session Age: {:.2}s", age.as_secs_f64());
-        println!("Time Since Last Activity: {:.2}s", inactive_time.as_secs_f64());
+        println!(
+            "Time Since Last Activity: {:.2}s",
+            inactive_time.as_secs_f64()
+        );
         if let Some(cwd) = current_cwd {
             println!("Current Working Directory: {}", cwd.display());
         }
-        
+
         match manager.get_semantic_search_session_status(semantic_search_session_id.clone()) {
             Ok(status) => {
                 println!("Indexing Status: {}", status.state);
@@ -451,7 +477,7 @@ async fn main() -> Result<()> {
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;
-    
+
     println!("Streaming Output:");
     let mut buffer = String::new();
     while let Ok(event) = stream.recv().await {
@@ -512,7 +538,7 @@ async fn main() -> Result<()> {
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;
-    
+
     println!("Streaming Output:");
     let mut buffer = String::new();
     while let Ok(event) = stream.recv().await {
@@ -573,7 +599,7 @@ async fn main() -> Result<()> {
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;
-    
+
     println!("Streaming Output:");
     let mut buffer = String::new();
     while let Ok(event) = stream.recv().await {
@@ -619,7 +645,7 @@ async fn main() -> Result<()> {
     // Test 14: Waiting for file to be indexed
     println!("14. Waiting for fibonacci.py to be indexed...");
     tokio::time::sleep(Duration::from_secs(2)).await;
-    
+
     match manager.get_semantic_search_session_status(semantic_search_session_id.clone()) {
         Ok(status) => {
             println!("Indexing Status: {}", status.state);
@@ -634,13 +660,16 @@ async fn main() -> Result<()> {
     // Test 15: Testing semantic search query
     println!("15. Testing semantic search query:");
     println!("Query: Find functions related to fibonacci calculation\n");
-    
+
     // Perform actual semantic search
-    match manager.search_and_format_results(
-        semantic_search_session_id.clone(),
-        "functions related to fibonacci calculation",
-        5
-    ).await {
+    match manager
+        .search_and_format_results(
+            semantic_search_session_id.clone(),
+            "functions related to fibonacci calculation",
+            5,
+        )
+        .await
+    {
         Ok(results) => {
             println!("{}", results);
         }
@@ -668,7 +697,7 @@ async fn main() -> Result<()> {
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;
-    
+
     println!("Streaming Output:");
     let mut buffer = String::new();
     while let Ok(event) = stream.recv().await {
@@ -714,7 +743,7 @@ async fn main() -> Result<()> {
     // Test 17: Waiting for file modification to be reindexed
     println!("17. Waiting for modified fibonacci.py to be reindexed...");
     tokio::time::sleep(Duration::from_secs(2)).await;
-    
+
     match manager.get_semantic_search_session_status(semantic_search_session_id.clone()) {
         Ok(status) => {
             println!("Indexing Status: {}", status.state);
@@ -729,19 +758,24 @@ async fn main() -> Result<()> {
     // Test 18: Testing semantic search after file modification
     println!("18. Testing semantic search after file modification:");
     println!("Query: Find functions related to mathematical calculations\n");
-    
+
     // Perform actual semantic search
-    match manager.search_and_format_results(
-        semantic_search_session_id.clone(),
-        "functions related to mathematical calculations",
-        5
-    ).await {
+    match manager
+        .search_and_format_results(
+            semantic_search_session_id.clone(),
+            "functions related to mathematical calculations",
+            5,
+        )
+        .await
+    {
         Ok(results) => {
             println!("{}", results);
         }
         Err(e) => {
             println!("Search failed: {}", e);
-            println!("Note: This could be due to indexing not being complete yet or Qdrant service issues.");
+            println!(
+                "Note: This could be due to indexing not being complete yet or Qdrant service issues."
+            );
             println!("Make sure the Qdrant service is running and indexing has completed.");
             println!();
         }
@@ -750,27 +784,27 @@ async fn main() -> Result<()> {
     // Test 19: Testing concurrent operations
     println!("19. Testing concurrent operations:");
     println!("Running multiple commands concurrently...");
-    
+
     let mut tasks: Vec<tokio::task::JoinHandle<Result<(), anyhow::Error>>> = vec![];
-    
+
     // Task 1: Streaming command
     tasks.push(tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(500)).await;
         Ok(())
     }));
-    
+
     // Task 2: Streaming command
     tasks.push(tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(500)).await;
         Ok(())
     }));
-    
+
     // Task 3: Semantic search query (simulated)
     tasks.push(tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(500)).await;
         Ok(())
     }));
-    
+
     // Wait for all tasks to complete
     for (i, task) in tasks.into_iter().enumerate() {
         match task.await {
@@ -784,9 +818,17 @@ async fn main() -> Result<()> {
     // Test 20: Session termination
     println!("20. Terminating sessions...");
     manager.terminate_session(shell_session_id.clone()).await?;
-    manager.terminate_session(semantic_search_session_id.clone()).await?;
-    println!("Shell Session {} terminated successfully", shell_session_id.as_str());
-    println!("Semantic Search Session {} terminated successfully", semantic_search_session_id.as_str());
+    manager
+        .terminate_session(semantic_search_session_id.clone())
+        .await?;
+    println!(
+        "Shell Session {} terminated successfully",
+        shell_session_id.as_str()
+    );
+    println!(
+        "Semantic Search Session {} terminated successfully",
+        semantic_search_session_id.as_str()
+    );
     println!();
 
     println!("Integration test completed successfully!");

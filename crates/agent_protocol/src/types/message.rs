@@ -305,7 +305,10 @@ pub struct MessageConfiguration {
     pub history_length: Option<usize>,
 
     /// Push notification configuration
-    #[serde(skip_serializing_if = "Option::is_none", rename = "pushNotificationConfig")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "pushNotificationConfig"
+    )]
     pub push_notification_config: Option<super::push_notification::PushNotificationConfig>,
 
     /// Whether to block until completion
@@ -334,7 +337,10 @@ mod tests {
     #[test]
     fn test_message_with_file() {
         let mut msg = Message::user("Check this file");
-        msg.add_part(MessagePart::file_uri("https://example.com/file.txt", "text/plain"));
+        msg.add_part(MessagePart::file_uri(
+            "https://example.com/file.txt",
+            "text/plain",
+        ));
 
         assert!(msg.has_files());
         assert_eq!(msg.files().count(), 1);

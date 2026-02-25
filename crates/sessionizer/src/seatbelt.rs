@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use tokio::process::Child;
 use crate::error::ColossalErr;
 use crate::protocol::SandboxPolicy;
 use crate::spawn::{COLOSSAL_SANDBOX_ENV_VAR, StdioPolicy, spawn_child_async};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use tokio::process::Child;
 
 const MACOS_SEATBELT_BASE_POLICY: &str = include_str!("seatbelt_base_policy.sbpl");
 const MACOS_PATH_TO_SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
@@ -31,76 +31,109 @@ pub async fn spawn_command_under_seatbelt(
     .map_err(|e| ColossalErr::Io(e))
 }
 
-pub fn apply_sandbox_policy(
-    sandbox_policy: &SandboxPolicy,
-    cwd: &Path,
-) -> Result<(), ColossalErr> {
-    use std::process::Command;
+pub fn apply_sandbox_policy(sandbox_policy: &SandboxPolicy, cwd: &Path) -> Result<(), ColossalErr> {
     use std::io::Write;
+    use std::process::Command;
     use tempfile::NamedTempFile;
 
     // Create a temporary seatbelt profile
     let mut profile = String::from("(version 1)\n");
-    
+
     match sandbox_policy {
-        crate::protocol::SandboxPolicy::WorkspaceWrite { 
-            writable_roots, 
-            network_access, 
-            exclude_tmpdir_env_var, 
-            exclude_slash_tmp 
+        crate::protocol::SandboxPolicy::WorkspaceWrite {
+            writable_roots,
+            network_access,
+            exclude_tmpdir_env_var,
+            exclude_slash_tmp,
         } => {
             // Allow reading the current working directory and its subdirectories
-            profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", cwd.display()));
-            
+            profile.push_str(&format!(
+                "(allow file-read* (subpath \"{}\"))\n",
+                cwd.display()
+            ));
+
             // Allow reading the current working directory itself
-            profile.push_str(&format!("(allow file-read-metadata (subpath \"{}\"))\n", cwd.display()));
-            
+            profile.push_str(&format!(
+                "(allow file-read-metadata (subpath \"{}\"))\n",
+                cwd.display()
+            ));
+
             // Add rules for writable roots
             for writable_root in writable_roots {
                 if writable_root.recursive {
-                    profile.push_str(&format!("(allow file-read* file-write* (subpath \"{}\"))\n", writable_root.root.display()));
-                    profile.push_str(&format!("(allow file-read-metadata file-write-data (subpath \"{}\"))\n", writable_root.root.display()));
+                    profile.push_str(&format!(
+                        "(allow file-read* file-write* (subpath \"{}\"))\n",
+                        writable_root.root.display()
+                    ));
+                    profile.push_str(&format!(
+                        "(allow file-read-metadata file-write-data (subpath \"{}\"))\n",
+                        writable_root.root.display()
+                    ));
                 } else {
-                    profile.push_str(&format!("(allow file-read* file-write* (literal \"{}\"))\n", writable_root.root.display()));
-                    profile.push_str(&format!("(allow file-read-metadata file-write-data (literal \"{}\"))\n", writable_root.root.display()));
+                    profile.push_str(&format!(
+                        "(allow file-read* file-write* (literal \"{}\"))\n",
+                        writable_root.root.display()
+                    ));
+                    profile.push_str(&format!(
+                        "(allow file-read-metadata file-write-data (literal \"{}\"))\n",
+                        writable_root.root.display()
+                    ));
                 }
-                
+
                 // Add read-only subpath restrictions
                 for read_only_path in &writable_root.read_only_subpaths {
-                    profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", read_only_path.display()));
-                    profile.push_str(&format!("(allow file-read-metadata (subpath \"{}\"))\n", read_only_path.display()));
+                    profile.push_str(&format!(
+                        "(allow file-read* (subpath \"{}\"))\n",
+                        read_only_path.display()
+                    ));
+                    profile.push_str(&format!(
+                        "(allow file-read-metadata (subpath \"{}\"))\n",
+                        read_only_path.display()
+                    ));
                 }
             }
-            
+
             // Handle /tmp access
             if !exclude_slash_tmp {
                 profile.push_str("(allow file-read* file-write* (subpath \"/tmp\"))\n");
                 profile.push_str("(allow file-read-metadata file-write-data (subpath \"/tmp\"))\n");
             }
-            
+
             // Handle TMPDIR access
             if !exclude_tmpdir_env_var {
                 if let Ok(tmpdir) = std::env::var("TMPDIR") {
-                    profile.push_str(&format!("(allow file-read* file-write* (subpath \"{}\"))\n", tmpdir));
-                    profile.push_str(&format!("(allow file-read-metadata file-write-data (subpath \"{}\"))\n", tmpdir));
+                    profile.push_str(&format!(
+                        "(allow file-read* file-write* (subpath \"{}\"))\n",
+                        tmpdir
+                    ));
+                    profile.push_str(&format!(
+                        "(allow file-read-metadata file-write-data (subpath \"{}\"))\n",
+                        tmpdir
+                    ));
                 }
             }
-            
+
             // Network access
             if matches!(network_access, crate::protocol::NetworkAccess::Enabled) {
                 profile.push_str("(allow network*)\n");
             } else {
                 profile.push_str("(deny network*)\n");
             }
-        },
+        }
         crate::protocol::SandboxPolicy::DangerFullAccess => {
             // For DangerFullAccess, allow everything (not recommended but possible)
             profile.push_str("(allow default)\n");
         }
         crate::protocol::SandboxPolicy::ReadOnly => {
             // Read-only mode: allow reading cwd and system paths, but NO writes
-            profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", cwd.display()));
-            profile.push_str(&format!("(allow file-read-metadata (subpath \"{}\"))\n", cwd.display()));
+            profile.push_str(&format!(
+                "(allow file-read* (subpath \"{}\"))\n",
+                cwd.display()
+            ));
+            profile.push_str(&format!(
+                "(allow file-read-metadata (subpath \"{}\"))\n",
+                cwd.display()
+            ));
             // Deny all writes
             profile.push_str("(deny file-write*)\n");
             // Deny network
@@ -114,35 +147,42 @@ pub fn apply_sandbox_policy(
     profile.push_str("(allow file-read* (subpath \"/lib\"))\n");
     profile.push_str("(allow file-read* (subpath \"/System\"))\n");
     profile.push_str("(allow process-exec)\n");
-    
+
     // Create a temporary file for the profile
-    let mut temp_file = NamedTempFile::new()
-        .map_err(|e| ColossalErr::Io(std::io::Error::new(
+    let mut temp_file = NamedTempFile::new().map_err(|e| {
+        ColossalErr::Io(std::io::Error::new(
             std::io::ErrorKind::Other,
-            format!("Failed to create temp profile file: {}", e)
-        )))?;
-    
-    temp_file.write_all(profile.as_bytes())
-        .map_err(|e| ColossalErr::Io(std::io::Error::new(
+            format!("Failed to create temp profile file: {}", e),
+        ))
+    })?;
+
+    temp_file.write_all(profile.as_bytes()).map_err(|e| {
+        ColossalErr::Io(std::io::Error::new(
             std::io::ErrorKind::Other,
-            format!("Failed to write profile: {}", e)
-        )))?;
-    
+            format!("Failed to write profile: {}", e),
+        ))
+    })?;
+
     // Apply the sandbox profile using sandbox-exec to 'true' to test if the sandbox is valid
     let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
         .arg("-f")
         .arg(temp_file.path())
         .arg("true") // Just test if the sandbox is valid
         .output()
-        .map_err(|e| ColossalErr::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to execute sandbox-exec: {}", e)
-        )))?;
-    
+        .map_err(|e| {
+            ColossalErr::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to execute sandbox-exec: {}", e),
+            ))
+        })?;
+
     if !output.status.success() {
         return Err(ColossalErr::Io(std::io::Error::new(
             std::io::ErrorKind::Other,
-            format!("Sandbox profile validation failed: {}", String::from_utf8_lossy(&output.stderr))
+            format!(
+                "Sandbox profile validation failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
         )));
     }
 
@@ -288,7 +328,10 @@ mod tests {
                 root_without_git_canon.to_string_lossy()
             ),
             format!("-DWRITABLE_ROOT_2={}", cwd.to_string_lossy()),
-            format!("-DWRITABLE_ROOT_2_RO_0={}", cwd.join(".git").to_string_lossy()),
+            format!(
+                "-DWRITABLE_ROOT_2_RO_0={}",
+                cwd.join(".git").to_string_lossy()
+            ),
         ];
         expected_args.extend(vec![
             "--".to_string(),

@@ -1,10 +1,10 @@
 use agent_core::{TaskSummary, VerificationStatus};
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::Line,
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap},
-    Frame,
 };
 
 pub fn render_history_panel(

@@ -1,7 +1,4 @@
-use crate::{
-    EditorMode, EditorState, 
-    events::key::KeyEventHandler
-};
+use crate::{events::key::KeyEventHandler, EditorMode, EditorState};
 
 #[derive(Clone, Debug)]
 pub struct ReadOnlyEventHandler {
@@ -23,7 +20,7 @@ impl ReadOnlyEventHandler {
             state.mode = EditorMode::Normal;
             return;
         }
-        
+
         // Handle the event based on its type
         match event {
             ratatui::crossterm::event::Event::Key(key_event) => {
@@ -33,7 +30,7 @@ impl ReadOnlyEventHandler {
                 // We ignore non-key events in our read-only handler
             }
         }
-        
+
         // Ensure we never stay in insert mode
         if state.mode == EditorMode::Insert {
             state.mode = EditorMode::Normal;

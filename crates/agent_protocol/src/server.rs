@@ -9,25 +9,25 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::{
-    extract::State,
-    http::{header, Method},
-    response::{sse::Event, IntoResponse, Response, Sse},
-    routing::{get, post},
     Json, Router,
+    extract::State,
+    http::{Method, header},
+    response::{IntoResponse, Response, Sse, sse::Event},
+    routing::{get, post},
 };
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tower_http::cors::{Any, CorsLayer};
 
+use crate::AGENT_CARD_PATH;
 use crate::error::{A2AError, A2AResult};
 use crate::jsonrpc::{
-    CancelTaskParams, GetTaskParams, JsonRpcRequest, JsonRpcResponse, ListTasksParams,
-    ListTasksResult, StreamEvent, A2AMethod,
+    A2AMethod, CancelTaskParams, GetTaskParams, JsonRpcRequest, JsonRpcResponse, ListTasksParams,
+    ListTasksResult, StreamEvent,
 };
 use crate::types::agent_card::AgentCard;
 use crate::types::message::{Message, SendMessageParams};
 use crate::types::spec::SpecStepRef;
 use crate::types::task::Task;
-use crate::AGENT_CARD_PATH;
 
 /// Handler trait for processing A2A requests
 ///
@@ -131,11 +131,7 @@ impl<H: A2AHandler> A2AServer<H> {
         let router = self.build().router.unwrap();
 
         tracing::info!("A2A server listening on {}", addr);
-        tracing::info!(
-            "Agent card available at http://{}{}",
-            addr,
-            AGENT_CARD_PATH
-        );
+        tracing::info!("Agent card available at http://{}{}", addr, AGENT_CARD_PATH);
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, router).await
@@ -324,8 +320,7 @@ fn create_sse_response(mut rx: mpsc::Receiver<StreamEvent>) -> impl IntoResponse
         }
     };
 
-    Sse::new(stream)
-        .keep_alive(axum::response::sse::KeepAlive::default())
+    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
 
 /// Simple in-memory task store for testing/examples
@@ -383,11 +378,7 @@ impl InMemoryTaskStore {
         let offset = offset.unwrap_or(0);
         let limit = limit.unwrap_or(100);
 
-        let paginated = filtered
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .collect();
+        let paginated = filtered.into_iter().skip(offset).take(limit).collect();
 
         (paginated, total)
     }

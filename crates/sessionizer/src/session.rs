@@ -27,21 +27,21 @@
 
 use crate::error::ColossalErr;
 use crate::protocol::SandboxPolicy;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
-use tokio::sync::{broadcast, mpsc};
-use tokio::task::JoinHandle;
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use qdrant_client::Payload;
+use qdrant_client::Qdrant;
+use serde::Serialize;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use serde::Serialize;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::{Mutex, RwLock};
-use std::collections::HashMap;
-use qdrant_client::Qdrant;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher, EventKind};
-use tokio::sync::mpsc as tokio_mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use qdrant_client::Payload;
+use tokio::sync::mpsc as tokio_mpsc;
+use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinHandle;
 
 // Compatible struct for linux-sandbox protocol
 #[derive(Serialize)]
@@ -77,11 +77,14 @@ impl From<&SandboxPolicy> for LinuxSandboxPolicy {
                         recursive: wr.recursive,
                     })
                     .collect();
-                
+
                 LinuxSandboxPolicy {
                     mode: "workspace-write".to_string(),
                     writable_roots: linux_writable_roots,
-                    network_access: matches!(network_access, crate::protocol::NetworkAccess::Enabled),
+                    network_access: matches!(
+                        network_access,
+                        crate::protocol::NetworkAccess::Enabled
+                    ),
                     exclude_tmpdir_env_var: *exclude_tmpdir_env_var,
                     exclude_slash_tmp: *exclude_slash_tmp,
                 }
@@ -95,8 +98,8 @@ impl From<&SandboxPolicy> for LinuxSandboxPolicy {
             },
             SandboxPolicy::ReadOnly => LinuxSandboxPolicy {
                 mode: "read-only".to_string(),
-                writable_roots: vec![],  // No writable roots in read-only mode
-                network_access: false,   // Restrict network in read-only mode
+                writable_roots: vec![], // No writable roots in read-only mode
+                network_access: false,  // Restrict network in read-only mode
                 exclude_tmpdir_env_var: true,
                 exclude_slash_tmp: true,
             },
@@ -177,9 +180,7 @@ impl SharedSessionState {
     /// Notify all listeners of a state change
     fn notify_listeners(&self, event: SessionStateEvent) {
         let mut listeners = self.listeners.lock().unwrap();
-        listeners.retain(|listener| {
-            listener.send(event.clone()).is_ok()
-        });
+        listeners.retain(|listener| listener.send(event.clone()).is_ok());
     }
 }
 
@@ -442,15 +443,15 @@ impl PersistentShellSession {
     pub fn get_previous_history_item(&self) -> Option<String> {
         let history = self.history.lock().unwrap();
         let mut pos = self.history_position.lock().unwrap();
-        
+
         if history.is_empty() {
             return None;
         }
-        
+
         if *pos > 0 {
             *pos -= 1;
         }
-        
+
         history.get(*pos).cloned()
     }
 
@@ -491,24 +492,27 @@ impl SemanticSearchSession {
 
         // Create a channel for file events
         let (file_event_tx, mut file_event_rx) = tokio_mpsc::unbounded_channel();
-        
+
         // Create file watcher
-        let file_watcher = match RecommendedWatcher::new(move |res: Result<notify::Event, notify::Error>| {
-            match res {
-                Ok(event) => {
-                    // Filter for relevant events (create, modify, delete)
-                    match event.kind {
-                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
-                            let _ = file_event_tx.send(event);
+        let file_watcher = match RecommendedWatcher::new(
+            move |res: Result<notify::Event, notify::Error>| {
+                match res {
+                    Ok(event) => {
+                        // Filter for relevant events (create, modify, delete)
+                        match event.kind {
+                            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+                                let _ = file_event_tx.send(event);
+                            }
+                            _ => {}
                         }
-                        _ => {}
+                    }
+                    Err(_e) => {
+                        // eprintln!("File watcher error: {:?}", e);
                     }
                 }
-                Err(_e) => {
-                    // eprintln!("File watcher error: {:?}", e);
-                }
-            }
-        }, notify::Config::default()) {
+            },
+            notify::Config::default(),
+        ) {
             Ok(watcher) => {
                 let watcher = Arc::new(Mutex::new(watcher));
                 // Start watching the current directory
@@ -535,7 +539,10 @@ impl SemanticSearchSession {
             let handle = tokio::spawn(async move {
                 // Apply sandbox to this file watcher task
                 #[cfg(target_os = "linux")]
-                if let Err(_e) = crate::landlock::apply_sandbox_policy_to_current_thread(&sandbox_policy_clone, &cwd_clone) {
+                if let Err(_e) = crate::landlock::apply_sandbox_policy_to_current_thread(
+                    &sandbox_policy_clone,
+                    &cwd_clone,
+                ) {
                     // eprintln!("Failed to apply sandbox to file watcher task: {}", e);
                     return;
                 }
@@ -549,7 +556,8 @@ impl SemanticSearchSession {
                         &file_content_cache_clone,
                         &cwd_clone,
                         event,
-                    ).await;
+                    )
+                    .await;
                 }
             });
 
@@ -669,7 +677,7 @@ impl SemanticSearchSession {
 
         Ok(())
     }
-    
+
     /// Static method to process file events - used by the background file watcher task
     async fn process_file_event_static(
         client: &Arc<Qdrant>,
@@ -684,7 +692,13 @@ impl SemanticSearchSession {
                 for path in event.paths {
                     if Self::is_supported_file_static(&path) {
                         if Self::should_process_event_static(&path, debounce_map, 1000).await {
-                            Self::index_file_static(client, collection_name, file_content_cache, &path).await;
+                            Self::index_file_static(
+                                client,
+                                collection_name,
+                                file_content_cache,
+                                &path,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -693,7 +707,13 @@ impl SemanticSearchSession {
                 for path in event.paths {
                     if Self::is_supported_file_static(&path) {
                         if Self::should_process_event_static(&path, debounce_map, 1000).await {
-                            Self::update_file_index_static(client, collection_name, file_content_cache, &path).await;
+                            Self::update_file_index_static(
+                                client,
+                                collection_name,
+                                file_content_cache,
+                                &path,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -701,16 +721,26 @@ impl SemanticSearchSession {
             EventKind::Remove(_) => {
                 for path in event.paths {
                     if Self::is_supported_file_static(&path) {
-                        Self::remove_file_from_index_static(client, collection_name, file_content_cache, &path).await;
+                        Self::remove_file_from_index_static(
+                            client,
+                            collection_name,
+                            file_content_cache,
+                            &path,
+                        )
+                        .await;
                     }
                 }
             }
             _ => {}
         }
     }
-    
+
     /// Check if we should process a file event based on debounce timing (static version)
-    async fn should_process_event_static(path: &PathBuf, debounce_map: &Arc<Mutex<HashMap<PathBuf, u64>>>, debounce_delay: u64) -> bool {
+    async fn should_process_event_static(
+        path: &PathBuf,
+        debounce_map: &Arc<Mutex<HashMap<PathBuf, u64>>>,
+        debounce_delay: u64,
+    ) -> bool {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_else(|_| std::time::Duration::from_secs(0))
@@ -737,7 +767,7 @@ impl SemanticSearchSession {
     fn is_supported_file_static(path: &PathBuf) -> bool {
         chunker::ChunkerFactory::is_supported(path)
     }
-    
+
     /// Index a new file (static version)
     async fn index_file_static(
         client: &Arc<Qdrant>,
@@ -774,7 +804,9 @@ impl SemanticSearchSession {
         // Generate embeddings and add to Qdrant
         for chunk in chunks.into_iter() {
             if let Ok(response) = crate::semantic_search_lib::call(&chunk.source_code).await {
-                if let Ok(embedding) = crate::semantic_search_lib::parse_response_to_vec(response).await {
+                if let Ok(embedding) =
+                    crate::semantic_search_lib::parse_response_to_vec(response).await
+                {
                     // Use UUID for point ID to avoid collisions
                     let point_id = uuid::Uuid::new_v4().to_string();
                     let payload: qdrant_client::Payload = serde_json::json!({
@@ -796,18 +828,16 @@ impl SemanticSearchSession {
 
                     // Upsert the point to Qdrant
                     let _ = client
-                        .upsert_points(
-                            qdrant_client::qdrant::UpsertPointsBuilder::new(
-                                collection_name,
-                                vec![point],
-                            )
-                        )
+                        .upsert_points(qdrant_client::qdrant::UpsertPointsBuilder::new(
+                            collection_name,
+                            vec![point],
+                        ))
                         .await;
                 }
             }
         }
     }
-    
+
     /// Update the index for a modified file (static version)
     async fn update_file_index_static(
         client: &Arc<Qdrant>,
@@ -839,7 +869,9 @@ impl SemanticSearchSession {
         }
 
         // Calculate the change range
-        if let Some((start_byte, end_byte)) = crate::semantic_search_lib::calculate_change_range(&old_content, &new_content) {
+        if let Some((start_byte, end_byte)) =
+            crate::semantic_search_lib::calculate_change_range(&old_content, &new_content)
+        {
             println!("Detected change range: {}-{}", start_byte, end_byte);
             // Use the update_affected_chunks function to update only affected parts
             if crate::semantic_search_lib::update_affected_chunks(
@@ -848,18 +880,28 @@ impl SemanticSearchSession {
                 &path.to_string_lossy(),
                 start_byte,
                 end_byte,
-                &new_content[start_byte as usize..std::cmp::min(end_byte as usize, new_content.len())]
-            ).await.is_err() {
+                &new_content
+                    [start_byte as usize..std::cmp::min(end_byte as usize, new_content.len())],
+            )
+            .await
+            .is_err()
+            {
                 // eprintln!("Failed to update affected chunks, falling back to full reindex");
                 // Fall back to full reindexing
-                Self::remove_file_from_index_static(client, collection_name, file_content_cache, path).await;
+                Self::remove_file_from_index_static(
+                    client,
+                    collection_name,
+                    file_content_cache,
+                    path,
+                )
+                .await;
                 Self::index_file_static(client, collection_name, file_content_cache, path).await;
             }
         } else {
             println!("No changes detected in file: {:?}", path);
         }
     }
-    
+
     /// Remove a file from the index (static version)
     async fn remove_file_from_index_static(
         client: &Arc<Qdrant>,
@@ -876,29 +918,33 @@ impl SemanticSearchSession {
         }
 
         // Create a filter to match points for this file
-        let filter = qdrant_client::qdrant::Filter::must([qdrant_client::qdrant::Condition::matches(
-            "file_name",
-            path.to_string_lossy().to_string(),
-        )]);
+        let filter =
+            qdrant_client::qdrant::Filter::must([qdrant_client::qdrant::Condition::matches(
+                "file_name",
+                path.to_string_lossy().to_string(),
+            )]);
 
         // Delete points matching the filter
         let delete_points = qdrant_client::qdrant::DeletePointsBuilder::new(collection_name)
             .points(filter)
             .wait(true)
             .build();
-        let _ = client
-            .delete_points(delete_points)
-            .await;
+        let _ = client.delete_points(delete_points).await;
     }
-    
+
     /// Search for code chunks using semantic search
-    pub async fn search(&self, query: &str, limit: u64) -> Result<Vec<(f32, Payload)>, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn search(
+        &self,
+        query: &str,
+        limit: u64,
+    ) -> Result<Vec<(f32, Payload)>, Box<dyn std::error::Error + Send + Sync>> {
         crate::semantic_search_lib::search_codebase(
             query,
             &self.client,
             &self.collection_name,
-            limit
-        ).await
+            limit,
+        )
+        .await
     }
 
     /// Get the sandbox policy for this session
@@ -925,12 +971,14 @@ pub async fn create_sandboxed_exec_session(
     // IMPORTANT: Open PTY BEFORE applying Landlock
     // Landlock restricts file system access, including /dev/ptmx which is needed for PTY creation
     let pty_system = native_pty_system();
-    let pair = pty_system.openpty(PtySize {
-        rows: 24,
-        cols: 80,
-        pixel_width: 0,
-        pixel_height: 0,
-    }).map_err(|e| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
     // Now apply the sandbox policy AFTER opening PTY but BEFORE spawning the command
     crate::landlock::apply_sandbox_policy_to_current_thread(&sandbox_policy, &cwd)?;
@@ -948,7 +996,7 @@ pub async fn create_sandboxed_exec_session(
             "Failed to parse command string",
         ))
     })?;
-    
+
     let mut child;
     let mut attempts = 0;
     loop {
@@ -976,13 +1024,19 @@ pub async fn create_sandboxed_exec_session(
                     if io_err.kind() == std::io::ErrorKind::WouldBlock {
                         attempts += 1;
                         if attempts > 5 {
-                            return Err(ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, "Failed to spawn command after several retries")));
+                            return Err(ColossalErr::Io(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                "Failed to spawn command after several retries",
+                            )));
                         }
                         std::thread::sleep(std::time::Duration::from_millis(100));
                         continue;
                     }
                 }
-                return Err(ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+                return Err(ColossalErr::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                )));
             }
         }
     }
@@ -996,7 +1050,9 @@ pub async fn create_sandboxed_exec_session(
     let (output_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(256);
 
     // Reader task: drain PTY and forward chunks to output channel.
-    let mut reader = pair.master.try_clone_reader()
+    let mut reader = pair
+        .master
+        .try_clone_reader()
         .map_err(|e| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
     let output_tx_clone = output_tx.clone();
     let reader_handle = tokio::task::spawn_blocking(move || {
@@ -1005,7 +1061,6 @@ pub async fn create_sandboxed_exec_session(
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
-                    
                     // Forward to broadcast; best-effort if there are subscribers.
                     // Don't stop if send fails - just means no active subscribers right now
                     let _ = output_tx_clone.send(buf[..n].to_vec());
@@ -1025,14 +1080,16 @@ pub async fn create_sandboxed_exec_session(
                 }
             }
         }
-        
+
         // The loop has finished, so we can drop the sender.
         // This will close the channel and signal to receivers that there is no more output.
         drop(output_tx_clone);
     });
 
     // Writer task: apply stdin writes to the PTY writer.
-    let writer = pair.master.take_writer()
+    let writer = pair
+        .master
+        .take_writer()
         .map_err(|e| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
     let writer = Arc::new(StdMutex::new(writer));
     let writer_handle = tokio::spawn({
@@ -1101,12 +1158,14 @@ pub async fn create_persistent_shell_session(
     // Landlock restricts file system access, including /dev/ptmx which is needed for PTY creation
     // Once Landlock is applied, we can't access /dev/ptmx anymore
     let pty_system = native_pty_system();
-    let pair = pty_system.openpty(PtySize {
-        rows: 24,
-        cols: 80,
-        pixel_width: 0,
-        pixel_height: 0,
-    }).map_err(|e| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
     // Now apply the sandbox policy AFTER opening PTY but BEFORE spawning the shell
     // This ensures the child process inherits the restrictions
@@ -1146,13 +1205,19 @@ pub async fn create_persistent_shell_session(
                     if io_err.kind() == std::io::ErrorKind::WouldBlock {
                         attempts += 1;
                         if attempts > 5 {
-                            return Err(ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, "Failed to spawn command after several retries")));
+                            return Err(ColossalErr::Io(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                "Failed to spawn command after several retries",
+                            )));
                         }
                         std::thread::sleep(std::time::Duration::from_millis(100));
                         continue;
                     }
                 }
-                return Err(ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+                return Err(ColossalErr::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                )));
             }
         }
     }
@@ -1166,7 +1231,9 @@ pub async fn create_persistent_shell_session(
     let (output_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(256);
 
     // Reader task: drain PTY and forward chunks to output channel.
-    let mut reader = pair.master.try_clone_reader()
+    let mut reader = pair
+        .master
+        .try_clone_reader()
         .map_err(|e| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
     let output_tx_clone = output_tx.clone();
     let reader_handle = tokio::task::spawn_blocking(move || {
@@ -1175,7 +1242,6 @@ pub async fn create_persistent_shell_session(
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
-                    
                     // Forward to broadcast; best-effort if there are subscribers.
                     // Don't stop if send fails - just means no active subscribers right now
                     let _ = output_tx_clone.send(buf[..n].to_vec());
@@ -1195,14 +1261,16 @@ pub async fn create_persistent_shell_session(
                 }
             }
         }
-        
+
         // The loop has finished, so we can drop the sender.
         // This will close the channel and signal to receivers that there is no more output.
         drop(output_tx_clone);
     });
 
     // Writer task: apply stdin writes to the PTY writer.
-    let writer = pair.master.take_writer()
+    let writer = pair
+        .master
+        .take_writer()
         .map_err(|e| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
     let writer = Arc::new(StdMutex::new(writer));
     let writer_handle = tokio::spawn({
@@ -1281,8 +1349,10 @@ pub async fn create_persistent_shell_session(
         while start.elapsed() < timeout {
             match tokio::time::timeout(
                 tokio::time::Duration::from_millis(100),
-                test_output_rx.recv()
-            ).await {
+                test_output_rx.recv(),
+            )
+            .await
+            {
                 Ok(Ok(output)) => {
                     let output_str = String::from_utf8_lossy(&output);
                     if output_str.contains(test_marker) {

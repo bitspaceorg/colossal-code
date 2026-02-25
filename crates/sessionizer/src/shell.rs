@@ -1,5 +1,5 @@
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Shell {
@@ -15,12 +15,16 @@ impl Shell {
     pub fn name(&self) -> &str {
         &self.name
     }
-    
+
     pub fn path(&self) -> &PathBuf {
         &self.path
     }
 
-    pub fn format_default_shell_invocation(&self, command: Vec<String>, is_login_shell: bool) -> Option<Vec<String>> {
+    pub fn format_default_shell_invocation(
+        &self,
+        command: Vec<String>,
+        is_login_shell: bool,
+    ) -> Option<Vec<String>> {
         let cmd = shlex::try_join(command.iter().map(|s| s.as_str())).ok()?;
         let shell_flag = if is_login_shell { "-lc" } else { "-c" };
         let source_cmd = if is_login_shell {
@@ -60,21 +64,13 @@ pub async fn default_user_shell() -> Shell {
                 })
             })
             .unwrap_or_else(|| "/bin/zsh".to_string());
-        let name = shell_path
-            .split('/')
-            .last()
-            .unwrap_or("zsh")
-            .to_string();
+        let name = shell_path.split('/').last().unwrap_or("zsh").to_string();
         Shell::new(name, PathBuf::from(shell_path))
     }
     #[cfg(target_os = "linux")]
     {
         let shell_path = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        let name = shell_path
-            .split('/')
-            .last()
-            .unwrap_or("bash")
-            .to_string();
+        let name = shell_path.split('/').last().unwrap_or("bash").to_string();
         Shell::new(name, PathBuf::from(shell_path))
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]

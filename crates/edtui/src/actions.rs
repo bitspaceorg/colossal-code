@@ -19,8 +19,8 @@ pub use self::delete::{
 pub use self::insert::{AppendNewline, InsertChar, InsertNewline, LineBreak};
 pub use self::motion::{
     FindCharBackward, FindCharForward, MoveBackward, MoveDown, MoveForward, MoveHalfPageDown,
-    MoveHalfPageUp, MoveToEndOfLine, MoveToFirst, MoveToMatchinBracket, MoveToStartOfLine,
-    MoveUp, MoveWordBackward, MoveWordForward, MoveWordForwardToEndOfWord, TillCharBackward,
+    MoveHalfPageUp, MoveToEndOfLine, MoveToFirst, MoveToMatchinBracket, MoveToStartOfLine, MoveUp,
+    MoveWordBackward, MoveWordForward, MoveWordForwardToEndOfWord, TillCharBackward,
     TillCharForward,
 };
 use self::search::StartSearch;

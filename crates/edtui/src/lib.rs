@@ -150,8 +150,8 @@ mod view;
 
 #[allow(deprecated)]
 pub use events::deprecated_input::EditorInput;
-pub use events::EditorEventHandler;
 pub use events::read_only::ReadOnlyEventHandler;
+pub use events::EditorEventHandler;
 pub use state::{mode::EditorMode, EditorState};
 pub use view::{theme::EditorTheme, EditorStatusLine, EditorView};
 

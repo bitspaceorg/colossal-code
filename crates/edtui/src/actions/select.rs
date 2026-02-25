@@ -194,7 +194,7 @@ impl Execute for SelectLine {
             let end = if len_col > 0 {
                 Index2::new(row, len_col - 1)
             } else {
-                Index2::new(row, 0)  // For empty lines, select the 0th position
+                Index2::new(row, 0) // For empty lines, select the 0th position
             };
             state.selection = Some(Selection::new(start, end).line_mode());
             state.mode = EditorMode::Visual;

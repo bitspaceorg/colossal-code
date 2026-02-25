@@ -37,7 +37,7 @@ impl SearchResult {
             source_code,
         }
     }
-    
+
     /// Get a formatted string representation of the search result
     pub fn format(&self) -> String {
         format!(
@@ -49,7 +49,7 @@ impl SearchResult {
             self.source_code
         )
     }
-    
+
     /// Get a concise representation for listings
     pub fn format_concise(&self) -> String {
         format!(
@@ -83,43 +83,50 @@ impl SearchResults {
             total_count,
         }
     }
-    
+
     /// Sort results by score (highest first)
     pub fn sort_by_score(&mut self) {
-        self.results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        self.results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
-    
+
     /// Get the top N results
     pub fn top_n(&self, n: usize) -> Vec<&SearchResult> {
         self.results.iter().take(n).collect()
     }
-    
+
     /// Filter results by minimum score
     pub fn filter_by_min_score(&self, min_score: f32) -> Vec<&SearchResult> {
-        self.results.iter().filter(|r| r.score >= min_score).collect()
+        self.results
+            .iter()
+            .filter(|r| r.score >= min_score)
+            .collect()
     }
-    
+
     /// Format all results as a string
     pub fn format(&self) -> String {
         let mut output = format!("Search results for '{}':\n", self.query);
         output.push_str(&format!("Found {} results:\n\n", self.total_count));
-        
+
         for (i, result) in self.results.iter().enumerate() {
             output.push_str(&format!("{}. {}\n", i + 1, result.format()));
         }
-        
+
         output
     }
-    
+
     /// Format results as a concise list
     pub fn format_concise(&self) -> String {
         let mut output = format!("Search results for '{}':\n", self.query);
         output.push_str(&format!("Found {} results:\n", self.total_count));
-        
+
         for (i, result) in self.results.iter().enumerate() {
             output.push_str(&format!("{}. {}\n", i + 1, result.format_concise()));
         }
-        
+
         output
     }
 }
