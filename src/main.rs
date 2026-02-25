@@ -308,6 +308,42 @@ mod tests {
     }
 
     #[test]
+    fn assistant_mode_to_display_matches_expected_labels() {
+        assert_eq!(AssistantMode::None.to_display(), None);
+        assert_eq!(
+            AssistantMode::Yolo.to_display(),
+            Some(("YOLO mode".to_string(), Color::Red))
+        );
+        assert_eq!(
+            AssistantMode::Plan.to_display(),
+            Some(("plan mode".to_string(), Color::Blue))
+        );
+        assert_eq!(
+            AssistantMode::AutoAccept.to_display(),
+            Some(("auto-accept edits".to_string(), Color::Green))
+        );
+        assert_eq!(
+            AssistantMode::ReadOnly.to_display(),
+            Some(("read-only".to_string(), Color::Yellow))
+        );
+    }
+
+    #[test]
+    fn format_tool_result_parses_success_and_failure_yaml_fields() {
+        let read_result = "status: Success\ncontent: |-\n  first\n  second\n";
+        assert_eq!(
+            App::format_tool_result("read_file", read_result),
+            "Read 2 lines (12 chars)"
+        );
+
+        let failure_result = "status: Failure\nmessage: permission denied\n";
+        assert_eq!(
+            App::format_tool_result("write_file", failure_result),
+            "Error: permission denied"
+        );
+    }
+
+    #[test]
     fn parses_queue_choice_actions() {
         assert_eq!(parse_queue_choice("1"), Some(QueueChoiceAction::Queue));
         assert_eq!(parse_queue_choice("2"), Some(QueueChoiceAction::Interrupt));
@@ -399,7 +435,7 @@ impl AssistantMode {
         }
     }
 
-    fn to_display(&self) -> Option<(String, Color)> {
+    fn to_display(self) -> Option<(String, Color)> {
         match self {
             AssistantMode::None => None,
             AssistantMode::Yolo => Some(("YOLO mode".to_string(), Color::Red)),
@@ -410,7 +446,7 @@ impl AssistantMode {
     }
 
     /// Convert to safety config mode
-    fn to_safety_mode(&self) -> Option<agent_core::safety_config::SafetyMode> {
+    fn to_safety_mode(self) -> Option<agent_core::safety_config::SafetyMode> {
         match self {
             AssistantMode::Yolo => Some(agent_core::safety_config::SafetyMode::Yolo),
             AssistantMode::ReadOnly => Some(agent_core::safety_config::SafetyMode::ReadOnly),
@@ -2639,7 +2675,7 @@ impl App {
             if let Some(obj) = result.as_mapping() {
                 // Check status
                 let status = obj
-                    .get(&serde_yaml::Value::String("status".to_string()))
+                    .get(serde_yaml::Value::String("status".to_string()))
                     .and_then(|v| v.as_str());
 
                 if status == Some("Success") {
@@ -2647,7 +2683,7 @@ impl App {
                     match tool_name {
                         "read_file" => {
                             if let Some(content) = obj
-                                .get(&serde_yaml::Value::String("content".to_string()))
+                                .get(serde_yaml::Value::String("content".to_string()))
                                 .and_then(|v| v.as_str())
                             {
                                 let lines = content.lines().count();
@@ -2657,7 +2693,7 @@ impl App {
                         }
                         "get_files" | "get_files_recursive" => {
                             if let Some(files) = obj
-                                .get(&serde_yaml::Value::String("files".to_string()))
+                                .get(serde_yaml::Value::String("files".to_string()))
                                 .and_then(|v| v.as_sequence())
                             {
                                 if files.is_empty() {
@@ -2688,7 +2724,7 @@ impl App {
                         }
                         "search_files_with_regex" | "grep" => {
                             if let Some(results) = obj
-                                .get(&serde_yaml::Value::String("results".to_string()))
+                                .get(serde_yaml::Value::String("results".to_string()))
                                 .and_then(|v| v.as_sequence())
                             {
                                 if results.is_empty() {
@@ -2703,7 +2739,7 @@ impl App {
                         }
                         "exec_command" => {
                             if let Some(cmd_out) = obj
-                                .get(&serde_yaml::Value::String("cmd_out".to_string()))
+                                .get(serde_yaml::Value::String("cmd_out".to_string()))
                                 .and_then(|v| v.as_str())
                             {
                                 let lines = cmd_out.lines().count();
@@ -2727,7 +2763,7 @@ impl App {
                 } else if status == Some("Background") {
                     // Background command - show session info
                     if let Some(session_id) = obj
-                        .get(&serde_yaml::Value::String("session_id".to_string()))
+                        .get(serde_yaml::Value::String("session_id".to_string()))
                         .and_then(|v| v.as_str())
                     {
                         return format!("Started in background (session {})", session_id);
@@ -2740,7 +2776,7 @@ impl App {
                 } else if let Some(_err_status) = status {
                     // Get error message
                     if let Some(msg) = obj
-                        .get(&serde_yaml::Value::String("message".to_string()))
+                        .get(serde_yaml::Value::String("message".to_string()))
                         .and_then(|v| v.as_str())
                     {
                         // Skip YAML artifacts
@@ -4509,20 +4545,15 @@ Let me analyze the conversation chronologically:
                 self.compact_pending = Some(CompactOptions {
                     custom_instructions,
                 });
-                return;
             }
             SlashCommandDispatch::AutoSummarize { command } => {
-                if self.handle_auto_summarize_threshold_command(&command) {
-                    return;
-                }
+                self.handle_auto_summarize_threshold_command(&command);
             }
             SlashCommandDispatch::Help => {
                 // Open help panel
                 self.ui_state.show_help = true;
                 self.ui_state.help_tab = HelpTab::General; // Start on general tab
                 self.help_commands_selected = 0; // Reset selection
-                // Early return to avoid adding command to messages
-                return;
             }
             SlashCommandDispatch::Resume => {
                 // Open resume panel and load conversations
@@ -4536,8 +4567,6 @@ Let me analyze the conversation chronologically:
                     self.is_fork_mode = false; // Normal resume
                     self.resume_selected = 0; // Reset selection
                 }
-                // Early return to avoid adding command to messages
-                return;
             }
             SlashCommandDispatch::Rewind => {
                 // Open rewind panel to restore to previous conversation state
@@ -4550,8 +4579,6 @@ Let me analyze the conversation chronologically:
                     self.show_rewind = true;
                     self.rewind_selected = self.rewind_points.len().saturating_sub(1); // Start at most recent
                 }
-                // Early return to avoid adding command to messages
-                return;
             }
             SlashCommandDispatch::Fork => {
                 // Fork (copy) a conversation - same UI but creates new ID
@@ -4565,8 +4592,6 @@ Let me analyze the conversation chronologically:
                     self.is_fork_mode = true; // Fork mode - don't track ID
                     self.resume_selected = 0; // Reset selection
                 }
-                // Early return to avoid adding command to messages
-                return;
             }
             SlashCommandDispatch::Vim => {
                 // Toggle vim mode
@@ -4599,8 +4624,6 @@ Let me analyze the conversation chronologically:
                     self.message_states.push(MessageState::Sent);
                 }
                 self.show_todos = !self.show_todos;
-                // Early return to avoid adding command to messages
-                return;
             }
             SlashCommandDispatch::Shells => {
                 // Toggle background tasks panel
@@ -4611,8 +4634,6 @@ Let me analyze the conversation chronologically:
                     self.message_states.push(MessageState::Sent);
                 }
                 self.show_background_tasks = !self.show_background_tasks;
-                // Early return to avoid adding command to messages
-                return;
             }
             SlashCommandDispatch::Model => {
                 // Open model selection panel
@@ -4625,8 +4646,6 @@ Let me analyze the conversation chronologically:
                     self.show_model_selection = true;
                     self.model_selected_index = 0;
                 }
-                // Early return to avoid adding command to messages
-                return;
             }
             SlashCommandDispatch::Safety { args } => {
                 if args.is_empty() {
@@ -4677,23 +4696,19 @@ Let me analyze the conversation chronologically:
                         _ => {}
                     }
                 }
-                return;
             }
             SlashCommandDispatch::Review { options } => {
                 // Set pending to trigger async review in event loop
                 self.review_pending = Some(options);
-                return;
             }
             SlashCommandDispatch::Spec { command } => {
                 // Set pending to trigger async spec command in event loop
                 self.spec_pending = Some(command);
-                return;
             }
             SlashCommandDispatch::Invalid { message } => {
                 self.messages.push(format!(" ⎿ {}", message));
                 self.message_types.push(MessageType::Agent);
                 self.message_states.push(MessageState::Sent);
-                return;
             }
             SlashCommandDispatch::Unknown { command } => {
                 // Unknown command
@@ -5392,7 +5407,7 @@ Let me analyze the conversation chronologically:
                             {
                                 if let Some(obj) = result_yaml.as_mapping() {
                                     if let Some(msg) = obj
-                                        .get(&serde_yaml::Value::String("message".to_string()))
+                                        .get(serde_yaml::Value::String("message".to_string()))
                                         .and_then(|v| v.as_str())
                                     {
                                         // Check if this is a sandbox permission error
