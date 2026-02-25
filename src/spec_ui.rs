@@ -130,12 +130,12 @@ fn append_tool_only_step_lines(
     let mut style = style_for_step(step.status);
 
     // Highlight active step
-    if let Some(active) = active_prefix {
-        if active == prefix {
-            style = Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD);
-        }
+    if let Some(active) = active_prefix
+        && active == prefix
+    {
+        style = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
     }
 
     let bullet = "●";
@@ -287,19 +287,19 @@ fn append_step_lines(
     let prefix = compose_prefix(parent_prefix, &step.index);
     let indent = "  ".repeat(depth);
     let mut style = style_for_step(step.status);
-    if let Some(active) = active_prefix {
-        if active == prefix {
-            style = Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD);
-        }
+    if let Some(active) = active_prefix
+        && active == prefix
+    {
+        style = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
     }
     let mut branch_selected = false;
-    if let Some(selected) = selected_prefix {
-        if prefix.starts_with(selected) {
-            style = style.add_modifier(Modifier::ITALIC);
-            branch_selected = prefix == selected;
-        }
+    if let Some(selected) = selected_prefix
+        && prefix.starts_with(selected)
+    {
+        style = style.add_modifier(Modifier::ITALIC);
+        branch_selected = prefix == selected;
     }
 
     let base_text = if step.title.trim().is_empty() {
@@ -637,7 +637,8 @@ fn trim_to_width(text: &str, max_width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        OrchestrationStatusLine, build_tool_only_plan_lines, compose_tool_plan_view_lines,
+        OrchestrationStatusLine, build_spec_plan_lines, build_tool_only_plan_lines,
+        compose_tool_plan_view_lines,
     };
     use crate::{SessionRole, StepToolCallEntry, ToolCallStatus};
     use agent_core::{SpecSheet, SpecStep, StepStatus};
@@ -738,5 +739,48 @@ mod tests {
         assert_eq!(line_text(&lines[1]), " ");
         assert_eq!(line_text(&lines[2]), "plan");
         assert!(line_text(lines.last().unwrap()).contains("[Esc to interrupt | 1m 05s]"));
+    }
+
+    #[test]
+    fn build_spec_plan_lines_applies_active_highlight_style() {
+        let spec = sample_spec();
+        let lines = build_spec_plan_lines(
+            &spec,
+            false,
+            0,
+            false,
+            false,
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            Some("1"),
+            false,
+            80,
+        );
+
+        let style = lines[0].spans[1].style;
+        assert_eq!(style.fg, Some(Color::Cyan));
+        assert!(style.add_modifier.contains(ratatui::style::Modifier::BOLD));
+    }
+
+    #[test]
+    fn build_spec_plan_lines_applies_selected_branch_italic_style() {
+        let spec = sample_spec();
+        let lines = build_spec_plan_lines(
+            &spec,
+            false,
+            0,
+            false,
+            false,
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            false,
+            80,
+        );
+
+        let style = lines[0].spans[1].style;
+        assert!(style.add_modifier.contains(ratatui::style::Modifier::ITALIC));
     }
 }

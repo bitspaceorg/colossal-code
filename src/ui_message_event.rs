@@ -46,8 +46,8 @@ impl UiMessageEvent {
                 parts.next(),
                 parts.next(),
                 parts.next(),
-            ) {
-                if let (
+            )
+                && let (
                     Ok(tokens_per_sec),
                     Ok(completion_tokens),
                     Ok(prompt_tokens),
@@ -57,15 +57,15 @@ impl UiMessageEvent {
                     comp.parse::<usize>(),
                     prompt.parse::<usize>(),
                     ttft.parse::<f32>(),
-                ) {
-                    return Some(Self::GenerationStats {
-                        tokens_per_sec,
-                        completion_tokens,
-                        prompt_tokens,
-                        time_to_first_token_sec,
-                        stop_reason: reason.replace("\\u{007C}", "|"),
-                    });
-                }
+                )
+            {
+                return Some(Self::GenerationStats {
+                    tokens_per_sec,
+                    completion_tokens,
+                    prompt_tokens,
+                    time_to_first_token_sec,
+                    stop_reason: reason.replace("\\u{007C}", "|"),
+                });
             }
             return None;
         }
@@ -210,6 +210,12 @@ mod tests {
     #[test]
     fn rejects_invalid_generation_stats_payload() {
         let parsed = UiMessageEvent::parse("[GEN_STATS:nope|7|11|0.250000|end_turn]");
+        assert_eq!(parsed, None);
+    }
+
+    #[test]
+    fn rejects_generation_stats_payload_with_missing_fields() {
+        let parsed = UiMessageEvent::parse("[GEN_STATS:1.500000|7|11|0.250000]");
         assert_eq!(parsed, None);
     }
 }
