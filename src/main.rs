@@ -2,8 +2,7 @@ use agent_core::{
     Agent, AgentMessage, GenerationStats as AgentGenerationStats, SpecSheet, SpecStep, StepStatus,
     TaskSummary, VerificationStatus,
     orchestrator::{
-        Orchestrator, OrchestratorAgent, OrchestratorControl, OrchestratorEvent,
-        SubAgentMessage,
+        Orchestrator, OrchestratorAgent, OrchestratorControl, OrchestratorEvent, SubAgentMessage,
     },
     set_workspace_root_override,
 };
@@ -48,6 +47,7 @@ mod ui_message_event;
 use command_runtime::{apply_command_runtime_route, route_command_runtime};
 use commands::{ReviewOptions, SlashCommandDispatch, dispatch_slash_command};
 use spec_cli::{MessageLog, SpecAgentBridge, SpecCliContext, SpecCliHandler, SpecCommandResult};
+use ui::thinking::{create_thinking_highlight_spans, encode_generation_stats_message};
 pub(crate) use ui_message_event::UiMessageEvent;
 pub mod spec_ui;
 
@@ -178,7 +178,6 @@ impl HelpTab {
             HelpTab::CustomCommands => HelpTab::General,
         }
     }
-
 }
 
 #[cfg(test)]
@@ -398,23 +397,6 @@ mod tests {
         assert_eq!(App::estimate_token_count_for_text("abcd"), 1);
         assert_eq!(App::estimate_token_count_for_text("abcde"), 2);
     }
-
-    #[test]
-    fn thinking_highlight_wave_applies_expected_colors() {
-        let spans = App::create_thinking_highlight_spans("abcdefghi", 7);
-        let mut char_colors = Vec::new();
-        for (text, color) in spans {
-            for _ in text.chars() {
-                char_colors.push(color);
-            }
-        }
-
-        assert_eq!(char_colors.len(), 9);
-        assert_eq!(char_colors[6], Color::Rgb(255, 215, 153));
-        assert_eq!(char_colors[5], Color::Rgb(255, 215, 153));
-        assert_eq!(char_colors[4], Color::Rgb(255, 179, 102));
-        assert_eq!(char_colors[3], Color::Rgb(255, 179, 102));
-    }
 }
 
 /// AI Assistant modes (cycled with Shift+Tab)
@@ -458,7 +440,6 @@ impl AssistantMode {
             }
         }
     }
-
 }
 /// Tips to display during startup
 const TIPS: &[&str] = &[
@@ -827,10 +808,7 @@ impl SubAgentContext {
         }
 
         if let Some(stats) = self.generation_stats.clone() {
-            self.push_message(
-                App::encode_generation_stats_message(&stats),
-                MessageType::Agent,
-            );
+            self.push_message(encode_generation_stats_message(&stats), MessageType::Agent);
             self.generation_stats_rendered = true;
         }
     }
@@ -2804,7 +2782,7 @@ impl App {
         let current_frame = self.thinking_snowflake_frames[self.get_thinking_loader_frame()];
         let text_with_dots = format!("{}...", self.get_thinking_current_word());
         let color_spans =
-            Self::create_thinking_highlight_spans(&text_with_dots, self.get_thinking_position());
+            create_thinking_highlight_spans(&text_with_dots, self.get_thinking_position());
         let elapsed_secs = self
             .thinking_start_time
             .map(|t| t.elapsed().as_secs())
@@ -2983,54 +2961,6 @@ impl App {
                 }
             }
         }
-    }
-
-    fn create_thinking_highlight_spans(text: &str, position: usize) -> Vec<(String, Color)> {
-        let base_color = Color::Rgb(224, 135, 57); // #e08739
-        let bright_color = Color::Rgb(255, 215, 153); // #ffd799
-        let medium_color = Color::Rgb(255, 179, 102); // #ffb366
-
-        let chars: Vec<char> = text.chars().collect();
-        let mut spans = Vec::new();
-        let mut current_color = base_color;
-        let mut current_text = String::new();
-
-        for (i, &ch) in chars.iter().enumerate() {
-            // Determine the color for this character based on its position relative to the highlight window
-            // The wave sweeps from left to right, with position being where the peak is
-            let color = if i + 7 >= position && i < position {
-                // This character is within the 7-character highlight window before position
-                let window_pos = position - i - 1;
-
-                match window_pos {
-                    0 => bright_color,       // Character right before position (brightest)
-                    1 => bright_color,       // Second brightest
-                    2 | 3 => medium_color,   // Medium brightness
-                    4..=6 => base_color,     // Fading back to base
-                    _ => base_color,
-                }
-            } else {
-                base_color
-            };
-
-            // If color changed, push the accumulated span and start a new one
-            if color != current_color {
-                if !current_text.is_empty() {
-                    spans.push((current_text.clone(), current_color));
-                    current_text.clear();
-                }
-                current_color = color;
-            }
-
-            current_text.push(ch);
-        }
-
-        // Push the last accumulated span
-        if !current_text.is_empty() {
-            spans.push((current_text, current_color));
-        }
-
-        spans
     }
 
     fn update_animation(&mut self) {
@@ -3997,9 +3927,7 @@ Let me analyze the conversation chronologically:
         let value_token = parts[1].trim().trim_end_matches('%');
         match value_token.parse::<f32>() {
             Ok(value) => {
-                if !(MIN_AUTO_SUMMARIZE_THRESHOLD..=MAX_AUTO_SUMMARIZE_THRESHOLD)
-                    .contains(&value)
-                {
+                if !(MIN_AUTO_SUMMARIZE_THRESHOLD..=MAX_AUTO_SUMMARIZE_THRESHOLD).contains(&value) {
                     self.messages.push(format!(
                         " ⎿ Enter a value between {:.0}% and {:.0}% (percent of context used).",
                         MIN_AUTO_SUMMARIZE_THRESHOLD, MAX_AUTO_SUMMARIZE_THRESHOLD
@@ -7670,24 +7598,13 @@ Let me analyze the conversation chronologically:
         Text::from(lines)
     }
 
-    fn encode_generation_stats_message(stats: &AgentGenerationStats) -> String {
-        UiMessageEvent::GenerationStats {
-            tokens_per_sec: stats.avg_completion_tok_per_sec,
-            completion_tokens: stats.completion_tokens,
-            prompt_tokens: stats.prompt_tokens,
-            time_to_first_token_sec: stats.time_to_first_token_sec,
-            stop_reason: stats.stop_reason.clone(),
-        }
-        .to_message()
-    }
-
     fn push_generation_stats_message(
         messages: &mut Vec<String>,
         message_types: &mut Vec<MessageType>,
         message_states: &mut Vec<MessageState>,
         stats: &AgentGenerationStats,
     ) {
-        messages.push(Self::encode_generation_stats_message(stats));
+        messages.push(encode_generation_stats_message(stats));
         message_types.push(MessageType::Agent);
         message_states.push(MessageState::Sent);
     }
@@ -8340,10 +8257,8 @@ Let me analyze the conversation chronologically:
             };
 
             // Get color-coded spans for the wave effect (using snapshot position if in nav mode)
-            let color_spans = Self::create_thinking_highlight_spans(
-                &text_with_dots,
-                self.get_thinking_position(),
-            );
+            let color_spans =
+                create_thinking_highlight_spans(&text_with_dots, self.get_thinking_position());
 
             // Build the line with one space padding on the left, then snowflake, then text
             let mut spans = Vec::new();
@@ -10549,10 +10464,8 @@ Let me analyze the conversation chronologically:
                                     self.thinking_position
                                 };
 
-                                let color_spans = Self::create_thinking_highlight_spans(
-                                    &text_with_dots,
-                                    position,
-                                );
+                                let color_spans =
+                                    create_thinking_highlight_spans(&text_with_dots, position);
 
                                 // Build elapsed time string
                                 let elapsed = if snapshot.thinking_indicator_active {
