@@ -69,10 +69,8 @@ impl Survey {
 
     /// Get the height needed for the current survey or thank you message (0 if none)
     pub fn get_height(&self) -> u16 {
-        if self.active_question.is_some() {
-            2 // Question line + options line
-        } else if self.thank_you_message.is_some() {
-            2 // Thank you message (2 lines)
+        if self.active_question.is_some() || self.thank_you_message.is_some() {
+            2 // Question or thank-you message uses two lines
         } else {
             0
         }
@@ -106,29 +104,6 @@ impl Survey {
                 self.message_count = 0;
             }
         }
-    }
-
-    /// Handle a key press for the survey (returns the choice index if valid)
-    /// Does NOT dismiss the survey - caller should do that after handling the choice
-    pub fn handle_key(&self, key_char: char) -> Option<usize> {
-        if let Some(question) = &self.active_question {
-            // Try to parse the key as a number
-            if let Some(digit) = key_char.to_digit(10) {
-                let choice = digit as usize;
-
-                // 0 is always dismiss (if optional) or cancel
-                if choice == 0 {
-                    if question.optional {
-                        return Some(0);
-                    }
-                }
-                // Check if choice is valid (1 to options.len() - 1)
-                else if choice > 0 && choice < question.options.len() {
-                    return Some(choice);
-                }
-            }
-        }
-        None
     }
 
     /// Dismiss the current survey
@@ -197,18 +172,9 @@ impl Survey {
     }
 
     /// Force show a survey question
+    #[cfg(test)]
     pub fn show_question(&mut self, question: SurveyQuestion) {
         self.active_question = Some(question);
-    }
-
-    /// Get the text of the selected option
-    pub fn get_option_text(&self, choice: usize) -> String {
-        if let Some(question) = &self.active_question {
-            if choice < question.options.len() {
-                return question.options[choice].clone();
-            }
-        }
-        String::new()
     }
 
     /// Check if the input is a valid number choice for the survey
@@ -234,10 +200,8 @@ impl Survey {
 
     /// Update the survey state (check for auto-dismiss of thank you message)
     pub fn update(&mut self) {
-        if let Some(shown_at) = self.thank_you_message {
-            if shown_at.elapsed().as_secs() >= 1 {
-                self.thank_you_message = None;
-            }
+        if let Some(shown_at) = self.thank_you_message && shown_at.elapsed().as_secs() >= 1 {
+            self.thank_you_message = None;
         }
     }
 }
@@ -245,6 +209,7 @@ impl Survey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn test_survey_creation() {
@@ -281,5 +246,22 @@ mod tests {
 
         survey.dismiss();
         assert!(!survey.is_active());
+    }
+
+    #[test]
+    fn test_survey_height_for_thank_you_message() {
+        let mut survey = Survey::new(10, 1.0);
+        survey.show_thank_you();
+        assert_eq!(survey.get_height(), 2);
+    }
+
+    #[test]
+    fn test_thank_you_message_auto_clears_after_timeout() {
+        let mut survey = Survey::new(10, 1.0);
+        survey.thank_you_message = Some(Instant::now() - Duration::from_secs(2));
+
+        survey.update();
+
+        assert!(!survey.has_thank_you());
     }
 }

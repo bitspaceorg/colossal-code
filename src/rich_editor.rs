@@ -1,12 +1,9 @@
 //! A rich editor that combines edtui navigation with rich formatting
-use edtui::{EditorEventHandler, EditorState, EditorTheme, EditorView};
+use edtui::{EditorEventHandler, EditorState};
 use markdown_renderer::render_markdown_text;
 use ratatui::{
-    buffer::Buffer,
     crossterm::event::Event,
-    layout::Rect,
     text::{Line, Span},
-    widgets::Widget,
 };
 /// Format elapsed seconds into a human-readable string using largest units first.
 /// Shows up to 4 non-zero units: y, mo, w, d, h, m, s
@@ -84,8 +81,6 @@ pub struct RichEditor {
     rich_content: Vec<Line<'static>>,
     /// Whether to use rich formatting or plain edtui
     use_rich_formatting: bool,
-    /// Command input for command mode (tracked from edtui state)
-    pub command_input: String,
     /// Search query for search mode (tracked from edtui state)
     pub search_query: String,
 }
@@ -101,15 +96,10 @@ impl RichEditor {
             event_handler: EditorEventHandler::default(),
             rich_content: Vec::new(),
             use_rich_formatting: false,
-            command_input: String::new(),
             search_query: String::new(),
         }
     }
-    /// Set plain text content for the editor
-    pub fn set_text_content(&mut self, content: &str) {
-        self.state = EditorState::new(edtui::Lines::from(content));
-        self.use_rich_formatting = false;
-    }
+
     /// Set plain text content while preserving the current mode
     pub fn set_text_content_preserving_mode(&mut self, content: &str) {
         let current_mode = self.state.mode;
@@ -140,29 +130,10 @@ impl RichEditor {
         // Update our tracked search state from edtui
         self.search_query = self.state.search_pattern();
     }
-    /// Render the editor - delegates to edtui
-    pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
-        // Use standard edtui rendering - it handles all cursor positioning, scrolling, etc.
-        // Disable the status line since we have our own mode display
-        // Set text color to gray to match user message style
-        // Hide edtui's cursor since we'll use the terminal cursor instead
-        // Enable line wrapping for multiline support
-        let theme = EditorTheme::default()
-            .hide_status_line()
-            .base(ratatui::style::Style::default().fg(ratatui::style::Color::Gray))
-            .hide_cursor();
-        EditorView::new(&mut self.state)
-            .theme(theme)
-            .wrap(true)
-            .render(area, buf);
-    }
+
     /// Get the current editor mode
     pub fn get_mode(&self) -> edtui::EditorMode {
         self.state.mode
-    }
-    /// Set a custom clipboard for the editor
-    pub fn set_clipboard(&mut self, clipboard: impl edtui::clipboard::ClipboardTrait + 'static) {
-        self.state.set_clipboard(clipboard);
     }
 }
 // Helper function to create rich content from messages with proper styling

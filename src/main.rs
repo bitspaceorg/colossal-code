@@ -176,13 +176,6 @@ impl HelpTab {
         }
     }
 
-    fn name(&self) -> &'static str {
-        match self {
-            HelpTab::General => "general",
-            HelpTab::Commands => "commands",
-            HelpTab::CustomCommands => "custom-commands",
-        }
-    }
 }
 
 #[cfg(test)]
@@ -315,22 +308,6 @@ mod tests {
     }
 
     #[test]
-    fn assistant_mode_from_safety_mode_matches_ui_defaults() {
-        assert!(matches!(
-            AssistantMode::from_safety_mode(SafetyMode::Yolo),
-            AssistantMode::Yolo
-        ));
-        assert!(matches!(
-            AssistantMode::from_safety_mode(SafetyMode::Regular),
-            AssistantMode::None
-        ));
-        assert!(matches!(
-            AssistantMode::from_safety_mode(SafetyMode::ReadOnly),
-            AssistantMode::ReadOnly
-        ));
-    }
-
-    #[test]
     fn parses_queue_choice_actions() {
         assert_eq!(parse_queue_choice("1"), Some(QueueChoiceAction::Queue));
         assert_eq!(parse_queue_choice("2"), Some(QueueChoiceAction::Interrupt));
@@ -443,14 +420,6 @@ impl AssistantMode {
         }
     }
 
-    /// Create from safety config mode
-    fn from_safety_mode(mode: agent_core::safety_config::SafetyMode) -> Self {
-        match mode {
-            agent_core::safety_config::SafetyMode::Yolo => AssistantMode::Yolo,
-            agent_core::safety_config::SafetyMode::ReadOnly => AssistantMode::ReadOnly,
-            agent_core::safety_config::SafetyMode::Regular => AssistantMode::None,
-        }
-    }
 }
 /// Tips to display during startup
 const TIPS: &[&str] = &[
@@ -1194,12 +1163,8 @@ struct App {
     cached_mode_content: Option<(Mode, Line<'static>)>,
     // Navigation editor state
     editor: RichEditor,
-    // For gg command timing
-    last_g_press: Option<std::time::Instant>,
     // Command mode state
     command_input: String,
-    // Search state
-    search_query: String,
     // Exit flag
     exit: bool,
     // Navigation scroll offset
@@ -1333,8 +1298,6 @@ struct App {
     history_panel_selected: usize,          // Selected summary in history panel
     // Status message for session window
     status_message: Option<String>, // Temporary status message for user feedback
-    // Agent path tracking for subagent hierarchy
-    current_agent_path: Vec<String>, // Stack of agent prefixes: ["main", "sub-1", ...]
     // Per-sub-agent message contexts for Alt+W view
     sub_agent_contexts: HashMap<String, SubAgentContext>, // prefix -> context
     // When set, we're viewing a sub-agent in full-screen mode (Enter from session window)
@@ -1509,21 +1472,6 @@ impl App {
         persistence::conversations::initialize_conversations_dir()
     }
 
-    // Helper method to add a message with full metadata tracking
-    fn add_message(
-        &mut self,
-        content: String,
-        message_type: MessageType,
-        message_state: MessageState,
-        metadata: Option<UIMessageMetadata>,
-    ) {
-        self.messages.push(content);
-        self.message_types.push(message_type);
-        self.message_states.push(message_state);
-        self.message_metadata.push(metadata);
-        self.message_timestamps.push(SystemTime::now());
-    }
-
     fn get_history_file_path() -> Result<std::path::PathBuf> {
         let cwd = std::env::current_dir()?;
         persistence::history::history_file_path_for_cwd(&cwd)
@@ -1597,34 +1545,6 @@ impl App {
         })
     }
 
-    /// Recursively format todos with indentation for display
-    fn format_todo_tree(
-        todos: &[TodoItem],
-        indent_level: usize,
-        buffer: &mut String,
-        counter: &mut usize,
-    ) {
-        let indent = "  ".repeat(indent_level);
-        for todo in todos {
-            *counter += 1;
-            let status_icon = match todo.status.as_str() {
-                "completed" => "✓",
-                "in_progress" => "→",
-                "pending" => "○",
-                _ => "·",
-            };
-            buffer.push_str(&format!(
-                "{}{}. [{}] {}\n",
-                indent, counter, status_icon, todo.content
-            ));
-
-            // Recursively display children with increased indentation
-            if !todo.children.is_empty() {
-                Self::format_todo_tree(&todo.children, indent_level + 1, buffer, counter);
-            }
-        }
-    }
-
     fn get_cursor_row(&self) -> usize {
         let lines: Vec<&str> = self.input.lines().collect();
         let mut char_count = 0;
@@ -1671,36 +1591,6 @@ impl App {
             cursor_col >= last_line.chars().count()
         } else {
             true
-        }
-    }
-
-    fn move_to_start_of_line(&mut self) {
-        let lines: Vec<&str> = self.input.lines().collect();
-        let cursor_row = self.get_cursor_row();
-
-        // Calculate character index at start of current line
-        let mut char_count = 0;
-        for (row, line) in lines.iter().enumerate() {
-            if row == cursor_row {
-                self.character_index = char_count;
-                return;
-            }
-            char_count += line.chars().count() + 1; // +1 for newline
-        }
-    }
-
-    fn move_to_end_of_line(&mut self) {
-        let lines: Vec<&str> = self.input.lines().collect();
-        let cursor_row = self.get_cursor_row();
-
-        // Calculate character index at end of current line
-        let mut char_count = 0;
-        for (row, line) in lines.iter().enumerate() {
-            if row == cursor_row {
-                self.character_index = char_count + line.chars().count();
-                return;
-            }
-            char_count += line.chars().count() + 1; // +1 for newline
         }
     }
 
@@ -2028,9 +1918,7 @@ impl App {
             initial_screen_cleared: false,
             cached_mode_content: None,
             editor: RichEditor::new(),
-            last_g_press: None,
             command_input: String::new(),
-            search_query: String::new(),
             exit: false,
             nav_scroll_offset: 0,
             nav_needs_init: false,
@@ -2273,8 +2161,6 @@ impl App {
             show_history_panel: false,
             history_panel_selected: 0,
             status_message: None,
-            // Agent path tracking for subagent hierarchy
-            current_agent_path: vec!["main".to_string()],
             // Per-sub-agent message contexts
             sub_agent_contexts: HashMap::new(),
             // No expanded sub-agent initially
@@ -2284,24 +2170,6 @@ impl App {
             rendering_sub_agent_view: false,
             rendering_sub_agent_prefix: None,
         })
-    }
-
-    /// Format the current agent path as a breadcrumb string.
-    /// e.g., ["main", "sub-1", "sub-1.1"] -> "main › sub-1 › sub-1.1"
-    fn format_agent_breadcrumb(&self) -> String {
-        self.current_agent_path.join(" › ")
-    }
-
-    /// Push a new agent onto the path stack (e.g., when entering a sub-agent).
-    fn push_agent_path(&mut self, agent_id: &str) {
-        self.current_agent_path.push(agent_id.to_string());
-    }
-
-    /// Pop the current agent from the path stack (e.g., when exiting a sub-agent).
-    fn pop_agent_path(&mut self) {
-        if self.current_agent_path.len() > 1 {
-            self.current_agent_path.pop();
-        }
     }
 
     fn enter_alt_w_view(&mut self) -> bool {
@@ -2528,10 +2396,6 @@ impl App {
 
     fn should_skip_token(token: &str) -> bool {
         matches!(token, "&&" | "||" | "|" | ";") || token.starts_with('>') || token.starts_with('<')
-    }
-
-    fn latest_summary_for_step(&self, step_index: &str) -> Option<&TaskSummary> {
-        self.latest_summaries.get(step_index)
     }
 
     fn update_session_for_step(
@@ -2949,11 +2813,6 @@ impl App {
         false
     }
 
-    /// Check if we have an active spec that should show tool activity in the message stream.
-    fn has_active_spec_with_tools(&self) -> bool {
-        self.current_spec.is_some() && !self.step_tool_calls.is_empty()
-    }
-
     /// Build tool-only plan lines for integration into message stream.
     /// Shows plan steps with tool calls underneath, no metadata.
     fn build_tool_only_plan_lines(&self, max_width: usize) -> Vec<Line<'static>> {
@@ -2992,6 +2851,10 @@ impl App {
     fn append_tool_plan_view_lines(&self, lines: &mut Vec<Line<'_>>, max_width: usize) {
         if self.current_spec.is_none() || !self.allow_plan_tree_render() {
             return;
+        }
+
+        if cfg!(test) {
+            let _ = self.build_spec_plan_lines(max_width);
         }
 
         let plan_lines = self.build_tool_only_plan_lines(max_width);
@@ -3386,124 +3249,7 @@ impl App {
         let cursor_moved_right = self.character_index.saturating_add(1);
         self.character_index = self.clamp_cursor(cursor_moved_right);
     }
-    fn move_cursor_up(&mut self, max_width: u16, prompt_width: u16, indent_width: u16) {
-        let content_str = if !self.input_modified && self.input.is_empty() {
-            "Type your message or @/ to give suggestions for what tools to use."
-        } else {
-            self.input.as_str()
-        };
-        // Calculate current cursor position (row, col)
-        let mut current_row = 0;
-        let mut current_col = 0;
-        let mut char_idx = 0;
-        let mut _current_line_start = 0;
-        let mut current_line_width = prompt_width;
-        for (i, c) in content_str.chars().enumerate() {
-            let cw = UnicodeWidthChar::width(c).unwrap_or(1) as u16;
-            if current_line_width + cw > max_width {
-                current_row += 1;
-                current_line_width = indent_width;
-                _current_line_start = i;
-            }
-            if i == self.character_index {
-                current_col = current_line_width;
-                break;
-            }
-            current_line_width += cw;
-            char_idx = i + 1;
-        }
-        if char_idx == self.character_index && char_idx == content_str.chars().count() {
-            current_col = current_line_width;
-        }
-        if current_row == 0 {
-            return;
-        }
-        let mut prev_line_start = 0;
-        let mut prev_line_end = 0;
-        let mut row = 0;
-        let mut line_width = prompt_width;
-        for (i, c) in content_str.chars().enumerate() {
-            let cw = UnicodeWidthChar::width(c).unwrap_or(1) as u16;
-            if line_width + cw > max_width {
-                if row == current_row - 1 {
-                    prev_line_end = i;
-                    break;
-                }
-                row += 1;
-                line_width = indent_width;
-                prev_line_start = i;
-            }
-            line_width += cw;
-        }
-        if row < current_row - 1 {
-            prev_line_end = content_str.chars().count();
-        }
-        let prev_line_length = prev_line_end - prev_line_start;
-        let target_col = current_col
-            .saturating_sub(indent_width)
-            .min(prev_line_length as u16);
-        self.character_index = prev_line_start + (target_col as usize);
-        self.character_index = self.clamp_cursor(self.character_index);
-    }
-    fn move_cursor_down(&mut self, max_width: u16, prompt_width: u16, indent_width: u16) {
-        let content_str = if !self.input_modified && self.input.is_empty() {
-            "Type your message or @/ to give suggestions for what tools to use."
-        } else {
-            self.input.as_str()
-        };
-        let mut current_row = 0;
-        let mut current_col = 0;
-        let mut char_idx = 0;
-        let mut _current_line_start = 0;
-        let mut current_line_width = prompt_width;
-        for (i, c) in content_str.chars().enumerate() {
-            let cw = UnicodeWidthChar::width(c).unwrap_or(1) as u16;
-            if current_line_width + cw > max_width {
-                current_row += 1;
-                current_line_width = indent_width;
-                _current_line_start = i;
-            }
-            if i == self.character_index {
-                current_col = current_line_width;
-                break;
-            }
-            current_line_width += cw;
-            char_idx = i + 1;
-        }
-        if char_idx == self.character_index && char_idx == content_str.chars().count() {
-            current_col = current_line_width;
-        }
-        let mut next_line_start = 0;
-        let mut next_line_end = content_str.chars().count();
-        let row = 0;
-        let mut line_width = prompt_width;
-        for (i, c) in content_str.chars().enumerate().skip(next_line_start) {
-            let cw = UnicodeWidthChar::width(c).unwrap_or(1) as u16;
-            if line_width + cw > max_width {
-                next_line_start = i;
-                break;
-            }
-            line_width += cw;
-        }
-        if row < current_row {
-            return;
-        }
-        let mut next_line_width = indent_width;
-        for (i, c) in content_str.chars().enumerate().skip(next_line_start) {
-            let cw = UnicodeWidthChar::width(c).unwrap_or(1) as u16;
-            if next_line_width + cw > max_width {
-                next_line_end = i;
-                break;
-            }
-            next_line_width += cw;
-        }
-        let next_line_length = next_line_end - next_line_start;
-        let target_col = current_col
-            .saturating_sub(indent_width)
-            .min(next_line_length as u16);
-        self.character_index = next_line_start + (target_col as usize);
-        self.character_index = self.clamp_cursor(self.character_index);
-    }
+
     fn enter_char(&mut self, new_char: char) {
         let index = self.byte_index();
         self.input.insert(index, new_char);
@@ -8013,14 +7759,6 @@ Let me analyze the conversation chronologically:
         messages.push(Self::encode_generation_stats_message(stats));
         message_types.push(MessageType::Agent);
         message_states.push(MessageState::Sent);
-    }
-
-    fn record_generation_stats(&mut self, stats: AgentGenerationStats) {
-        Self::record_generation_stats_fields(
-            &mut self.generation_stats,
-            &mut self.generation_stats_rendered,
-            stats,
-        );
     }
 
     fn clear_generation_stats(&mut self) {
