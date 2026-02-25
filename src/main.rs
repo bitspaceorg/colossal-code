@@ -36,6 +36,7 @@ mod survey;
 use survey::{Survey, SurveyQuestion};
 mod session_manager;
 pub use session_manager::{OrchestratorEntry, Session, SessionManager, SessionRole, SessionStatus};
+mod command_runtime;
 mod commands;
 mod git_ops;
 mod model_context;
@@ -44,6 +45,7 @@ mod session_lifecycle;
 mod spec_cli;
 mod ui;
 mod ui_message_event;
+use command_runtime::{apply_command_runtime_route, route_command_runtime};
 use commands::{ReviewOptions, SlashCommandDispatch, dispatch_slash_command};
 use spec_cli::{MessageLog, SpecAgentBridge, SpecCliContext, SpecCliHandler, SpecCommandResult};
 pub(crate) use ui_message_event::UiMessageEvent;
@@ -1031,7 +1033,7 @@ struct FileChange {
 }
 
 /// Options for /summarize command
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct CompactOptions {
     /// Optional custom instructions for summarization
     custom_instructions: Option<String>,
@@ -4405,7 +4407,13 @@ Let me analyze the conversation chronologically:
         }
 
         // Parse and execute command
-        match dispatch_slash_command(&command) {
+        let dispatch = dispatch_slash_command(&command);
+        let runtime_route = route_command_runtime(&dispatch, self.messages.len());
+        if apply_command_runtime_route(self, runtime_route) {
+            return;
+        }
+
+        match dispatch {
             SlashCommandDispatch::Clear => {
                 // Trigger save before clearing
                 self.persistence_state.save_pending = true;
@@ -4456,29 +4464,8 @@ Let me analyze the conversation chronologically:
                 // Set exit flag
                 self.exit = true;
             }
-            SlashCommandDispatch::Export => {
-                // Export needs async, so we'll set a flag and handle it in the event loop
-                self.export_pending = true;
-            }
-            SlashCommandDispatch::Summarize {
-                custom_instructions,
-            } => {
-                // Need at least one prior message (besides the command itself)
-                if self.messages.len() <= 1 {
-                    self.messages
-                        .push(" ⎿ Nothing to summarize - conversation is empty".to_string());
-                    self.message_types.push(MessageType::Agent);
-                    self.message_states.push(MessageState::Sent);
-                    return;
-                }
-
-                // Set pending to trigger async compaction
-                self.compaction_resume_prompt = None;
-                self.compaction_resume_ready = false;
-                self.compact_pending = Some(CompactOptions {
-                    custom_instructions,
-                });
-            }
+            SlashCommandDispatch::Export => {}
+            SlashCommandDispatch::Summarize { .. } => {}
             SlashCommandDispatch::AutoSummarize { command } => {
                 self.handle_auto_summarize_threshold_command(&command);
             }
@@ -4630,14 +4617,8 @@ Let me analyze the conversation chronologically:
                     }
                 }
             }
-            SlashCommandDispatch::Review { options } => {
-                // Set pending to trigger async review in event loop
-                self.review_pending = Some(options);
-            }
-            SlashCommandDispatch::Spec { command } => {
-                // Set pending to trigger async spec command in event loop
-                self.spec_pending = Some(command);
-            }
+            SlashCommandDispatch::Review { .. } => {}
+            SlashCommandDispatch::Spec { .. } => {}
             SlashCommandDispatch::Invalid { message } => {
                 self.messages.push(format!(" ⎿ {}", message));
                 self.message_types.push(MessageType::Agent);
