@@ -47,6 +47,7 @@ mod ui_message_event;
 use command_runtime::{apply_command_runtime_route, route_command_runtime};
 use commands::{ReviewOptions, SlashCommandDispatch, dispatch_slash_command};
 use spec_cli::{MessageLog, SpecAgentBridge, SpecCliContext, SpecCliHandler, SpecCommandResult};
+use ui::model_picker;
 use ui::thinking::{create_thinking_highlight_spans, encode_generation_stats_message};
 pub(crate) use ui_message_event::UiMessageEvent;
 pub mod spec_ui;
@@ -8919,20 +8920,11 @@ Let me analyze the conversation chronologically:
             // Calculate available height for list items
             let list_height = inner.height.saturating_sub(2) as usize;
 
-            // Each model takes 3 lines (title + metadata1 + metadata2)
-            // We'll assume worst case of 3 lines per model for scroll calculation
-            let lines_per_model = 3;
-            let visible_models = (list_height / lines_per_model).max(1);
-
-            // Calculate scroll offset to keep selected model visible
-            let scroll_offset = if self.model_selected_index >= visible_models {
-                self.model_selected_index - visible_models + 1
-            } else {
-                0
-            };
-
-            // Determine which models to render
-            let end_index = (scroll_offset + visible_models).min(self.available_models.len());
+            let (scroll_offset, end_index) = model_picker::visible_model_bounds(
+                list_height,
+                self.model_selected_index,
+                self.available_models.len(),
+            );
             let models_to_render = &self.available_models[scroll_offset..end_index];
 
             // Render list of models with > indicator and metadata
@@ -8948,102 +8940,9 @@ Let me analyze the conversation chronologically:
                         .map(|m| m == &model.filename)
                         .unwrap_or(false);
 
-                    // Format size (GB if >= 1024 MB, otherwise MB)
-                    let size_str = if model.size_mb >= 1024.0 {
-                        format!("{:.1}GB", model.size_mb / 1024.0)
-                    } else {
-                        format!("{:.0}MB", model.size_mb)
-                    };
-
-                    // Build metadata string with all available info
-                    let mut metadata_parts = Vec::new();
-
-                    // Add architecture and parameter count first (most important)
-                    if let Some(ref arch) = model.architecture {
-                        if let Some(ref params) = model.parameter_count {
-                            metadata_parts.push(format!("{} {}", arch, params));
-                        } else {
-                            metadata_parts.push(arch.clone());
-                        }
-                    } else if let Some(ref params) = model.parameter_count {
-                        metadata_parts.push(params.clone());
-                    }
-
-                    // Add size and quantization
-                    metadata_parts.push(size_str);
-                    if let Some(ref quant) = model.quantization {
-                        metadata_parts.push(quant.clone());
-                    }
-                    if let Some(ctx) = model.context_length {
-                        metadata_parts.push(format!("{} ctx", self.format_compact_number(ctx)));
-                    }
-
-                    let metadata = metadata_parts.join(" · ");
-
-                    // Build second metadata line (author, version, hash)
-                    let mut metadata2_parts = Vec::new();
-                    if let Some(ref author) = model.author {
-                        metadata2_parts.push(author.clone());
-                    }
-                    if let Some(ref version) = model.version {
-                        metadata2_parts.push(format!("ver {}", version));
-                    }
-                    if let Some(ref hash) = model.file_hash {
-                        metadata2_parts.push(format!("hash {}", hash));
-                    }
-                    let metadata2 = if !metadata2_parts.is_empty() {
-                        Some(metadata2_parts.join(" · "))
-                    } else {
-                        None
-                    };
-
-                    // Title line
-                    let title_line = if is_selected {
-                        Line::from(vec![
-                            Span::styled(">  ", Style::default().fg(Color::Blue)),
-                            Span::styled(&model.display_name, Style::default().fg(Color::Blue)),
-                            if is_current {
-                                Span::styled(" ✔", Style::default().fg(Color::Green))
-                            } else {
-                                Span::raw("")
-                            },
-                        ])
-                    } else {
-                        Line::from(vec![
-                            Span::raw("   "),
-                            Span::styled(&model.display_name, Style::default().fg(Color::White)),
-                            if is_current {
-                                Span::styled(" ✔", Style::default().fg(Color::Green))
-                            } else {
-                                Span::raw("")
-                            },
-                        ])
-                    };
-
-                    // First metadata line (arch, size, quant)
-                    let metadata_line1 = Line::from(vec![
-                        Span::raw("   "),
-                        Span::styled(metadata, Style::default().fg(Color::DarkGray)),
-                    ]);
-
-                    // Build lines vec
-                    let mut lines = vec![title_line, metadata_line1];
-
-                    // Second metadata line (author, version, hash) - only if we have data
-                    if let Some(meta2) = metadata2 {
-                        let metadata_line2 = Line::from(vec![
-                            Span::raw("   "),
-                            Span::styled(
-                                meta2,
-                                Style::default()
-                                    .fg(Color::DarkGray)
-                                    .add_modifier(Modifier::DIM),
-                            ),
-                        ]);
-                        lines.push(metadata_line2);
-                    }
-
-                    ListItem::new(lines)
+                    model_picker::model_list_item(model, is_selected, is_current, |ctx| {
+                        self.format_compact_number(ctx)
+                    })
                 })
                 .collect();
 
