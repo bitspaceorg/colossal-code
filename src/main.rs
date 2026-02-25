@@ -3146,6 +3146,38 @@ impl App {
         Vec::new()
     }
 
+    fn orchestration_status_line(&self) -> Option<spec_ui::OrchestrationStatusLine> {
+        if !self.orchestration_in_progress {
+            return None;
+        }
+
+        let current_frame = self.thinking_snowflake_frames[self.get_thinking_loader_frame()];
+        let text_with_dots = format!("{}...", self.get_thinking_current_word());
+        let color_spans = Self::create_thinking_highlight_spans(
+            &text_with_dots,
+            self.get_thinking_position(),
+        );
+        let elapsed_secs = self
+            .thinking_start_time
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0);
+
+        Some(spec_ui::OrchestrationStatusLine {
+            current_frame: current_frame.to_string(),
+            color_spans,
+            elapsed_secs,
+        })
+    }
+
+    fn append_tool_plan_view_lines(&self, lines: &mut Vec<Line<'_>>, max_width: usize) {
+        if self.current_spec.is_none() || !self.allow_plan_tree_render() {
+            return;
+        }
+
+        let plan_lines = self.build_tool_only_plan_lines(max_width);
+        spec_ui::compose_tool_plan_view_lines(lines, plan_lines, self.orchestration_status_line());
+    }
+
     fn build_spec_plan_lines(&self, max_width: usize) -> Vec<Line<'static>> {
         if let Some(spec) = &self.current_spec {
             let selected_index = self
@@ -10916,50 +10948,7 @@ Let me analyze the conversation chronologically:
                 }
 
                 // If spec is active, append tool-only plan tree to messages
-                if self.current_spec.is_some() && self.allow_plan_tree_render() {
-                    message_lines.push(Line::from(" ")); // Gap before plan tree
-                    message_lines.extend(self.build_tool_only_plan_lines(max_width));
-
-                    // Add thinking animation at the bottom during orchestration
-                    if self.orchestration_in_progress {
-                        let current_frame =
-                            self.thinking_snowflake_frames[self.get_thinking_loader_frame()];
-                        let text_with_dots = format!("{}...", self.get_thinking_current_word());
-                        let color_spans = Self::create_thinking_highlight_spans(
-                            &text_with_dots,
-                            self.get_thinking_position(),
-                        );
-
-                        // Build elapsed time string
-                        let elapsed = self
-                            .thinking_start_time
-                            .map(|t| t.elapsed().as_secs())
-                            .unwrap_or(0);
-                        let mins = elapsed / 60;
-                        let secs = elapsed % 60;
-                        let time_str = if mins > 0 {
-                            format!("{}m {:02}s", mins, secs)
-                        } else {
-                            format!("{}s", secs)
-                        };
-
-                        let mut spans = vec![
-                            Span::styled(
-                                current_frame,
-                                Style::default().fg(Color::Rgb(255, 165, 0)),
-                            ),
-                            Span::raw(" "),
-                        ];
-                        for (text, color) in color_spans {
-                            spans.push(Span::styled(text, Style::default().fg(color)));
-                        }
-                        spans.push(Span::styled(
-                            format!(" [Esc to interrupt | {}]", time_str),
-                            Style::default().fg(Color::DarkGray),
-                        ));
-                        message_lines.push(Line::from(spans));
-                    }
-                }
+                self.append_tool_plan_view_lines(&mut message_lines, max_width);
 
                 if self.show_summary_history {
                     message_lines = self.render_summary_history_lines(max_width);
@@ -11041,48 +11030,7 @@ Let me analyze the conversation chronologically:
 
                     // If spec is active, append tool-only plan tree to messages
                     if self.current_spec.is_some() && self.allow_plan_tree_render() {
-                        lines.push(Line::from(" ")); // Gap before plan tree
-                        lines.extend(self.build_tool_only_plan_lines(max_width));
-
-                        // Add thinking animation at the bottom during orchestration
-                        if self.orchestration_in_progress {
-                            let current_frame =
-                                self.thinking_snowflake_frames[self.get_thinking_loader_frame()];
-                            let text_with_dots = format!("{}...", self.get_thinking_current_word());
-                            let color_spans = Self::create_thinking_highlight_spans(
-                                &text_with_dots,
-                                self.get_thinking_position(),
-                            );
-
-                            // Build elapsed time string
-                            let elapsed = self
-                                .thinking_start_time
-                                .map(|t| t.elapsed().as_secs())
-                                .unwrap_or(0);
-                            let mins = elapsed / 60;
-                            let secs = elapsed % 60;
-                            let time_str = if mins > 0 {
-                                format!("{}m {:02}s", mins, secs)
-                            } else {
-                                format!("{}s", secs)
-                            };
-
-                            let mut spans = vec![
-                                Span::styled(
-                                    current_frame,
-                                    Style::default().fg(Color::Rgb(255, 165, 0)),
-                                ),
-                                Span::raw(" "),
-                            ];
-                            for (text, color) in color_spans {
-                                spans.push(Span::styled(text, Style::default().fg(color)));
-                            }
-                            spans.push(Span::styled(
-                                format!(" [Esc to interrupt | {}]", time_str),
-                                Style::default().fg(Color::DarkGray),
-                            ));
-                            lines.push(Line::from(spans));
-                        }
+                        self.append_tool_plan_view_lines(&mut lines, max_width);
                     } else if self.rendering_sub_agent_view {
                         // Show thinking animation for sub-agent view when:
                         // 1. Sub-agent is actively thinking, OR

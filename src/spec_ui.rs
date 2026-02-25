@@ -9,6 +9,52 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{SessionRole, StepToolCallEntry, ToolCallStatus};
 
+pub struct OrchestrationStatusLine {
+    pub current_frame: String,
+    pub color_spans: Vec<(String, Color)>,
+    pub elapsed_secs: u64,
+}
+
+pub fn compose_tool_plan_view_lines(
+    lines: &mut Vec<Line<'_>>,
+    plan_lines: Vec<Line<'static>>,
+    orchestration_status: Option<OrchestrationStatusLine>,
+) {
+    let mut plan_lines = plan_lines.into_iter().peekable();
+    if plan_lines.peek().is_none() {
+        return;
+    }
+
+    lines.push(Line::from(" "));
+    lines.extend(plan_lines);
+
+    if let Some(status) = orchestration_status {
+        let mins = status.elapsed_secs / 60;
+        let secs = status.elapsed_secs % 60;
+        let time_str = if mins > 0 {
+            format!("{}m {:02}s", mins, secs)
+        } else {
+            format!("{}s", secs)
+        };
+
+        let mut spans = vec![
+            Span::styled(
+                status.current_frame,
+                Style::default().fg(Color::Rgb(255, 165, 0)),
+            ),
+            Span::raw(" "),
+        ];
+        for (text, color) in status.color_spans {
+            spans.push(Span::styled(text, Style::default().fg(color)));
+        }
+        spans.push(Span::styled(
+            format!(" [Esc to interrupt | {}]", time_str),
+            Style::default().fg(Color::DarkGray),
+        ));
+        lines.push(Line::from(spans));
+    }
+}
+
 /// Build tool-only plan lines for the main message view.
 /// Only shows steps that have actual tool activity - no empty steps.
 pub fn build_tool_only_plan_lines(
@@ -585,5 +631,112 @@ fn trim_to_width(text: &str, max_width: usize) -> String {
         text.chars().take(max_width).collect()
     } else {
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_tool_only_plan_lines, compose_tool_plan_view_lines, OrchestrationStatusLine,
+    };
+    use crate::{SessionRole, StepToolCallEntry, ToolCallStatus};
+    use agent_core::{SpecSheet, SpecStep, StepStatus};
+    use chrono::{TimeZone, Utc};
+    use ratatui::{
+        style::Color,
+        text::{Line, Span},
+    };
+    use std::collections::HashMap;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
+    fn sample_spec() -> SpecSheet {
+        SpecSheet {
+            id: "spec-1".to_string(),
+            title: "Demo Spec".to_string(),
+            description: "desc".to_string(),
+            steps: vec![
+                SpecStep {
+                    index: "1".to_string(),
+                    title: "No tools".to_string(),
+                    instructions: String::new(),
+                    acceptance_criteria: vec![],
+                    required_tools: vec![],
+                    constraints: vec![],
+                    is_parallel: false,
+                    requires_verification: false,
+                    max_parallelism: None,
+                    status: StepStatus::Pending,
+                    dependencies: vec![],
+                    sub_spec: None,
+                    completed_at: None,
+                },
+                SpecStep {
+                    index: "2".to_string(),
+                    title: "With tools".to_string(),
+                    instructions: String::new(),
+                    acceptance_criteria: vec![],
+                    required_tools: vec![],
+                    constraints: vec![],
+                    is_parallel: false,
+                    requires_verification: false,
+                    max_parallelism: None,
+                    status: StepStatus::InProgress,
+                    dependencies: vec![],
+                    sub_spec: None,
+                    completed_at: None,
+                },
+            ],
+            created_by: "tester".to_string(),
+            created_at: Utc.timestamp_opt(0, 0).unwrap(),
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn build_tool_only_plan_lines_omits_steps_without_activity() {
+        let mut tool_calls = HashMap::new();
+        tool_calls.insert(
+            "2".to_string(),
+            vec![StepToolCallEntry {
+                id: 1,
+                label: "run tests".to_string(),
+                status: ToolCallStatus::Started,
+                role: SessionRole::Implementor,
+                worktree_branch: None,
+                worktree_path: None,
+            }],
+        );
+
+        let lines = build_tool_only_plan_lines(&sample_spec(), &tool_calls, Some("2"), 80);
+        let combined = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(combined.contains("With tools"));
+        assert!(!combined.contains("No tools"));
+    }
+
+    #[test]
+    fn compose_tool_plan_view_lines_adds_gap_plan_and_status_line() {
+        let mut lines = vec![Line::from("existing")];
+        let plan_lines = vec![Line::from(vec![Span::raw("plan")])];
+
+        compose_tool_plan_view_lines(
+            &mut lines,
+            plan_lines,
+            Some(OrchestrationStatusLine {
+                current_frame: "*".to_string(),
+                color_spans: vec![("thinking...".to_string(), Color::Yellow)],
+                elapsed_secs: 65,
+            }),
+        );
+
+        assert_eq!(line_text(&lines[1]), " ");
+        assert_eq!(line_text(&lines[2]), "plan");
+        assert!(line_text(lines.last().unwrap()).contains("[Esc to interrupt | 1m 05s]"));
     }
 }
