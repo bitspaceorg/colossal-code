@@ -2868,16 +2868,18 @@ impl App {
                 .min(spec.steps.len().saturating_sub(1));
             return spec_ui::build_spec_plan_lines(
                 spec,
-                self.orchestrator_paused,
-                selected_index,
-                self.spec_pane_show_history,
-                false,
-                &self.orchestrator_history,
-                &self.latest_summaries,
-                &self.step_tool_calls,
-                self.active_step_prefix.as_deref(),
-                false,
-                max_width,
+                spec_ui::SpecPlanRenderParams {
+                    orchestrator_paused: self.orchestrator_paused,
+                    selected_index,
+                    show_history: self.spec_pane_show_history,
+                    step_drawer_open: false,
+                    orchestrator_history: &self.orchestrator_history,
+                    latest_summaries: &self.latest_summaries,
+                    step_tool_calls: &self.step_tool_calls,
+                    active_prefix: self.active_step_prefix.as_deref(),
+                    include_metadata: false,
+                    max_width,
+                },
             );
         }
         Vec::new()

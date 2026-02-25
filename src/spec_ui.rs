@@ -15,6 +15,28 @@ pub struct OrchestrationStatusLine {
     pub elapsed_secs: u64,
 }
 
+pub struct SpecPlanRenderParams<'a> {
+    pub orchestrator_paused: bool,
+    pub selected_index: usize,
+    pub show_history: bool,
+    pub step_drawer_open: bool,
+    pub orchestrator_history: &'a [TaskSummary],
+    pub latest_summaries: &'a HashMap<String, TaskSummary>,
+    pub step_tool_calls: &'a HashMap<String, Vec<StepToolCallEntry>>,
+    pub active_prefix: Option<&'a str>,
+    pub include_metadata: bool,
+    pub max_width: usize,
+}
+
+struct StepRenderContext<'a> {
+    selected_prefix: Option<&'a str>,
+    drawer_open: bool,
+    active_prefix: Option<&'a str>,
+    step_tool_calls: &'a HashMap<String, Vec<StepToolCallEntry>>,
+    latest_summaries: &'a HashMap<String, TaskSummary>,
+    max_width: usize,
+}
+
 pub fn compose_tool_plan_view_lines(
     lines: &mut Vec<Line<'_>>,
     plan_lines: Vec<Line<'static>>,
@@ -192,21 +214,16 @@ fn append_tool_only_step_lines(
 
 pub fn build_spec_plan_lines(
     spec: &SpecSheet,
-    orchestrator_paused: bool,
-    selected_index: usize,
-    show_history: bool,
-    step_drawer_open: bool,
-    orchestrator_history: &[TaskSummary],
-    latest_summaries: &HashMap<String, TaskSummary>,
-    step_tool_calls: &HashMap<String, Vec<StepToolCallEntry>>,
-    active_prefix: Option<&str>,
-    include_metadata: bool,
-    max_width: usize,
+    params: SpecPlanRenderParams<'_>,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
-    if include_metadata {
-        let paused_badge = if orchestrator_paused { " [PAUSED]" } else { "" };
+    if params.include_metadata {
+        let paused_badge = if params.orchestrator_paused {
+            " [PAUSED]"
+        } else {
+            ""
+        };
         lines.push(Line::from(vec![
             Span::styled("📋 ", Style::default().fg(Color::Yellow)),
             Span::styled(
@@ -241,8 +258,8 @@ pub fn build_spec_plan_lines(
         lines.push(Line::from(""));
     }
 
-    if show_history {
-        lines.extend(build_history_lines(orchestrator_history));
+    if params.show_history {
+        lines.extend(build_history_lines(params.orchestrator_history));
         return lines;
     }
 
@@ -251,22 +268,19 @@ pub fn build_spec_plan_lines(
         return lines;
     }
 
-    let bounded_index = selected_index.min(spec.steps.len().saturating_sub(1));
+    let bounded_index = params.selected_index.min(spec.steps.len().saturating_sub(1));
     let selected_prefix = spec.steps.get(bounded_index).map(|step| step.index.clone());
+    let context = StepRenderContext {
+        selected_prefix: selected_prefix.as_deref(),
+        drawer_open: params.step_drawer_open && params.include_metadata,
+        active_prefix: params.active_prefix,
+        step_tool_calls: params.step_tool_calls,
+        latest_summaries: params.latest_summaries,
+        max_width: params.max_width,
+    };
 
     for step in &spec.steps {
-        append_step_lines(
-            &mut lines,
-            step,
-            "",
-            0,
-            selected_prefix.as_deref(),
-            step_drawer_open && include_metadata,
-            active_prefix,
-            step_tool_calls,
-            latest_summaries,
-            max_width,
-        );
+        append_step_lines(&mut lines, step, "", 0, &context);
     }
 
     lines
@@ -277,17 +291,12 @@ fn append_step_lines(
     step: &SpecStep,
     parent_prefix: &str,
     depth: usize,
-    selected_prefix: Option<&str>,
-    drawer_open: bool,
-    active_prefix: Option<&str>,
-    step_tool_calls: &HashMap<String, Vec<StepToolCallEntry>>,
-    latest_summaries: &HashMap<String, TaskSummary>,
-    max_width: usize,
+    context: &StepRenderContext<'_>,
 ) {
     let prefix = compose_prefix(parent_prefix, &step.index);
     let indent = "  ".repeat(depth);
     let mut style = style_for_step(step.status);
-    if let Some(active) = active_prefix
+    if let Some(active) = context.active_prefix
         && active == prefix
     {
         style = Style::default()
@@ -295,7 +304,7 @@ fn append_step_lines(
             .add_modifier(Modifier::BOLD);
     }
     let mut branch_selected = false;
-    if let Some(selected) = selected_prefix
+    if let Some(selected) = context.selected_prefix
         && prefix.starts_with(selected)
     {
         style = style.add_modifier(Modifier::ITALIC);
@@ -308,7 +317,7 @@ fn append_step_lines(
         step.title.clone()
     };
     let reserved = indent.len() + 4;
-    let available = max_width.saturating_sub(reserved);
+    let available = context.max_width.saturating_sub(reserved);
     let content = trim_to_width(&base_text, available);
 
     lines.push(Line::from(vec![
@@ -316,14 +325,20 @@ fn append_step_lines(
         Span::styled(content, style),
     ]));
 
-    if drawer_open && branch_selected {
-        append_drawer_lines(lines, depth + 1, step, latest_summaries, max_width);
+    if context.drawer_open && branch_selected {
+        append_drawer_lines(
+            lines,
+            depth + 1,
+            step,
+            context.latest_summaries,
+            context.max_width,
+        );
     }
 
-    if let Some(entries) = step_tool_calls.get(&prefix) {
+    if let Some(entries) = context.step_tool_calls.get(&prefix) {
         for entry in entries {
             let entry_indent = "  ".repeat(depth + 1);
-            let available = max_width.saturating_sub(entry_indent.len() + 6);
+            let available = context.max_width.saturating_sub(entry_indent.len() + 6);
             lines.push(Line::from(vec![
                 Span::raw(format!(
                     "{}└ {} ",
@@ -340,18 +355,7 @@ fn append_step_lines(
 
     if let Some(sub_spec) = &step.sub_spec {
         for child in &sub_spec.steps {
-            append_step_lines(
-                lines,
-                child,
-                &prefix,
-                depth + 1,
-                selected_prefix,
-                drawer_open,
-                active_prefix,
-                step_tool_calls,
-                latest_summaries,
-                max_width,
-            );
+            append_step_lines(lines, child, &prefix, depth + 1, context);
         }
     }
 }
@@ -637,8 +641,8 @@ fn trim_to_width(text: &str, max_width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        OrchestrationStatusLine, build_spec_plan_lines, build_tool_only_plan_lines,
-        compose_tool_plan_view_lines,
+        OrchestrationStatusLine, SpecPlanRenderParams, build_spec_plan_lines,
+        build_tool_only_plan_lines, compose_tool_plan_view_lines,
     };
     use crate::{SessionRole, StepToolCallEntry, ToolCallStatus};
     use agent_core::{SpecSheet, SpecStep, StepStatus};
@@ -744,18 +748,22 @@ mod tests {
     #[test]
     fn build_spec_plan_lines_applies_active_highlight_style() {
         let spec = sample_spec();
+        let latest_summaries = HashMap::new();
+        let tool_calls = HashMap::new();
         let lines = build_spec_plan_lines(
             &spec,
-            false,
-            0,
-            false,
-            false,
-            &[],
-            &HashMap::new(),
-            &HashMap::new(),
-            Some("1"),
-            false,
-            80,
+            SpecPlanRenderParams {
+                orchestrator_paused: false,
+                selected_index: 0,
+                show_history: false,
+                step_drawer_open: false,
+                orchestrator_history: &[],
+                latest_summaries: &latest_summaries,
+                step_tool_calls: &tool_calls,
+                active_prefix: Some("1"),
+                include_metadata: false,
+                max_width: 80,
+            },
         );
 
         let style = lines[0].spans[1].style;
@@ -766,21 +774,50 @@ mod tests {
     #[test]
     fn build_spec_plan_lines_applies_selected_branch_italic_style() {
         let spec = sample_spec();
+        let latest_summaries = HashMap::new();
+        let tool_calls = HashMap::new();
         let lines = build_spec_plan_lines(
             &spec,
-            false,
-            0,
-            false,
-            false,
-            &[],
-            &HashMap::new(),
-            &HashMap::new(),
-            None,
-            false,
-            80,
+            SpecPlanRenderParams {
+                orchestrator_paused: false,
+                selected_index: 0,
+                show_history: false,
+                step_drawer_open: false,
+                orchestrator_history: &[],
+                latest_summaries: &latest_summaries,
+                step_tool_calls: &tool_calls,
+                active_prefix: None,
+                include_metadata: false,
+                max_width: 80,
+            },
         );
 
         let style = lines[0].spans[1].style;
         assert!(style.add_modifier.contains(ratatui::style::Modifier::ITALIC));
+    }
+
+    #[test]
+    fn build_spec_plan_lines_renders_history_when_enabled() {
+        let spec = sample_spec();
+        let latest_summaries = HashMap::new();
+        let tool_calls = HashMap::new();
+
+        let lines = build_spec_plan_lines(
+            &spec,
+            SpecPlanRenderParams {
+                orchestrator_paused: false,
+                selected_index: 0,
+                show_history: true,
+                step_drawer_open: false,
+                orchestrator_history: &[],
+                latest_summaries: &latest_summaries,
+                step_tool_calls: &tool_calls,
+                active_prefix: None,
+                include_metadata: false,
+                max_width: 80,
+            },
+        );
+
+        assert_eq!(line_text(&lines[0]), "History: no entries yet.");
     }
 }
