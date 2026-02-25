@@ -200,7 +200,9 @@ impl Survey {
 
     /// Update the survey state (check for auto-dismiss of thank you message)
     pub fn update(&mut self) {
-        if let Some(shown_at) = self.thank_you_message && shown_at.elapsed().as_secs() >= 1 {
+        if let Some(shown_at) = self.thank_you_message
+            && shown_at.elapsed().as_secs() >= 1
+        {
             self.thank_you_message = None;
         }
     }

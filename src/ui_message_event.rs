@@ -46,19 +46,17 @@ impl UiMessageEvent {
                 parts.next(),
                 parts.next(),
                 parts.next(),
-            )
-                && let (
-                    Ok(tokens_per_sec),
-                    Ok(completion_tokens),
-                    Ok(prompt_tokens),
-                    Ok(time_to_first_token_sec),
-                ) = (
-                    tps.parse::<f32>(),
-                    comp.parse::<usize>(),
-                    prompt.parse::<usize>(),
-                    ttft.parse::<f32>(),
-                )
-            {
+            ) && let (
+                Ok(tokens_per_sec),
+                Ok(completion_tokens),
+                Ok(prompt_tokens),
+                Ok(time_to_first_token_sec),
+            ) = (
+                tps.parse::<f32>(),
+                comp.parse::<usize>(),
+                prompt.parse::<usize>(),
+                ttft.parse::<f32>(),
+            ) {
                 return Some(Self::GenerationStats {
                     tokens_per_sec,
                     completion_tokens,

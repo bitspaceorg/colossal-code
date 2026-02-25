@@ -29,6 +29,6 @@ echo "[4/5] cargo test --all-targets"
 cargo test --all-targets
 
 echo "[5/5] targeted app tests"
-cargo test -p cocode commands:: persistence:: tests:: ui:: -- --nocapture
+cargo test -p cocode -- --nocapture
 
 echo "Regression verification passed."

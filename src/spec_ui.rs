@@ -268,7 +268,9 @@ pub fn build_spec_plan_lines(
         return lines;
     }
 
-    let bounded_index = params.selected_index.min(spec.steps.len().saturating_sub(1));
+    let bounded_index = params
+        .selected_index
+        .min(spec.steps.len().saturating_sub(1));
     let selected_prefix = spec.steps.get(bounded_index).map(|step| step.index.clone());
     let context = StepRenderContext {
         selected_prefix: selected_prefix.as_deref(),
@@ -793,7 +795,11 @@ mod tests {
         );
 
         let style = lines[0].spans[1].style;
-        assert!(style.add_modifier.contains(ratatui::style::Modifier::ITALIC));
+        assert!(
+            style
+                .add_modifier
+                .contains(ratatui::style::Modifier::ITALIC)
+        );
     }
 
     #[test]
