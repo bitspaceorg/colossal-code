@@ -9340,59 +9340,6 @@ Let me analyze the conversation chronologically:
         lines
     }
 
-    fn render_sandbox_prompt(&self) -> Vec<Line> {
-        let mut lines = Vec::new();
-
-        // First line: question with path
-        lines.push(Line::from(vec![
-            Span::styled("● ", Style::default().fg(Color::Red)),
-            Span::raw("Add "),
-            Span::styled(
-                &self.safety_state.sandbox_blocked_path,
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::raw(" to writable roots?"),
-        ]));
-
-        // Second line: options
-        let option_spans = vec![
-            Span::raw("  "),
-            Span::styled("0: ", Style::default().fg(Color::Yellow)),
-            Span::raw("Accept   "),
-            Span::styled("1: ", Style::default().fg(Color::Yellow)),
-            Span::raw("Deny   "),
-            Span::styled("2: ", Style::default().fg(Color::Yellow)),
-            Span::raw("Interrupt and tell Nite what to do"),
-        ];
-        lines.push(Line::from(option_spans));
-
-        lines
-    }
-
-    fn render_approval_prompt(&self) -> Vec<Line> {
-        let mut lines = Vec::new();
-
-        // First line: question with content
-        lines.push(Line::from(vec![
-            Span::styled("● ", Style::default().fg(Color::Yellow)),
-            Span::raw(&self.safety_state.approval_prompt_content),
-        ]));
-
-        // Second line: options
-        let option_spans = vec![
-            Span::raw("  "),
-            Span::styled("0: ", Style::default().fg(Color::Yellow)),
-            Span::raw("Approve   "),
-            Span::styled("1: ", Style::default().fg(Color::Yellow)),
-            Span::raw("Deny   "),
-            Span::styled("2: ", Style::default().fg(Color::Yellow)),
-            Span::raw("Interrupt and tell Nite what to do"),
-        ];
-        lines.push(Line::from(option_spans));
-
-        lines
-    }
-
     fn render_tips(&self) -> Vec<Line<'_>> {
         TIPS.iter()
             .take(self.visible_tips)
@@ -12093,7 +12040,9 @@ Let me analyze the conversation chronologically:
             // Render approval prompt if active
             if let Some(idx) = approval_prompt_area_idx {
                 let prompt_area = areas[idx];
-                let prompt_lines = self.render_approval_prompt();
+                let prompt_lines = ui::prompts::render_approval_prompt(
+                    &self.safety_state.approval_prompt_content,
+                );
                 let prompt_widget = Paragraph::new(prompt_lines);
                 frame.render_widget(prompt_widget, prompt_area);
             }
@@ -12101,7 +12050,9 @@ Let me analyze the conversation chronologically:
             // Render sandbox permission prompt if active
             if let Some(idx) = sandbox_prompt_area_idx {
                 let prompt_area = areas[idx];
-                let prompt_lines = self.render_sandbox_prompt();
+                let prompt_lines = ui::prompts::render_sandbox_prompt(
+                    &self.safety_state.sandbox_blocked_path,
+                );
                 let prompt_widget = Paragraph::new(prompt_lines);
                 frame.render_widget(prompt_widget, prompt_area);
             }
