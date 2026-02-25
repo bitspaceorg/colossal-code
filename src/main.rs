@@ -188,8 +188,9 @@ impl HelpTab {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentState, AssistantMode, HelpTab, MessageState, MessageType, PersistenceState,
-        QueueChoiceAction, SafetyState, SubAgentContext, UiState, parse_queue_choice,
+        AgentState, App, AssistantMode, Color, HelpTab, MessageState, MessageType,
+        PersistenceState, QueueChoiceAction, SafetyState, SubAgentContext, UiState,
+        parse_queue_choice,
     };
     use crate::model_context;
     use agent_core::safety_config::SafetyMode;
@@ -373,6 +374,30 @@ mod tests {
             model_context::extract_parameter_count("example-314b-chat.gguf"),
             None
         );
+    }
+
+    #[test]
+    fn estimate_token_count_rounds_up_and_never_zero() {
+        assert_eq!(App::estimate_token_count_for_text(""), 1);
+        assert_eq!(App::estimate_token_count_for_text("abcd"), 1);
+        assert_eq!(App::estimate_token_count_for_text("abcde"), 2);
+    }
+
+    #[test]
+    fn thinking_highlight_wave_applies_expected_colors() {
+        let spans = App::create_thinking_highlight_spans("abcdefghi", 7);
+        let mut char_colors = Vec::new();
+        for (text, color) in spans {
+            for _ in text.chars() {
+                char_colors.push(color);
+            }
+        }
+
+        assert_eq!(char_colors.len(), 9);
+        assert_eq!(char_colors[6], Color::Rgb(255, 215, 153));
+        assert_eq!(char_colors[5], Color::Rgb(255, 215, 153));
+        assert_eq!(char_colors[4], Color::Rgb(255, 179, 102));
+        assert_eq!(char_colors[3], Color::Rgb(255, 179, 102));
     }
 }
 
@@ -3147,7 +3172,7 @@ impl App {
                     0 => bright_color,       // Character right before position (brightest)
                     1 => bright_color,       // Second brightest
                     2 | 3 => medium_color,   // Medium brightness
-                    4 | 5 | 6 => base_color, // Fading back to base
+                    4..=6 => base_color,     // Fading back to base
                     _ => base_color,
                 }
             } else {
@@ -3752,7 +3777,7 @@ impl App {
 
     fn estimate_token_count_for_text(text: &str) -> usize {
         let chars = text.chars().count();
-        let tokens = (chars + APPROX_CHARS_PER_TOKEN - 1) / APPROX_CHARS_PER_TOKEN;
+        let tokens = chars.div_ceil(APPROX_CHARS_PER_TOKEN);
         tokens.max(1)
     }
 
@@ -4255,7 +4280,9 @@ Let me analyze the conversation chronologically:
         let value_token = parts[1].trim().trim_end_matches('%');
         match value_token.parse::<f32>() {
             Ok(value) => {
-                if value < MIN_AUTO_SUMMARIZE_THRESHOLD || value > MAX_AUTO_SUMMARIZE_THRESHOLD {
+                if !(MIN_AUTO_SUMMARIZE_THRESHOLD..=MAX_AUTO_SUMMARIZE_THRESHOLD)
+                    .contains(&value)
+                {
                     self.messages.push(format!(
                         " ⎿ Enter a value between {:.0}% and {:.0}% (percent of context used).",
                         MIN_AUTO_SUMMARIZE_THRESHOLD, MAX_AUTO_SUMMARIZE_THRESHOLD
@@ -4360,7 +4387,7 @@ Let me analyze the conversation chronologically:
                 if let Some(ref mut spec) = self.current_spec {
                     if spec.id == spec_id {
                         if let Some(step) = spec.steps.iter_mut().find(|s| s.index == step_index) {
-                            step.status = status.clone();
+                            step.status = status;
                         }
                     }
                 }
@@ -4371,7 +4398,7 @@ Let me analyze the conversation chronologically:
                     &prefix,
                     &step_index,
                     &step_title,
-                    status.clone(),
+                    status,
                     role,
                 );
 
