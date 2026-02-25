@@ -186,11 +186,12 @@ impl HelpTab {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentState, App, AssistantMode, HelpTab, MessageState, MessageType, PersistenceState,
+        AgentState, AssistantMode, HelpTab, MessageState, MessageType, PersistenceState,
         QueueChoiceAction, SafetyState, SubAgentContext, UiMessageEvent, UiState,
         parse_queue_choice,
     };
     use agent_core::safety_config::SafetyMode;
+    use crate::model_context;
 
     #[test]
     fn parses_thinking_animation_event() {
@@ -417,15 +418,15 @@ mod tests {
     #[test]
     fn extract_parameter_count_parses_common_model_sizes() {
         assert_eq!(
-            App::extract_parameter_count("Qwen2.5-7b-Instruct-Q4_K_M.gguf"),
+            model_context::extract_parameter_count("Qwen2.5-7b-Instruct-Q4_K_M.gguf"),
             Some("7B".to_string())
         );
         assert_eq!(
-            App::extract_parameter_count("TinyLlama-1.5B-Chat-v1.0.gguf"),
+            model_context::extract_parameter_count("TinyLlama-1.5B-Chat-v1.0.gguf"),
             Some("1.5B".to_string())
         );
         assert_eq!(
-            App::extract_parameter_count("Meta-Llama-3.1-70B-Instruct.Q8_0.gguf"),
+            model_context::extract_parameter_count("Meta-Llama-3.1-70B-Instruct.Q8_0.gguf"),
             Some("70B".to_string())
         );
     }
@@ -433,10 +434,13 @@ mod tests {
     #[test]
     fn extract_parameter_count_avoids_partial_number_matches() {
         assert_eq!(
-            App::extract_parameter_count("example-130B-instruct.gguf"),
+            model_context::extract_parameter_count("example-130B-instruct.gguf"),
             None
         );
-        assert_eq!(App::extract_parameter_count("example-314b-chat.gguf"), None);
+        assert_eq!(
+            model_context::extract_parameter_count("example-314b-chat.gguf"),
+            None
+        );
     }
 }
 
@@ -1634,16 +1638,16 @@ impl App {
                     let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
 
                     // Extract metadata from filename
-                    let quantization = Self::extract_quantization(file_name);
-                    let architecture = Self::extract_architecture(file_name);
-                    let parameter_count = Self::extract_parameter_count(file_name);
-                    let author = Self::extract_author(file_name);
-                    let version = Self::extract_version(file_name);
+                    let quantization = model_context::extract_quantization(file_name);
+                    let architecture = model_context::extract_architecture(file_name);
+                    let parameter_count = model_context::extract_parameter_count(file_name);
+                    let author = model_context::extract_author(file_name);
+                    let version = model_context::extract_version(file_name);
 
                     let context_length = model_context::context_length_from_gguf(&path);
 
                     // Compute file hash (quick hash for integrity checking)
-                    let file_hash = Self::compute_file_hash(&path);
+                    let file_hash = model_context::compute_file_hash(&path);
 
                     // Create display name (remove .gguf extension)
                     let display_name = file_name
@@ -1673,207 +1677,6 @@ impl App {
         self.model_selected_index = 0;
 
         Ok(())
-    }
-
-    fn extract_quantization(filename: &str) -> Option<String> {
-        // Common quantization patterns in GGUF filenames
-        let patterns = [
-            "Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q3_K_M", "Q3_K_S", "Q2_K",
-        ];
-        for pattern in patterns {
-            if filename.to_uppercase().contains(pattern) {
-                return Some(pattern.to_string());
-            }
-        }
-        None
-    }
-
-    fn extract_architecture(filename: &str) -> Option<String> {
-        // Common model architectures in filenames
-        let architectures = [
-            ("qwen3", "Qwen3"),
-            ("qwen2.5", "Qwen2.5"),
-            ("qwen2", "Qwen2"),
-            ("qwen", "Qwen"),
-            ("llama-3.3", "Llama 3.3"),
-            ("llama-3.2", "Llama 3.2"),
-            ("llama-3.1", "Llama 3.1"),
-            ("llama-3", "Llama 3"),
-            ("llama3", "Llama 3"),
-            ("llama-2", "Llama 2"),
-            ("llama2", "Llama 2"),
-            ("llama", "Llama"),
-            ("mistral", "Mistral"),
-            ("mixtral", "Mixtral"),
-            ("phi-3", "Phi-3"),
-            ("phi3", "Phi-3"),
-            ("phi-2", "Phi-2"),
-            ("phi2", "Phi-2"),
-            ("gemma", "Gemma"),
-            ("deepseek", "DeepSeek"),
-            ("yi-", "Yi"),
-        ];
-
-        let lower = filename.to_lowercase();
-        for (pattern, name) in architectures {
-            if lower.contains(pattern) {
-                return Some(name.to_string());
-            }
-        }
-        None
-    }
-
-    fn extract_parameter_count(filename: &str) -> Option<String> {
-        // Extract parameter count from filename (e.g., 7B, 13B, 70B, 0.5B)
-        let patterns = [
-            ("0.5b", "0.5B"),
-            ("1.5b", "1.5B"),
-            ("3b", "3B"),
-            ("4b", "4B"),
-            ("7b", "7B"),
-            ("8b", "8B"),
-            ("13b", "13B"),
-            ("14b", "14B"),
-            ("30b", "30B"),
-            ("34b", "34B"),
-            ("70b", "70B"),
-        ];
-
-        let normalized = filename.to_ascii_lowercase();
-
-        for (pattern, value) in patterns {
-            let mut search_start = 0;
-            while let Some(relative_index) = normalized[search_start..].find(pattern) {
-                let start = search_start + relative_index;
-                let end = start + pattern.len();
-
-                let before_ok =
-                    start == 0 || !normalized.as_bytes()[start - 1].is_ascii_alphanumeric();
-                let after_ok =
-                    end == normalized.len() || !normalized.as_bytes()[end].is_ascii_alphanumeric();
-
-                if before_ok && after_ok {
-                    return Some(value.to_string());
-                }
-
-                search_start = start + 1;
-            }
-        }
-        None
-    }
-
-    fn extract_author(filename: &str) -> Option<String> {
-        // Common author/publisher prefixes in model filenames
-        let lower = filename.to_lowercase();
-
-        // Check for organization prefixes (Org_ModelName or Org-ModelName patterns)
-        if lower.starts_with("meta-llama") || lower.starts_with("meta_llama") {
-            return Some("Meta".to_string());
-        }
-        if lower.starts_with("mistralai") || lower.starts_with("mistral-") {
-            return Some("Mistral AI".to_string());
-        }
-        if lower.starts_with("microsoft") {
-            return Some("Microsoft".to_string());
-        }
-        if lower.starts_with("google") {
-            return Some("Google".to_string());
-        }
-        if lower.starts_with("alibaba") || lower.starts_with("qwen") {
-            return Some("Alibaba".to_string());
-        }
-        if lower.starts_with("deepseek") {
-            return Some("DeepSeek".to_string());
-        }
-        if lower.starts_with("01-ai") || lower.starts_with("yi-") {
-            return Some("01.AI".to_string());
-        }
-
-        // Check for username_modelname pattern (common in HuggingFace)
-        if let Some(underscore_pos) = filename.find('_') {
-            if underscore_pos > 0 && underscore_pos < 20 {
-                let potential_author = &filename[..underscore_pos];
-                // Only return if it looks like a valid author (no numbers, reasonable length)
-                if !potential_author.chars().any(|c| c.is_numeric()) && potential_author.len() > 2 {
-                    return Some(potential_author.to_string());
-                }
-            }
-        }
-
-        None
-    }
-
-    fn extract_version(filename: &str) -> Option<String> {
-        // Extract version numbers from filename (e.g., v1, v2, 2024, etc.)
-        let lower = filename.to_lowercase();
-
-        // Check for v1, v2, v3 patterns
-        if lower.contains("v1.5") {
-            return Some("v1.5".to_string());
-        }
-        if lower.contains("v1") {
-            return Some("v1".to_string());
-        }
-        if lower.contains("v2") {
-            return Some("v2".to_string());
-        }
-        if lower.contains("v3") {
-            return Some("v3".to_string());
-        }
-
-        // Check for year-based versions (2024, 2025, etc.)
-        if lower.contains("2024") {
-            return Some("2024".to_string());
-        }
-        if lower.contains("2025") {
-            return Some("2025".to_string());
-        }
-        if lower.contains("2507") {
-            return Some("2507".to_string());
-        }
-
-        None
-    }
-
-    fn compute_file_hash(path: &std::path::Path) -> Option<String> {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        use std::io::Read;
-
-        // For large files, only hash first and last 1MB for speed
-        let file = std::fs::File::open(path).ok()?;
-        let metadata = file.metadata().ok()?;
-        let file_size = metadata.len();
-
-        let mut hasher = DefaultHasher::new();
-
-        if file_size <= 2 * 1024 * 1024 {
-            // Small file, hash the whole thing
-            let mut buf = Vec::new();
-            std::fs::File::open(path).ok()?.read_to_end(&mut buf).ok()?;
-            buf.hash(&mut hasher);
-        } else {
-            // Large file, hash first 1MB + last 1MB + file size
-            let mut file = std::fs::File::open(path).ok()?;
-            let mut buf = vec![0u8; 1024 * 1024];
-
-            // Read first 1MB
-            file.read_exact(&mut buf).ok()?;
-            buf.hash(&mut hasher);
-
-            // Include file size in hash
-            file_size.hash(&mut hasher);
-
-            // Read last 1MB
-            use std::io::Seek;
-            file.seek(std::io::SeekFrom::End(-1024 * 1024)).ok()?;
-            file.read_exact(&mut buf).ok()?;
-            buf.hash(&mut hasher);
-        }
-
-        let hash = hasher.finish();
-        // Return first 12 characters of hex hash
-        Some(format!("{:012x}", hash))
     }
 
     fn initialize_config_file() -> Result<()> {
