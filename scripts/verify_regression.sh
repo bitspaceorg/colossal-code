@@ -5,8 +5,19 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 cd "$ROOT_DIR"
 
-echo "[1/5] cargo fmt --all --check"
-cargo fmt --all --check
+fmt_check_first_party() {
+  cargo fmt --manifest-path "$ROOT_DIR/Cargo.toml" -- --check
+  cargo fmt --manifest-path "$ROOT_DIR/crates/agent_core/Cargo.toml" -- --check
+  cargo fmt --manifest-path "$ROOT_DIR/crates/agent_protocol/Cargo.toml" -- --check
+  cargo fmt --manifest-path "$ROOT_DIR/crates/chunker/Cargo.toml" -- --check
+  cargo fmt --manifest-path "$ROOT_DIR/crates/edtui/Cargo.toml" -- --check
+  cargo fmt --manifest-path "$ROOT_DIR/crates/markdown-renderer/Cargo.toml" -- --check
+  cargo fmt --manifest-path "$ROOT_DIR/crates/sandbox/Cargo.toml" -- --check
+  cargo fmt --manifest-path "$ROOT_DIR/crates/sessionizer/Cargo.toml" -- --check
+}
+
+echo "[1/5] cargo fmt (first-party only) --check"
+fmt_check_first_party
 
 echo "[2/5] cargo check --all-targets"
 cargo check --all-targets

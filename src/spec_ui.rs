@@ -637,7 +637,7 @@ fn trim_to_width(text: &str, max_width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_tool_only_plan_lines, compose_tool_plan_view_lines, OrchestrationStatusLine,
+        OrchestrationStatusLine, build_tool_only_plan_lines, compose_tool_plan_view_lines,
     };
     use crate::{SessionRole, StepToolCallEntry, ToolCallStatus};
     use agent_core::{SpecSheet, SpecStep, StepStatus};

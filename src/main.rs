@@ -2950,10 +2950,8 @@ impl App {
 
         let current_frame = self.thinking_snowflake_frames[self.get_thinking_loader_frame()];
         let text_with_dots = format!("{}...", self.get_thinking_current_word());
-        let color_spans = Self::create_thinking_highlight_spans(
-            &text_with_dots,
-            self.get_thinking_position(),
-        );
+        let color_spans =
+            Self::create_thinking_highlight_spans(&text_with_dots, self.get_thinking_position());
         let elapsed_secs = self
             .thinking_start_time
             .map(|t| t.elapsed().as_secs())
@@ -11588,9 +11586,8 @@ Let me analyze the conversation chronologically:
             // Render approval prompt if active
             if let Some(idx) = approval_prompt_area_idx {
                 let prompt_area = areas[idx];
-                let prompt_lines = ui::prompts::render_approval_prompt(
-                    &self.safety_state.approval_prompt_content,
-                );
+                let prompt_lines =
+                    ui::prompts::render_approval_prompt(&self.safety_state.approval_prompt_content);
                 let prompt_widget = Paragraph::new(prompt_lines);
                 frame.render_widget(prompt_widget, prompt_area);
             }
@@ -11598,9 +11595,8 @@ Let me analyze the conversation chronologically:
             // Render sandbox permission prompt if active
             if let Some(idx) = sandbox_prompt_area_idx {
                 let prompt_area = areas[idx];
-                let prompt_lines = ui::prompts::render_sandbox_prompt(
-                    &self.safety_state.sandbox_blocked_path,
-                );
+                let prompt_lines =
+                    ui::prompts::render_sandbox_prompt(&self.safety_state.sandbox_blocked_path);
                 let prompt_widget = Paragraph::new(prompt_lines);
                 frame.render_widget(prompt_widget, prompt_area);
             }

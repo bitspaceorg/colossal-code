@@ -9,8 +9,7 @@ use std::path::{Path, PathBuf};
 
 pub fn extract_quantization(filename: &str) -> Option<String> {
     let patterns = [
-        "Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q3_K_M", "Q3_K_S",
-        "Q2_K",
+        "Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q3_K_M", "Q3_K_S", "Q2_K",
     ];
     for pattern in patterns {
         if filename.to_uppercase().contains(pattern) {
@@ -78,7 +77,8 @@ pub fn extract_parameter_count(filename: &str) -> Option<String> {
             let end = start + pattern.len();
 
             let before_ok = start == 0 || !normalized.as_bytes()[start - 1].is_ascii_alphanumeric();
-            let after_ok = end == normalized.len() || !normalized.as_bytes()[end].is_ascii_alphanumeric();
+            let after_ok =
+                end == normalized.len() || !normalized.as_bytes()[end].is_ascii_alphanumeric();
 
             if before_ok && after_ok {
                 return Some(value.to_string());
@@ -286,7 +286,9 @@ fn detect_from_filesystem(base: &Path, identifier: &str) -> Option<usize> {
         return Some(length);
     }
 
-    if joined.is_dir() && let Some(length) = context_length_from_hf_dir(&joined) {
+    if joined.is_dir()
+        && let Some(length) = context_length_from_hf_dir(&joined)
+    {
         return Some(length);
     }
 
@@ -328,7 +330,9 @@ fn candidate_model_names(identifier: &str) -> Vec<String> {
         push_candidate(&mut ordered, &mut seen, stem.to_string());
     }
 
-    if let Some(last) = identifier.split('/').next_back() && last != identifier {
+    if let Some(last) = identifier.split('/').next_back()
+        && last != identifier
+    {
         push_candidate(&mut ordered, &mut seen, last.to_string());
     }
 
@@ -417,10 +421,15 @@ fn value_as_usize(value: &Value) -> Option<usize> {
     if let Some(num) = value.as_u64() {
         return usize::try_from(num).ok();
     }
-    if let Some(num) = value.as_i64() && num >= 0 {
+    if let Some(num) = value.as_i64()
+        && num >= 0
+    {
         return usize::try_from(num as u64).ok();
     }
-    if let Some(num) = value.as_f64() && num.is_finite() && num > 0.0 {
+    if let Some(num) = value.as_f64()
+        && num.is_finite()
+        && num > 0.0
+    {
         return usize::try_from(num.round() as u64).ok();
     }
     None
@@ -605,15 +614,16 @@ mod tests {
             extract_author("meta-llama-3.1-8b-instruct.gguf"),
             Some("Meta".to_string())
         );
-        assert_eq!(extract_version("qwen2.5-7b-v1.5-q4_k_m.gguf"), Some("v1.5".to_string()));
+        assert_eq!(
+            extract_version("qwen2.5-7b-v1.5-q4_k_m.gguf"),
+            Some("v1.5".to_string())
+        );
     }
 
     #[test]
     fn compute_file_hash_is_stable_for_same_content() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "model-context-test-{}",
-            std::process::id()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("model-context-test-{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_dir);
         let file_path = temp_dir.join("hash.gguf");
 
