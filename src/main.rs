@@ -290,6 +290,19 @@ mod tests {
     }
 
     #[test]
+    fn sub_agent_context_snapshot_preserves_message_states() {
+        let mut context = SubAgentContext::new("1".to_string(), "step".to_string());
+
+        context.add_user_message("queued question".to_string());
+        context.add_agent_text("answer".to_string());
+
+        let snapshot = context.to_snapshot();
+        assert_eq!(snapshot.message_states.len(), 2);
+        assert_eq!(snapshot.message_states[0], MessageState::Sent);
+        assert_eq!(snapshot.message_states[1], MessageState::Sent);
+    }
+
+    #[test]
     fn grouped_ui_state_defaults_match_previous_behavior() {
         let ui = UiState::default();
 
@@ -924,7 +937,7 @@ impl SubAgentContext {
         self.generation_stats_rendered = false;
     }
 
-    pub fn to_snapshot(&self) -> AppSnapshot {
+    fn to_snapshot(&self) -> AppSnapshot {
         // Calculate elapsed time: use live calculation if thinking is active, otherwise use stored value
         let elapsed_secs = if self.thinking_indicator_active {
             self.thinking_start_time
@@ -1059,7 +1072,7 @@ pub(crate) enum MessageState {
 pub struct UiMessage {
     pub content: String,
     pub message_type: MessageType,
-    pub message_state: MessageState,
+    pub(crate) message_state: MessageState,
 }
 
 impl UiMessage {
