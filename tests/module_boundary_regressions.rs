@@ -198,3 +198,68 @@ fn prompt_text_stays_in_ui_prompts_module() {
     assert!(prompts.contains("Add "));
     assert!(prompts.contains(" to writable roots?"));
 }
+
+#[test]
+fn session_lifecycle_mapping_stays_in_dedicated_module() {
+    let main_rs = read("src/main.rs");
+    assert!(
+        main_rs.contains("session_lifecycle::update_session_for_step"),
+        "main.rs should delegate session updates to src/session_lifecycle.rs"
+    );
+    assert!(
+        !main_rs.contains("fn session_role_from_step_role"),
+        "main.rs should not inline session role mapping logic"
+    );
+    assert!(
+        !main_rs.contains("fn step_status_to_session_status"),
+        "main.rs should not inline step status mapping logic"
+    );
+
+    let lifecycle = read("src/session_lifecycle.rs");
+    assert!(lifecycle.contains("fn session_role_from_step_role"));
+    assert!(lifecycle.contains("fn step_status_to_session_status"));
+}
+
+#[test]
+fn spec_plan_rendering_logic_stays_in_spec_ui_module() {
+    let main_rs = read("src/main.rs");
+    assert!(main_rs.contains("spec_ui::build_spec_plan_lines"));
+    assert!(main_rs.contains("spec_ui::build_tool_only_plan_lines"));
+    assert!(
+        !main_rs.contains("No steps in this spec."),
+        "main.rs should not own spec plan fallback copy"
+    );
+    assert!(
+        !main_rs.contains("History: no entries yet."),
+        "main.rs should not own spec history copy"
+    );
+
+    let spec_ui = read("src/spec_ui.rs");
+    assert!(spec_ui.contains("No steps in this spec."));
+    assert!(spec_ui.contains("History: no entries yet."));
+}
+
+#[test]
+fn survey_feedback_copy_stays_in_survey_module() {
+    let main_rs = read("src/main.rs");
+    assert!(
+        main_rs.contains("self.survey.check_number_input"),
+        "main.rs should route numeric answer checks through Survey"
+    );
+    assert!(
+        main_rs.contains("self.survey.show_thank_you"),
+        "main.rs should route thank-you state through Survey"
+    );
+    assert!(
+        !main_rs.contains("Thanks for making Nite better"),
+        "main.rs should not own survey thank-you copy"
+    );
+    assert!(
+        !main_rs.contains("(use /feedback to give suggestions or bug reports)"),
+        "main.rs should not own survey helper copy"
+    );
+
+    let survey = read("src/survey.rs");
+    assert!(survey.contains("Thanks for making Nite better"));
+    assert!(survey.contains("(use /feedback to give suggestions or bug reports)"));
+}
