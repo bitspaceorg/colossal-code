@@ -4,7 +4,6 @@ use agent_core::{
     orchestrator::{
         Orchestrator, OrchestratorAgent, OrchestratorControl, OrchestratorEvent, SubAgentMessage,
     },
-    set_workspace_root_override,
 };
 use color_eyre::Result;
 use edtui::clipboard::ClipboardTrait;
@@ -42,12 +41,14 @@ mod model_context;
 mod persistence;
 mod session_lifecycle;
 mod spec_cli;
+mod startup;
 mod state_domain;
 mod ui;
 mod ui_message_event;
 use command_runtime::{apply_command_runtime_route, route_command_runtime};
 use commands::{ReviewOptions, SlashCommandDispatch, dispatch_slash_command};
 use spec_cli::{MessageLog, SpecAgentBridge, SpecCliContext, SpecCliHandler, SpecCommandResult};
+use startup::{Phase, tips};
 pub(crate) use state_domain::*;
 use ui::model_picker;
 use ui::thinking::{create_thinking_highlight_spans, encode_generation_stats_message};
@@ -147,13 +148,6 @@ const COMPACTION_HISTORY_RESERVE_TOKENS: usize = 1024;
 const DEFAULT_COMPACTION_HISTORY_BUDGET: usize = 6000;
 const MIN_COMPACTION_HISTORY_BUDGET: usize = 1024;
 const APPROX_CHARS_PER_TOKEN: usize = 4;
-/// Application phases for startup animation
-#[derive(Clone, Copy, PartialEq, PartialOrd)]
-enum Phase {
-    Ascii,
-    Tips,
-    Input,
-}
 /// Application modes
 #[derive(Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -184,223 +178,7 @@ impl HelpTab {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        AgentState, App, AssistantMode, Color, HelpTab, MessageState, MessageType,
-        PersistenceState, QueueChoiceAction, SafetyState, SubAgentContext, UiState,
-        parse_queue_choice,
-    };
-    use crate::model_context;
-    use agent_core::safety_config::SafetyMode;
-
-    #[test]
-    fn sub_agent_context_uses_typed_ui_messages() {
-        let mut context = SubAgentContext::new("1".to_string(), "step".to_string());
-
-        context.add_user_message("hi".to_string());
-        context.add_agent_text("hello".to_string());
-
-        assert_eq!(context.messages.len(), 2);
-        assert_eq!(context.messages[0].content, "hi");
-        assert_eq!(context.messages[0].message_type, MessageType::User);
-        assert_eq!(context.messages[0].message_state, MessageState::Sent);
-        assert_eq!(context.messages[1].content, "hello");
-        assert_eq!(context.messages[1].message_type, MessageType::Agent);
-        assert_eq!(context.messages[1].message_state, MessageState::Sent);
-    }
-
-    #[test]
-    fn sub_agent_context_drops_thinking_placeholder_before_agent_text() {
-        let mut context = SubAgentContext::new("1".to_string(), "step".to_string());
-
-        context.start_thinking("".to_string());
-        context.add_agent_text("done".to_string());
-
-        assert_eq!(context.messages.len(), 1);
-        assert_eq!(context.messages[0].content, "done");
-        assert_eq!(context.messages[0].message_type, MessageType::Agent);
-    }
-
-    #[test]
-    fn sub_agent_context_snapshot_preserves_typed_messages() {
-        let mut context = SubAgentContext::new("1".to_string(), "step".to_string());
-
-        context.add_user_message("queued question".to_string());
-        context.add_agent_text("answer".to_string());
-
-        let snapshot = context.to_snapshot();
-        assert_eq!(snapshot.messages.len(), 2);
-        assert_eq!(
-            snapshot.message_types,
-            vec![MessageType::User, MessageType::Agent]
-        );
-    }
-
-    #[test]
-    fn grouped_ui_state_defaults_match_previous_behavior() {
-        let ui = UiState::default();
-
-        assert!(!ui.show_help);
-        assert!(!ui.show_resume);
-        assert!(matches!(ui.help_tab, HelpTab::General));
-    }
-
-    #[test]
-    fn grouped_agent_safety_and_persistence_defaults_are_empty() {
-        let agent = AgentState::default();
-        let safety = SafetyState::default();
-        let persistence = PersistenceState::default();
-
-        assert!(!agent.agent_processing);
-        assert!(!agent.agent_interrupted);
-        assert!(!agent.is_compacting);
-        assert!(!agent.agent_response_started);
-        assert!(agent.interrupt_pending.is_none());
-
-        assert!(matches!(safety.assistant_mode, AssistantMode::None));
-        assert!(!safety.show_approval_prompt);
-        assert!(!safety.show_sandbox_prompt);
-        assert!(!safety.sandbox_enabled);
-        assert!(safety.approval_prompt_content.is_empty());
-        assert!(safety.sandbox_blocked_path.is_empty());
-
-        assert!(!persistence.save_pending);
-        assert!(persistence.current_conversation_id.is_none());
-        assert!(persistence.current_conversation_path.is_none());
-        assert!(persistence.current_forked_from.is_none());
-        assert!(persistence.current_forked_at.is_none());
-    }
-
-    #[test]
-    fn assistant_mode_cycles_through_expected_order() {
-        let mut mode = AssistantMode::None;
-
-        mode = mode.next();
-        assert!(matches!(mode, AssistantMode::Yolo));
-
-        mode = mode.next();
-        assert!(matches!(mode, AssistantMode::Plan));
-
-        mode = mode.next();
-        assert!(matches!(mode, AssistantMode::AutoAccept));
-
-        mode = mode.next();
-        assert!(matches!(mode, AssistantMode::ReadOnly));
-
-        mode = mode.next();
-        assert!(matches!(mode, AssistantMode::None));
-    }
-
-    #[test]
-    fn assistant_mode_to_safety_mode_preserves_expected_policy() {
-        assert_eq!(
-            AssistantMode::None.to_safety_mode(),
-            Some(SafetyMode::Regular)
-        );
-        assert_eq!(AssistantMode::Yolo.to_safety_mode(), Some(SafetyMode::Yolo));
-        assert_eq!(
-            AssistantMode::Plan.to_safety_mode(),
-            Some(SafetyMode::Regular)
-        );
-        assert_eq!(
-            AssistantMode::AutoAccept.to_safety_mode(),
-            Some(SafetyMode::Regular)
-        );
-        assert_eq!(
-            AssistantMode::ReadOnly.to_safety_mode(),
-            Some(SafetyMode::ReadOnly)
-        );
-    }
-
-    #[test]
-    fn assistant_mode_to_display_matches_expected_labels() {
-        assert_eq!(AssistantMode::None.to_display(), None);
-        assert_eq!(
-            AssistantMode::Yolo.to_display(),
-            Some(("YOLO mode".to_string(), Color::Red))
-        );
-        assert_eq!(
-            AssistantMode::Plan.to_display(),
-            Some(("plan mode".to_string(), Color::Blue))
-        );
-        assert_eq!(
-            AssistantMode::AutoAccept.to_display(),
-            Some(("auto-accept edits".to_string(), Color::Green))
-        );
-        assert_eq!(
-            AssistantMode::ReadOnly.to_display(),
-            Some(("read-only".to_string(), Color::Yellow))
-        );
-    }
-
-    #[test]
-    fn format_tool_result_parses_success_and_failure_yaml_fields() {
-        let read_result = "status: Success\ncontent: |-\n  first\n  second\n";
-        assert_eq!(
-            App::format_tool_result("read_file", read_result),
-            "Read 2 lines (12 chars)"
-        );
-
-        let failure_result = "status: Failure\nmessage: permission denied\n";
-        assert_eq!(
-            App::format_tool_result("write_file", failure_result),
-            "Error: permission denied"
-        );
-    }
-
-    #[test]
-    fn parses_queue_choice_actions() {
-        assert_eq!(parse_queue_choice("1"), Some(QueueChoiceAction::Queue));
-        assert_eq!(parse_queue_choice("2"), Some(QueueChoiceAction::Interrupt));
-        assert_eq!(parse_queue_choice("3"), Some(QueueChoiceAction::Cancel));
-    }
-
-    #[test]
-    fn rejects_invalid_queue_choice_actions() {
-        assert_eq!(parse_queue_choice("0"), None);
-        assert_eq!(parse_queue_choice("4"), None);
-        assert_eq!(parse_queue_choice("interrupt"), None);
-        assert_eq!(
-            parse_queue_choice(" 2 "),
-            Some(QueueChoiceAction::Interrupt)
-        );
-    }
-
-    #[test]
-    fn extract_parameter_count_parses_common_model_sizes() {
-        assert_eq!(
-            model_context::extract_parameter_count("Qwen2.5-7b-Instruct-Q4_K_M.gguf"),
-            Some("7B".to_string())
-        );
-        assert_eq!(
-            model_context::extract_parameter_count("TinyLlama-1.5B-Chat-v1.0.gguf"),
-            Some("1.5B".to_string())
-        );
-        assert_eq!(
-            model_context::extract_parameter_count("Meta-Llama-3.1-70B-Instruct.Q8_0.gguf"),
-            Some("70B".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_parameter_count_avoids_partial_number_matches() {
-        assert_eq!(
-            model_context::extract_parameter_count("example-130B-instruct.gguf"),
-            None
-        );
-        assert_eq!(
-            model_context::extract_parameter_count("example-314b-chat.gguf"),
-            None
-        );
-    }
-
-    #[test]
-    fn estimate_token_count_rounds_up_and_never_zero() {
-        assert_eq!(App::estimate_token_count_for_text(""), 1);
-        assert_eq!(App::estimate_token_count_for_text("abcd"), 1);
-        assert_eq!(App::estimate_token_count_for_text("abcde"), 2);
-    }
-}
+mod main_tests;
 
 /// AI Assistant modes (cycled with Shift+Tab)
 #[derive(Clone, Copy, PartialEq)]
@@ -444,34 +222,6 @@ impl AssistantMode {
         }
     }
 }
-/// Tips to display during startup
-const TIPS: &[&str] = &[
-    "Tips for getting started:",
-    "1. Be specific for the best results.",
-    "2. Edit .niterules file to customize your interactions with the agent.",
-    "3. /help for more information.",
-    "4. Press Alt+n to enter navigation mode (vim-style hjkl, gg, G).",
-];
-
-/// Parse command line arguments for a flag (`--flag` or `--flag=value`).
-/// Returns the associated value if provided.
-fn parse_arg_value(args: &[String], flag: &str) -> Option<String> {
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        if arg == flag {
-            // Check if next argument exists and is the value
-            if let Some(value) = iter.next() {
-                if !value.starts_with('-') {
-                    return Some(value.clone());
-                }
-            }
-        } else if let Some(stripped) = arg.strip_prefix(&format!("{}=", flag)) {
-            return Some(stripped.to_string());
-        }
-    }
-    None
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueueChoiceAction {
     Queue,
@@ -490,60 +240,7 @@ fn parse_queue_choice(choice: &str) -> Option<QueueChoiceAction> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    color_eyre::install()?;
-
-    let args: Vec<String> = std::env::args().collect();
-    let spec_arg = parse_arg_value(&args, "--spec");
-    if let Some(workspace_root) = parse_arg_value(&args, "--workspace-root") {
-        set_workspace_root_override(workspace_root);
-    }
-
-    // Show loading spinner while initializing
-    let terminal = ratatui::init();
-
-    // Enable bracketed paste mode for proper paste handling
-    use ratatui::crossterm::{event::EnableBracketedPaste, execute};
-    execute!(std::io::stdout(), EnableBracketedPaste)?;
-
-    let app_result = {
-        // Create a simple loading task that shows spinner
-        let loading_handle = tokio::spawn(async {
-            let spinner_frames = vec!["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let mut frame_idx = 0;
-
-            loop {
-                print!("\r{} Loading model...", spinner_frames[frame_idx]);
-                use std::io::Write;
-                std::io::stdout().flush().unwrap();
-                frame_idx = (frame_idx + 1) % spinner_frames.len();
-                tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
-            }
-        });
-
-        // Initialize app (this loads the model)
-        let mut app = App::new().await?;
-
-        // Cancel the spinner
-        loading_handle.abort();
-        print!("\r✓ Model loaded successfully!\n");
-
-        // Load spec if --spec flag was provided
-        if let Some(spec_path) = spec_arg {
-            if let Err(e) = app.load_spec(&spec_path) {
-                eprintln!("Warning: Failed to load spec: {}", e);
-            }
-        }
-
-        // Run the app
-        app.run(terminal).await
-    };
-
-    // Disable bracketed paste mode before restoring terminal
-    use ratatui::crossterm::event::DisableBracketedPaste;
-    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
-
-    ratatui::restore();
-    app_result
+    startup::run().await
 }
 /// Application state for the TUI
 struct App {
@@ -1833,31 +1530,6 @@ impl App {
         }
     }
 
-    fn create_title_lines() -> Vec<Line<'static>> {
-        let ascii_art = r"__     _________  __   ____  ___________   __     _________  ___  ____
-\ \   / ___/ __ \/ /  / __ \/ __/ __/ _ | / /    / ___/ __ \/ _ \/ __/
- > > / /__/ /_/ / /__/ /_/ /\ \_\ \/ __ |/ /__  / /__/ /_/ / // / _/  
-/_/  \___/\____/____/\____/___/___/_/ |_/____/  \___/\____/____/___/  
-";
-        let colors = [Color::Cyan, Color::Blue, Color::Magenta, Color::Red];
-        ascii_art
-            .lines()
-            .map(|line| {
-                let spans: Vec<Span> = line
-                    .chars()
-                    .enumerate()
-                    .map(|(i, ch)| {
-                        let color = colors[i % colors.len()];
-                        Span::styled(
-                            ch.to_string(),
-                            Style::default().fg(color).add_modifier(Modifier::BOLD),
-                        )
-                    })
-                    .collect();
-                Line::from(spans)
-            })
-            .collect()
-    }
     fn get_mode_content(&mut self) -> Line<'static> {
         // Check if we have cached content for current mode
         if let Some((cached_mode, cached_content)) = &self.cached_mode_content
@@ -2395,58 +2067,7 @@ impl App {
             );
         }
 
-        match self.phase {
-            Phase::Ascii => {
-                if self.last_update.elapsed() >= Duration::from_nanos(800) {
-                    let mut animation_complete = false;
-                    let mut current_line = 0;
-                    let mut found_incomplete = false;
-                    for (i, line) in self.title_lines.iter().enumerate() {
-                        if self.visible_chars[i] < line.width() {
-                            current_line = i;
-                            found_incomplete = true;
-                            break;
-                        }
-                    }
-                    if found_incomplete {
-                        self.visible_chars[current_line] += 10;
-                        if self.visible_chars[current_line] > self.title_lines[current_line].width()
-                        {
-                            self.visible_chars[current_line] =
-                                self.title_lines[current_line].width();
-                        }
-                        self.last_update = Instant::now();
-                        if self
-                            .visible_chars
-                            .iter()
-                            .zip(self.title_lines.iter())
-                            .all(|(visible, line)| *visible >= line.width())
-                        {
-                            animation_complete = true;
-                        }
-                    } else {
-                        animation_complete = true;
-                    }
-                    if animation_complete && self.last_update.elapsed() >= Duration::from_nanos(900)
-                    {
-                        self.phase = Phase::Tips;
-                        self.visible_tips = 0;
-                        self.last_update = Instant::now();
-                    }
-                }
-            }
-            Phase::Tips => {
-                if self.last_update.elapsed() >= Duration::from_millis(30) {
-                    if self.visible_tips < TIPS.len() {
-                        self.visible_tips += 1;
-                        self.last_update = Instant::now();
-                    } else if self.last_update.elapsed() >= Duration::from_millis(30) {
-                        self.phase = Phase::Input;
-                    }
-                }
-            }
-            Phase::Input => {}
-        }
+        self.advance_startup_phase();
     }
     fn compute_status_left_initial() -> Result<Line<'static>> {
         Self::compute_status_left_impl(false, edtui::EditorMode::Normal)
@@ -5420,25 +5041,10 @@ Let me analyze the conversation chronologically:
                 }
             }
 
-            if !self.initial_screen_cleared && self.phase == Phase::Input {
-                // Clear once after the loader so static CLI output doesn't leak into the TUI.
-                terminal.clear()?;
-                self.initial_screen_cleared = true;
-            }
+            self.clear_startup_screen_if_ready(&mut terminal)?;
             terminal.draw(|frame| self.draw(frame))?;
 
-            // Use shorter poll duration for responsive UI
-            // Even shorter when agent is processing or thinking to show animations smoothly
-            let poll_duration = match self.phase {
-                Phase::Ascii | Phase::Tips => Duration::from_millis(30),
-                Phase::Input => {
-                    if self.agent_state.agent_processing || self.thinking_indicator_active {
-                        Duration::from_millis(16) // ~60fps when agent is responding or thinking
-                    } else {
-                        Duration::from_millis(50) // Responsive but not too aggressive
-                    }
-                }
-            };
+            let poll_duration = self.startup_poll_duration();
             if event::poll(poll_duration)? {
                 match event::read()? {
                     Event::Paste(data)
@@ -7968,48 +7574,6 @@ Let me analyze the conversation chronologically:
         lines
     }
 
-    fn render_tips(&self) -> Vec<Line<'_>> {
-        TIPS.iter()
-            .take(self.visible_tips)
-            .map(|&tip| {
-                let mut spans = Vec::new();
-                spans.push(Span::raw(" "));
-                let mut remaining = tip.to_string();
-                if remaining.contains(".niterules") {
-                    let parts: Vec<&str> = remaining.splitn(2, ".niterules").collect();
-                    if !parts[0].is_empty() {
-                        spans.push(Span::raw(parts[0].to_string()));
-                    }
-                    spans.push(Span::styled(
-                        ".niterules",
-                        Style::default().fg(Color::Magenta),
-                    ));
-                    remaining = parts.get(1).unwrap_or(&"").to_string();
-                }
-                if remaining.contains("/help") {
-                    let parts: Vec<&str> = remaining.splitn(2, "/help").collect();
-                    if !parts[0].is_empty() {
-                        spans.push(Span::raw(parts[0].to_string()));
-                    }
-                    spans.push(Span::styled("/help", Style::default().fg(Color::Blue)));
-                    remaining = parts.get(1).unwrap_or(&"").to_string();
-                }
-                if remaining.contains("Alt+n") {
-                    let parts: Vec<&str> = remaining.splitn(2, "Alt+n").collect();
-                    if !parts[0].is_empty() {
-                        spans.push(Span::raw(parts[0].to_string()));
-                    }
-                    spans.push(Span::styled("Alt+n", Style::default().fg(Color::Yellow)));
-                    remaining = parts.get(1).unwrap_or(&"").to_string();
-                }
-                if !remaining.is_empty() {
-                    spans.push(Span::raw(remaining));
-                }
-                Line::from(spans)
-            })
-            .collect()
-    }
-
     fn render_history_panel(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
         ui::history_panel::render_history_panel(
             frame,
@@ -9280,195 +8844,9 @@ Let me analyze the conversation chronologically:
             }
         }
 
-        let constraints = match self.phase {
-            Phase::Ascii => vec![
-                Constraint::Length(self.title_lines.len() as u16),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ],
-            Phase::Tips => vec![
-                Constraint::Length(self.title_lines.len() as u16),
-                Constraint::Length(1), // One character gap
-                Constraint::Length(TIPS.len() as u16),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ],
-            Phase::Input => {
-                let input_height = match self.mode {
-                    Mode::Normal => {
-                        let prompt_width = 4u16;
-                        let indent_width = 4u16;
-                        let max_width = render_area.width.saturating_sub(4);
-                        let content_str = if !self.input_modified && self.input.is_empty() {
-                            "Type your message or @/ to give suggestions for what tools to use."
-                        } else {
-                            self.input.as_str()
-                        };
-                        let mut lines_needed = 1u16;
-                        let mut current_width = prompt_width;
-                        for c in content_str.chars() {
-                            // Handle newlines explicitly - they create new lines
-                            if c == '\n' {
-                                lines_needed += 1;
-                                current_width = indent_width;
-                                continue;
-                            }
-
-                            let cw = UnicodeWidthChar::width(c).unwrap_or(1) as u16;
-                            if current_width + cw > max_width {
-                                lines_needed += 1;
-                                current_width = indent_width + cw;
-                            } else {
-                                current_width += cw;
-                            }
-                        }
-                        lines_needed.clamp(1, 4) + 2
-                    }
-                    _ => 3u16, // Fixed height for special modes
-                };
-                // Add space for queue choice popup, survey, autocomplete, and infobar if active
-                let queue_choice_height = if self.show_queue_choice { 2 } else { 0 };
-                let approval_prompt_height = if self.safety_state.show_approval_prompt {
-                    2
-                } else {
-                    0
-                };
-                let sandbox_prompt_height = if self.safety_state.show_sandbox_prompt {
-                    2
-                } else {
-                    0
-                };
-                let survey_height = self.survey.get_height();
-                let autocomplete_height = if self.autocomplete_active && self.mode == Mode::Normal {
-                    self.autocomplete_suggestions.len().min(10) as u16
-                } else {
-                    0
-                };
-                let background_tasks_height = if self.show_background_tasks {
-                    10 // Fixed height for background tasks panel
-                } else if self.viewing_task.is_some() {
-                    20 // Fixed height for task viewer
-                } else {
-                    0
-                };
-                let help_height = if self.ui_state.show_help {
-                    25 // Fixed height for help panel
-                } else {
-                    0
-                };
-                let resume_height = if self.ui_state.show_resume {
-                    25 // Fixed height for resume panel
-                } else {
-                    0
-                };
-                let rewind_height = if self.show_rewind {
-                    25 // Fixed height for rewind panel
-                } else {
-                    0
-                };
-                let todos_height = if self.show_todos {
-                    15 // Fixed height for todos panel
-                } else {
-                    0
-                };
-                let model_selection_height = if self.show_model_selection {
-                    20 // Fixed height for model selection panel
-                } else {
-                    0
-                };
-                // spec_pane removed - tool activity shown via compressed view in message stream
-                let has_infobar = self.ctrl_c_pressed.is_some() || !self.queued_messages.is_empty();
-
-                // Build constraints dynamically
-                let mut constraints_vec = vec![
-                    Constraint::Length(self.title_lines.len() as u16),
-                    Constraint::Length(1), // One character gap
-                ];
-
-                constraints_vec.push(Constraint::Min(1)); // Messages area (includes tips)
-
-                if queue_choice_height > 0 {
-                    constraints_vec.push(Constraint::Length(queue_choice_height));
-                }
-                if approval_prompt_height > 0 {
-                    constraints_vec.push(Constraint::Length(approval_prompt_height));
-                }
-                if sandbox_prompt_height > 0 {
-                    constraints_vec.push(Constraint::Length(sandbox_prompt_height));
-                }
-                if survey_height > 0 {
-                    constraints_vec.push(Constraint::Length(survey_height));
-                }
-                if has_infobar {
-                    constraints_vec.push(Constraint::Length(1)); // Infobar
-                }
-
-                constraints_vec.push(Constraint::Length(input_height));
-
-                if autocomplete_height > 0 {
-                    constraints_vec.push(Constraint::Length(autocomplete_height)); // Autocomplete
-                }
-
-                if background_tasks_height > 0 {
-                    constraints_vec.push(Constraint::Length(background_tasks_height)); // Background tasks
-                }
-
-                if help_height > 0 {
-                    constraints_vec.push(Constraint::Length(help_height)); // Help panel
-                }
-
-                if resume_height > 0 {
-                    constraints_vec.push(Constraint::Length(resume_height)); // Resume panel
-                }
-
-                if rewind_height > 0 {
-                    constraints_vec.push(Constraint::Length(rewind_height)); // Rewind panel
-                }
-
-                if todos_height > 0 {
-                    constraints_vec.push(Constraint::Length(todos_height)); // Todos panel
-                }
-
-                if model_selection_height > 0 {
-                    constraints_vec.push(Constraint::Length(model_selection_height)); // Model selection panel
-                }
-
-                constraints_vec.push(Constraint::Length(1)); // Status bar
-
-                constraints_vec
-            }
-        };
+        let constraints = self.startup_layout_constraints(render_area);
         let areas = Layout::vertical(constraints).split(render_area);
-        if self.phase >= Phase::Ascii {
-            let title_text: Vec<Line> = self
-                .title_lines
-                .iter()
-                .enumerate()
-                .map(|(i, line)| {
-                    let visible_chars = self.visible_chars[i];
-                    let spans: Vec<Span> = line.spans.iter().take(visible_chars).cloned().collect();
-                    Line::from(spans)
-                })
-                .collect();
-            let title =
-                Paragraph::new(Text::from(title_text)).style(Style::default().fg(Color::White));
-            frame.render_widget(title, areas[0]);
-        }
-        if self.phase == Phase::Tips && areas.len() > 2 {
-            // Render gap (areas[1] is the gap area with 1 line height)
-            let gap = Paragraph::new(Line::from(" "));
-            frame.render_widget(gap, areas[1]);
-
-            // Render tips in areas[2]
-            let tips = self.render_tips();
-            let tips_paragraph = Paragraph::new(tips).style(Style::default().fg(Color::Gray));
-            frame.render_widget(tips_paragraph, areas[2]);
-        }
-        // Render gap between ASCII art and messages for Input phase
-        if self.phase == Phase::Input && areas.len() > 2 {
-            let gap = Paragraph::new(Line::from(" "));
-            frame.render_widget(gap, areas[1]);
-        }
+        self.render_startup_chrome(frame, &areas);
 
         let status_area = areas[areas.len() - 1];
         // Determine area indices based on whether queue choice popup, sandbox prompt, survey/thank_you and infobar are active
@@ -9985,7 +9363,7 @@ Let me analyze the conversation chronologically:
                 let rich_content = create_rich_content_from_messages(
                     &messages_with_stats,
                     &message_types_with_stats,
-                    TIPS,
+                    tips(),
                     self.visible_tips,
                     MESSAGE_BORDER_SET,
                     wrap_width,
@@ -9994,7 +9372,7 @@ Let me analyze the conversation chronologically:
                 let plain_content = rich_editor::create_plain_content_for_editor(
                     &messages_with_stats,
                     &message_types_with_stats,
-                    TIPS,
+                    tips(),
                     self.visible_tips,
                     wrap_width,
                     &thinking_context,
