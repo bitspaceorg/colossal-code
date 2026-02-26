@@ -34,9 +34,10 @@ mod session_manager;
 pub use session_manager::{OrchestratorEntry, Session, SessionManager, SessionRole, SessionStatus};
 mod app_constructor;
 mod command_runtime;
-mod config_model_helpers;
 mod commands;
+mod config_model_helpers;
 mod git_ops;
+mod input_helpers;
 mod model_context;
 mod persistence;
 mod session_lifecycle;
@@ -485,156 +486,6 @@ impl App {
             active_form,
             children,
         })
-    }
-
-    fn get_cursor_row(&self) -> usize {
-        let lines: Vec<&str> = self.input.lines().collect();
-        let mut char_count = 0;
-        for (row, line) in lines.iter().enumerate() {
-            let line_len = line.chars().count() + 1; // +1 for newline
-            if char_count + line_len > self.character_index {
-                return row;
-            }
-            char_count += line_len;
-        }
-        lines.len().saturating_sub(1)
-    }
-
-    fn get_cursor_col(&self) -> usize {
-        let lines: Vec<&str> = self.input.lines().collect();
-        let mut char_count = 0;
-        for line in &lines {
-            let line_len = line.chars().count() + 1; // +1 for newline
-            if char_count + line_len > self.character_index {
-                // Found the line, calculate column
-                return self.character_index - char_count;
-            }
-            char_count += line_len;
-        }
-        0
-    }
-
-    fn is_at_start_of_first_line(&self) -> bool {
-        self.get_cursor_row() == 0 && self.get_cursor_col() == 0
-    }
-
-    fn is_at_end_of_last_line(&self) -> bool {
-        let lines: Vec<&str> = self.input.lines().collect();
-        let last_line_idx = lines.len().saturating_sub(1);
-        let cursor_row = self.get_cursor_row();
-
-        if cursor_row != last_line_idx {
-            return false;
-        }
-
-        // Check if cursor is at end of last line
-        if let Some(last_line) = lines.last() {
-            let cursor_col = self.get_cursor_col();
-            cursor_col >= last_line.chars().count()
-        } else {
-            true
-        }
-    }
-
-    fn navigate_history_backwards(&mut self) {
-        // Combined history: command_history + queued_messages
-        // Most recent queued message is at the end
-        let total_items = self.command_history.len() + self.queued_messages.len();
-
-        if total_items == 0 {
-            return;
-        }
-
-        // If not in history mode, save current input and start from most recent
-        if self.history_index.is_none() {
-            self.temp_input = Some(self.input.clone());
-            self.history_index = Some(total_items - 1);
-        } else {
-            // Go backwards
-            if let Some(idx) = self.history_index {
-                if idx > 0 {
-                    self.history_index = Some(idx - 1);
-                } else {
-                    // Already at oldest, don't do anything
-                    return;
-                }
-            }
-        }
-
-        // Load the message at the current index
-        if let Some(idx) = self.history_index {
-            let history_len = self.command_history.len();
-
-            if idx < history_len {
-                // In regular history
-                if let Some(cmd) = self.command_history.get(idx) {
-                    self.input = cmd.clone();
-                    self.character_index = 0;
-                    self.editing_queue_index = None;
-                }
-            } else {
-                // In queued messages (idx >= history_len)
-                let queue_idx = idx - history_len;
-                if let Some(queued_msg) = self.queued_messages.get(queue_idx) {
-                    self.input = queued_msg.clone();
-                    self.character_index = 0;
-                    self.editing_queue_index = Some(queue_idx);
-                }
-            }
-        }
-
-        // Sync to vim editor if vim mode is enabled
-        if self.vim_mode_enabled {
-            self.sync_input_to_vim();
-        }
-    }
-
-    fn navigate_history_forwards(&mut self) {
-        if let Some(idx) = self.history_index {
-            let total_items = self.command_history.len() + self.queued_messages.len();
-
-            if idx < total_items - 1 {
-                // Go forwards in combined history
-                let new_idx = idx + 1;
-                self.history_index = Some(new_idx);
-
-                let history_len = self.command_history.len();
-                if new_idx < history_len {
-                    // In regular history
-                    if let Some(cmd) = self.command_history.get(new_idx) {
-                        self.input = cmd.clone();
-                        self.character_index = 0;
-                        self.editing_queue_index = None;
-                    }
-                } else {
-                    // In queued messages
-                    let queue_idx = new_idx - history_len;
-                    if let Some(queued_msg) = self.queued_messages.get(queue_idx) {
-                        self.input = queued_msg.clone();
-                        self.character_index = 0;
-                        self.editing_queue_index = Some(queue_idx);
-                    }
-                }
-            } else {
-                // At newest item, restore original input and exit history mode
-                self.history_index = None;
-                self.editing_queue_index = None;
-                if let Some(temp) = self.temp_input.take() {
-                    self.input = temp;
-                    self.character_index = self.input.chars().count();
-                } else {
-                    // No temp input saved (e.g., entered history without typing first)
-                    // Clear the input
-                    self.input.clear();
-                    self.character_index = 0;
-                }
-            }
-        }
-
-        // Sync to vim editor if vim mode is enabled
-        if self.vim_mode_enabled {
-            self.sync_input_to_vim();
-        }
     }
 
     fn enter_alt_w_view(&mut self) -> bool {
@@ -1433,50 +1284,6 @@ impl App {
 
         self.advance_startup_phase();
     }
-    // Existing cursor movement functions (keeping for normal mode)
-    fn move_cursor_left(&mut self) {
-        let cursor_moved_left = self.character_index.saturating_sub(1);
-        self.character_index = self.clamp_cursor(cursor_moved_left);
-    }
-    fn move_cursor_right(&mut self) {
-        let cursor_moved_right = self.character_index.saturating_add(1);
-        self.character_index = self.clamp_cursor(cursor_moved_right);
-    }
-
-    fn enter_char(&mut self, new_char: char) {
-        let index = self.byte_index();
-        self.input.insert(index, new_char);
-        self.move_cursor_right();
-        self.input_modified = true;
-
-        // Check if autocomplete should be triggered or updated
-        self.update_autocomplete();
-    }
-
-    fn byte_index(&self) -> usize {
-        self.input
-            .char_indices()
-            .map(|(i, _)| i)
-            .nth(self.character_index)
-            .unwrap_or(self.input.len())
-    }
-    fn delete_char(&mut self) {
-        if self.character_index != 0 {
-            let current_index = self.character_index;
-            let from_left_to_current_index = current_index - 1;
-            let before_char_to_delete = self.input.chars().take(from_left_to_current_index);
-            let after_char_to_delete = self.input.chars().skip(current_index);
-            self.input = before_char_to_delete.chain(after_char_to_delete).collect();
-            self.move_cursor_left();
-        }
-        if self.input.is_empty() {
-            self.input_modified = false;
-        }
-
-        // Update autocomplete after deletion
-        self.update_autocomplete();
-    }
-
     // Conversation persistence functions
     fn get_conversations_dir() -> Result<std::path::PathBuf> {
         persistence::conversations::conversations_dir()
@@ -2106,100 +1913,6 @@ Let me analyze the conversation chronologically:
         }
 
         Ok(())
-    }
-
-    fn update_autocomplete(&mut self) {
-        let input_trimmed = self.input.trim_start();
-
-        // Only trigger if input starts with "/" or " /" (but not "@/" or other prefixes)
-        let should_show = if input_trimmed.starts_with('/') {
-            // Check that it's not preceded by @ or other non-space characters
-            let prefix = self
-                .input
-                .chars()
-                .take_while(|&c| c != '/')
-                .collect::<String>();
-            prefix.is_empty() || prefix.chars().all(|c| c.is_whitespace())
-        } else {
-            false
-        };
-
-        if should_show {
-            // Extract the command prefix after the /
-            let after_slash = input_trimmed.trim_start_matches('/');
-
-            // Filter commands that match the prefix
-            self.autocomplete_suggestions = SLASH_COMMANDS
-                .iter()
-                .filter(|(cmd, _)| cmd.trim_start_matches('/').starts_with(after_slash))
-                .map(|(cmd, desc)| (cmd.to_string(), desc.to_string()))
-                .collect();
-
-            self.autocomplete_active = !self.autocomplete_suggestions.is_empty();
-
-            // Reset selection to first item
-            if self.autocomplete_active {
-                self.autocomplete_selected_index = 0;
-            }
-        } else {
-            self.autocomplete_active = false;
-            self.autocomplete_suggestions.clear();
-            self.autocomplete_selected_index = 0;
-        }
-    }
-    fn clamp_cursor(&self, new_cursor_pos: usize) -> usize {
-        new_cursor_pos.clamp(0, self.input.chars().count())
-    }
-    fn reset_cursor(&mut self) {
-        self.character_index = 0;
-    }
-
-    fn sync_vim_input(&mut self) {
-        // Sync edtui editor content to self.input
-        self.input = self.vim_input_editor.get_text_content();
-
-        // Sync cursor position from vim editor
-        let cursor = self.vim_input_editor.state.cursor;
-        // Calculate linear position from row/col
-        let lines: Vec<&str> = self.input.lines().collect();
-        let mut char_index = 0;
-        for (row_idx, line) in lines.iter().enumerate() {
-            if row_idx < cursor.row {
-                char_index += line.len() + 1; // +1 for newline
-            } else if row_idx == cursor.row {
-                char_index += cursor.col.min(line.len());
-                break;
-            }
-        }
-        self.character_index = char_index.min(self.input.len());
-    }
-
-    fn sync_input_to_vim(&mut self) {
-        // Sync self.input to edtui editor by replacing text, preserving mode
-        self.vim_input_editor
-            .set_text_content_preserving_mode(&self.input);
-
-        // Sync cursor position to vim editor
-        // Convert linear character_index to row/col
-        let char_idx = self.character_index;
-        let lines: Vec<&str> = self.input.lines().collect();
-        let mut remaining = char_idx;
-        let mut row = 0;
-        let mut col = 0;
-
-        for (row_idx, line) in lines.iter().enumerate() {
-            let line_len = line.len();
-            if remaining <= line_len {
-                row = row_idx;
-                col = remaining;
-                break;
-            }
-            remaining = remaining.saturating_sub(line_len + 1); // +1 for newline
-            row = row_idx + 1;
-        }
-
-        self.vim_input_editor.state.cursor.row = row;
-        self.vim_input_editor.state.cursor.col = col;
     }
 
     fn handle_auto_summarize_threshold_command(&mut self, command: &str) -> bool {
@@ -5344,46 +5057,22 @@ Let me analyze the conversation chronologically:
                                             if self.phase == Phase::Input
                                                 && self.autocomplete_active =>
                                         {
-                                            // Dismiss autocomplete
-                                            self.autocomplete_active = false;
-                                            self.autocomplete_suggestions.clear();
-                                            self.autocomplete_selected_index = 0;
+                                            self.clear_autocomplete();
                                         }
                                         KeyCode::Tab
                                             if self.phase == Phase::Input
                                                 && self.autocomplete_active =>
                                         {
-                                            // Apply autocomplete selection
-                                            if let Some((cmd, _desc)) = self
-                                                .autocomplete_suggestions
-                                                .get(self.autocomplete_selected_index)
-                                            {
-                                                self.input = cmd.clone();
-                                                self.character_index = self.input.chars().count();
-                                                self.autocomplete_active = false;
-                                                self.autocomplete_suggestions.clear();
-                                                self.autocomplete_selected_index = 0;
-                                            }
+                                            self.apply_autocomplete_selection();
                                         }
                                         KeyCode::Enter
                                             if self.phase == Phase::Input
                                                 && !self.show_background_tasks
                                                 && self.viewing_task.is_none() =>
                                         {
-                                            // If autocomplete is active, apply selection instead of submitting
-                                            if self.autocomplete_active {
-                                                if let Some((cmd, _desc)) = self
-                                                    .autocomplete_suggestions
-                                                    .get(self.autocomplete_selected_index)
-                                                {
-                                                    self.input = cmd.clone();
-                                                    self.character_index =
-                                                        self.input.chars().count();
-                                                    self.autocomplete_active = false;
-                                                    self.autocomplete_suggestions.clear();
-                                                    self.autocomplete_selected_index = 0;
-                                                }
-                                            } else {
+                                            if !self.autocomplete_active
+                                                || !self.apply_autocomplete_selection()
+                                            {
                                                 self.submit_message();
                                             }
                                         }
@@ -5391,32 +5080,13 @@ Let me analyze the conversation chronologically:
                                             if self.phase == Phase::Input
                                                 && !self.show_background_tasks =>
                                         {
-                                            if self.vim_mode_enabled {
-                                                // Special case: Intercept '/' in vim Normal mode to do nothing (prevent search mode in input bar)
-                                                if to_insert == '/'
-                                                    && self.vim_input_editor.get_mode()
-                                                        == edtui::EditorMode::Normal
-                                                {
-                                                    // Do nothing - '/' should not trigger search mode in input bar
-                                                } else {
-                                                    self.vim_input_editor
-                                                        .handle_event(Event::Key(key));
-                                                    self.sync_vim_input();
-                                                }
-                                            } else {
-                                                self.enter_char(to_insert);
-                                            }
+                                            self.handle_input_char_key(key, to_insert);
                                         }
                                         KeyCode::Backspace
                                             if self.phase == Phase::Input
                                                 && !self.show_background_tasks =>
                                         {
-                                            if self.vim_mode_enabled {
-                                                self.vim_input_editor.handle_event(Event::Key(key));
-                                                self.sync_vim_input();
-                                            } else {
-                                                self.delete_char();
-                                            }
+                                            self.handle_input_backspace_key(key);
                                         }
                                         KeyCode::Left
                                             if self.phase == Phase::Input
@@ -5435,85 +5105,10 @@ Let me analyze the conversation chronologically:
                                             }
                                         }
                                         KeyCode::Up if self.phase == Phase::Input => {
-                                            // Check if autocomplete is active
-                                            if self.autocomplete_active
-                                                && !self.autocomplete_suggestions.is_empty()
-                                            {
-                                                // Navigate autocomplete suggestions (cycle)
-                                                if self.autocomplete_selected_index == 0 {
-                                                    self.autocomplete_selected_index =
-                                                        self.autocomplete_suggestions.len() - 1;
-                                                } else {
-                                                    self.autocomplete_selected_index -= 1;
-                                                }
-                                            } else if self.vim_mode_enabled {
-                                                // In vim mode: Up arrow ALWAYS navigates history
-                                                // Use j/k keys for cursor movement within text
-                                                self.navigate_history_backwards();
-                                            } else {
-                                                // In normal mode: go to (0,0) first, then history
-                                                if self.is_at_start_of_first_line() {
-                                                    // Already at (0,0) - navigate history backwards
-                                                    self.navigate_history_backwards();
-                                                } else {
-                                                    // Not at (0,0) - move to position (0,0)
-                                                    self.character_index = 0;
-                                                }
-                                            }
+                                            self.handle_input_up_key();
                                         }
                                         KeyCode::Down if self.phase == Phase::Input => {
-                                            // Check if autocomplete is active
-                                            if self.autocomplete_active
-                                                && !self.autocomplete_suggestions.is_empty()
-                                            {
-                                                // Navigate autocomplete suggestions (cycle)
-                                                if self.autocomplete_selected_index
-                                                    >= self.autocomplete_suggestions.len() - 1
-                                                {
-                                                    self.autocomplete_selected_index = 0;
-                                                } else {
-                                                    self.autocomplete_selected_index += 1;
-                                                }
-                                            } else {
-                                                // Unified behavior for both vim and normal mode:
-                                                // Work with LOGICAL lines (split by \n), not visual rows
-                                                // 1. Move to END of next logical line
-                                                // 2. When on last line at end, navigate history
-
-                                                let lines: Vec<&str> = self.input.lines().collect();
-                                                let cursor_row = self.get_cursor_row();
-                                                let last_line_idx = lines.len().saturating_sub(1);
-
-                                                if cursor_row < last_line_idx {
-                                                    // Not on last logical line - move to END of next logical line
-                                                    let mut char_count = 0;
-                                                    for (row, line) in lines.iter().enumerate() {
-                                                        if row == cursor_row + 1 {
-                                                            // Found next line - move to its end
-                                                            self.character_index =
-                                                                char_count + line.chars().count();
-                                                            break;
-                                                        }
-                                                        char_count += line.chars().count() + 1; // +1 for newline
-                                                    }
-
-                                                    if self.vim_mode_enabled {
-                                                        self.sync_input_to_vim();
-                                                    }
-                                                } else if self.is_at_end_of_last_line() {
-                                                    // At end of last line - navigate history
-                                                    if self.history_index.is_some() {
-                                                        self.navigate_history_forwards();
-                                                    }
-                                                } else {
-                                                    // On last line but not at end - move to end
-                                                    self.character_index =
-                                                        self.input.chars().count();
-                                                    if self.vim_mode_enabled {
-                                                        self.sync_input_to_vim();
-                                                    }
-                                                }
-                                            }
+                                            self.handle_input_down_key();
                                         }
                                         _ => {}
                                     }
