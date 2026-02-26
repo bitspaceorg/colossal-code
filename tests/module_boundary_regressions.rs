@@ -60,6 +60,7 @@ fn main_wires_extracted_modules() {
     let main_rs = read("src/main.rs");
 
     for required in [
+        "mod state_domain;",
         "mod commands;",
         "mod model_context;",
         "mod spec_cli;",
@@ -76,6 +77,35 @@ fn main_wires_extracted_modules() {
         assert!(
             main_rs.contains(required),
             "main.rs should keep module boundary wiring for: {required}"
+        );
+    }
+}
+
+#[test]
+fn state_domain_types_live_in_dedicated_module() {
+    let main_rs = read("src/main.rs");
+    for forbidden in [
+        "pub struct SubAgentContext",
+        "pub enum MessageType",
+        "pub(crate) enum MessageState",
+        "pub(crate) enum UIMessageMetadata",
+    ] {
+        assert!(
+            !main_rs.contains(forbidden),
+            "main.rs should not define extracted state/domain type: {forbidden}"
+        );
+    }
+
+    let state_domain = read("src/state_domain.rs");
+    for required in [
+        "pub struct SubAgentContext",
+        "pub enum MessageType",
+        "pub(crate) enum MessageState",
+        "pub(crate) enum UIMessageMetadata",
+    ] {
+        assert!(
+            state_domain.contains(required),
+            "state_domain.rs should own extracted state/domain type: {required}"
         );
     }
 }
