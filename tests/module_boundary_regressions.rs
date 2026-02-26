@@ -62,13 +62,14 @@ fn main_wires_extracted_modules() {
     for required in [
         "mod state_domain;",
         "mod commands;",
+        "mod config_model_helpers;",
         "mod model_context;",
         "mod spec_cli;",
+        "mod status_helpers;",
         "mod ui;",
         "mod ui_message_event;",
         "pub mod spec_ui;",
         "dispatch_slash_command",
-        "model_context::detect_context_length",
         "spec_ui::build_spec_plan_lines",
         "ui::prompts::render_approval_prompt",
         "ui::prompts::render_sandbox_prompt",
@@ -79,6 +80,12 @@ fn main_wires_extracted_modules() {
             "main.rs should keep module boundary wiring for: {required}"
         );
     }
+
+    let config_helpers = read("src/config_model_helpers.rs");
+    assert!(
+        config_helpers.contains("model_context::detect_context_length"),
+        "config_model_helpers.rs should own context token detection wiring"
+    );
 }
 
 #[test]
