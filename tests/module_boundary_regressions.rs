@@ -66,12 +66,12 @@ fn main_wires_extracted_modules() {
         "mod model_context;",
         "mod slash_command_executor;",
         "mod spec_cli;",
+        "mod spec_orchestrator_reducer;",
         "mod submit_message_reducer;",
         "mod status_helpers;",
         "mod ui;",
         "mod ui_message_event;",
         "pub mod spec_ui;",
-        "spec_ui::build_spec_plan_lines",
         "ui::prompts::render_approval_prompt",
         "ui::prompts::render_sandbox_prompt",
         "UiMessageEvent::parse",
@@ -81,6 +81,20 @@ fn main_wires_extracted_modules() {
             "main.rs should keep module boundary wiring for: {required}"
         );
     }
+
+    let spec_orch = read("src/spec_orchestrator_reducer.rs");
+    assert!(
+        spec_orch.contains("spec_ui::build_spec_plan_lines"),
+        "spec_orchestrator_reducer.rs should own spec plan wiring"
+    );
+    assert!(
+        spec_orch.contains("fn handle_orchestrator_event"),
+        "spec_orchestrator_reducer.rs should own orchestrator event handler"
+    );
+    assert!(
+        spec_orch.contains("fn load_spec"),
+        "spec_orchestrator_reducer.rs should own load_spec"
+    );
 
     let slash_executor = read("src/slash_command_executor.rs");
     assert!(
@@ -296,16 +310,19 @@ fn prompt_text_stays_in_ui_prompts_module() {
 fn session_lifecycle_mapping_stays_in_dedicated_module() {
     let main_rs = read("src/main.rs");
     assert!(
-        main_rs.contains("session_lifecycle::update_session_for_step"),
-        "main.rs should delegate session updates to src/session_lifecycle.rs"
-    );
-    assert!(
         !main_rs.contains("fn session_role_from_step_role"),
         "main.rs should not inline session role mapping logic"
     );
     assert!(
         !main_rs.contains("fn step_status_to_session_status"),
         "main.rs should not inline step status mapping logic"
+    );
+
+    // Delegation to session_lifecycle now lives in spec_orchestrator_reducer
+    let spec_orch = read("src/spec_orchestrator_reducer.rs");
+    assert!(
+        spec_orch.contains("session_lifecycle::update_session_for_step"),
+        "spec_orchestrator_reducer.rs should delegate session updates to session_lifecycle.rs"
     );
 
     let lifecycle = read("src/session_lifecycle.rs");
@@ -316,8 +333,6 @@ fn session_lifecycle_mapping_stays_in_dedicated_module() {
 #[test]
 fn spec_plan_rendering_logic_stays_in_spec_ui_module() {
     let main_rs = read("src/main.rs");
-    assert!(main_rs.contains("spec_ui::build_spec_plan_lines"));
-    assert!(main_rs.contains("spec_ui::build_tool_only_plan_lines"));
     assert!(
         !main_rs.contains("No steps in this spec."),
         "main.rs should not own spec plan fallback copy"
@@ -326,6 +341,11 @@ fn spec_plan_rendering_logic_stays_in_spec_ui_module() {
         !main_rs.contains("History: no entries yet."),
         "main.rs should not own spec history copy"
     );
+
+    // spec_ui calls now live in spec_orchestrator_reducer
+    let spec_orch = read("src/spec_orchestrator_reducer.rs");
+    assert!(spec_orch.contains("spec_ui::build_spec_plan_lines"));
+    assert!(spec_orch.contains("spec_ui::build_tool_only_plan_lines"));
 
     let spec_ui = read("src/spec_ui.rs");
     assert!(spec_ui.contains("No steps in this spec."));
