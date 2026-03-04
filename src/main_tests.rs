@@ -1,8 +1,9 @@
 use super::{
     AgentState, App, AssistantMode, Color, HelpTab, MessageState, MessageType, PersistenceState,
-    QueueChoiceAction, SafetyState, SubAgentContext, UiState, parse_queue_choice,
+    SafetyState, SubAgentContext, UiState,
 };
 use crate::model_context;
+use crate::submit_message_reducer::{QueueChoiceAction, parse_queue_choice};
 use agent_core::safety_config::SafetyMode;
 
 #[test]

@@ -66,6 +66,7 @@ fn main_wires_extracted_modules() {
         "mod model_context;",
         "mod slash_command_executor;",
         "mod spec_cli;",
+        "mod submit_message_reducer;",
         "mod status_helpers;",
         "mod ui;",
         "mod ui_message_event;",
@@ -96,6 +97,51 @@ fn main_wires_extracted_modules() {
         config_helpers.contains("model_context::detect_context_length"),
         "config_model_helpers.rs should own context token detection wiring"
     );
+
+    let submit_reducer = read("src/submit_message_reducer.rs");
+    assert!(
+        submit_reducer.contains("fn submit_message"),
+        "submit_message_reducer.rs should own submit_message"
+    );
+    assert!(
+        submit_reducer.contains("QueueChoiceAction"),
+        "submit_message_reducer.rs should own QueueChoiceAction"
+    );
+    assert!(
+        submit_reducer.contains("fn parse_queue_choice"),
+        "submit_message_reducer.rs should own parse_queue_choice"
+    );
+}
+
+#[test]
+fn submit_message_reducer_owns_submit_logic() {
+    let main_rs = read("src/main.rs");
+    for forbidden in [
+        "fn submit_message",
+        "fn save_to_history",
+        "fn ensure_conversation_id",
+        "enum QueueChoiceAction",
+        "fn parse_queue_choice",
+    ] {
+        assert!(
+            !main_rs.contains(forbidden),
+            "main.rs should not define extracted submit logic: {forbidden}"
+        );
+    }
+
+    let reducer = read("src/submit_message_reducer.rs");
+    for required in [
+        "fn submit_message",
+        "fn save_to_history",
+        "fn ensure_conversation_id",
+        "enum QueueChoiceAction",
+        "fn parse_queue_choice",
+    ] {
+        assert!(
+            reducer.contains(required),
+            "submit_message_reducer.rs should own: {required}"
+        );
+    }
 }
 
 #[test]
