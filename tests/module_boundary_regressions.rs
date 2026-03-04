@@ -63,6 +63,7 @@ fn main_wires_extracted_modules() {
         "mod state_domain;",
         "mod commands;",
         "mod config_model_helpers;",
+        "mod key_panel_dispatcher;",
         "mod model_context;",
         "mod pending_actions_reducer;",
         "mod slash_command_executor;",
@@ -160,6 +161,41 @@ fn pending_actions_reducer_owns_runtime_pending_branches() {
         assert!(
             reducer.contains(required),
             "pending_actions_reducer.rs should own pending runtime branch: {required}"
+        );
+    }
+}
+
+#[test]
+fn key_panel_dispatcher_owns_panel_specific_key_handlers() {
+    let main_rs = read("src/main.rs");
+    for forbidden in [
+        "self.ui_state.help_tab = self.ui_state.help_tab.next();",
+        "self.resume_load_pending = true;",
+        "self.rewind_points.truncate(self.rewind_selected + 1);",
+        "self.current_model = Some(selected_filename.clone());",
+    ] {
+        assert!(
+            !main_rs.contains(forbidden),
+            "main.rs should delegate panel key handling branch: {forbidden}"
+        );
+    }
+    assert!(
+        main_rs.contains("self.handle_panel_dispatch_key(&key)"),
+        "main.rs should dispatch panel keys through key_panel_dispatcher"
+    );
+
+    let dispatcher = read("src/key_panel_dispatcher.rs");
+    for required in [
+        "fn handle_panel_dispatch_key",
+        "fn handle_summary_history_panel_key",
+        "fn handle_help_panel_key",
+        "fn handle_resume_panel_key",
+        "fn handle_rewind_panel_key",
+        "fn handle_model_selection_panel_key",
+    ] {
+        assert!(
+            dispatcher.contains(required),
+            "key_panel_dispatcher.rs should own extracted handler: {required}"
         );
     }
 }
