@@ -64,6 +64,7 @@ fn main_wires_extracted_modules() {
         "mod commands;",
         "mod config_model_helpers;",
         "mod key_panel_dispatcher;",
+        "mod message_render_helpers;",
         "mod model_context;",
         "mod pending_actions_reducer;",
         "mod slash_command_executor;",
@@ -448,4 +449,33 @@ fn survey_feedback_copy_stays_in_survey_module() {
     let survey = read("src/survey.rs");
     assert!(survey.contains("Thanks for making Nite better"));
     assert!(survey.contains("(use /feedback to give suggestions or bug reports)"));
+}
+
+#[test]
+fn message_rendering_helpers_live_in_dedicated_module() {
+    let main_rs = read("src/main.rs");
+    for forbidden in [
+        "fn render_message_with_max_width(",
+        "fn render_agent_message_with_bullet(",
+        "fn wrap_text(",
+        "fn render_summary_banner(",
+    ] {
+        assert!(
+            !main_rs.contains(forbidden),
+            "main.rs should not define extracted render helper: {forbidden}"
+        );
+    }
+
+    let helpers = read("src/message_render_helpers.rs");
+    for required in [
+        "fn render_message_with_max_width(",
+        "fn render_agent_message_with_bullet(",
+        "fn wrap_text(",
+        "fn render_summary_banner(",
+    ] {
+        assert!(
+            helpers.contains(required),
+            "message_render_helpers.rs should own extracted render helper: {required}"
+        );
+    }
 }
