@@ -64,12 +64,12 @@ fn main_wires_extracted_modules() {
         "mod commands;",
         "mod config_model_helpers;",
         "mod model_context;",
+        "mod slash_command_executor;",
         "mod spec_cli;",
         "mod status_helpers;",
         "mod ui;",
         "mod ui_message_event;",
         "pub mod spec_ui;",
-        "dispatch_slash_command",
         "spec_ui::build_spec_plan_lines",
         "ui::prompts::render_approval_prompt",
         "ui::prompts::render_sandbox_prompt",
@@ -80,6 +80,16 @@ fn main_wires_extracted_modules() {
             "main.rs should keep module boundary wiring for: {required}"
         );
     }
+
+    let slash_executor = read("src/slash_command_executor.rs");
+    assert!(
+        slash_executor.contains("dispatch_slash_command"),
+        "slash_command_executor.rs should own dispatch_slash_command wiring"
+    );
+    assert!(
+        slash_executor.contains("fn handle_slash_command"),
+        "slash_command_executor.rs should own handle_slash_command"
+    );
 
     let config_helpers = read("src/config_model_helpers.rs");
     assert!(

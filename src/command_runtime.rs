@@ -68,8 +68,7 @@ pub(crate) fn apply_command_runtime_route(app: &mut App, route: CommandRuntimeRo
 #[cfg(test)]
 mod tests {
     use super::{CommandRuntimeRoute, route_command_runtime};
-    use crate::commands::ReviewType;
-    use crate::{ReviewOptions, SlashCommandDispatch};
+    use crate::commands::{ReviewOptions, ReviewType, SlashCommandDispatch};
 
     #[test]
     fn summarize_routes_to_empty_when_only_command_exists() {
