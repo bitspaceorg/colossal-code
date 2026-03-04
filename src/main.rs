@@ -8,10 +8,10 @@ use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     layout::{Constraint, Layout, Position},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     symbols,
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, List, Paragraph, Wrap},
+    widgets::{Block, BorderType, Paragraph},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -45,6 +45,7 @@ mod persistence;
 mod persistence_helpers;
 mod rewind_compaction_helpers;
 mod session_lifecycle;
+mod session_subagent_render_helpers;
 mod slash_command_executor;
 mod spec_cli;
 mod spec_orchestrator_reducer;
@@ -2140,164 +2141,6 @@ impl App {
             &self.autocomplete_suggestions,
             self.autocomplete_selected_index,
         );
-    }
-
-    fn render_session_window_with_agent_ui(&mut self, frame: &mut Frame) {
-        // Split screen: top 49% for session list, bottom 51% for bordered box containing Agent UI
-        let layout = Layout::vertical([Constraint::Percentage(49), Constraint::Percentage(51)]);
-        let [sessions_area, input_box_area] = layout.areas(frame.area());
-
-        let sessions_block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Agent sessions (Alt+W to close) ");
-
-        if self.session_manager.sessions.is_empty() {
-            frame.render_widget(sessions_block.clone(), sessions_area);
-        } else {
-            // Render sessions list in top area
-            let session_items =
-                session_manager::SessionManager::create_session_list_items_with_selection(
-                    &self.session_manager.sessions,
-                    self.session_manager.selected_index,
-                );
-            let sessions_list = List::new(session_items)
-                .block(sessions_block)
-                .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-            frame.render_stateful_widget(
-                sessions_list,
-                sessions_area,
-                &mut self.session_manager.list_state,
-            );
-        }
-
-        // Get the selected session's prefix to find the sub-agent context
-        let selected_prefix = self
-            .session_manager
-            .get_selected_session()
-            .and_then(|s| s.prefix.clone());
-
-        // Render the bordered box with title
-        let title = self
-            .session_manager
-            .get_selected_session()
-            .map(|s| format!(" Live UI: {} ", s.name))
-            .unwrap_or_else(|| " Live UI ".to_string());
-        let input_box = Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .title(title);
-        let agent_ui_area = input_box.inner(input_box_area);
-        frame.render_widget(input_box, input_box_area);
-
-        // If we have a selected prefix with sub-agent context, render that sub-agent's messages
-        // Otherwise fall back to the main agent UI
-        if let Some(ref prefix) = selected_prefix {
-            if let Some(context) = self.sub_agent_contexts.get(prefix) {
-                self.render_sub_agent_context(frame, agent_ui_area, context.clone());
-                return;
-            }
-        }
-
-        // Fall back to main agent UI if no sub-agent context exists
-        self.draw_internal(frame, Some(agent_ui_area));
-    }
-
-    /// Render a sub-agent's context in full screen mode using the standard UI layout.
-    fn render_sub_agent_fullscreen(&mut self, frame: &mut Frame, context: SubAgentContext) {
-        let snapshot = context.to_snapshot();
-        let previous_snapshot = self.nav_snapshot.clone();
-        let previous_render_flag = self.rendering_sub_agent_view;
-        let previous_render_prefix = self.rendering_sub_agent_prefix.clone();
-        let context_prefix = context.prefix.clone();
-
-        self.nav_snapshot = Some(snapshot);
-        self.rendering_sub_agent_view = true;
-        self.rendering_sub_agent_prefix = Some(context_prefix);
-        self.draw_internal(frame, Some(frame.area()));
-
-        self.nav_snapshot = previous_snapshot;
-        self.rendering_sub_agent_view = previous_render_flag;
-        self.rendering_sub_agent_prefix = previous_render_prefix;
-    }
-
-    /// Render a sub-agent's context (messages, tool calls, etc.) in the given area.
-    fn render_sub_agent_context(
-        &mut self,
-        frame: &mut Frame,
-        area: ratatui::layout::Rect,
-        context: SubAgentContext,
-    ) {
-        let max_width = area.width.saturating_sub(4) as usize;
-        let mut lines: Vec<Line<'static>> = Vec::new();
-
-        let snapshot = context.to_snapshot();
-        let previous_snapshot = self.nav_snapshot.clone();
-        let previous_render_flag = self.rendering_sub_agent_view;
-        let previous_render_prefix = self.rendering_sub_agent_prefix.clone();
-        let context_prefix = context.prefix.clone();
-
-        self.nav_snapshot = Some(snapshot);
-        self.rendering_sub_agent_view = true;
-        self.rendering_sub_agent_prefix = Some(context_prefix.clone());
-
-        lines.push(Line::from(vec![
-            Span::styled("● ", Style::default().fg(Color::Yellow)),
-            Span::styled(
-                format!("{} — {}", context_prefix, context.step_title),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        lines.push(Line::from(""));
-
-        let message_count = context.messages.len();
-        if message_count == 0 {
-            lines.push(Line::from(Span::styled(
-                "Waiting for sub-agent activity…",
-                Style::default().fg(Color::DarkGray),
-            )));
-        } else {
-            let message_types: Vec<MessageType> = context
-                .messages
-                .iter()
-                .map(|message| message.message_type.clone())
-                .collect();
-
-            for (idx, message) in context.messages.iter().enumerate() {
-                let is_agent = matches!(message.message_type, MessageType::Agent);
-                let connector = self.agent_connector_for_index(&message_types, idx);
-                let rendered = self.render_message_with_max_width(
-                    &message.content,
-                    max_width,
-                    None,
-                    is_agent,
-                    connector,
-                );
-                lines.extend(rendered.lines);
-            }
-
-            if let Some(stats) = context.generation_stats.clone() {
-                let stats_text = format!(
-                    " {:.2} tok/sec • {} completion • {} prompt",
-                    stats.avg_completion_tok_per_sec,
-                    self.format_compact_number(stats.completion_tokens),
-                    self.format_compact_number(stats.prompt_tokens),
-                );
-                lines.push(Line::from(Span::styled(
-                    stats_text,
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(ratatui::style::Modifier::ITALIC),
-                )));
-            }
-        }
-
-        let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
-        frame.render_widget(paragraph, area);
-
-        self.nav_snapshot = previous_snapshot;
-        self.rendering_sub_agent_view = previous_render_flag;
-        self.rendering_sub_agent_prefix = previous_render_prefix;
     }
 
     fn draw(&mut self, frame: &mut Frame) {

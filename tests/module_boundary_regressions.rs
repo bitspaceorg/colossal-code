@@ -67,6 +67,7 @@ fn main_wires_extracted_modules() {
         "mod message_render_helpers;",
         "mod model_context;",
         "mod pending_actions_reducer;",
+        "mod session_subagent_render_helpers;",
         "mod slash_command_executor;",
         "mod spec_cli;",
         "mod spec_orchestrator_reducer;",
@@ -476,6 +477,33 @@ fn message_rendering_helpers_live_in_dedicated_module() {
         assert!(
             helpers.contains(required),
             "message_render_helpers.rs should own extracted render helper: {required}"
+        );
+    }
+}
+
+#[test]
+fn session_sub_agent_rendering_helpers_live_in_dedicated_module() {
+    let main_rs = read("src/main.rs");
+    for forbidden in [
+        "fn render_session_window_with_agent_ui(",
+        "fn render_sub_agent_fullscreen(",
+        "fn render_sub_agent_context(",
+    ] {
+        assert!(
+            !main_rs.contains(forbidden),
+            "main.rs should not define extracted session/sub-agent helper: {forbidden}"
+        );
+    }
+
+    let helpers = read("src/session_subagent_render_helpers.rs");
+    for required in [
+        "fn render_session_window_with_agent_ui(",
+        "fn render_sub_agent_fullscreen(",
+        "fn render_sub_agent_context(",
+    ] {
+        assert!(
+            helpers.contains(required),
+            "session_subagent_render_helpers.rs should own extracted render helper: {required}"
         );
     }
 }
