@@ -34,6 +34,7 @@ mod app_constructor;
 mod command_runtime;
 mod commands;
 mod config_model_helpers;
+mod draw_internal_render_helpers;
 mod git_ops;
 mod input_helpers;
 mod key_panel_dispatcher;
@@ -2128,6 +2129,14 @@ impl App {
         lines
     }
 
+    fn render_approval_prompt_lines<'a>(&'a self) -> Vec<Line<'a>> {
+        ui::prompts::render_approval_prompt(&self.safety_state.approval_prompt_content)
+    }
+
+    fn render_sandbox_prompt_lines<'a>(&'a self) -> Vec<Line<'a>> {
+        ui::prompts::render_sandbox_prompt(&self.safety_state.sandbox_blocked_path)
+    }
+
     fn center_horizontal(area: ratatui::layout::Rect, width: u16) -> ratatui::layout::Rect {
         let [area] = Layout::horizontal([Constraint::Length(width)])
             .flex(ratatui::layout::Flex::Center)
@@ -2191,114 +2200,29 @@ impl App {
         self.render_startup_chrome(frame, &areas);
 
         let status_area = areas[areas.len() - 1];
-        // Determine area indices based on whether queue choice popup, sandbox prompt, survey/thank_you and infobar are active
         let has_queue_choice = self.show_queue_choice;
         let has_approval_prompt = self.safety_state.show_approval_prompt;
         let has_sandbox_prompt = self.safety_state.show_sandbox_prompt;
         let has_survey_or_thanks = self.survey.is_active() || self.survey.has_thank_you();
         let has_infobar = self.ctrl_c_pressed.is_some() || !self.queued_messages.is_empty();
         let has_autocomplete = self.autocomplete_active && self.mode == Mode::Normal;
-
-        // Messages area is always at index 2 (after title and gap)
-        let messages_area_idx = 2;
-
-        // Calculate indices dynamically
-        let mut idx = messages_area_idx + 1;
-        let queue_choice_area_idx = if has_queue_choice {
-            let i = idx;
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-        let approval_prompt_area_idx = if has_approval_prompt {
-            let i = idx;
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-        let sandbox_prompt_area_idx = if has_sandbox_prompt {
-            let i = idx;
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-        let survey_area_idx = if has_survey_or_thanks {
-            let i = idx;
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-        let infobar_area_idx = if has_infobar {
-            let i = idx;
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-        let input_area_idx = idx;
-        idx += 1;
-        let autocomplete_area_idx = if has_autocomplete {
-            let i = idx;
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-        let background_tasks_area_idx = if self.show_background_tasks || self.viewing_task.is_some()
-        {
-            let i = idx;
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-        let help_area_idx = if self.ui_state.show_help {
-            let i = idx;
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-        let resume_area_idx = if self.ui_state.show_resume {
-            let i = idx;
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-        let history_panel_area_idx = if self.show_history_panel {
-            let i = idx;
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-        let rewind_area_idx = if self.show_rewind {
-            let i = idx;
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-        let todos_area_idx = if self.show_todos {
-            let i = idx;
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-        let model_selection_area_idx = if self.show_model_selection {
-            let i = idx;
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-        let min_areas = idx + 1; // +1 for status bar
+        let area_indices = Self::compute_draw_area_indices(
+            has_queue_choice,
+            has_approval_prompt,
+            has_sandbox_prompt,
+            has_survey_or_thanks,
+            has_infobar,
+            has_autocomplete,
+            self.show_background_tasks || self.viewing_task.is_some(),
+            self.ui_state.show_help,
+            self.ui_state.show_resume,
+            self.show_history_panel,
+            self.show_rewind,
+            self.show_todos,
+            self.show_model_selection,
+        );
+        let messages_area_idx = area_indices.messages_area_idx;
+        let min_areas = area_indices.min_areas;
 
         // Collect status info for status bar
         let (mode, cursor_row, cursor_col, scroll_offset) = if self.phase == Phase::Input
@@ -2390,7 +2314,7 @@ impl App {
         );
         if self.phase == Phase::Input && areas.len() >= min_areas {
             let messages_area = areas[messages_area_idx];
-            let input_area = areas[input_area_idx];
+            let input_area = areas[area_indices.input_area_idx];
             if spec_tree_view_active
                 || self.mode == Mode::Normal
                 || self.mode == Mode::SessionWindow
@@ -3109,188 +3033,8 @@ impl App {
                 frame.render_widget(mode_widget, input_area);
             }
 
-            // Render search results info or assistant mode indicator above input bar (top-right)
-            let indicator_y = input_area.y.saturating_sub(1);
-
-            // Check if we have active search results (in either Navigation or Search mode)
-            if (self.mode == Mode::Navigation || self.mode == Mode::Search)
-                && !self.editor.state.search_matches().is_empty()
-            {
-                let num_results = self.editor.state.search_matches().len();
-                let _current_match_idx = self.editor.state.search_selected_index();
-                let cursor_pos = self.editor.state.cursor;
-                let current_line = cursor_pos.row + 1; // Convert to 1-indexed
-                let total_lines = self.editor.state.lines.len();
-
-                let search_info =
-                    format!("{} results [{}/{}]", num_results, current_line, total_lines);
-                let total_width = search_info.len() as u16;
-                let start_x = input_area.x + input_area.width.saturating_sub(total_width + 1);
-
-                let mut current_x = start_x;
-                for ch in search_info.chars() {
-                    if current_x < frame.area().width && indicator_y < frame.area().height {
-                        let cell = frame.buffer_mut().cell_mut((current_x, indicator_y));
-                        if let Some(cell) = cell {
-                            cell.set_char(ch);
-                            cell.set_style(Style::default().fg(Color::Cyan));
-                        }
-                        current_x += 1;
-                    }
-                }
-            } else if let Some((mode_text, mode_color)) =
-                self.safety_state.assistant_mode.to_display()
-            {
-                // Render assistant mode indicator
-                let full_text = format!("{} (shift + tab to cycle)", mode_text);
-
-                let separator = " ";
-                let cycle_text_with_parens = "(shift + tab to cycle)";
-
-                let total_width = full_text.len() as u16;
-                let start_x = input_area.x + input_area.width.saturating_sub(total_width + 1);
-
-                let mut current_x = start_x;
-
-                // Render mode text with its color
-                for ch in mode_text.chars() {
-                    if current_x < frame.area().width && indicator_y < frame.area().height {
-                        let cell = frame.buffer_mut().cell_mut((current_x, indicator_y));
-                        if let Some(cell) = cell {
-                            cell.set_char(ch);
-                            cell.set_style(Style::default().fg(mode_color));
-                        }
-                        current_x += 1;
-                    }
-                }
-
-                // Render separator space
-                for ch in separator.chars() {
-                    if current_x < frame.area().width && indicator_y < frame.area().height {
-                        let cell = frame.buffer_mut().cell_mut((current_x, indicator_y));
-                        if let Some(cell) = cell {
-                            cell.set_char(ch);
-                            cell.set_style(Style::default().fg(Color::DarkGray));
-                        }
-                        current_x += 1;
-                    }
-                }
-
-                // Render cycle text with parentheses in dark gray
-                for ch in cycle_text_with_parens.chars() {
-                    if current_x < frame.area().width && indicator_y < frame.area().height {
-                        let cell = frame.buffer_mut().cell_mut((current_x, indicator_y));
-                        if let Some(cell) = cell {
-                            cell.set_char(ch);
-                            cell.set_style(Style::default().fg(Color::DarkGray));
-                        }
-                        current_x += 1;
-                    }
-                }
-            }
-
-            // Render queue choice popup if active
-            if let Some(idx) = queue_choice_area_idx {
-                let queue_area = areas[idx];
-                let queue_lines = self.render_queue_choice_popup();
-                let queue_widget = Paragraph::new(queue_lines);
-                frame.render_widget(queue_widget, queue_area);
-            }
-
-            // Render approval prompt if active
-            if let Some(idx) = approval_prompt_area_idx {
-                let prompt_area = areas[idx];
-                let prompt_lines =
-                    ui::prompts::render_approval_prompt(&self.safety_state.approval_prompt_content);
-                let prompt_widget = Paragraph::new(prompt_lines);
-                frame.render_widget(prompt_widget, prompt_area);
-            }
-
-            // Render sandbox permission prompt if active
-            if let Some(idx) = sandbox_prompt_area_idx {
-                let prompt_area = areas[idx];
-                let prompt_lines =
-                    ui::prompts::render_sandbox_prompt(&self.safety_state.sandbox_blocked_path);
-                let prompt_widget = Paragraph::new(prompt_lines);
-                frame.render_widget(prompt_widget, prompt_area);
-            }
-
-            // Render survey if active
-            if let Some(idx) = survey_area_idx {
-                let survey_area = areas[idx];
-                let survey_lines = self.survey.render();
-                let survey_widget = Paragraph::new(survey_lines);
-                frame.render_widget(survey_widget, survey_area);
-            }
-
-            // Render Ctrl+C confirmation or queued message infobar if active
-            if let Some(idx) = infobar_area_idx {
-                let infobar_area = areas[idx];
-                let infobar_text = if !self.queued_messages.is_empty() {
-                    let count = self.queued_messages.len();
-                    let plural = if count == 1 { "message" } else { "messages" };
-                    format!(
-                        "{} {} in queue • ↑ to edit • Ctrl+C to cancel",
-                        count, plural
-                    )
-                } else if self.ctrl_c_pressed.is_some() {
-                    "Press Ctrl+C again to quit".to_string()
-                } else {
-                    String::new()
-                };
-                let infobar_widget = Paragraph::new(Line::from(Span::styled(
-                    infobar_text,
-                    Style::default().fg(Color::Rgb(172, 172, 212)),
-                )));
-                frame.render_widget(infobar_widget, infobar_area);
-            }
-
-            // Render autocomplete if active
-            if let Some(idx) = autocomplete_area_idx {
-                let autocomplete_area = areas[idx];
-                self.render_autocomplete(frame, autocomplete_area);
-            }
-
-            // Render background tasks panel OR task viewer if active (same area)
-            if let Some(idx) = background_tasks_area_idx {
-                let background_tasks_area = areas[idx];
-                if self.viewing_task.is_some() {
-                    self.render_task_viewer(frame, background_tasks_area);
-                } else {
-                    self.render_background_tasks(frame, background_tasks_area);
-                }
-            }
-
-            // Render help panel below input bar
-            if let Some(idx) = help_area_idx {
-                let help_area = areas[idx];
-                self.render_help_panel(frame, help_area);
-            }
-
-            if let Some(idx) = resume_area_idx {
-                let resume_area = areas[idx];
-                self.render_resume_panel(frame, resume_area);
-            }
-
-            if let Some(idx) = history_panel_area_idx {
-                let history_area = areas[idx];
-                self.render_history_panel(frame, history_area);
-            }
-
-            if let Some(idx) = rewind_area_idx {
-                let rewind_area = areas[idx];
-                self.render_rewind_panel(frame, rewind_area);
-            }
-
-            if let Some(idx) = todos_area_idx {
-                let todos_area = areas[idx];
-                self.render_todos_panel(frame, todos_area);
-            }
-
-            if let Some(idx) = model_selection_area_idx {
-                let model_area = areas[idx];
-                self.render_model_selection_panel(frame, model_area);
-            }
+            self.render_input_top_right_indicator(frame, input_area);
+            self.render_optional_draw_sections(frame, &areas, area_indices);
         }
     }
 }
