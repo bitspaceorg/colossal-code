@@ -64,6 +64,7 @@ fn main_wires_extracted_modules() {
         "mod commands;",
         "mod config_model_helpers;",
         "mod model_context;",
+        "mod pending_actions_reducer;",
         "mod slash_command_executor;",
         "mod spec_cli;",
         "mod spec_orchestrator_reducer;",
@@ -125,6 +126,42 @@ fn main_wires_extracted_modules() {
         submit_reducer.contains("fn parse_queue_choice"),
         "submit_message_reducer.rs should own parse_queue_choice"
     );
+
+    let pending_actions = read("src/pending_actions_reducer.rs");
+    assert!(
+        pending_actions.contains("fn process_pending_actions"),
+        "pending_actions_reducer.rs should own process_pending_actions"
+    );
+}
+
+#[test]
+fn pending_actions_reducer_owns_runtime_pending_branches() {
+    let main_rs = read("src/main.rs");
+    for forbidden in [
+        "if self.export_pending",
+        "if let Some(options) = self.review_pending.take()",
+        "if let Some(command) = self.spec_pending.take()",
+        "if let Some(goal) = self.orchestration_pending.take()",
+    ] {
+        assert!(
+            !main_rs.contains(forbidden),
+            "main.rs should not inline pending runtime branch: {forbidden}"
+        );
+    }
+
+    let reducer = read("src/pending_actions_reducer.rs");
+    for required in [
+        "fn process_pending_actions",
+        "if self.export_pending",
+        "if let Some(options) = self.review_pending.take()",
+        "if let Some(command) = self.spec_pending.take()",
+        "if let Some(goal) = self.orchestration_pending.take()",
+    ] {
+        assert!(
+            reducer.contains(required),
+            "pending_actions_reducer.rs should own pending runtime branch: {required}"
+        );
+    }
 }
 
 #[test]
