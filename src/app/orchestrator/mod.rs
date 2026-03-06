@@ -1,6 +1,10 @@
 pub mod control;
+pub mod events;
 pub mod lifecycle;
 pub mod labels;
 pub mod plan_view;
+pub mod plan_state;
 pub mod reducer;
+pub mod session_sync;
 pub mod session_manager;
+pub mod spec_loading;
