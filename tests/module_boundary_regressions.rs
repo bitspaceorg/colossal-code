@@ -60,24 +60,9 @@ fn main_wires_extracted_modules() {
     let main_rs = read("src/main.rs");
 
     for required in [
-        "mod state_domain;",
-        "mod commands;",
-        "mod config_model_helpers;",
-        "mod key_panel_dispatcher;",
-        "mod message_render_helpers;",
-        "mod model_context;",
-        "mod pending_actions_reducer;",
-        "mod session_subagent_render_helpers;",
-        "mod slash_command_executor;",
-        "mod spec_cli;",
-        "mod spec_orchestrator_reducer;",
-        "mod submit_message_reducer;",
-        "mod status_helpers;",
-        "mod ui;",
-        "mod ui_message_event;",
-        "pub mod spec_ui;",
-        "ui::prompts::render_approval_prompt",
-        "ui::prompts::render_sandbox_prompt",
+        "mod app;",
+        "app::render::panels::prompts::render_approval_prompt",
+        "app::render::panels::prompts::render_sandbox_prompt",
         "UiMessageEvent::parse",
     ] {
         assert!(
@@ -86,7 +71,7 @@ fn main_wires_extracted_modules() {
         );
     }
 
-    let spec_orch = read("src/spec_orchestrator_reducer.rs");
+    let spec_orch = read("src/app/orchestrator/reducer.rs");
     assert!(
         spec_orch.contains("spec_ui::build_spec_plan_lines"),
         "spec_orchestrator_reducer.rs should own spec plan wiring"
@@ -100,7 +85,7 @@ fn main_wires_extracted_modules() {
         "spec_orchestrator_reducer.rs should own load_spec"
     );
 
-    let slash_executor = read("src/slash_command_executor.rs");
+    let slash_executor = read("src/app/commands/slash.rs");
     assert!(
         slash_executor.contains("dispatch_slash_command"),
         "slash_command_executor.rs should own dispatch_slash_command wiring"
@@ -110,13 +95,13 @@ fn main_wires_extracted_modules() {
         "slash_command_executor.rs should own handle_slash_command"
     );
 
-    let config_helpers = read("src/config_model_helpers.rs");
+    let config_helpers = read("src/app/init/config.rs");
     assert!(
         config_helpers.contains("model_context::detect_context_length"),
-        "config_model_helpers.rs should own context token detection wiring"
+        "app/init/config.rs should own context token detection wiring"
     );
 
-    let submit_reducer = read("src/submit_message_reducer.rs");
+    let submit_reducer = read("src/app/commands/submit.rs");
     assert!(
         submit_reducer.contains("fn submit_message"),
         "submit_message_reducer.rs should own submit_message"
@@ -130,7 +115,7 @@ fn main_wires_extracted_modules() {
         "submit_message_reducer.rs should own parse_queue_choice"
     );
 
-    let pending_actions = read("src/pending_actions_reducer.rs");
+    let pending_actions = read("src/app/runtime/pending_actions.rs");
     assert!(
         pending_actions.contains("fn process_pending_actions"),
         "pending_actions_reducer.rs should own process_pending_actions"
@@ -152,7 +137,7 @@ fn pending_actions_reducer_owns_runtime_pending_branches() {
         );
     }
 
-    let reducer = read("src/pending_actions_reducer.rs");
+    let reducer = read("src/app/runtime/pending_actions.rs");
     for required in [
         "fn process_pending_actions",
         "if self.export_pending",
@@ -186,7 +171,7 @@ fn key_panel_dispatcher_owns_panel_specific_key_handlers() {
         "main.rs should dispatch panel keys through key_panel_dispatcher"
     );
 
-    let dispatcher = read("src/key_panel_dispatcher.rs");
+    let dispatcher = read("src/app/runtime/key_dispatch.rs");
     for required in [
         "fn handle_panel_dispatch_key",
         "fn handle_summary_history_panel_key",
@@ -218,7 +203,7 @@ fn submit_message_reducer_owns_submit_logic() {
         );
     }
 
-    let reducer = read("src/submit_message_reducer.rs");
+    let reducer = read("src/app/commands/submit.rs");
     for required in [
         "fn submit_message",
         "fn save_to_history",
@@ -248,7 +233,7 @@ fn state_domain_types_live_in_dedicated_module() {
         );
     }
 
-    let state_domain = read("src/state_domain.rs");
+    let state_domain = read("src/app/state/message.rs");
     for required in [
         "pub struct SubAgentContext",
         "pub enum MessageType",
@@ -257,7 +242,7 @@ fn state_domain_types_live_in_dedicated_module() {
     ] {
         assert!(
             state_domain.contains(required),
-            "state_domain.rs should own extracted state/domain type: {required}"
+            "app/state/message.rs should own extracted state/domain type: {required}"
         );
     }
 }
@@ -265,22 +250,15 @@ fn state_domain_types_live_in_dedicated_module() {
 #[test]
 fn commands_module_does_not_depend_on_ui_or_persistence_io() {
     assert_none_match(
-        "src/commands",
-        &[
-            "ratatui",
-            "ui::",
-            "persistence::",
-            "std::fs",
-            "tokio::fs",
-            "File::open",
-        ],
+        "src/app/commands",
+        &["ratatui", "ui::", "std::fs", "tokio::fs", "File::open"],
     );
 }
 
 #[test]
 fn persistence_module_does_not_depend_on_command_or_ui_logic() {
     assert_none_match(
-        "src/persistence",
+        "src/app/persistence",
         &[
             "dispatch_slash_command",
             "parse_slash_command",
@@ -294,7 +272,7 @@ fn persistence_module_does_not_depend_on_command_or_ui_logic() {
 #[test]
 fn ui_module_does_not_parse_slash_commands_or_write_persistence() {
     assert_none_match(
-        "src/ui",
+        "src/app/render",
         &[
             "dispatch_slash_command",
             "parse_slash_command",
@@ -309,7 +287,7 @@ fn ui_module_does_not_parse_slash_commands_or_write_persistence() {
 
 #[test]
 fn spec_cli_and_model_context_keep_narrow_dependencies() {
-    let spec_cli = read("src/spec_cli.rs");
+    let spec_cli = read("src/app/orchestrator/control.rs");
     for forbidden in [
         "dispatch_slash_command",
         "parse_slash_command",
@@ -318,11 +296,11 @@ fn spec_cli_and_model_context_keep_narrow_dependencies() {
     ] {
         assert!(
             !spec_cli.contains(forbidden),
-            "src/spec_cli.rs should not contain `{forbidden}`"
+            "src/app/orchestrator/control.rs should not contain `{forbidden}`"
         );
     }
 
-    let model_context = read("src/model_context.rs");
+    let model_context = read("src/app/init/model_context.rs");
     for forbidden in [
         "ratatui",
         "ui::",
@@ -331,7 +309,7 @@ fn spec_cli_and_model_context_keep_narrow_dependencies() {
     ] {
         assert!(
             !model_context.contains(forbidden),
-            "src/model_context.rs should not contain `{forbidden}`"
+            "src/app/init/model_context.rs should not contain `{forbidden}`"
         );
     }
 }
@@ -352,7 +330,7 @@ fn message_event_protocol_tokens_stay_in_ui_message_event_module() {
         );
     }
 
-    let events = read("src/ui_message_event.rs");
+    let events = read("src/app/state/ui_message_event.rs");
     for token in [
         "[THINKING_ANIMATION]",
         "[COMMAND:",
@@ -362,7 +340,7 @@ fn message_event_protocol_tokens_stay_in_ui_message_event_module() {
     ] {
         assert!(
             events.contains(token),
-            "ui_message_event.rs should own protocol token: {token}"
+            "app/state/ui_message_event.rs should own protocol token: {token}"
         );
     }
 }
@@ -372,10 +350,10 @@ fn prompt_text_stays_in_ui_prompts_module() {
     let main_rs = read("src/main.rs");
     assert!(
         !main_rs.contains("Interrupt and tell Nite what to do"),
-        "main.rs should delegate prompt copy to src/ui/prompts.rs"
+        "main.rs should delegate prompt copy to src/app/render/panels/prompts.rs"
     );
 
-    let prompts = read("src/ui/prompts.rs");
+    let prompts = read("src/app/render/panels/prompts.rs");
     assert!(prompts.contains("Interrupt and tell Nite what to do"));
     assert!(prompts.contains("Add "));
     assert!(prompts.contains(" to writable roots?"));
@@ -393,14 +371,14 @@ fn session_lifecycle_mapping_stays_in_dedicated_module() {
         "main.rs should not inline step status mapping logic"
     );
 
-    // Delegation to session_lifecycle now lives in spec_orchestrator_reducer
-    let spec_orch = read("src/spec_orchestrator_reducer.rs");
+    // Delegation to session_lifecycle now lives in app/orchestrator/reducer
+    let spec_orch = read("src/app/orchestrator/reducer.rs");
     assert!(
-        spec_orch.contains("session_lifecycle::update_session_for_step"),
-        "spec_orchestrator_reducer.rs should delegate session updates to session_lifecycle.rs"
+        spec_orch.contains("lifecycle::update_session_for_step"),
+        "app/orchestrator/reducer.rs should delegate session updates to session_lifecycle.rs"
     );
 
-    let lifecycle = read("src/session_lifecycle.rs");
+    let lifecycle = read("src/app/orchestrator/lifecycle.rs");
     assert!(lifecycle.contains("fn session_role_from_step_role"));
     assert!(lifecycle.contains("fn step_status_to_session_status"));
 }
@@ -417,12 +395,12 @@ fn spec_plan_rendering_logic_stays_in_spec_ui_module() {
         "main.rs should not own spec history copy"
     );
 
-    // spec_ui calls now live in spec_orchestrator_reducer
-    let spec_orch = read("src/spec_orchestrator_reducer.rs");
+    // spec_ui calls now live in app/orchestrator/reducer
+    let spec_orch = read("src/app/orchestrator/reducer.rs");
     assert!(spec_orch.contains("spec_ui::build_spec_plan_lines"));
     assert!(spec_orch.contains("spec_ui::build_tool_only_plan_lines"));
 
-    let spec_ui = read("src/spec_ui.rs");
+    let spec_ui = read("src/app/orchestrator/plan_view.rs");
     assert!(spec_ui.contains("No steps in this spec."));
     assert!(spec_ui.contains("History: no entries yet."));
 }
@@ -447,7 +425,7 @@ fn survey_feedback_copy_stays_in_survey_module() {
         "main.rs should not own survey helper copy"
     );
 
-    let survey = read("src/survey.rs");
+    let survey = read("src/app/render/panels/survey.rs");
     assert!(survey.contains("Thanks for making Nite better"));
     assert!(survey.contains("(use /feedback to give suggestions or bug reports)"));
 }
@@ -467,7 +445,7 @@ fn message_rendering_helpers_live_in_dedicated_module() {
         );
     }
 
-    let helpers = read("src/message_render_helpers.rs");
+    let helpers = read("src/app/render/messages.rs");
     for required in [
         "fn render_message_with_max_width(",
         "fn render_agent_message_with_bullet(",
@@ -495,7 +473,7 @@ fn session_sub_agent_rendering_helpers_live_in_dedicated_module() {
         );
     }
 
-    let helpers = read("src/session_subagent_render_helpers.rs");
+    let helpers = read("src/app/render/panels/task_viewer.rs");
     for required in [
         "fn render_session_window_with_agent_ui(",
         "fn render_sub_agent_fullscreen(",

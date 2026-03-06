@@ -23,45 +23,19 @@ use std::{
 use tokio::{sync::mpsc, task};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-mod rich_editor;
-use rich_editor::{RichEditor, ThinkingContext, create_rich_content_from_messages};
-mod survey;
-use survey::Survey;
-mod session_manager;
-pub use session_manager::{OrchestratorEntry, Session, SessionManager, SessionRole, SessionStatus};
-mod agent_stream_reducer;
-mod app_constructor;
-mod command_runtime;
-mod commands;
-mod config_model_helpers;
-mod draw_internal_render_helpers;
-mod git_ops;
-mod input_helpers;
-mod key_panel_dispatcher;
-mod message_render_helpers;
-mod model_context;
-mod panel_renderers;
-mod pending_actions_reducer;
-mod persistence;
-mod persistence_helpers;
-mod rewind_compaction_helpers;
-mod session_lifecycle;
-mod session_subagent_render_helpers;
-mod slash_command_executor;
-mod spec_cli;
-mod spec_orchestrator_reducer;
-mod startup;
-mod state_domain;
-mod status_helpers;
-mod submit_message_reducer;
-mod ui;
-mod ui_message_event;
-use commands::ReviewOptions;
-use startup::{Phase, tips};
-pub(crate) use state_domain::*;
-use ui::thinking::{create_thinking_highlight_spans, encode_generation_stats_message};
-pub(crate) use ui_message_event::UiMessageEvent;
-pub mod spec_ui;
+use app::input::vim_sync::{RichEditor, ThinkingContext, create_rich_content_from_messages};
+mod app;
+use app::render::panels::survey::Survey;
+pub use app::orchestrator::session_manager::{
+    OrchestratorEntry, Session, SessionManager, SessionRole, SessionStatus,
+};
+use app::render::thinking::{create_thinking_highlight_spans, encode_generation_stats_message};
+use app::init::model_context;
+use app::persistence;
+use app::commands::ReviewOptions;
+use app::init::startup::{Phase, tips};
+pub(crate) use app::state::message::*;
+pub(crate) use app::state::ui_message_event::UiMessageEvent;
 
 /// Custom border set for messages
 const MESSAGE_BORDER_SET: symbols::border::Set = symbols::border::Set {
@@ -186,7 +160,17 @@ impl HelpTab {
 }
 
 #[cfg(test)]
-mod main_tests;
+#[path = "../tests/unit/assistant_mode.rs"]
+mod assistant_mode_tests;
+#[cfg(test)]
+#[path = "../tests/unit/sub_agent_context.rs"]
+mod sub_agent_context_tests;
+#[cfg(test)]
+#[path = "../tests/unit/queue_and_vectors.rs"]
+mod queue_and_vectors_tests;
+#[cfg(test)]
+#[path = "../tests/unit/model_and_helpers.rs"]
+mod model_and_helpers_tests;
 
 /// AI Assistant modes (cycled with Shift+Tab)
 #[derive(Clone, Copy, PartialEq)]
@@ -232,7 +216,7 @@ impl AssistantMode {
 }
 #[tokio::main]
 async fn main() -> Result<()> {
-    startup::run().await
+    app::init::startup::run().await
 }
 /// Application state for the TUI
 struct App {
@@ -380,7 +364,7 @@ struct App {
     orchestrator_control: Option<OrchestratorControl>, // Control handle for pause/resume/abort
     orchestrator_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<OrchestratorEvent>>,
     orchestrator_task: Option<task::JoinHandle<()>>, // Background task running orchestrator
-    orchestrator_sessions: HashMap<String, session_manager::OrchestratorEntry>,
+    orchestrator_sessions: HashMap<String, OrchestratorEntry>,
     orchestrator_history: Vec<TaskSummary>, // History of completed task summaries
     latest_summaries: HashMap<String, TaskSummary>, // Latest summary per step index
     orchestrator_paused: bool,              // Whether orchestrator is currently paused
@@ -407,11 +391,11 @@ impl App {
 
     fn get_history_file_path() -> Result<std::path::PathBuf> {
         let cwd = std::env::current_dir()?;
-        persistence::history::history_file_path_for_cwd(&cwd)
+        app::persistence::history::history_file_path_for_cwd(&cwd)
     }
 
     fn load_history(history_file: &std::path::Path) -> Vec<String> {
-        persistence::history::load_history(history_file)
+        app::persistence::history::load_history(history_file)
     }
 
     /// Recursively parse a TodoItem from JSON
@@ -602,6 +586,8 @@ impl App {
     }
 
     async fn save_conversation(&mut self) -> Result<()> {
+        self.reconcile_message_vectors();
+
         if self.messages.is_empty() {
             return Ok(());
         }
@@ -621,7 +607,7 @@ impl App {
                 .message_types
                 .get(i)
                 .cloned()
-                .unwrap_or(MessageType::Agent);
+                .unwrap_or(MessageType::User);
             let message_state = self
                 .message_states
                 .get(i)
@@ -841,6 +827,7 @@ impl App {
         while !self.exit {
             self.update_animation();
             self.survey.update(); // Update survey state (auto-dismiss thank you message)
+            self.reconcile_message_vectors();
 
             // Process agent messages if available
             let outcome = self.drain_agent_rx();
@@ -933,7 +920,16 @@ impl App {
                             self.update_autocomplete();
                         }
                     }
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    Event::Key(key)
+                        if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                    {
+                        if std::env::var("NITE_DEBUG_KEYS").ok().as_deref() == Some("1") {
+                            eprintln!(
+                                "[NITE KEY] code={:?} modifiers={:?} kind={:?} state={:?}",
+                                key.code, key.modifiers, key.kind, key.state
+                            );
+                        }
+
                         match self.mode {
                             Mode::Normal => {
                                 if self.handle_panel_dispatch_key(&key) {
@@ -1756,6 +1752,44 @@ impl App {
         *rendered_flag = false;
     }
 
+    fn reconcile_message_vectors(&mut self) {
+        Self::reconcile_message_vectors_fields(
+            &self.messages,
+            &mut self.message_types,
+            &mut self.message_states,
+            &mut self.message_metadata,
+            &mut self.message_timestamps,
+        );
+    }
+
+    fn reconcile_message_vectors_fields(
+        messages: &[String],
+        message_types: &mut Vec<MessageType>,
+        message_states: &mut Vec<MessageState>,
+        message_metadata: &mut Vec<Option<UIMessageMetadata>>,
+        message_timestamps: &mut Vec<SystemTime>,
+    ) {
+        let target_len = messages.len();
+
+        while message_types.len() < target_len {
+            message_types.push(MessageType::User);
+        }
+        while message_states.len() < target_len {
+            message_states.push(MessageState::Sent);
+        }
+        while message_metadata.len() < target_len {
+            message_metadata.push(None);
+        }
+        while message_timestamps.len() < target_len {
+            message_timestamps.push(SystemTime::now());
+        }
+
+        message_types.truncate(target_len);
+        message_states.truncate(target_len);
+        message_metadata.truncate(target_len);
+        message_timestamps.truncate(target_len);
+    }
+
     fn ensure_generation_stats_marker_fields(
         messages: &mut Vec<String>,
         message_types: &mut Vec<MessageType>,
@@ -2130,11 +2164,11 @@ impl App {
     }
 
     fn render_approval_prompt_lines<'a>(&'a self) -> Vec<Line<'a>> {
-        ui::prompts::render_approval_prompt(&self.safety_state.approval_prompt_content)
+        app::render::panels::prompts::render_approval_prompt(&self.safety_state.approval_prompt_content)
     }
 
     fn render_sandbox_prompt_lines<'a>(&'a self) -> Vec<Line<'a>> {
-        ui::prompts::render_sandbox_prompt(&self.safety_state.sandbox_blocked_path)
+        app::render::panels::prompts::render_sandbox_prompt(&self.safety_state.sandbox_blocked_path)
     }
 
     fn center_horizontal(area: ratatui::layout::Rect, width: u16) -> ratatui::layout::Rect {
@@ -2144,7 +2178,7 @@ impl App {
         area
     }
     fn render_autocomplete(&self, frame: &mut Frame, autocomplete_area: ratatui::layout::Rect) {
-        ui::autocomplete::render_autocomplete(
+        app::input::autocomplete::render_autocomplete(
             frame,
             autocomplete_area,
             &self.autocomplete_suggestions,
@@ -2635,7 +2669,7 @@ impl App {
                     wrap_width,
                     &thinking_context,
                 );
-                let plain_content = rich_editor::create_plain_content_for_editor(
+                let plain_content = app::input::vim_sync::create_plain_content_for_editor(
                     &messages_with_stats,
                     &message_types_with_stats,
                     tips(),
