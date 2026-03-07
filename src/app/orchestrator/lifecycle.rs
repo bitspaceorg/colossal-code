@@ -2,7 +2,9 @@ use std::{collections::HashMap, time::Instant};
 
 use agent_core::{StepStatus, orchestrator::StepRole};
 
-use crate::app::orchestrator::session_manager::{OrchestratorEntry, SessionManager, SessionRole, SessionStatus};
+use crate::app::orchestrator::session_manager::{
+    OrchestratorEntry, SessionManager, SessionRole, SessionStatus,
+};
 
 pub(crate) fn update_session_for_step(
     orchestrator_sessions: &mut HashMap<String, OrchestratorEntry>,

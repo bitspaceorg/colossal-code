@@ -4,8 +4,8 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::state::message::AgentConnector;
 use crate::app::render::thinking::create_thinking_highlight_spans;
+use crate::app::state::message::AgentConnector;
 use crate::{App, MESSAGE_BORDER_SET, SUMMARY_BANNER_PREFIX, UiMessageEvent};
 
 impl App {
@@ -226,13 +226,14 @@ impl App {
             ])]);
         }
 
-        if is_agent && let Some(UiMessageEvent::GenerationStats {
-            tokens_per_sec,
-            completion_tokens,
-            prompt_tokens,
-            time_to_first_token_sec,
-            stop_reason,
-        }) = parsed_event.as_ref()
+        if is_agent
+            && let Some(UiMessageEvent::GenerationStats {
+                tokens_per_sec,
+                completion_tokens,
+                prompt_tokens,
+                time_to_first_token_sec,
+                stop_reason,
+            }) = parsed_event.as_ref()
         {
             let stats_text = format!(
                 " {:.2} tok/sec • {} completion • {} prompt • {:.2}s to first token • Stop reason: {}",
@@ -313,11 +314,12 @@ impl App {
             return Text::from(vec![Line::from(spans)]);
         }
 
-        if is_agent && let Some(UiMessageEvent::ToolCallCompleted {
-            tool_name,
-            args,
-            result,
-        }) = parsed_event.as_ref()
+        if is_agent
+            && let Some(UiMessageEvent::ToolCallCompleted {
+                tool_name,
+                args,
+                result,
+            }) = parsed_event.as_ref()
         {
             let trimmed = result.trim().to_ascii_lowercase();
             let success = !(trimmed.starts_with("error") || trimmed == "failed");

@@ -3,7 +3,7 @@ use color_eyre::Result;
 
 use crate::app::render::panels::survey::SurveyQuestion;
 use crate::app::state::ui_message_event::UiMessageEvent;
-use crate::{persistence, App, MessageState, MessageType};
+use crate::{App, MessageState, MessageType, persistence};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QueueChoiceAction {
@@ -44,8 +44,10 @@ impl App {
         }
 
         // Write to file - escape newlines and backslashes
-        let _ =
-            crate::app::persistence::history::save_history(&self.history_file_path, &self.command_history);
+        let _ = crate::app::persistence::history::save_history(
+            &self.history_file_path,
+            &self.command_history,
+        );
     }
 
     /// Ensure conversation ID exists, generating one if needed
@@ -100,8 +102,7 @@ impl App {
                         }
 
                         // Store message to send after cancel completes
-                        self.agent_state.interrupt_pending =
-                            Some(self.queue_choice_input.clone());
+                        self.agent_state.interrupt_pending = Some(self.queue_choice_input.clone());
 
                         // Clear UI state immediately
                         if let Some(last_msg) = self.messages.last() {
@@ -215,8 +216,7 @@ impl App {
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
                         self.messages.push(
-                            " ⎿ The agent can now write to this path. Continuing..."
-                                .to_string(),
+                            " ⎿ The agent can now write to this path. Continuing...".to_string(),
                         );
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);

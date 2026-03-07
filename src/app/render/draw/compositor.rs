@@ -79,7 +79,10 @@ impl App {
         let (mode, cursor_row, cursor_col, scroll_offset) = if self.phase == Phase::Input
             && areas.len() >= min_areas
         {
-            if spec_tree_view_active || self.mode == Mode::Normal || self.mode == Mode::SessionWindow {
+            if spec_tree_view_active
+                || self.mode == Mode::Normal
+                || self.mode == Mode::SessionWindow
+            {
                 (Mode::Normal, 0, 0, 0)
             } else {
                 let cursor_row = self.editor.state.cursor.row;
@@ -99,12 +102,16 @@ impl App {
                     let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
                     let connector = self.agent_connector_for_index(message_types, idx);
                     message_lines.extend(
-                        self.render_message_with_max_width(message, max_width, None, is_agent, connector)
-                            .lines,
+                        self.render_message_with_max_width(
+                            message, max_width, None, is_agent, connector,
+                        )
+                        .lines,
                     );
                 }
 
-                if let Some(stats) = self.get_generation_stats() && stats.stop_reason != "tool_calls" {
+                if let Some(stats) = self.get_generation_stats()
+                    && stats.stop_reason != "tool_calls"
+                {
                     let stats_text = format!(
                         " {:.2} tok/sec • {} completion • {} prompt • {:.2}s to first token • Stop reason: {}",
                         stats.avg_completion_tok_per_sec,
@@ -155,7 +162,10 @@ impl App {
         if self.phase == Phase::Input && areas.len() >= min_areas {
             let messages_area = areas[messages_area_idx];
             let input_area = areas[area_indices.input_area_idx];
-            if spec_tree_view_active || self.mode == Mode::Normal || self.mode == Mode::SessionWindow {
+            if spec_tree_view_active
+                || self.mode == Mode::Normal
+                || self.mode == Mode::SessionWindow
+            {
                 let max_width = messages_area.width.saturating_sub(4) as usize;
                 let message_lines = {
                     let mut lines = Vec::new();
@@ -171,12 +181,16 @@ impl App {
                         let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
                         let connector = self.agent_connector_for_index(message_types, idx);
                         lines.extend(
-                            self.render_message_with_max_width(message, max_width, None, is_agent, connector)
-                                .lines,
+                            self.render_message_with_max_width(
+                                message, max_width, None, is_agent, connector,
+                            )
+                            .lines,
                         );
                     }
 
-                    if let Some(stats) = self.get_generation_stats() && stats.stop_reason != "tool_calls" {
+                    if let Some(stats) = self.get_generation_stats()
+                        && stats.stop_reason != "tool_calls"
+                    {
                         let stats_text = format!(
                             " {:.2} tok/sec • {} completion • {} prompt • {:.2}s to first token • Stop reason: {}",
                             stats.avg_completion_tok_per_sec,
@@ -217,7 +231,8 @@ impl App {
                             self.thinking_position
                         };
 
-                        let color_spans = create_thinking_highlight_spans(&text_with_dots, position);
+                        let color_spans =
+                            create_thinking_highlight_spans(&text_with_dots, position);
                         let elapsed = if snapshot.thinking_indicator_active {
                             snapshot.thinking_elapsed_secs
                         } else {
@@ -234,7 +249,10 @@ impl App {
                         };
 
                         let mut spans = vec![
-                            Span::styled(current_frame, Style::default().fg(Color::Rgb(255, 165, 0))),
+                            Span::styled(
+                                current_frame,
+                                Style::default().fg(Color::Rgb(255, 165, 0)),
+                            ),
                             Span::raw(" "),
                         ];
                         for (text, color) in color_spans {
@@ -261,7 +279,8 @@ impl App {
                 } else {
                     total_lines.saturating_sub(visible_lines)
                 };
-                let messages_widget = Paragraph::new(Text::from(message_lines)).scroll((scroll_offset as u16, 0));
+                let messages_widget =
+                    Paragraph::new(Text::from(message_lines)).scroll((scroll_offset as u16, 0));
                 frame.render_widget(messages_widget, messages_area);
 
                 let prompt_spans: Vec<Span> = vec![
@@ -363,11 +382,13 @@ impl App {
                 } else {
                     0
                 };
-                let input = Paragraph::new(Text::from(lines)).scroll((scroll_y, 0)).block(
-                    ratatui::widgets::Block::bordered()
-                        .border_type(ratatui::widgets::BorderType::Rounded)
-                        .border_style(Style::default().fg(self.get_mode_border_color())),
-                );
+                let input = Paragraph::new(Text::from(lines))
+                    .scroll((scroll_y, 0))
+                    .block(
+                        ratatui::widgets::Block::bordered()
+                            .border_type(ratatui::widgets::BorderType::Rounded)
+                            .border_style(Style::default().fg(self.get_mode_border_color())),
+                    );
                 frame.render_widget(input, input_area);
 
                 let visible_cursor_row = cursor_row.saturating_sub(scroll_y);

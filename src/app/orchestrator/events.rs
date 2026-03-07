@@ -1,8 +1,10 @@
-use agent_core::{StepStatus, VerificationStatus, orchestrator::{OrchestratorEvent, SubAgentMessage}};
+use agent_core::{
+    StepStatus, VerificationStatus,
+    orchestrator::{OrchestratorEvent, SubAgentMessage},
+};
 
 use crate::{
-    App, MessageState, MessageType, SessionRole, StepToolCallEntry, SubAgentContext,
-    ToolCallStatus,
+    App, MessageState, MessageType, SessionRole, StepToolCallEntry, SubAgentContext, ToolCallStatus,
 };
 
 impl App {
@@ -125,10 +127,7 @@ impl App {
         Self::format_tool_result_fallback(result_yaml)
     }
 
-    fn format_success_tool_result(
-        tool_name: &str,
-        obj: &serde_yaml::Mapping,
-    ) -> Option<String> {
+    fn format_success_tool_result(tool_name: &str, obj: &serde_yaml::Mapping) -> Option<String> {
         match tool_name {
             "read_file" => obj
                 .get(serde_yaml::Value::String("content".to_string()))
@@ -211,7 +210,10 @@ impl App {
         if let Some(msg) = obj
             .get(serde_yaml::Value::String("message".to_string()))
             .and_then(|v| v.as_str())
-            && !msg.is_empty() && msg != "|+" && msg != "|-" && msg != "|"
+            && !msg.is_empty()
+            && msg != "|+"
+            && msg != "|-"
+            && msg != "|"
         {
             return format!("Error: {}", msg);
         }
@@ -386,9 +388,10 @@ impl App {
                 status,
             ),
             OrchestratorEvent::SummaryUpdated { summary } => self.handle_summary_updated(summary),
-            OrchestratorEvent::VerifierFailed { summary, feedback: _ } => {
-                self.handle_verifier_failed(summary)
-            }
+            OrchestratorEvent::VerifierFailed {
+                summary,
+                feedback: _,
+            } => self.handle_verifier_failed(summary),
             OrchestratorEvent::ChildSpecPushed {
                 parent_step_index,
                 child_spec_id: _,
@@ -459,13 +462,7 @@ impl App {
         }
 
         self.sync_session_for_step(
-            spec_id,
-            spec_title,
-            prefix,
-            step_index,
-            step_title,
-            status,
-            role,
+            spec_id, spec_title, prefix, step_index, step_title, status, role,
         );
         self.update_active_step_prefix_for_status(prefix, status);
         self.status_message = Some(format!(
@@ -482,7 +479,10 @@ impl App {
             VerificationStatus::Failed => "failed",
             VerificationStatus::Pending => "pending",
         };
-        self.status_message = Some(format!("Step {} summary {}", summary.step_index, status_str));
+        self.status_message = Some(format!(
+            "Step {} summary {}",
+            summary.step_index, status_str
+        ));
     }
 
     fn handle_verifier_failed(&mut self, summary: agent_core::TaskSummary) {
@@ -503,7 +503,8 @@ impl App {
         } else {
             None
         };
-        let label = planned_label.unwrap_or_else(|| Self::describe_tool_call(&tool_name, &arguments));
+        let label =
+            planned_label.unwrap_or_else(|| Self::describe_tool_call(&tool_name, &arguments));
         let entry_id = self.next_tool_call_id;
         self.next_tool_call_id = self.next_tool_call_id.saturating_add(1);
 

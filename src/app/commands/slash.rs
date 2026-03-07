@@ -1,10 +1,10 @@
 use agent_core::AgentMessage;
 
-use crate::app::runtime::r#loop::{apply_command_runtime_route, route_command_runtime};
 use crate::app::commands::{SlashCommandDispatch, dispatch_slash_command};
 use crate::app::orchestrator::control::{
     MessageLog, SpecAgentBridge, SpecCliContext, SpecCliHandler, SpecCommandResult,
 };
+use crate::app::runtime::r#loop::{apply_command_runtime_route, route_command_runtime};
 use crate::{
     App, AssistantMode, HelpTab, MAX_AUTO_SUMMARIZE_THRESHOLD, MIN_AUTO_SUMMARIZE_THRESHOLD,
     MessageState, MessageType, UiMessageEvent,
@@ -369,8 +369,8 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::runtime::r#loop::route_command_runtime;
     use crate::app::commands::{SlashCommandDispatch, dispatch_slash_command};
+    use crate::app::runtime::r#loop::route_command_runtime;
 
     #[test]
     fn slash_dispatch_clear_routes_to_none() {

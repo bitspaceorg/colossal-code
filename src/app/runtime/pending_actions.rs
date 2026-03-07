@@ -5,9 +5,9 @@ use clipboard::{ClipboardContext, ClipboardProvider};
 use color_eyre::Result;
 
 use crate::app::runtime::agent_stream::AgentStreamOutcome;
+use crate::app::runtime::git_ops;
 use crate::app::state::message::{MessageState, MessageType};
 use crate::app::state::ui_message_event::UiMessageEvent;
-use crate::app::runtime::git_ops;
 use crate::{App, CompactOptions};
 
 impl App {
@@ -284,7 +284,8 @@ impl App {
 
             if self.resume_selected < self.resume_conversations.len() {
                 // Auto-save current conversation before loading a new one
-                if self.persistence_state.current_conversation_id.is_some() && !self.messages.is_empty()
+                if self.persistence_state.current_conversation_id.is_some()
+                    && !self.messages.is_empty()
                 {
                     if let Err(e) = self.save_conversation().await {
                         self.messages.push(format!(

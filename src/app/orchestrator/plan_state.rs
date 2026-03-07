@@ -2,9 +2,9 @@ use agent_core::{SpecStep, TaskSummary};
 use ratatui::{layout::Rect, text::Line};
 use std::collections::HashMap;
 
+use crate::App;
 use crate::app::orchestrator::plan_view as spec_ui;
 use crate::app::render::thinking::create_thinking_highlight_spans;
-use crate::App;
 
 impl App {
     pub(crate) fn reset_orchestrator_views(&mut self) {
@@ -182,7 +182,9 @@ impl App {
 
     pub(crate) fn build_spec_plan_lines(&self, max_width: usize) -> Vec<Line<'static>> {
         if let Some(spec) = &self.current_spec {
-            let selected_index = self.spec_pane_selected.min(spec.steps.len().saturating_sub(1));
+            let selected_index = self
+                .spec_pane_selected
+                .min(spec.steps.len().saturating_sub(1));
             return spec_ui::build_spec_plan_lines(
                 spec,
                 spec_ui::SpecPlanRenderParams {

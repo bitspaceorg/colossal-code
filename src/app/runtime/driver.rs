@@ -26,15 +26,16 @@ impl App {
 
         let outcome = self.drain_agent_rx();
 
-        let orchestrator_events: Vec<OrchestratorEvent> = if let Some(rx) = &mut self.orchestrator_event_rx {
-            let mut events = Vec::new();
-            while let Ok(event) = rx.try_recv() {
-                events.push(event);
-            }
-            events
-        } else {
-            Vec::new()
-        };
+        let orchestrator_events: Vec<OrchestratorEvent> =
+            if let Some(rx) = &mut self.orchestrator_event_rx {
+                let mut events = Vec::new();
+                while let Ok(event) = rx.try_recv() {
+                    events.push(event);
+                }
+                events
+            } else {
+                Vec::new()
+            };
         for event in orchestrator_events {
             self.handle_orchestrator_event(event);
         }

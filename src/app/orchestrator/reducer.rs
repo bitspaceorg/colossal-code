@@ -1,11 +1,11 @@
 use agent_core::{
-    orchestrator::{OrchestratorEvent, StepRole},
     StepStatus,
+    orchestrator::{OrchestratorEvent, StepRole},
 };
 use color_eyre::Result;
 
-use crate::app::orchestrator::lifecycle;
 use crate::App;
+use crate::app::orchestrator::lifecycle;
 
 impl App {
     pub(crate) fn handle_orchestrator_event(&mut self, event: OrchestratorEvent) {

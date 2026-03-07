@@ -1,7 +1,7 @@
 use color_eyre::Result;
 
 use crate::{
-    persistence, App, ConversationMetadata, EnhancedSavedConversation, SavedConversation, TodoItem,
+    App, ConversationMetadata, EnhancedSavedConversation, SavedConversation, TodoItem, persistence,
 };
 
 impl App {

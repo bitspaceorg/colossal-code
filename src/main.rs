@@ -1,4 +1,5 @@
 use agent_core::{AgentMessage, GenerationStats as AgentGenerationStats};
+use app::input::vim_sync::RichEditor;
 use color_eyre::Result;
 use ratatui::{
     Frame,
@@ -7,20 +8,17 @@ use ratatui::{
     symbols,
     text::{Line, Span},
 };
-use std::{
-    time::{Instant, SystemTime},
-};
-use app::input::vim_sync::RichEditor;
+use std::time::{Instant, SystemTime};
 mod app;
-use app::render::panels::survey::Survey;
+use app::commands::ReviewOptions;
+use app::init::model_context;
+use app::init::startup::Phase;
 pub use app::orchestrator::session_manager::{
     OrchestratorEntry, Session, SessionManager, SessionRole, SessionStatus,
 };
-use app::render::thinking::{create_thinking_highlight_spans, encode_generation_stats_message};
-use app::init::model_context;
 use app::persistence;
-use app::commands::ReviewOptions;
-use app::init::startup::Phase;
+use app::render::panels::survey::Survey;
+use app::render::thinking::{create_thinking_highlight_spans, encode_generation_stats_message};
 pub(crate) use app::state::message::*;
 pub(crate) use app::state::ui_message_event::UiMessageEvent;
 
@@ -114,14 +112,14 @@ const APPROX_CHARS_PER_TOKEN: usize = 4;
 #[path = "../tests/unit/assistant_mode.rs"]
 mod assistant_mode_tests;
 #[cfg(test)]
-#[path = "../tests/unit/sub_agent_context.rs"]
-mod sub_agent_context_tests;
+#[path = "../tests/unit/model_and_helpers.rs"]
+mod model_and_helpers_tests;
 #[cfg(test)]
 #[path = "../tests/unit/queue_and_vectors.rs"]
 mod queue_and_vectors_tests;
 #[cfg(test)]
-#[path = "../tests/unit/model_and_helpers.rs"]
-mod model_and_helpers_tests;
+#[path = "../tests/unit/sub_agent_context.rs"]
+mod sub_agent_context_tests;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -653,7 +651,9 @@ impl App {
     }
 
     fn render_approval_prompt_lines<'a>(&'a self) -> Vec<Line<'a>> {
-        app::render::panels::prompts::render_approval_prompt(&self.safety_state.approval_prompt_content)
+        app::render::panels::prompts::render_approval_prompt(
+            &self.safety_state.approval_prompt_content,
+        )
     }
 
     fn render_sandbox_prompt_lines<'a>(&'a self) -> Vec<Line<'a>> {
@@ -674,5 +674,4 @@ impl App {
             self.autocomplete_selected_index,
         );
     }
-
 }

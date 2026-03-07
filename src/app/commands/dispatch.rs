@@ -1,5 +1,5 @@
-use super::parse::{parse_slash_command, ParsedSlashCommand};
 use super::ReviewOptions;
+use super::parse::{ParsedSlashCommand, parse_slash_command};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SlashCommandDispatch {
@@ -58,7 +58,7 @@ pub(crate) fn dispatch_slash_command(command: &str) -> SlashCommandDispatch {
 
 #[cfg(test)]
 mod tests {
-    use super::{dispatch_slash_command, SlashCommandDispatch};
+    use super::{SlashCommandDispatch, dispatch_slash_command};
     use crate::app::commands::ReviewType;
 
     #[test]

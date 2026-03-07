@@ -1,4 +1,7 @@
-use agent_core::{SpecSheet, SpecStep, orchestrator::{Orchestrator, OrchestratorAgent, OrchestratorEvent}};
+use agent_core::{
+    SpecSheet, SpecStep,
+    orchestrator::{Orchestrator, OrchestratorAgent, OrchestratorEvent},
+};
 use color_eyre::Result;
 use std::sync::Arc;
 use tokio::{sync::mpsc, task};

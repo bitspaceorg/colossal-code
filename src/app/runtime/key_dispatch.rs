@@ -10,8 +10,7 @@ use crate::{App, SLASH_COMMANDS};
 impl App {
     fn is_shift_tab(key: &KeyEvent) -> bool {
         matches!(key.code, KeyCode::BackTab)
-            || (matches!(key.code, KeyCode::Tab)
-                && key.modifiers.contains(KeyModifiers::SHIFT))
+            || (matches!(key.code, KeyCode::Tab) && key.modifiers.contains(KeyModifiers::SHIFT))
     }
 
     pub(crate) fn handle_panel_dispatch_key(&mut self, key: &KeyEvent) -> bool {

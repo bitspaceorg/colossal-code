@@ -73,7 +73,9 @@ pub(crate) fn build_spec_step_lines(
         return lines;
     }
 
-    let bounded_index = params.selected_index.min(spec.steps.len().saturating_sub(1));
+    let bounded_index = params
+        .selected_index
+        .min(spec.steps.len().saturating_sub(1));
     let selected_prefix = spec.steps.get(bounded_index).map(|step| step.index.clone());
     let context = StepRenderContext {
         selected_prefix: selected_prefix.as_deref(),
@@ -305,7 +307,10 @@ fn append_drawer_lines(
         )]));
         for criterion in &step.acceptance_criteria {
             lines.push(Line::from(vec![
-                Span::styled(format!("{}• ", indent), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}• ", indent),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled(
                     trim_to_width(criterion, available),
                     Style::default().fg(Color::White),
@@ -331,7 +336,10 @@ fn append_drawer_lines(
 
     if let Some(summary) = latest_summaries.get(&step.index) {
         lines.push(Line::from(vec![
-            Span::styled(format!("{}Latest: ", indent), Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{}Latest: ", indent),
+                Style::default().fg(Color::Gray),
+            ),
             Span::styled(
                 trim_to_width(&summary.summary_text, available),
                 Style::default().fg(Color::White),
@@ -345,8 +353,14 @@ fn append_drawer_lines(
                 .collect::<Vec<_>>()
                 .join(", ");
             lines.push(Line::from(vec![
-                Span::styled(format!("{}Tests: ", indent), Style::default().fg(Color::Gray)),
-                Span::styled(trim_to_width(&tests, available), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{}Tests: ", indent),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(
+                    trim_to_width(&tests, available),
+                    Style::default().fg(Color::White),
+                ),
             ]));
         }
         if !summary.artifacts_touched.is_empty() {
@@ -374,7 +388,10 @@ fn append_drawer_lines(
         for feedback in &summary.verification.feedback {
             let message = format!("{}: {}", feedback.author, feedback.message);
             lines.push(Line::from(vec![
-                Span::styled(format!("{}• ", indent), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}• ", indent),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled(
                     trim_to_width(&message, available),
                     Style::default().fg(Color::White),

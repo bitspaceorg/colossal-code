@@ -113,7 +113,9 @@ impl App {
         if key.code == KeyCode::Esc
             && (self.agent_state.agent_processing || self.thinking_indicator_active)
         {
-            if let Some((current_summary, token_count, chunk_count)) = self.thinking_current_summary.take() {
+            if let Some((current_summary, token_count, chunk_count)) =
+                self.thinking_current_summary.take()
+            {
                 if let Some(last_msg) = self.messages.last()
                     && matches!(
                         UiMessageEvent::parse(last_msg),
@@ -406,7 +408,8 @@ impl App {
                     && self.background_tasks_selected < self.background_tasks.len()
                 {
                     let task = &self.background_tasks[self.background_tasks_selected];
-                    self.viewing_task = Some((task.0.clone(), task.1.clone(), task.2.clone(), task.3));
+                    self.viewing_task =
+                        Some((task.0.clone(), task.1.clone(), task.2.clone(), task.3));
                     self.show_background_tasks = false;
                 }
             }
@@ -425,7 +428,9 @@ impl App {
                     self.submit_message();
                 }
             }
-            KeyCode::Char(to_insert) if self.phase == Phase::Input && !self.show_background_tasks => {
+            KeyCode::Char(to_insert)
+                if self.phase == Phase::Input && !self.show_background_tasks =>
+            {
                 self.handle_input_char_key(key, to_insert);
             }
             KeyCode::Backspace if self.phase == Phase::Input && !self.show_background_tasks => {
@@ -534,7 +539,8 @@ impl App {
                         .lines
                         .len_col(self.editor.state.cursor.row)
                         .unwrap_or(0);
-                    self.editor.state.cursor.col = current_col.min(line_len.saturating_sub(1).max(0));
+                    self.editor.state.cursor.col =
+                        current_col.min(line_len.saturating_sub(1).max(0));
                 }
                 self.mode = Mode::Navigation;
                 self.command_input.clear();
@@ -578,7 +584,8 @@ impl App {
                             self.mode = Mode::Normal;
                             self.cached_mode_content = None;
                         } else {
-                            self.status_message = Some(format!("No activity yet for: {}", session.name));
+                            self.status_message =
+                                Some(format!("No activity yet for: {}", session.name));
                         }
                     } else {
                         self.expanded_sub_agent = None;
@@ -595,10 +602,14 @@ impl App {
                     .map(|s| (s.name.clone(), s.group.clone()));
                 if let Some((name, group)) = session_info {
                     if group.as_deref() == Some("orchestrator") {
-                        self.status_message = Some("Cannot detach orchestrator sessions".to_string());
+                        self.status_message =
+                            Some("Cannot detach orchestrator sessions".to_string());
                     } else {
                         self.session_manager.toggle_detach();
-                        let badge = self.session_manager.get_selected_status_badge().unwrap_or("");
+                        let badge = self
+                            .session_manager
+                            .get_selected_status_badge()
+                            .unwrap_or("");
                         self.status_message = Some(format!("Session {} {}", name, badge));
                     }
                 }

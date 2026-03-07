@@ -4,8 +4,7 @@ use std::time::SystemTime;
 
 use crate::{
     App, ConversationMetadata, EnhancedSavedConversation, MessageState, MessageType,
-    SavedConversation, SavedUIMessage,
-    app::persistence,
+    SavedConversation, SavedUIMessage, app::persistence,
 };
 
 impl App {
@@ -148,7 +147,10 @@ impl App {
         Ok(())
     }
 
-    pub(crate) async fn load_conversation(&mut self, metadata: &ConversationMetadata) -> Result<()> {
+    pub(crate) async fn load_conversation(
+        &mut self,
+        metadata: &ConversationMetadata,
+    ) -> Result<()> {
         // Read the conversation file
         let content = persistence::conversations::read_conversation_file(&metadata.file_path)?;
 
@@ -234,8 +236,10 @@ impl App {
 
             // Close resume panel and show fork confirmation
             self.ui_state.show_resume = false;
-            self.messages
-                .push(format!(" ⎇ conversation forked from '{}'", metadata.preview));
+            self.messages.push(format!(
+                " ⎇ conversation forked from '{}'",
+                metadata.preview
+            ));
             self.message_types.push(MessageType::Agent);
             self.message_states.push(MessageState::Sent);
 

@@ -1,5 +1,5 @@
 use super::{App, MessageState, MessageType};
-use crate::app::commands::submit::{parse_queue_choice, QueueChoiceAction};
+use crate::app::commands::submit::{QueueChoiceAction, parse_queue_choice};
 
 #[test]
 fn parses_queue_choice_actions() {

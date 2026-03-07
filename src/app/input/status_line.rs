@@ -139,7 +139,8 @@ impl App {
                 }
 
                 if self.agent_state.agent_processing {
-                    let streaming_tokens = self.streaming_completion_tokens + self.thinking_token_count;
+                    let streaming_tokens =
+                        self.streaming_completion_tokens + self.thinking_token_count;
                     if streaming_tokens > 0 {
                         let prompt_tokens = self
                             .nav_snapshot

@@ -188,7 +188,7 @@ pub(crate) struct App {
     pub(crate) last_compacted_summary: Option<String>,
     pub(crate) is_auto_summarize: bool, // Track if current summarization was auto-triggered
     pub(crate) auto_summarize_threshold: f32, // Context percentage used before auto-summarization triggers
-    pub(crate) context_sync_pending: bool, // Waiting for context operation to complete
+    pub(crate) context_sync_pending: bool,    // Waiting for context operation to complete
     pub(crate) context_sync_started: Option<Instant>, // When sync started (for timeout)
     pub(crate) context_inject_expected: bool, // Whether ContextInjected is expected (summary was sent)
     pub(crate) compaction_resume_prompt: Option<String>, // Pending auto-resume prompt after compaction
@@ -244,22 +244,23 @@ pub(crate) struct App {
     pub(crate) spec_pane_selected: usize, // Selected step in the spec pane (for history navigation)
     pub(crate) step_tool_calls: HashMap<String, Vec<StepToolCallEntry>>, // Tool activity per step prefix
     pub(crate) step_label_overrides: HashMap<String, String>, // Prefix → planned label for leaf sub-steps
-    pub(crate) active_step_prefix: Option<String>, // Currently running step prefix
+    pub(crate) active_step_prefix: Option<String>,            // Currently running step prefix
     pub(crate) active_tool_call: Option<(String, u64)>, // (prefix, entry_id) for in-flight tool call
     pub(crate) next_tool_call_id: u64,
     // Orchestrator control and events
     pub(crate) orchestrator_control: Option<OrchestratorControl>, // Control handle for pause/resume/abort
-    pub(crate) orchestrator_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<OrchestratorEvent>>,
+    pub(crate) orchestrator_event_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<OrchestratorEvent>>,
     pub(crate) orchestrator_task: Option<task::JoinHandle<()>>, // Background task running orchestrator
     pub(crate) orchestrator_sessions: HashMap<String, crate::OrchestratorEntry>,
     pub(crate) orchestrator_history: Vec<TaskSummary>, // History of completed task summaries
     pub(crate) latest_summaries: HashMap<String, TaskSummary>, // Latest summary per step index
-    pub(crate) orchestrator_paused: bool, // Whether orchestrator is currently paused
+    pub(crate) orchestrator_paused: bool,              // Whether orchestrator is currently paused
     pub(crate) has_orchestrator_activity: bool, // Alt+W gating: true once an orchestrator event arrives
-    pub(crate) spec_pane_show_history: bool, // Whether to show history view in spec pane
-    pub(crate) spec_step_drawer_open: bool, // Whether the drawer for selected step is visible
-    pub(crate) show_history_panel: bool, // Dedicated history panel visibility
-    pub(crate) history_panel_selected: usize, // Selected summary in history panel
+    pub(crate) spec_pane_show_history: bool,    // Whether to show history view in spec pane
+    pub(crate) spec_step_drawer_open: bool,     // Whether the drawer for selected step is visible
+    pub(crate) show_history_panel: bool,        // Dedicated history panel visibility
+    pub(crate) history_panel_selected: usize,   // Selected summary in history panel
     // Status message for session window
     pub(crate) status_message: Option<String>, // Temporary status message for user feedback
     // Per-sub-agent message contexts for Alt+W view
@@ -398,7 +399,8 @@ impl App {
             if self.thinking_last_word_change.elapsed() >= std::time::Duration::from_secs(4) {
                 use rand::seq::SliceRandom;
                 let mut rng = rand::thread_rng();
-                self.thinking_current_word = self.thinking_words.choose(&mut rng).unwrap().to_string();
+                self.thinking_current_word =
+                    self.thinking_words.choose(&mut rng).unwrap().to_string();
                 self.thinking_position = 0;
                 self.thinking_last_word_change = Instant::now();
             }
@@ -406,11 +408,12 @@ impl App {
             // Update position every 40ms for smooth wave effect
             if self.thinking_last_tick.elapsed() >= std::time::Duration::from_millis(40) {
                 // Calculate the true display length (counting characters, not bytes)
-                let text_with_dots = if let Some((ref summary, _, _)) = self.thinking_current_summary {
-                    format!("{}...", summary)
-                } else {
-                    format!("{}...", self.thinking_current_word)
-                };
+                let text_with_dots =
+                    if let Some((ref summary, _, _)) = self.thinking_current_summary {
+                        format!("{}...", summary)
+                    } else {
+                        format!("{}...", self.thinking_current_word)
+                    };
                 let text_len = text_with_dots.chars().count();
                 // Add 7 to complete the wave sweep all the way to the end
                 self.thinking_position = (self.thinking_position + 1) % (text_len + 7);

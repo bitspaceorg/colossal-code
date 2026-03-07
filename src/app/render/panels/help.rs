@@ -1,13 +1,13 @@
 use std::time::Duration;
 
 use ratatui::{
+    Frame,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap},
-    Frame,
 };
 
-use crate::{App, HelpTab, TodoItem, SLASH_COMMANDS};
+use crate::{App, HelpTab, SLASH_COMMANDS, TodoItem};
 
 fn todo_symbol(status: &str) -> &str {
     match status {

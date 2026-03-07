@@ -7,8 +7,8 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::app;
-use crate::app::input::vim_sync::{ThinkingContext, create_rich_content_from_messages};
 use crate::app::init::startup::tips;
+use crate::app::input::vim_sync::{ThinkingContext, create_rich_content_from_messages};
 use crate::{App, MESSAGE_BORDER_SET, MessageType};
 
 impl App {
@@ -104,7 +104,8 @@ impl App {
                 .lines
                 .len_col(self.editor.state.cursor.row)
             {
-                self.editor.state.cursor.col = old_cursor_col.min(line_len.saturating_sub(1).max(0));
+                self.editor.state.cursor.col =
+                    old_cursor_col.min(line_len.saturating_sub(1).max(0));
             }
             self.editor.state.set_desired_col(old_desired_col);
             self.editor.state.mode = old_mode;
@@ -174,7 +175,8 @@ impl App {
         } else {
             current_scroll
         };
-        let messages_widget = Paragraph::new(Text::from(message_lines.clone())).scroll((scroll_offset as u16, 0));
+        let messages_widget =
+            Paragraph::new(Text::from(message_lines.clone())).scroll((scroll_offset as u16, 0));
         frame.render_widget(messages_widget, messages_area);
 
         if !self.editor.state.search_matches().is_empty() {
@@ -183,7 +185,10 @@ impl App {
             for &match_pos in self.editor.state.search_matches() {
                 let row = match_pos.row;
                 let col = match_pos.col;
-                if row >= scroll_offset && row < scroll_offset + visible_lines && row < message_lines.len() {
+                if row >= scroll_offset
+                    && row < scroll_offset + visible_lines
+                    && row < message_lines.len()
+                {
                     let visible_row = row - scroll_offset;
                     let y = messages_area.y + visible_row as u16;
                     let line = &message_lines[row];
@@ -200,10 +205,15 @@ impl App {
                     for span in &line.spans {
                         let span_chars: Vec<char> = span.content.chars().collect();
                         for _ch in &span_chars {
-                            if char_idx >= col && char_idx < col + pattern_len && x < messages_area.right() {
+                            if char_idx >= col
+                                && char_idx < col + pattern_len
+                                && x < messages_area.right()
+                            {
                                 let cell = frame.buffer_mut().cell_mut((x, y));
                                 if let Some(cell) = cell {
-                                    cell.set_style(Style::default().bg(highlight_color).fg(Color::Black));
+                                    cell.set_style(
+                                        Style::default().bg(highlight_color).fg(Color::Black),
+                                    );
                                 }
                             }
                             x += 1;
@@ -228,7 +238,10 @@ impl App {
                 (sel_end, sel_start)
             };
             for row in start.row..=end.row {
-                if row >= scroll_offset && row < scroll_offset + visible_lines && row < message_lines.len() {
+                if row >= scroll_offset
+                    && row < scroll_offset + visible_lines
+                    && row < message_lines.len()
+                {
                     let visible_row = row - scroll_offset;
                     let y = messages_area.y + visible_row as u16;
                     let line = &message_lines[row];
@@ -290,7 +303,10 @@ impl App {
                 (sel_end, sel_start)
             };
             for row in start.row..=end.row {
-                if row >= scroll_offset && row < scroll_offset + visible_lines && row < message_lines.len() {
+                if row >= scroll_offset
+                    && row < scroll_offset + visible_lines
+                    && row < message_lines.len()
+                {
                     let visible_row = row - scroll_offset;
                     let y = messages_area.y + visible_row as u16;
                     let line = &message_lines[row];
@@ -339,9 +355,12 @@ impl App {
             }
         }
 
-        let should_show_cursor =
-            self.nav_snapshot.is_some() || (!self.agent_state.agent_processing && !self.thinking_indicator_active);
-        if should_show_cursor && cursor_row >= scroll_offset && cursor_row < scroll_offset + visible_lines {
+        let should_show_cursor = self.nav_snapshot.is_some()
+            || (!self.agent_state.agent_processing && !self.thinking_indicator_active);
+        if should_show_cursor
+            && cursor_row >= scroll_offset
+            && cursor_row < scroll_offset + visible_lines
+        {
             let visible_row = cursor_row - scroll_offset;
             let cursor_y = messages_area.y + visible_row as u16;
             if cursor_row < message_lines.len() {
