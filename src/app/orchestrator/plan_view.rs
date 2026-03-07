@@ -1,40 +1,22 @@
 use std::collections::HashMap;
 
-use agent_core::{SpecSheet, SpecStep, StepStatus, TaskSummary, VerificationStatus};
+use agent_core::SpecSheet;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthChar;
 
-use crate::{SessionRole, StepToolCallEntry, ToolCallStatus};
+use super::{plan_history, plan_lines};
+
+pub use super::plan_lines::SpecPlanRenderParams;
+
+const NO_STEPS_FALLBACK: &str = "No steps in this spec.";
+const HISTORY_EMPTY_FALLBACK: &str = "History: no entries yet.";
 
 pub struct OrchestrationStatusLine {
     pub current_frame: String,
     pub color_spans: Vec<(String, Color)>,
     pub elapsed_secs: u64,
-}
-
-pub struct SpecPlanRenderParams<'a> {
-    pub orchestrator_paused: bool,
-    pub selected_index: usize,
-    pub show_history: bool,
-    pub step_drawer_open: bool,
-    pub orchestrator_history: &'a [TaskSummary],
-    pub latest_summaries: &'a HashMap<String, TaskSummary>,
-    pub step_tool_calls: &'a HashMap<String, Vec<StepToolCallEntry>>,
-    pub active_prefix: Option<&'a str>,
-    pub include_metadata: bool,
-    pub max_width: usize,
-}
-
-struct StepRenderContext<'a> {
-    selected_prefix: Option<&'a str>,
-    drawer_open: bool,
-    active_prefix: Option<&'a str>,
-    step_tool_calls: &'a HashMap<String, Vec<StepToolCallEntry>>,
-    latest_summaries: &'a HashMap<String, TaskSummary>,
-    max_width: usize,
 }
 
 pub fn compose_tool_plan_view_lines(
@@ -77,139 +59,13 @@ pub fn compose_tool_plan_view_lines(
     }
 }
 
-/// Build tool-only plan lines for the main message view.
-/// Only shows steps that have actual tool activity - no empty steps.
 pub fn build_tool_only_plan_lines(
     spec: &SpecSheet,
-    step_tool_calls: &HashMap<String, Vec<StepToolCallEntry>>,
+    step_tool_calls: &HashMap<String, Vec<crate::StepToolCallEntry>>,
     active_prefix: Option<&str>,
     max_width: usize,
 ) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-
-    // Only show if there's actual tool activity
-    if step_tool_calls.is_empty() {
-        return lines;
-    }
-
-    for step in &spec.steps {
-        append_tool_only_step_lines(
-            &mut lines,
-            step,
-            "",
-            0,
-            active_prefix,
-            step_tool_calls,
-            max_width,
-        );
-    }
-
-    lines
-}
-
-/// Check if a step or any of its children have tool calls
-fn step_has_tool_activity(
-    step: &SpecStep,
-    parent_prefix: &str,
-    step_tool_calls: &HashMap<String, Vec<StepToolCallEntry>>,
-) -> bool {
-    let prefix = compose_prefix(parent_prefix, &step.index);
-
-    // Check if this step has tool calls
-    if step_tool_calls.contains_key(&prefix) {
-        return true;
-    }
-
-    // Check children
-    if let Some(sub_spec) = &step.sub_spec {
-        for child in &sub_spec.steps {
-            if step_has_tool_activity(child, &prefix, step_tool_calls) {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-fn append_tool_only_step_lines(
-    lines: &mut Vec<Line<'static>>,
-    step: &SpecStep,
-    parent_prefix: &str,
-    depth: usize,
-    active_prefix: Option<&str>,
-    step_tool_calls: &HashMap<String, Vec<StepToolCallEntry>>,
-    max_width: usize,
-) {
-    let prefix = compose_prefix(parent_prefix, &step.index);
-
-    // Skip steps without any tool activity (including children)
-    if !step_has_tool_activity(step, parent_prefix, step_tool_calls) {
-        return;
-    }
-
-    let indent = "  ".repeat(depth);
-    let mut style = style_for_step(step.status);
-
-    // Highlight active step
-    if let Some(active) = active_prefix
-        && active == prefix
-    {
-        style = Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD);
-    }
-
-    let bullet = "●";
-
-    let base_text = if step.title.trim().is_empty() {
-        step.instructions.clone()
-    } else {
-        step.title.clone()
-    };
-    let reserved = indent.len() + 4;
-    let available = max_width.saturating_sub(reserved);
-    let content = trim_to_width(&base_text, available);
-
-    lines.push(Line::from(vec![
-        Span::raw(format!("{}{} ", indent, bullet)),
-        Span::styled(content, style),
-    ]));
-
-    // Show tool calls under this step
-    if let Some(entries) = step_tool_calls.get(&prefix) {
-        for (i, entry) in entries.iter().enumerate() {
-            let entry_indent = "  ".repeat(depth);
-            let is_last = i == entries.len() - 1;
-            let connector = if is_last { "└ " } else { "│ " };
-            let available = max_width.saturating_sub(entry_indent.len() + 6);
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{}│ {} ", entry_indent, connector),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format_tool_label(entry, available),
-                    style_for_tool(entry.status),
-                ),
-            ]));
-        }
-    }
-
-    // Process sub-spec steps recursively
-    if let Some(sub_spec) = &step.sub_spec {
-        for child in &sub_spec.steps {
-            append_tool_only_step_lines(
-                lines,
-                child,
-                &prefix,
-                depth + 1,
-                active_prefix,
-                step_tool_calls,
-                max_width,
-            );
-        }
-    }
+    plan_lines::build_tool_only_plan_lines(spec, step_tool_calls, active_prefix, max_width)
 }
 
 pub fn build_spec_plan_lines(
@@ -219,611 +75,65 @@ pub fn build_spec_plan_lines(
     let mut lines = Vec::new();
 
     if params.include_metadata {
-        let paused_badge = if params.orchestrator_paused {
-            " [PAUSED]"
-        } else {
-            ""
-        };
-        lines.push(Line::from(vec![
-            Span::styled("📋 ", Style::default().fg(Color::Yellow)),
-            Span::styled(
-                spec.title.clone(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(paused_badge, Style::default().fg(Color::Yellow)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("Created by ", Style::default().fg(Color::DarkGray)),
-            Span::styled(spec.created_by.clone(), Style::default().fg(Color::Gray)),
-            Span::styled(" • ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                spec.created_at.format("%Y-%m-%d %H:%M").to_string(),
-                Style::default().fg(Color::Gray),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("Controls: ", Style::default().fg(Color::DarkGray)),
-            Span::styled("P Pause", Style::default().fg(Color::Cyan)),
-            Span::raw(" · "),
-            Span::styled("R Rerun", Style::default().fg(Color::Cyan)),
-            Span::raw(" · "),
-            Span::styled("A Abort", Style::default().fg(Color::Cyan)),
-            Span::raw(" · "),
-            Span::styled("H History", Style::default().fg(Color::Cyan)),
-            Span::raw(" · "),
-            Span::styled("Enter Drawer", Style::default().fg(Color::Cyan)),
-        ]));
-        lines.push(Line::from(""));
+        append_spec_metadata_lines(&mut lines, spec, params.orchestrator_paused);
     }
 
     if params.show_history {
-        lines.extend(build_history_lines(params.orchestrator_history));
+        if params.orchestrator_history.is_empty() {
+            lines.push(Line::from(HISTORY_EMPTY_FALLBACK.to_string()));
+            return lines;
+        }
+        lines.extend(plan_history::build_history_lines(
+            params.orchestrator_history,
+        ));
         return lines;
     }
 
     if spec.steps.is_empty() {
-        lines.push(Line::from("No steps in this spec."));
+        lines.push(Line::from(NO_STEPS_FALLBACK));
         return lines;
     }
 
-    let bounded_index = params
-        .selected_index
-        .min(spec.steps.len().saturating_sub(1));
-    let selected_prefix = spec.steps.get(bounded_index).map(|step| step.index.clone());
-    let context = StepRenderContext {
-        selected_prefix: selected_prefix.as_deref(),
-        drawer_open: params.step_drawer_open && params.include_metadata,
-        active_prefix: params.active_prefix,
-        step_tool_calls: params.step_tool_calls,
-        latest_summaries: params.latest_summaries,
-        max_width: params.max_width,
-    };
-
-    for step in &spec.steps {
-        append_step_lines(&mut lines, step, "", 0, &context);
-    }
-
+    lines.extend(plan_lines::build_spec_step_lines(spec, &params));
     lines
 }
 
-fn append_step_lines(
-    lines: &mut Vec<Line<'static>>,
-    step: &SpecStep,
-    parent_prefix: &str,
-    depth: usize,
-    context: &StepRenderContext<'_>,
-) {
-    let prefix = compose_prefix(parent_prefix, &step.index);
-    let indent = "  ".repeat(depth);
-    let mut style = style_for_step(step.status);
-    if let Some(active) = context.active_prefix
-        && active == prefix
-    {
-        style = Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD);
-    }
-    let mut branch_selected = false;
-    if let Some(selected) = context.selected_prefix
-        && prefix.starts_with(selected)
-    {
-        style = style.add_modifier(Modifier::ITALIC);
-        branch_selected = prefix == selected;
-    }
-
-    let base_text = if step.title.trim().is_empty() {
-        step.instructions.clone()
-    } else {
-        step.title.clone()
-    };
-    let reserved = indent.len() + 4;
-    let available = context.max_width.saturating_sub(reserved);
-    let content = trim_to_width(&base_text, available);
-
+fn append_spec_metadata_lines(lines: &mut Vec<Line<'static>>, spec: &SpecSheet, paused: bool) {
+    let paused_badge = if paused { " [PAUSED]" } else { "" };
     lines.push(Line::from(vec![
-        Span::raw(format!("{}{} ", indent, step_status_icon(step.status))),
-        Span::styled(content, style),
+        Span::styled("📋 ", Style::default().fg(Color::Yellow)),
+        Span::styled(
+            spec.title.clone(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(paused_badge, Style::default().fg(Color::Yellow)),
     ]));
-
-    if context.drawer_open && branch_selected {
-        append_drawer_lines(
-            lines,
-            depth + 1,
-            step,
-            context.latest_summaries,
-            context.max_width,
-        );
-    }
-
-    if let Some(entries) = context.step_tool_calls.get(&prefix) {
-        for entry in entries {
-            let entry_indent = "  ".repeat(depth + 1);
-            let available = context.max_width.saturating_sub(entry_indent.len() + 6);
-            lines.push(Line::from(vec![
-                Span::raw(format!(
-                    "{}└ {} ",
-                    entry_indent,
-                    tool_status_icon(entry.status)
-                )),
-                Span::styled(
-                    format_tool_label(entry, available),
-                    style_for_tool(entry.status),
-                ),
-            ]));
-        }
-    }
-
-    if let Some(sub_spec) = &step.sub_spec {
-        for child in &sub_spec.steps {
-            append_step_lines(lines, child, &prefix, depth + 1, context);
-        }
-    }
-}
-
-fn append_drawer_lines(
-    lines: &mut Vec<Line<'static>>,
-    depth: usize,
-    step: &SpecStep,
-    latest_summaries: &HashMap<String, TaskSummary>,
-    max_width: usize,
-) {
-    let indent = "  ".repeat(depth);
-    let available = max_width.saturating_sub(indent.len() + 2);
-    let mut pushed = false;
-
-    if !step.instructions.trim().is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            format!("{}Instructions:", indent),
+    lines.push(Line::from(vec![
+        Span::styled("Created by ", Style::default().fg(Color::DarkGray)),
+        Span::styled(spec.created_by.clone(), Style::default().fg(Color::Gray)),
+        Span::styled(" • ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            spec.created_at.format("%Y-%m-%d %H:%M").to_string(),
             Style::default().fg(Color::Gray),
-        )]));
-        for chunk in step
-            .instructions
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-        {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{}↳ ", indent),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    trim_to_width(chunk.trim(), available),
-                    Style::default().fg(Color::White),
-                ),
-            ]));
-        }
-        pushed = true;
-    }
-
-    if !step.acceptance_criteria.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            format!("{}Acceptance criteria:", indent),
-            Style::default().fg(Color::Gray),
-        )]));
-        for criterion in &step.acceptance_criteria {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{}• ", indent),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    trim_to_width(criterion, available),
-                    Style::default().fg(Color::White),
-                ),
-            ]));
-        }
-        pushed = true;
-    }
-
-    if !step.dependencies.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{}Depends on: ", indent),
-                Style::default().fg(Color::Gray),
-            ),
-            Span::styled(
-                trim_to_width(&step.dependencies.join(", "), available),
-                Style::default().fg(Color::White),
-            ),
-        ]));
-        pushed = true;
-    }
-
-    if let Some(summary) = latest_summaries.get(&step.index) {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{}Latest: ", indent),
-                Style::default().fg(Color::Gray),
-            ),
-            Span::styled(
-                trim_to_width(&summary.summary_text, available),
-                Style::default().fg(Color::White),
-            ),
-        ]));
-        if !summary.tests_run.is_empty() {
-            let tests = summary
-                .tests_run
-                .iter()
-                .map(|test| format!("{}({:?})", test.name, test.result))
-                .collect::<Vec<_>>()
-                .join(", ");
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{}Tests: ", indent),
-                    Style::default().fg(Color::Gray),
-                ),
-                Span::styled(
-                    trim_to_width(&tests, available),
-                    Style::default().fg(Color::White),
-                ),
-            ]));
-        }
-        if !summary.artifacts_touched.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{}Artifacts: ", indent),
-                    Style::default().fg(Color::Gray),
-                ),
-                Span::styled(
-                    trim_to_width(&summary.artifacts_touched.join(", "), available),
-                    Style::default().fg(Color::White),
-                ),
-            ]));
-        }
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{}Verification: ", indent),
-                Style::default().fg(Color::Gray),
-            ),
-            Span::styled(
-                format!("{:?}", summary.verification.status),
-                Style::default().fg(Color::White),
-            ),
-        ]));
-        for feedback in &summary.verification.feedback {
-            let message = format!("{}: {}", feedback.author, feedback.message);
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{}• ", indent),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    trim_to_width(&message, available),
-                    Style::default().fg(Color::White),
-                ),
-            ]));
-        }
-        pushed = true;
-    }
-
-    if !pushed {
-        lines.push(Line::from(vec![Span::styled(
-            format!("{}No additional details yet.", indent),
-            Style::default().fg(Color::DarkGray),
-        )]));
-    }
-}
-
-fn build_history_lines(history: &[TaskSummary]) -> Vec<Line<'static>> {
-    if history.is_empty() {
-        return vec![Line::from("History: no entries yet.".to_string())];
-    }
-    let mut lines = vec![Line::from(Span::styled(
-        "History (H to toggle):",
-        Style::default().fg(Color::Gray),
-    ))];
-    for summary in history {
-        let status_icon = match summary.verification.status {
-            VerificationStatus::Passed => "✓",
-            VerificationStatus::Failed => "✗",
-            VerificationStatus::Pending => "○",
-        };
-        lines.push(Line::from(vec![
-            Span::styled(status_icon, Style::default().fg(Color::Green)),
-            Span::raw(" "),
-            Span::styled(
-                format!("Step {} · {}", summary.step_index, summary.summary_text),
-                Style::default().fg(Color::White),
-            ),
-        ]));
-        if !summary.tests_run.is_empty() {
-            let tests = summary
-                .tests_run
-                .iter()
-                .map(|test| format!("{}({:?})", test.name, test.result))
-                .collect::<Vec<_>>()
-                .join(", ");
-            lines.push(Line::from(format!("  Tests: {}", tests)));
-        }
-        if !summary.artifacts_touched.is_empty() {
-            lines.push(Line::from(format!(
-                "  Artifacts: {}",
-                summary.artifacts_touched.join(", ")
-            )));
-        }
-        if !summary.verification.feedback.is_empty() {
-            for feedback in &summary.verification.feedback {
-                lines.push(Line::from(format!(
-                    "  Feedback {}: {}",
-                    feedback.author, feedback.message
-                )));
-            }
-        }
-        if let Some(worktree) = &summary.worktree {
-            let mut spans = vec![
-                Span::styled("  Branch: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(worktree.branch.clone(), Style::default().fg(Color::White)),
-            ];
-            spans.push(Span::styled(
-                format!(" ({})", worktree.path),
-                Style::default().fg(Color::DarkGray),
-            ));
-            lines.push(Line::from(spans));
-        }
-    }
-    lines
-}
-
-fn format_tool_label(entry: &StepToolCallEntry, available: usize) -> String {
-    let role_prefix = match entry.role {
-        SessionRole::Implementor => "",
-        SessionRole::Summarizer => "[Summarize] ",
-        SessionRole::Verifier => "[Verifier] ",
-        SessionRole::Merge => "[Merge] ",
-    };
-    trim_to_width(&format!("{}{}", role_prefix, entry.label), available)
-}
-
-fn compose_prefix(parent: &str, index: &str) -> String {
-    if parent.is_empty() {
-        index.to_string()
-    } else {
-        format!("{}.{}", parent, index)
-    }
-}
-
-fn step_status_icon(status: StepStatus) -> &'static str {
-    match status {
-        StepStatus::Pending => "○",
-        StepStatus::InProgress => "◐",
-        StepStatus::Completed => "●",
-        StepStatus::Failed => "✗",
-    }
-}
-
-fn tool_status_icon(status: ToolCallStatus) -> &'static str {
-    match status {
-        ToolCallStatus::Started => "◐",
-        ToolCallStatus::Completed => "●",
-        ToolCallStatus::Error => "✗",
-    }
-}
-
-fn style_for_step(status: StepStatus) -> Style {
-    match status {
-        StepStatus::Pending => Style::default().fg(Color::DarkGray),
-        StepStatus::InProgress => Style::default().fg(Color::Yellow),
-        StepStatus::Completed => Style::default().fg(Color::Green),
-        StepStatus::Failed => Style::default().fg(Color::Red),
-    }
-}
-
-fn style_for_tool(status: ToolCallStatus) -> Style {
-    match status {
-        ToolCallStatus::Started => Style::default().fg(Color::Yellow),
-        ToolCallStatus::Completed => Style::default().fg(Color::Green),
-        ToolCallStatus::Error => Style::default().fg(Color::Red),
-    }
-}
-
-fn trim_to_width(text: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    let mut result = String::new();
-    let mut width = 0;
-    for ch in text.chars() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1);
-        if width + ch_width > max_width {
-            result.push('…');
-            break;
-        }
-        result.push(ch);
-        width += ch_width;
-    }
-    if result.is_empty() {
-        text.chars().take(max_width).collect()
-    } else {
-        result
-    }
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Controls: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("P Pause", Style::default().fg(Color::Cyan)),
+        Span::raw(" · "),
+        Span::styled("R Rerun", Style::default().fg(Color::Cyan)),
+        Span::raw(" · "),
+        Span::styled("A Abort", Style::default().fg(Color::Cyan)),
+        Span::raw(" · "),
+        Span::styled("H History", Style::default().fg(Color::Cyan)),
+        Span::raw(" · "),
+        Span::styled("Enter Drawer", Style::default().fg(Color::Cyan)),
+    ]));
+    lines.push(Line::from(""));
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        OrchestrationStatusLine, SpecPlanRenderParams, build_spec_plan_lines,
-        build_tool_only_plan_lines, compose_tool_plan_view_lines,
-    };
-    use crate::{SessionRole, StepToolCallEntry, ToolCallStatus};
-    use agent_core::{SpecSheet, SpecStep, StepStatus};
-    use chrono::{TimeZone, Utc};
-    use ratatui::{
-        style::Color,
-        text::{Line, Span},
-    };
-    use std::collections::HashMap;
-
-    fn line_text(line: &Line<'_>) -> String {
-        line.spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>()
-    }
-
-    fn sample_spec() -> SpecSheet {
-        SpecSheet {
-            id: "spec-1".to_string(),
-            title: "Demo Spec".to_string(),
-            description: "desc".to_string(),
-            steps: vec![
-                SpecStep {
-                    index: "1".to_string(),
-                    title: "No tools".to_string(),
-                    instructions: String::new(),
-                    acceptance_criteria: vec![],
-                    required_tools: vec![],
-                    constraints: vec![],
-                    is_parallel: false,
-                    requires_verification: false,
-                    max_parallelism: None,
-                    status: StepStatus::Pending,
-                    dependencies: vec![],
-                    sub_spec: None,
-                    completed_at: None,
-                },
-                SpecStep {
-                    index: "2".to_string(),
-                    title: "With tools".to_string(),
-                    instructions: String::new(),
-                    acceptance_criteria: vec![],
-                    required_tools: vec![],
-                    constraints: vec![],
-                    is_parallel: false,
-                    requires_verification: false,
-                    max_parallelism: None,
-                    status: StepStatus::InProgress,
-                    dependencies: vec![],
-                    sub_spec: None,
-                    completed_at: None,
-                },
-            ],
-            created_by: "tester".to_string(),
-            created_at: Utc.timestamp_opt(0, 0).unwrap(),
-            metadata: serde_json::Value::Null,
-        }
-    }
-
-    #[test]
-    fn build_tool_only_plan_lines_omits_steps_without_activity() {
-        let mut tool_calls = HashMap::new();
-        tool_calls.insert(
-            "2".to_string(),
-            vec![StepToolCallEntry {
-                id: 1,
-                label: "run tests".to_string(),
-                status: ToolCallStatus::Started,
-                role: SessionRole::Implementor,
-                worktree_branch: None,
-                worktree_path: None,
-            }],
-        );
-
-        let lines = build_tool_only_plan_lines(&sample_spec(), &tool_calls, Some("2"), 80);
-        let combined = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
-
-        assert!(combined.contains("With tools"));
-        assert!(!combined.contains("No tools"));
-    }
-
-    #[test]
-    fn compose_tool_plan_view_lines_adds_gap_plan_and_status_line() {
-        let mut lines = vec![Line::from("existing")];
-        let plan_lines = vec![Line::from(vec![Span::raw("plan")])];
-
-        compose_tool_plan_view_lines(
-            &mut lines,
-            plan_lines,
-            Some(OrchestrationStatusLine {
-                current_frame: "*".to_string(),
-                color_spans: vec![("thinking...".to_string(), Color::Yellow)],
-                elapsed_secs: 65,
-            }),
-        );
-
-        assert_eq!(line_text(&lines[1]), " ");
-        assert_eq!(line_text(&lines[2]), "plan");
-        assert!(line_text(lines.last().unwrap()).contains("[Esc to interrupt | 1m 05s]"));
-    }
-
-    #[test]
-    fn build_spec_plan_lines_applies_active_highlight_style() {
-        let spec = sample_spec();
-        let latest_summaries = HashMap::new();
-        let tool_calls = HashMap::new();
-        let lines = build_spec_plan_lines(
-            &spec,
-            SpecPlanRenderParams {
-                orchestrator_paused: false,
-                selected_index: 0,
-                show_history: false,
-                step_drawer_open: false,
-                orchestrator_history: &[],
-                latest_summaries: &latest_summaries,
-                step_tool_calls: &tool_calls,
-                active_prefix: Some("1"),
-                include_metadata: false,
-                max_width: 80,
-            },
-        );
-
-        let style = lines[0].spans[1].style;
-        assert_eq!(style.fg, Some(Color::Cyan));
-        assert!(style.add_modifier.contains(ratatui::style::Modifier::BOLD));
-    }
-
-    #[test]
-    fn build_spec_plan_lines_applies_selected_branch_italic_style() {
-        let spec = sample_spec();
-        let latest_summaries = HashMap::new();
-        let tool_calls = HashMap::new();
-        let lines = build_spec_plan_lines(
-            &spec,
-            SpecPlanRenderParams {
-                orchestrator_paused: false,
-                selected_index: 0,
-                show_history: false,
-                step_drawer_open: false,
-                orchestrator_history: &[],
-                latest_summaries: &latest_summaries,
-                step_tool_calls: &tool_calls,
-                active_prefix: None,
-                include_metadata: false,
-                max_width: 80,
-            },
-        );
-
-        let style = lines[0].spans[1].style;
-        assert!(
-            style
-                .add_modifier
-                .contains(ratatui::style::Modifier::ITALIC)
-        );
-    }
-
-    #[test]
-    fn build_spec_plan_lines_renders_history_when_enabled() {
-        let spec = sample_spec();
-        let latest_summaries = HashMap::new();
-        let tool_calls = HashMap::new();
-
-        let lines = build_spec_plan_lines(
-            &spec,
-            SpecPlanRenderParams {
-                orchestrator_paused: false,
-                selected_index: 0,
-                show_history: true,
-                step_drawer_open: false,
-                orchestrator_history: &[],
-                latest_summaries: &latest_summaries,
-                step_tool_calls: &tool_calls,
-                active_prefix: None,
-                include_metadata: false,
-                max_width: 80,
-            },
-        );
-
-        assert_eq!(line_text(&lines[0]), "History: no entries yet.");
-    }
-}
+#[path = "plan_view_tests.rs"]
+mod tests;
