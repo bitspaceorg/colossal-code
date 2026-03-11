@@ -16,7 +16,7 @@ use mistralrs::{
     ToolCallResponse, ToolChoice,
 };
 use mistralrs_core::MessageContent;
-use once_cell::sync::{Lazy, OnceCell};
+use once_cell::sync::OnceCell;
 use serde::Serialize;
 use serde_json::{Value, json};
 use shell_escape::escape;
@@ -25,10 +25,8 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokenizers::Tokenizer;
-use tokio::process::Command as TokioCommand;
 use tokio::sync::{Mutex, mpsc};
 
-static GIT_COMMAND_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
 static WORKSPACE_ROOT_OVERRIDE: OnceCell<Option<PathBuf>> = OnceCell::new();
 
 pub mod config;
@@ -82,6 +80,62 @@ fn preview_thinking(text: &str) -> String {
         preview.push_str("…");
     }
     preview
+}
+
+fn sandbox_policy_from_config(safety_config: &safety_config::SafetyConfig) -> SandboxPolicy {
+    let workspace_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut writable_roots = vec![colossal_linux_sandbox::protocol::WritableRoot {
+        root: workspace_path.clone(),
+        recursive: true,
+        read_only_subpaths: vec![],
+    }];
+
+    if let Some(parent) = workspace_path.parent() {
+        writable_roots.push(colossal_linux_sandbox::protocol::WritableRoot {
+            root: parent.to_path_buf(),
+            recursive: true,
+            read_only_subpaths: vec![],
+        });
+    }
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_parent) = exe_path.parent().and_then(|p| p.parent()) {
+            writable_roots.push(colossal_linux_sandbox::protocol::WritableRoot {
+                root: exe_parent.to_path_buf(),
+                recursive: true,
+                read_only_subpaths: vec![],
+            });
+        }
+    }
+
+    if let Ok(extra_roots) = std::env::var("SANDBOX_EXTRA_ROOTS") {
+        for root_path in extra_roots.split(':') {
+            if !root_path.is_empty() {
+                writable_roots.push(colossal_linux_sandbox::protocol::WritableRoot {
+                    root: PathBuf::from(root_path),
+                    recursive: true,
+                    read_only_subpaths: vec![],
+                });
+            }
+        }
+    }
+
+    match safety_config.mode {
+        safety_config::SafetyMode::ReadOnly => SandboxPolicy::ReadOnly,
+        safety_config::SafetyMode::Regular => {
+            if safety_config.sandbox_enabled || std::env::var("SAFE_MODE").is_ok() {
+                SandboxPolicy::WorkspaceWrite {
+                    writable_roots,
+                    network_access: colossal_linux_sandbox::protocol::NetworkAccess::Enabled,
+                    exclude_tmpdir_env_var: false,
+                    exclude_slash_tmp: false,
+                }
+            } else {
+                SandboxPolicy::DangerFullAccess
+            }
+        }
+        safety_config::SafetyMode::Yolo => SandboxPolicy::DangerFullAccess,
+    }
 }
 
 pub(crate) fn workspace_root_override() -> Option<PathBuf> {
@@ -179,70 +233,8 @@ async fn execute_tool_binary(args: Vec<String>, sandbox_policy: &SandboxPolicy) 
 async fn ensure_global_state_initialized() {
     if GLOBAL_STATE.get().is_none() {
         let shell = colossal_linux_sandbox::shell::default_user_shell().await;
-        let workspace_path =
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-
-        let mut writable_roots = vec![colossal_linux_sandbox::protocol::WritableRoot {
-            root: workspace_path.clone(),
-            recursive: true,
-            read_only_subpaths: vec![],
-        }];
-
-        if let Some(parent) = workspace_path.parent() {
-            writable_roots.push(colossal_linux_sandbox::protocol::WritableRoot {
-                root: parent.to_path_buf(),
-                recursive: true,
-                read_only_subpaths: vec![],
-            });
-        }
-
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_parent) = exe_path.parent().and_then(|p| p.parent()) {
-                writable_roots.push(colossal_linux_sandbox::protocol::WritableRoot {
-                    root: exe_parent.to_path_buf(),
-                    recursive: true,
-                    read_only_subpaths: vec![],
-                });
-            }
-        }
-
-        if let Ok(extra_roots) = std::env::var("SANDBOX_EXTRA_ROOTS") {
-            for root_path in extra_roots.split(':') {
-                if !root_path.is_empty() {
-                    writable_roots.push(colossal_linux_sandbox::protocol::WritableRoot {
-                        root: std::path::PathBuf::from(root_path),
-                        recursive: true,
-                        read_only_subpaths: vec![],
-                    });
-                }
-            }
-        }
-
-        // Determine sandbox policy based on safety configuration
         let safety_config = safety_config::SafetyConfig::load().unwrap_or_default();
-        let sandbox_policy = match safety_config.mode {
-            safety_config::SafetyMode::ReadOnly => {
-                // Read-only mode: NO write access anywhere
-                SandboxPolicy::ReadOnly
-            }
-            safety_config::SafetyMode::Regular => {
-                // Regular mode: sandbox enabled with write access to workspace
-                if safety_config.sandbox_enabled || std::env::var("SAFE_MODE").is_ok() {
-                    SandboxPolicy::WorkspaceWrite {
-                        writable_roots,
-                        network_access: colossal_linux_sandbox::protocol::NetworkAccess::Enabled,
-                        exclude_tmpdir_env_var: false,
-                        exclude_slash_tmp: false,
-                    }
-                } else {
-                    SandboxPolicy::DangerFullAccess
-                }
-            }
-            safety_config::SafetyMode::Yolo => {
-                // Yolo mode: full access (no sandbox)
-                SandboxPolicy::DangerFullAccess
-            }
-        };
+        let sandbox_policy = sandbox_policy_from_config(&safety_config);
 
         let _ = GLOBAL_STATE.set(GlobalState {
             manager: Arc::new(colossal_linux_sandbox::manager::SessionManager::default()),
@@ -353,53 +345,6 @@ pub(crate) async fn get_or_create_shell_session() -> Result<(
     Ok((state.manager.clone(), session_id_lock.clone().unwrap()))
 }
 
-pub(crate) async fn run_shell_command(command: &str) -> Result<String> {
-    ensure_global_state_initialized().await;
-    let (manager, session_id) = get_or_create_shell_session().await?;
-    let result = manager
-        .exec_command_in_shell_session(session_id, command.to_string(), Some(120_000), 2000, None)
-        .await?;
-
-    match result.exit_status {
-        ExitStatus::Completed { code } if code == 0 => Ok(result.stdout),
-        other => Err(anyhow::anyhow!(
-            "Command `{}` failed ({:?}): {}",
-            command,
-            other,
-            result.stderr
-        )),
-    }
-}
-
-pub(crate) async fn run_git_command(command: &str) -> Result<String> {
-    if !command.trim().starts_with("git ") {
-        return Err(anyhow::anyhow!(
-            "git helper requires commands to start with `git`: {}",
-            command
-        ));
-    }
-    let _guard = GIT_COMMAND_LOCK.lock().await;
-    let workspace_root = resolve_workspace_root();
-    let escaped_root = escape(workspace_root.to_string_lossy());
-    let full_command = format!("cd {} && {}", escaped_root, command);
-    let output = TokioCommand::new("sh")
-        .arg("-c")
-        .arg(&full_command)
-        .output()
-        .await?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Err(anyhow::anyhow!(
-            "Command `{}` failed (code {:?}): {}",
-            full_command,
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
-        ))
-    }
-}
-
 async fn execute_tool_call(
     agent: &Agent,
     tool_call: &ToolCallResponse,
@@ -424,8 +369,8 @@ async fn execute_tool_call(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(600_000); // 10 minutes default
 
-            // Determine safety strategy
-            let safety_mode = if std::env::var("SAFE_MODE").is_ok() {
+            let requires_approval = { agent.safety_config.lock().await.ask_permission };
+            let safety_mode = if requires_approval {
                 colossal_linux_sandbox::safety::AskForApproval::OnRequest
             } else {
                 colossal_linux_sandbox::safety::AskForApproval::Never
@@ -445,7 +390,11 @@ async fn execute_tool_call(
                     drop(has_background); // Release lock
 
                     // Create log file for background output
-                    let log_file_path = format!("/tmp/shell_{}.log", session_id.as_str());
+                    let log_file_path = colossal_linux_sandbox::manager::background_log_path(
+                        &session_id,
+                    )
+                    .display()
+                    .to_string();
 
                     // Run command in background with output redirected to log file
                     // Strip trailing & if present since we'll add it with redirection
@@ -1263,7 +1212,7 @@ impl Agent {
 
     /// Create a new agent with a custom tool list and prompt.
     pub async fn with_tools(&self, tools: Vec<Tool>) -> Result<Self> {
-        let mut agent = self.clone();
+        let agent = self.clone();
 
         {
             let mut tools_guard = agent.tools.lock().await;
@@ -1752,6 +1701,11 @@ impl Agent {
         {
             let mut config_guard = self.safety_config.lock().await;
             *config_guard = safety_config_for_update;
+        }
+
+        if let Some(state) = GLOBAL_STATE.get() {
+            let mut policy_guard = state.sandbox_policy.lock().await;
+            *policy_guard = sandbox_policy_from_config(&new_safety_config);
         }
 
         // Update tools in the agent
@@ -2534,7 +2488,7 @@ impl Agent {
                 let tools_guard = self.tools.lock().await;
                 tools_guard.clone()
             };
-            let mut builder = RequestBuilder::new()
+            let builder = RequestBuilder::new()
                 .add_message(TextMessageRole::System, system_msg)
                 .add_message(TextMessageRole::User, &full_user_msg)
                 .set_tools(tools)
@@ -3111,11 +3065,6 @@ impl Agent {
             if !pending_prefix.is_empty() {
                 accumulated_content.push_str(&pending_prefix);
                 let token_count = self.count_tokens(&pending_prefix);
-                // Track first token time and total tokens for stats
-                if first_token_time.is_none() && token_count > 0 {
-                    first_token_time = Some(std::time::Instant::now());
-                }
-                total_generated_tokens += token_count;
                 let _ = tx.send(AgentMessage::AgentResponse(
                     pending_prefix.clone(),
                     token_count,
@@ -3125,11 +3074,6 @@ impl Agent {
             // After stream ends, if still in thinking (no </think> found), flush residual
             if in_thinking && !thinking_buffer.is_empty() {
                 let token_count = self.count_tokens(&thinking_buffer);
-                // Track first token time and total tokens for stats
-                if first_token_time.is_none() && token_count > 0 {
-                    first_token_time = Some(std::time::Instant::now());
-                }
-                total_generated_tokens += token_count;
                 let _ = tx.send(AgentMessage::ThinkingContent(
                     thinking_buffer.clone(),
                     token_count,
@@ -3679,22 +3623,6 @@ fn truncate_title(s: &str, max_chars: usize) -> String {
     } else {
         let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
         format!("{}...", truncated)
-    }
-}
-
-/// Truncate a string to a maximum number of characters, adding suffix if truncated.
-/// This is UTF-8 safe - it counts characters, not bytes.
-pub(crate) fn truncate_string(s: &str, max_chars: usize, suffix: &str) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        s.to_string()
-    } else {
-        let suffix_len = suffix.chars().count();
-        let truncated: String = s
-            .chars()
-            .take(max_chars.saturating_sub(suffix_len))
-            .collect();
-        format!("{}{}", truncated, suffix)
     }
 }
 

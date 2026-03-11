@@ -1,5 +1,18 @@
-#[allow(unused_imports)]
-pub(crate) use crate::app::state::message::*;
+use crate::SessionRole;
 
-#[allow(unused_imports)]
-pub(crate) use crate::app::orchestrator::reducer::*;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolCallStatus {
+    Started,
+    Completed,
+    Error,
+}
+
+#[derive(Clone, Debug)]
+pub struct StepToolCallEntry {
+    pub id: u64,
+    pub label: String,
+    pub status: ToolCallStatus,
+    pub role: SessionRole,
+    pub worktree_branch: Option<String>,
+    pub worktree_path: Option<String>,
+}

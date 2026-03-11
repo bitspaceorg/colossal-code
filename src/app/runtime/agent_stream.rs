@@ -2,7 +2,8 @@ use std::time::Instant;
 
 use agent_core::AgentMessage;
 
-use crate::app::state::message::{CompactionEntry, MessageState, MessageType, ToolCallStatus};
+use crate::app::state::message::{CompactionEntry, MessageState, MessageType};
+use crate::app::state::orchestrator::ToolCallStatus;
 use crate::app::state::ui_message_event::UiMessageEvent;
 use crate::{App, StepToolCallEntry, TodoItem};
 

@@ -1,6 +1,6 @@
 use super::{
-    OrchestrationStatusLine, SpecPlanRenderParams, build_spec_plan_lines,
-    build_tool_only_plan_lines, compose_tool_plan_view_lines,
+    build_spec_plan_lines, build_tool_only_plan_lines, compose_tool_plan_view_lines,
+    OrchestrationStatusLine, SpecPlanRenderParams,
 };
 use crate::{SessionRole, StepToolCallEntry, ToolCallStatus};
 use agent_core::{SpecSheet, SpecStep, StepStatus};
@@ -151,11 +151,9 @@ fn build_spec_plan_lines_applies_selected_branch_italic_style() {
     );
 
     let style = lines[0].spans[1].style;
-    assert!(
-        style
-            .add_modifier
-            .contains(ratatui::style::Modifier::ITALIC)
-    );
+    assert!(style
+        .add_modifier
+        .contains(ratatui::style::Modifier::ITALIC));
 }
 
 #[test]

@@ -118,6 +118,60 @@ struct SemanticSearchResult {
 #[derive(Debug, Serialize, Deserialize)]
 struct SemanticSearchHit(f32, SemanticSearchResult);
 
+fn workspace_root() -> Result<PathBuf, String> {
+    let root = match std::env::var("NITE_WORKSPACE_ROOT") {
+        Ok(raw) if !raw.trim().is_empty() => {
+            let candidate = PathBuf::from(raw);
+            if candidate.is_absolute() {
+                candidate
+            } else {
+                std::env::current_dir()
+                    .map_err(|e| format!("Failed to read current dir: {}", e))?
+                    .join(candidate)
+            }
+        }
+        _ => std::env::current_dir().map_err(|e| format!("Failed to read current dir: {}", e))?,
+    };
+
+    root.canonicalize()
+        .map_err(|e| format!("Failed to resolve workspace root {}: {}", root.display(), e))
+}
+
+fn checked_path(path: &Path, must_exist: bool) -> Result<PathBuf, String> {
+    let root = workspace_root()?;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+
+    let resolved = if must_exist {
+        absolute
+            .canonicalize()
+            .map_err(|e| format!("Failed to resolve path {}: {}", absolute.display(), e))?
+    } else if let Some(parent) = absolute.parent() {
+        let parent_resolved = parent
+            .canonicalize()
+            .map_err(|e| format!("Failed to resolve parent {}: {}", parent.display(), e))?;
+        match absolute.file_name() {
+            Some(name) => parent_resolved.join(name),
+            None => parent_resolved,
+        }
+    } else {
+        absolute
+    };
+
+    if resolved.starts_with(&root) {
+        Ok(resolved)
+    } else {
+        Err(format!(
+            "Path {} is outside workspace root {}",
+            resolved.display(),
+            root.display()
+        ))
+    }
+}
+
 fn delete_path(path: &Path) -> DeleteResult {
     if !path.exists() {
         return DeleteResult {
@@ -619,7 +673,13 @@ fn main() {
                 eprintln!("Usage: tools get_files <path> [limit]");
                 std::process::exit(1);
             }
-            let path = PathBuf::from(&args[2]);
+            let path = match checked_path(Path::new(&args[2]), true) {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("{}", error);
+                    std::process::exit(1);
+                }
+            };
             let limit = args.get(3).and_then(|s| s.parse::<usize>().ok());
 
             let files = get_files(&path, limit);
@@ -633,7 +693,13 @@ fn main() {
                 );
                 std::process::exit(1);
             }
-            let path = PathBuf::from(&args[2]);
+            let path = match checked_path(Path::new(&args[2]), true) {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("{}", error);
+                    std::process::exit(1);
+                }
+            };
             let mut index = 3;
 
             let mut limit = args
@@ -706,7 +772,19 @@ fn main() {
                 );
                 std::process::exit(1);
             }
-            let path = PathBuf::from(&args[2]);
+            let path = match checked_path(Path::new(&args[2]), true) {
+                Ok(path) => path,
+                Err(error) => {
+                    let result = ReadResult {
+                        path: args[2].clone(),
+                        status: ReadStatus::Failure,
+                        message: Some(error),
+                        content: None,
+                    };
+                    println!("{}", serde_yaml::to_string(&result).unwrap());
+                    return;
+                }
+            };
             let span = match args.get(3) {
                 None => ReadSpan::Entire,
                 Some(mode) if mode == "entire" => ReadSpan::Entire,
@@ -755,7 +833,18 @@ fn main() {
                 eprintln!("Usage: tools delete_path <path>");
                 std::process::exit(1);
             }
-            let path = PathBuf::from(&args[2]);
+            let path = match checked_path(Path::new(&args[2]), true) {
+                Ok(path) => path,
+                Err(error) => {
+                    let result = DeleteResult {
+                        path: args[2].clone(),
+                        status: DeleteStatus::Failure,
+                        message: Some(error),
+                    };
+                    println!("{}", serde_yaml::to_string(&result).unwrap());
+                    return;
+                }
+            };
             let result = delete_path(&path);
             println!("{}", serde_yaml::to_string(&result).unwrap());
         }
@@ -765,8 +854,19 @@ fn main() {
                 eprintln!("Usage: tools delete_many <path1> [path2] [path3]...");
                 std::process::exit(1);
             }
-            let paths: Vec<PathBuf> = args[2..].iter().map(PathBuf::from).collect();
-            let results = delete_many(&paths);
+            let mut valid_paths = Vec::new();
+            let mut results: Vec<DeleteResult> = Vec::new();
+            for raw_path in &args[2..] {
+                match checked_path(Path::new(raw_path), true) {
+                    Ok(path) => valid_paths.push(path),
+                    Err(error) => results.push(DeleteResult {
+                        path: raw_path.clone(),
+                        status: DeleteStatus::Failure,
+                        message: Some(error),
+                    }),
+                }
+            }
+            results.extend(delete_many(&valid_paths));
             println!("{}", serde_yaml::to_string(&results).unwrap());
         }
 
@@ -777,7 +877,20 @@ fn main() {
                 );
                 std::process::exit(1);
             }
-            let path = PathBuf::from(&args[2]);
+            let path = match checked_path(Path::new(&args[2]), true) {
+                Ok(path) => path,
+                Err(error) => {
+                    #[derive(Serialize)]
+                    struct ErrorResponse {
+                        error: String,
+                    }
+                    eprintln!(
+                        "{}",
+                        serde_yaml::to_string(&ErrorResponse { error }).unwrap()
+                    );
+                    std::process::exit(1);
+                }
+            };
             let pattern = &args[3];
             let limit = args.get(4).and_then(|s| s.parse::<usize>().ok());
             let case_sensitive = args.get(5).map(|s| s == "true").unwrap_or(false);
@@ -803,7 +916,18 @@ fn main() {
                 eprintln!("Usage: tools edit_file <path> <old_string> <new_string>");
                 std::process::exit(1);
             }
-            let path = PathBuf::from(&args[2]);
+            let path = match checked_path(Path::new(&args[2]), false) {
+                Ok(path) => path,
+                Err(error) => {
+                    let result = EditResult {
+                        path: args[2].clone(),
+                        status: EditStatus::Failure,
+                        message: Some(error),
+                    };
+                    println!("{}", serde_yaml::to_string(&result).unwrap());
+                    return;
+                }
+            };
             let old_string = &args[3];
             let new_string = &args[4];
 

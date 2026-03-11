@@ -101,10 +101,10 @@ Run the full test suite:
 cargo test -p cocode
 ```
 
-Run module boundary regression tests:
+Run all crate tests and integration targets:
 
 ```bash
-cargo test --test module_boundary_regressions
+cargo test -p cocode --all-targets
 ```
 
 ## Troubleshooting

@@ -1,14 +1,16 @@
 use std::time::SystemTime;
 
 use crate::{
-    APPROX_CHARS_PER_TOKEN, App, COMPACTION_HISTORY_RESERVE_TOKENS,
-    DEFAULT_COMPACTION_HISTORY_BUDGET, FileChange, MIN_COMPACTION_HISTORY_BUDGET, MessageState,
-    MessageType, RewindPoint, UIMessageMetadata, UiMessageEvent,
+    App, FileChange, MessageState, MessageType, RewindPoint, UIMessageMetadata, UiMessageEvent,
+    APPROX_CHARS_PER_TOKEN, COMPACTION_HISTORY_RESERVE_TOKENS, DEFAULT_COMPACTION_HISTORY_BUDGET,
+    MIN_COMPACTION_HISTORY_BUDGET,
 };
 
 impl App {
     pub(crate) fn track_file_change(&mut self, tool_name: &str, arguments: &str, _result: &str) {
-        if tool_name != "Write" && tool_name != "Edit" {
+        let is_write = matches!(tool_name, "Write" | "write_file");
+        let is_edit = matches!(tool_name, "Edit" | "edit_file");
+        if !is_write && !is_edit {
             return;
         }
 
@@ -21,7 +23,7 @@ impl App {
                     .unwrap_or(file_path)
                     .to_string();
 
-                let (insertions, deletions) = if tool_name == "Edit" {
+                let (insertions, deletions) = if is_edit {
                     let old_lines = args_json
                         .get("old_string")
                         .and_then(|v| v.as_str())

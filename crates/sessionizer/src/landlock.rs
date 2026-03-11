@@ -25,11 +25,18 @@ pub fn apply_sandbox_policy_to_current_thread(
 }
 
 #[cfg(target_os = "linux")]
+fn landlock_bypass_enabled() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var("DISABLE_LANDLOCK").unwrap_or_default() == "1"
+        && std::env::var("ALLOW_UNSAFE_SANDBOX_BYPASS").unwrap_or_default() == "1"
+}
+
+#[cfg(target_os = "linux")]
 fn apply_linux_landlock_policy(
     sandbox_policy: &SandboxPolicy,
     cwd: &Path,
 ) -> Result<(), ColossalErr> {
-    use landlock::{ABI, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr};
+    use landlock::{Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI};
 
     match sandbox_policy {
         SandboxPolicy::WorkspaceWrite {
@@ -170,13 +177,9 @@ fn apply_linux_landlock_policy(
                 }
             }
 
-            // Apply Landlock restrictions unless explicitly disabled
-            // Note: Some systems may have issues with Landlock (e.g., Fedora 42 with kernel 6.14)
-            // where child processes get Permission Denied even with proper rules configured.
-            // Set DISABLE_LANDLOCK=1 to bypass Landlock if you encounter such issues.
-            if std::env::var("DISABLE_LANDLOCK").unwrap_or_default() == "1" {
+            if landlock_bypass_enabled() {
                 eprintln!(
-                    "[LANDLOCK] Sandbox rules configured but NOT activated (DISABLE_LANDLOCK=1)"
+                    "[LANDLOCK] Sandbox rules configured but NOT activated (unsafe debug bypass enabled)"
                 );
                 Ok(())
             } else {
@@ -275,10 +278,9 @@ fn apply_linux_landlock_policy(
                     })?;
             }
 
-            // Apply restrictions
-            if std::env::var("DISABLE_LANDLOCK").unwrap_or_default() == "1" {
+            if landlock_bypass_enabled() {
                 eprintln!(
-                    "[LANDLOCK] ReadOnly sandbox rules configured but NOT activated (DISABLE_LANDLOCK=1)"
+                    "[LANDLOCK] ReadOnly sandbox rules configured but NOT activated (unsafe debug bypass enabled)"
                 );
                 Ok(())
             } else {

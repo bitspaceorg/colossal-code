@@ -1,31 +1,16 @@
 use crate::app::render::thinking::encode_generation_stats_message;
-use crate::{AssistantMode, HelpTab, SessionRole, UiMessageEvent};
+use crate::{AssistantMode, HelpTab, UiMessageEvent};
 use agent_core::GenerationStats as AgentGenerationStats;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant, SystemTime};
+
+use super::snapshot::AppSnapshot;
 
 /// Message type to distinguish between user and agent messages
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageType {
     User,
     Agent,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ToolCallStatus {
-    Started,
-    Completed,
-    Error,
-}
-
-#[derive(Clone, Debug)]
-pub struct StepToolCallEntry {
-    pub id: u64,
-    pub label: String,
-    pub status: ToolCallStatus,
-    pub role: SessionRole,
-    pub worktree_branch: Option<String>,
-    pub worktree_path: Option<String>,
 }
 
 /// Stores the transcript for a sub-agent so we can replay it inside the UI.
@@ -349,64 +334,6 @@ impl UiMessage {
     }
 }
 
-/// Saved conversation data structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct SavedConversation {
-    pub(crate) id: String,
-    pub(crate) created_at: SystemTime,
-    pub(crate) updated_at: SystemTime,
-    pub(crate) git_branch: Option<String>,
-    pub(crate) working_directory: String,
-    pub(crate) message_count: usize,
-    pub(crate) preview: String,
-    pub(crate) messages: Vec<ConversationMessage>,
-    #[serde(default)]
-    pub(crate) forked_from: Option<String>,
-    #[serde(default)]
-    pub(crate) forked_at: Option<SystemTime>,
-}
-
-/// Individual message in a conversation (OLD FORMAT - kept for compatibility)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ConversationMessage {
-    pub(crate) role: String, // "system", "user", "assistant"
-    pub(crate) content: String,
-}
-
-/// Enhanced saved conversation with complete UI state
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct EnhancedSavedConversation {
-    pub(crate) id: String,
-    pub(crate) created_at: SystemTime,
-    pub(crate) updated_at: SystemTime,
-    pub(crate) git_branch: Option<String>,
-    pub(crate) working_directory: String,
-    pub(crate) message_count: usize,
-    pub(crate) preview: String,
-
-    // Complete UI message history
-    pub(crate) ui_messages: Vec<SavedUIMessage>,
-
-    // Agent conversation for LLM context restoration
-    pub(crate) agent_conversation: Option<String>,
-
-    // Fork metadata
-    #[serde(default)]
-    pub(crate) forked_from: Option<String>,
-    #[serde(default)]
-    pub(crate) forked_at: Option<SystemTime>,
-}
-
-/// Individual UI message with complete state
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct SavedUIMessage {
-    pub(crate) content: String,
-    pub(crate) message_type: MessageType,
-    pub(crate) message_state: MessageState,
-    pub(crate) timestamp: SystemTime,
-    pub(crate) metadata: Option<UIMessageMetadata>,
-}
-
 /// Rich metadata for different message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum UIMessageMetadata {
@@ -492,57 +419,6 @@ pub(crate) struct RewindPoint {
     pub(crate) preview: String, // Description of this rewind point
     pub(crate) message_count: usize,
     pub(crate) file_changes: Vec<FileChange>, // Files modified in this rewind point
-}
-
-/// Metadata for displaying conversation in list
-#[derive(Debug, Clone)]
-pub(crate) struct ConversationMetadata {
-    pub(crate) id: String,
-    pub(crate) updated_at: SystemTime,
-    pub(crate) git_branch: Option<String>,
-    pub(crate) message_count: usize,
-    pub(crate) preview: String,
-    pub(crate) file_path: std::path::PathBuf,
-    pub(crate) time_ago_str: String, // Static string calculated once
-    pub(crate) forked_from: Option<String>, // Parent conversation ID if this is a fork
-}
-
-impl ConversationMetadata {
-    pub(crate) fn calculate_time_ago(updated_at: SystemTime) -> String {
-        let elapsed = updated_at.elapsed().unwrap_or(Duration::from_secs(0));
-        let secs = elapsed.as_secs();
-
-        if secs < 60 {
-            format!("{}s ago", secs)
-        } else if secs < 3600 {
-            format!("{}m ago", secs / 60)
-        } else if secs < 86400 {
-            format!("{}h ago", secs / 3600)
-        } else if secs < 604800 {
-            format!("{}d ago", secs / 86400)
-        } else if secs < 2592000 {
-            format!("{}w ago", secs / 604800)
-        } else if secs < 31536000 {
-            format!("{}mo ago", secs / 2592000)
-        } else {
-            format!("{}y ago", secs / 31536000)
-        }
-    }
-}
-
-/// Snapshot of UI state for frozen display in Navigation mode
-#[derive(Clone)]
-pub(crate) struct AppSnapshot {
-    pub(crate) messages: Vec<String>,
-    pub(crate) message_types: Vec<MessageType>,
-    pub(crate) thinking_indicator_active: bool,
-    pub(crate) thinking_elapsed_secs: u64, // Frozen elapsed time in seconds
-    pub(crate) thinking_token_count: usize,
-    pub(crate) thinking_current_summary: Option<(String, usize, usize)>,
-    pub(crate) thinking_position: usize,
-    pub(crate) thinking_loader_frame: usize,
-    pub(crate) thinking_current_word: String,
-    pub(crate) generation_stats: Option<AgentGenerationStats>, // Frozen generation stats
 }
 
 #[derive(Clone)]

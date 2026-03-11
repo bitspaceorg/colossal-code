@@ -1,13 +1,11 @@
 use agent_core::AgentMessage;
+use std::sync::Arc;
+use tokio::task;
 
 use crate::app::commands::{SlashCommandDispatch, dispatch_slash_command};
-use crate::app::orchestrator::control::{
-    MessageLog, SpecAgentBridge, SpecCliContext, SpecCliHandler, SpecCommandResult,
-};
 use crate::app::runtime::r#loop::{apply_command_runtime_route, route_command_runtime};
 use crate::{
-    App, AssistantMode, HelpTab, MAX_AUTO_SUMMARIZE_THRESHOLD, MIN_AUTO_SUMMARIZE_THRESHOLD,
-    MessageState, MessageType, UiMessageEvent,
+    App, AssistantMode, HelpTab, MessageState, MessageType, UiMessageEvent,
 };
 
 impl App {
@@ -202,6 +200,7 @@ impl App {
                         self.message_states.push(MessageState::Sent);
                     }
                 } else {
+                    let mut config_changed = false;
                     // Handle subcommands (silently update, sync with assistant_mode)
                     match args[0].as_str() {
                         "yolo" => {
@@ -210,6 +209,7 @@ impl App {
                             config.set_mode(agent_core::safety_config::SafetyMode::Yolo);
                             let _ = config.save();
                             self.safety_state.assistant_mode = AssistantMode::Yolo;
+                            config_changed = true;
                         }
                         "regular" => {
                             let mut config =
@@ -217,6 +217,7 @@ impl App {
                             config.set_mode(agent_core::safety_config::SafetyMode::Regular);
                             let _ = config.save();
                             self.safety_state.assistant_mode = AssistantMode::None;
+                            config_changed = true;
                         }
                         "readonly" | "read-only" => {
                             let mut config =
@@ -224,12 +225,14 @@ impl App {
                             config.set_mode(agent_core::safety_config::SafetyMode::ReadOnly);
                             let _ = config.save();
                             self.safety_state.assistant_mode = AssistantMode::ReadOnly;
+                            config_changed = true;
                         }
                         "permissions" | "perms" => {
                             let mut config =
                                 agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
                             config.toggle_ask_permission();
                             let _ = config.save();
+                            config_changed = true;
                         }
                         "sandbox" => {
                             let mut config =
@@ -237,8 +240,20 @@ impl App {
                             config.toggle_sandbox();
                             let _ = config.save();
                             self.safety_state.sandbox_enabled = config.sandbox_enabled;
+                            config_changed = true;
                         }
                         _ => {}
+                    }
+
+                    if config_changed {
+                        if let Ok(config) = agent_core::safety_config::SafetyConfig::load() {
+                            if let Some(agent_arc) = &self.agent {
+                                let agent_clone = Arc::clone(agent_arc);
+                                task::spawn(async move {
+                                    let _ = agent_clone.update_safety_config(config).await;
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -260,111 +275,6 @@ impl App {
         }
     }
 
-    fn handle_auto_summarize_threshold_command(&mut self, command: &str) -> bool {
-        let parts: Vec<&str> = command.split_whitespace().collect();
-
-        if parts.len() == 1 {
-            let status_text = format!(
-                " ⎿ Auto-summarize triggers when {}. Use '/autosummarize [percent-used]' to change it.",
-                self.auto_summarize_hint()
-            );
-            self.messages.push(status_text);
-            self.message_types.push(MessageType::Agent);
-            self.message_states.push(MessageState::Sent);
-            return true;
-        }
-
-        let value_token = parts[1].trim().trim_end_matches('%');
-        match value_token.parse::<f32>() {
-            Ok(value) => {
-                if !(MIN_AUTO_SUMMARIZE_THRESHOLD..=MAX_AUTO_SUMMARIZE_THRESHOLD).contains(&value) {
-                    self.messages.push(format!(
-                        " ⎿ Enter a value between {:.0}% and {:.0}% (percent of context used).",
-                        MIN_AUTO_SUMMARIZE_THRESHOLD, MAX_AUTO_SUMMARIZE_THRESHOLD
-                    ));
-                    self.message_types.push(MessageType::Agent);
-                    self.message_states.push(MessageState::Sent);
-                    return true;
-                }
-
-                self.auto_summarize_threshold = Self::clamp_auto_summarize_threshold(value);
-                if let Err(e) = self.save_config() {
-                    self.messages.push(format!(
-                        " ⎿ Auto-summarize updated but failed to persist setting: {}",
-                        e
-                    ));
-                    self.message_types.push(MessageType::Agent);
-                    self.message_states.push(MessageState::Sent);
-                    return true;
-                }
-
-                self.messages.push(format!(
-                    " ⎿ Auto-summarize now triggers when {}.",
-                    self.auto_summarize_hint()
-                ));
-                self.message_types.push(MessageType::Agent);
-                self.message_states.push(MessageState::Sent);
-                true
-            }
-            Err(_) => {
-                self.messages.push(
-                    " ⎿ Invalid auto-summarize threshold. Provide a numeric percent of context used."
-                        .to_string(),
-                );
-                self.message_types.push(MessageType::Agent);
-                self.message_states.push(MessageState::Sent);
-                true
-            }
-        }
-    }
-
-    /// Handle /spec commands: /spec, /spec split <index>, /spec status, /spec abort
-    pub(crate) async fn handle_spec_command(&mut self, command: &str) {
-        let mut handler = SpecCliHandler::new(SpecCliContext {
-            current_spec: &mut self.current_spec,
-            orchestrator_control: self.orchestrator_control.as_ref(),
-            orchestrator_history: &self.orchestrator_history,
-            orchestrator_paused: &mut self.orchestrator_paused,
-            status_message: &mut self.status_message,
-            message_log: MessageLog {
-                messages: &mut self.messages,
-                types: &mut self.message_types,
-                states: &mut self.message_states,
-                metadata: &mut self.message_metadata,
-                timestamps: &mut self.message_timestamps,
-            },
-        });
-
-        let agent_ref = self
-            .agent
-            .as_deref()
-            .map(|agent| agent as &(dyn SpecAgentBridge + Send + Sync));
-
-        if let SpecCommandResult::Handled = handler.execute(agent_ref, command).await {
-            return;
-        }
-
-        let parts: Vec<&str> = command.split_whitespace().collect();
-
-        if parts.len() >= 2 && parts[0].eq_ignore_ascii_case("/spec") {
-            // Load a new spec: /spec <path|goal>
-            let path_or_goal = parts[1..].join(" ");
-            if let Err(e) = self.load_spec(&path_or_goal) {
-                self.messages.push(format!("Failed to load spec: {}", e));
-                self.message_types.push(MessageType::Agent);
-                self.message_states.push(MessageState::Sent);
-                self.message_metadata.push(None);
-                self.message_timestamps.push(std::time::SystemTime::now());
-            }
-            // Success case: no message - tool activity will show in compressed view
-        } else {
-            self.messages.push("[SPEC] Unknown spec command. Available: /spec, /spec split <index>, /spec status, /spec abort, /spec pause, /spec resume, /spec rerun, /spec history".to_string());
-            self.message_types.push(MessageType::Agent);
-            self.message_states.push(MessageState::Sent);
-            self.message_metadata.push(None);
-            self.message_timestamps.push(std::time::SystemTime::now());
-        }
-    }
 }
 
 #[cfg(test)]

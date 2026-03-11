@@ -21,6 +21,18 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tokio::select;
 
+fn background_log_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".local/state/nite/shell-logs")
+    } else {
+        std::env::temp_dir().join("nite-shell-logs")
+    }
+}
+
+pub fn background_log_path(session_id: &SessionId) -> PathBuf {
+    background_log_dir().join(format!("{}.log", session_id.as_str()))
+}
+
 /// Clean shell output by removing prompts and command echoes
 fn clean_shell_output(output: &str, command: &str) -> String {
     // Normalize line endings (convert \r\n and \r to \n)
@@ -379,10 +391,18 @@ impl SessionManager {
         // Handle background vs foreground execution differently
         if params.is_background {
             // Background execution: spawn a task to write output to log file
-            let log_file_path =
-                std::path::PathBuf::from(format!("/tmp/shell_{}.log", session_id.as_str()));
+            let log_file_path = background_log_path(&session_id);
             let log_file_path_clone = log_file_path.clone();
             let session_id_clone = session_id.clone();
+
+            if let Some(parent) = log_file_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+                }
+            }
 
             tokio::spawn(async move {
                 let file = tokio::fs::OpenOptions::new()
@@ -515,7 +535,7 @@ impl SessionManager {
         session_id: SessionId,
     ) -> Result<String, ColossalErr> {
         let log_file_path =
-            std::path::PathBuf::from(format!("/tmp/shell_{}.log", session_id.as_str()));
+            background_log_path(&session_id);
 
         // Wait for log file to be created (up to 2 seconds) - handles race condition
         // where read_output is called before the background task creates the file

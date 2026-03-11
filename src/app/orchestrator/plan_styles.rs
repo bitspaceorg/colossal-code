@@ -11,7 +11,18 @@ pub(crate) fn format_tool_label(entry: &StepToolCallEntry, available: usize) -> 
         SessionRole::Verifier => "[Verifier] ",
         SessionRole::Merge => "[Merge] ",
     };
-    trim_to_width(&format!("{}{}", role_prefix, entry.label), available)
+    let mut label = format!("{}{}", role_prefix, entry.label);
+    if let Some(branch) = entry.worktree_branch.as_deref()
+        && !branch.is_empty()
+    {
+        label.push_str(&format!(" [{}]", branch));
+    }
+    if let Some(path) = entry.worktree_path.as_deref()
+        && !path.is_empty()
+    {
+        label.push_str(&format!(" ({})", path));
+    }
+    trim_to_width(&label, available)
 }
 
 pub(crate) fn compose_prefix(parent: &str, index: &str) -> String {

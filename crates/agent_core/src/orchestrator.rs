@@ -385,7 +385,7 @@ pub struct Orchestrator {
     main_agent: Arc<dyn OrchestratorAgent>,
     sub_agent_factory:
         Arc<dyn Fn(&SpecStep, Option<PathBuf>) -> Arc<dyn OrchestratorAgent> + Send + Sync>,
-    verifier_chain: VerifierChain,
+    _verifier_chain: VerifierChain,
     stack: Vec<(SpecSheet, usize, String)>,
     /// Event sender for TUI updates
     event_tx: Option<mpsc::UnboundedSender<OrchestratorEvent>>,
@@ -448,7 +448,7 @@ impl Orchestrator {
         let mut orchestrator = Self {
             main_agent,
             sub_agent_factory,
-            verifier_chain: VerifierChain::default(),
+            _verifier_chain: VerifierChain::default(),
             stack: vec![(spec, 0, String::new())],
             event_tx: None,
             command_rx: None,
@@ -495,7 +495,7 @@ impl Orchestrator {
         let mut orchestrator = Self {
             main_agent,
             sub_agent_factory,
-            verifier_chain: VerifierChain::default(),
+            _verifier_chain: VerifierChain::default(),
             stack: vec![(spec, 0, String::new())],
             event_tx: Some(event_tx),
             command_rx: Some(command_rx),

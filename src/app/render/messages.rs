@@ -5,6 +5,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::render::thinking::create_thinking_highlight_spans;
+use crate::app::render::tool_format::tool_result_color;
 use crate::app::state::message::AgentConnector;
 use crate::{App, MESSAGE_BORDER_SET, SUMMARY_BANNER_PREFIX, UiMessageEvent};
 
@@ -321,9 +322,7 @@ impl App {
                 result,
             }) = parsed_event.as_ref()
         {
-            let trimmed = result.trim().to_ascii_lowercase();
-            let success = !(trimmed.starts_with("error") || trimmed == "failed");
-            let bullet_color = if success { Color::Green } else { Color::Red };
+            let bullet_color = tool_result_color(result);
             let result_color = bullet_color;
 
             let mut lines = Vec::new();

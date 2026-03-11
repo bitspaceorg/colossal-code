@@ -1,2 +1,14 @@
-#[allow(unused_imports)]
-pub(crate) use crate::app::input::status_line::*;
+use ratatui::Frame;
+
+use crate::App;
+
+impl App {
+    pub(crate) fn render_history_panel(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        crate::app::input::history::render_history_panel(
+            frame,
+            area,
+            &self.orchestrator_history,
+            self.history_panel_selected,
+        );
+    }
+}
