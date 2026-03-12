@@ -20,6 +20,7 @@ use once_cell::sync::OnceCell;
 use serde::Serialize;
 use serde_json::{Value, json};
 use shell_escape::escape;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -1080,9 +1081,93 @@ pub struct Agent {
     safety_config: Arc<Mutex<safety_config::SafetyConfig>>,
     /// Optional working directory override for orchestration (worktree support)
     working_directory: Option<PathBuf>,
+    /// Display label for the currently loaded model
+    model_name: Arc<Mutex<String>>,
 }
 
 impl Agent {
+    fn prompt_context() -> (String, String) {
+        let os_info = std::env::consts::OS;
+        let os_version = if os_info == "linux" {
+            std::fs::read_to_string("/etc/os-release")
+                .ok()
+                .and_then(|content| {
+                    content
+                        .lines()
+                        .find(|line| line.starts_with("PRETTY_NAME="))
+                        .map(|line| line.trim_start_matches("PRETTY_NAME=").trim_matches('"').to_string())
+                })
+                .unwrap_or_else(|| "Linux".to_string())
+        } else {
+            os_info.to_string()
+        };
+        let workspace_path = resolve_workspace_root().display().to_string();
+        (os_version, workspace_path)
+    }
+
+    fn render_system_prompt(
+        template: &str,
+        tools_section: &str,
+        os_version: &str,
+        workspace_path: &str,
+        model_label: &str,
+    ) -> String {
+        template
+            .replace("{tools_section}", tools_section)
+            .replace("{os_version}", os_version)
+            .replace("{workspace_path}", workspace_path)
+            .replace("{model_name}", model_label)
+    }
+
+    fn label_from_filename(model_filename: &str) -> String {
+        std::path::Path::new(model_filename)
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| model_filename.to_string())
+    }
+
+    fn model_label_from_backend(backend_config: &BackendConfig) -> String {
+        match backend_config {
+            BackendConfig::Local { model_path, model_files } => {
+                model_files
+                    .first()
+                    .map(|filename| Self::label_from_filename(filename))
+                    .or_else(|| {
+                        std::path::Path::new(model_path)
+                            .file_stem()
+                            .and_then(OsStr::to_str)
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| "local model".to_string())
+            }
+            BackendConfig::Http { model, .. } => model.clone(),
+        }
+    }
+
+    async fn regenerate_system_prompt(&self, suffix: Option<String>) -> Result<()> {
+        let tools_section = {
+            let tools_guard = self.tools.lock().await;
+            generate_tools_section(&tools_guard)
+        };
+        let (os_version, workspace_path) = Self::prompt_context();
+        let system_prompt_template =
+            read_system_prompt().unwrap_or_else(|_e| get_default_niterules());
+        let model_label = { self.model_name.lock().await.clone() };
+        let mut prompt = Self::render_system_prompt(
+            &system_prompt_template,
+            &tools_section,
+            &os_version,
+            &workspace_path,
+            &model_label,
+        );
+        if let Some(s) = suffix {
+            prompt.push_str(&s);
+        }
+        let mut system_prompt_guard = self.system_prompt.lock().await;
+        *system_prompt_guard = prompt;
+        Ok(())
+    }
     /// Load thinking tag configuration from disk if available.
     /// Falls back to default `<think>`/`</think>` tags when no config is present.
     fn load_thinking_tags(_model_path: &str, model_filename: &str) -> model_config::ThinkingTags {
@@ -1121,6 +1206,7 @@ impl Agent {
         tools: Vec<Tool>,
         tokenizer: Tokenizer,
         safety_config: safety_config::SafetyConfig,
+        model_label: String,
     ) -> Self {
         // Create backend based on config
         let (backend, backend_kind, thinking_tags): (
@@ -1188,6 +1274,7 @@ impl Agent {
             thinking_tags: Arc::new(Mutex::new(thinking_tags)),
             safety_config: Arc::new(Mutex::new(safety_config)),
             working_directory: None,
+            model_name: Arc::new(Mutex::new(model_label)),
         }
     }
 
@@ -1206,6 +1293,7 @@ impl Agent {
             thinking_tags: self.thinking_tags.clone(),
             safety_config: self.safety_config.clone(),
             working_directory: Some(cwd),
+            model_name: self.model_name.clone(),
         }
     }
 
@@ -1219,43 +1307,8 @@ impl Agent {
         }
 
         let safety_config = self.safety_config.lock().await.clone();
-        let tools_section = generate_tools_section(&tools);
-        let os_info = std::env::consts::OS;
-        let os_version = if os_info == "linux" {
-            std::fs::read_to_string("/etc/os-release")
-                .ok()
-                .and_then(|content| {
-                    content
-                        .lines()
-                        .find(|line| line.starts_with("PRETTY_NAME="))
-                        .map(|line| {
-                            line.trim_start_matches("PRETTY_NAME=")
-                                .trim_matches('"')
-                                .to_string()
-                        })
-                })
-                .unwrap_or_else(|| "Linux".to_string())
-        } else {
-            os_info.to_string()
-        };
-        let workspace_path = resolve_workspace_root().display().to_string();
-
-        let system_prompt_template =
-            read_system_prompt().unwrap_or_else(|_e| get_default_niterules());
-
-        let mut updated_system_prompt = system_prompt_template
-            .replace("{tools_section}", &tools_section)
-            .replace("{os_version}", &os_version)
-            .replace("{workspace_path}", &workspace_path);
-
-        if let Some(suffix) = safety_config.get_system_prompt_suffix() {
-            updated_system_prompt.push_str(&suffix);
-        }
-
-        {
-            let mut system_prompt_guard = agent.system_prompt.lock().await;
-            *system_prompt_guard = updated_system_prompt;
-        }
+        let suffix = safety_config.get_system_prompt_suffix();
+        agent.regenerate_system_prompt(suffix).await?;
 
         {
             let mut conversation_guard = agent.conversation.lock().await;
@@ -1298,15 +1351,19 @@ impl Agent {
         tokenizer: Tokenizer,
         safety_config: safety_config::SafetyConfig,
     ) -> Self {
+        let backend_config = BackendConfig::Local {
+            model_path,
+            model_files,
+        };
+        let model_label = Self::model_label_from_backend(&backend_config);
+
         Self::new_with_backend(
-            BackendConfig::Local {
-                model_path,
-                model_files,
-            },
+            backend_config,
             system_prompt,
             tools,
             tokenizer,
             safety_config,
+            model_label,
         )
     }
 
@@ -1353,26 +1410,27 @@ impl Agent {
         };
         let tools_section = generate_tools_section(&tools);
 
-        // Read system prompt
         let system_prompt_template = read_system_prompt().unwrap_or_else(|_e| {
             // eprintln!("Warning: Failed to read .niterules, using default: {}", e);
             get_default_niterules()
         });
 
-        // Replace placeholders
-        let mut system_prompt = system_prompt_template
-            .replace("{tools_section}", &tools_section)
-            .replace("{os_version}", &os_version)
-            .replace("{workspace_path}", &workspace_path);
-
-        // Add safety mode suffix if needed
-        if let Some(suffix) = safety_config.get_system_prompt_suffix() {
-            system_prompt.push_str(&suffix);
-        }
-
         let model_path = "/home/wise/.config/.nite/models".to_string();
         let selected_model =
             model_filename.unwrap_or_else(|| "Qwen_Qwen3-4B-Thinking-2507-Q8_0.gguf".to_string());
+
+        let model_label = Self::label_from_filename(&selected_model);
+        let mut system_prompt = Self::render_system_prompt(
+            &system_prompt_template,
+            &tools_section,
+            &os_version,
+            &workspace_path,
+            &model_label,
+        );
+
+        if let Some(suffix) = safety_config.get_system_prompt_suffix() {
+            system_prompt.push_str(&suffix);
+        }
 
         // Detect tokenizer from model filename
         let tokenizer_name = Self::detect_tokenizer_from_model(&selected_model);
@@ -1473,6 +1531,7 @@ impl Agent {
             tools,
             tokenizer,
             safety_config,
+            model_label,
         ))
     }
 
@@ -1517,6 +1576,17 @@ impl Agent {
                 thinking_summarizer::ThinkingSummarizer::with_threshold(summary_interval);
             drop(summarizer_guard);
         }
+
+        let model_label = Self::label_from_filename(&new_model_filename);
+        {
+            let mut model_name_guard = self.model_name.lock().await;
+            *model_name_guard = model_label.clone();
+        }
+        let suffix = {
+            let safety_guard = self.safety_config.lock().await;
+            safety_guard.get_system_prompt_suffix()
+        };
+        self.regenerate_system_prompt(suffix).await?;
 
         Ok(())
     }
@@ -1707,50 +1777,8 @@ impl Agent {
             *tools_guard = new_tools.clone();
         }
 
-        // Update system prompt with new tools section
-        let tools_section = generate_tools_section(&new_tools);
-        let os_info = std::env::consts::OS;
-        let os_version = if os_info == "linux" {
-            std::fs::read_to_string("/etc/os-release")
-                .ok()
-                .and_then(|content| {
-                    content
-                        .lines()
-                        .find(|line| line.starts_with("PRETTY_NAME="))
-                        .map(|line| {
-                            line.trim_start_matches("PRETTY_NAME=")
-                                .trim_matches('"')
-                                .to_string()
-                        })
-                })
-                .unwrap_or_else(|| "Linux".to_string())
-        } else {
-            os_info.to_string()
-        };
-        let workspace_path = resolve_workspace_root().display().to_string();
-
-        // Read system prompt and apply new tools section
-        let system_prompt_template = read_system_prompt().unwrap_or_else(|_e| {
-            // eprintln!("Warning: Failed to read .niterules, using default: {}", e);
-            get_default_niterules()
-        });
-
-        // Update the system prompt with new tools
-        let mut updated_system_prompt = system_prompt_template
-            .replace("{tools_section}", &tools_section)
-            .replace("{os_version}", &os_version)
-            .replace("{workspace_path}", &workspace_path);
-
-        // Add safety mode suffix if needed
-        if let Some(suffix) = new_safety_config.get_system_prompt_suffix() {
-            updated_system_prompt.push_str(&suffix);
-        }
-
-        // Update the system prompt in the agent
-        {
-            let mut system_prompt_guard = self.system_prompt.lock().await;
-            *system_prompt_guard = updated_system_prompt;
-        }
+        let suffix = new_safety_config.get_system_prompt_suffix();
+        self.regenerate_system_prompt(suffix).await?;
 
         // If there's an active conversation, update the tools in the request builder
         {
