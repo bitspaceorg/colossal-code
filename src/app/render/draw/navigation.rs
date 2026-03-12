@@ -1,4 +1,4 @@
-use crate::App;
+use crate::app::App;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DrawAreaIndices {
@@ -88,7 +88,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::DrawAreaIndices;
-    use crate::App;
+    use crate::app::App;
 
     #[test]
     fn compute_draw_area_indices_uses_baseline_layout() {

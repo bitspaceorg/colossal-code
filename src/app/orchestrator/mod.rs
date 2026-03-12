@@ -1,4 +1,7 @@
 pub mod control;
+#[cfg(test)]
+mod control_tests;
+mod event_formatting;
 pub mod events;
 pub mod labels;
 pub mod lifecycle;
@@ -10,4 +13,7 @@ pub mod plan_view;
 pub mod reducer;
 pub mod session_manager;
 pub mod session_sync;
+mod spec_command;
+mod spec_executor;
 pub mod spec_loading;
+mod spec_messages;

@@ -6,7 +6,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::StepToolCallEntry;
+use crate::app::StepToolCallEntry;
 
 use super::plan_styles::{
     compose_prefix, format_tool_label, step_status_icon, style_for_step, style_for_tool,

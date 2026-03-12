@@ -1,7 +1,7 @@
 use crate::app::orchestrator::control::{
     MessageLog, SpecAgentBridge, SpecCliContext, SpecCliHandler, SpecCommandResult,
 };
-use crate::{App, MessageState, MessageType};
+use crate::app::{App, MessageState, MessageType};
 
 impl App {
     /// Handle /spec commands: /spec, /spec split <index>, /spec status, /spec abort

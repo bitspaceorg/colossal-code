@@ -1,5 +1,5 @@
 use crate::app::commands::{ReviewOptions, SlashCommandDispatch};
-use crate::{App, CompactOptions};
+use crate::app::{App, CompactOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CommandRuntimeRoute {
@@ -40,8 +40,8 @@ pub(crate) fn apply_command_runtime_route(app: &mut App, route: CommandRuntimeRo
         CommandRuntimeRoute::SummarizeEmpty => {
             app.messages
                 .push(" ⎿ Nothing to summarize - conversation is empty".to_string());
-            app.message_types.push(crate::MessageType::Agent);
-            app.message_states.push(crate::MessageState::Sent);
+            app.message_types.push(crate::app::MessageType::Agent);
+            app.message_states.push(crate::app::MessageState::Sent);
             true
         }
         CommandRuntimeRoute::Export => {

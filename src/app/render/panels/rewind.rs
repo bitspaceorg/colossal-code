@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, List, ListItem, Paragraph},
 };
 
-use crate::App;
+use crate::app::App;
 
 fn rewind_time_ago(elapsed: Duration) -> String {
     if elapsed.as_secs() < 60 {

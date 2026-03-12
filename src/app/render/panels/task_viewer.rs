@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::orchestrator::session_manager;
-use crate::{App, MessageType, SubAgentContext};
+use crate::app::{App, MessageType, SubAgentContext};
 
 fn sub_agent_header(prefix: &str, step_title: &str) -> Line<'static> {
     Line::from(vec![

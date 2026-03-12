@@ -8,7 +8,7 @@ use ratatui::{
 };
 use std::{env, path::PathBuf, process::Command};
 
-use crate::{App, Mode};
+use crate::app::{App, Mode};
 
 fn context_status_color_for_percent(percent_left: f32) -> Color {
     if percent_left <= 10.0 {

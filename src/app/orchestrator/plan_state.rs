@@ -2,7 +2,7 @@ use agent_core::{SpecStep, TaskSummary};
 use ratatui::{layout::Rect, text::Line};
 use std::collections::HashMap;
 
-use crate::App;
+use crate::app::App;
 use crate::app::orchestrator::plan_view as spec_ui;
 use crate::app::render::thinking::create_thinking_highlight_spans;
 

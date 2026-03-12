@@ -4,11 +4,9 @@ use std::{
 };
 
 use ratatui::{
-    Frame,
-    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState},
+    widgets::{ListItem, ListState},
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +18,6 @@ pub struct Session {
     pub group: Option<String>,
     pub children: Vec<Session>,
     pub prefix: Option<String>,
-    pub breadcrumb: Option<String>,
     pub started_at: Option<Instant>,
     pub completed_at: Option<Instant>,
     pub role: Option<SessionRole>,
@@ -49,7 +46,6 @@ pub struct OrchestratorEntry {
     pub spec_id: String,
     pub spec_title: String,
     pub prefix: String,
-    pub step_index: String,
     pub step_title: String,
     pub role: SessionRole,
     pub status: SessionStatus,
@@ -117,7 +113,6 @@ impl SessionManager {
                 group: Some("orchestrator".to_string()),
                 children: Vec::new(),
                 prefix: None,
-                breadcrumb: Some("main".to_string()),
                 started_at: None,
                 completed_at: None,
                 role: None,
@@ -181,7 +176,6 @@ impl SessionManager {
                     group: Some("orchestrator".to_string()),
                     children: Vec::new(),
                     prefix: Some(key.clone()),
-                    breadcrumb: Some(format!("main › {}", key)),
                     started_at: None,
                     completed_at: None,
                     role: Some(entry.role.clone()),
@@ -257,14 +251,6 @@ impl SessionManager {
             .sum::<usize>()
     }
 
-    pub fn get_session_count(&self) -> usize {
-        self.get_total_session_count()
-    }
-
-    pub fn get_selected_session_index(&self) -> usize {
-        self.selected_index
-    }
-
     /// Get the currently selected session.
     pub fn get_selected_session(&self) -> Option<&Session> {
         let path = Self::index_path(&self.sessions, self.selected_index)?;
@@ -316,15 +302,6 @@ impl SessionManager {
         let mut count = 0;
         let mut trail = Vec::new();
         dfs(sessions, target, &mut count, &mut trail)
-    }
-
-    /// Rename the session at the given index.
-    pub fn rename_session(&mut self, new_name: String) {
-        if let Some(path) = Self::index_path(&self.sessions, self.selected_index) {
-            if let Some(session) = Self::session_from_path_mut(&mut self.sessions, &path) {
-                session.name = new_name;
-            }
-        }
     }
 
     /// Toggle the status of the selected session between attached/detached.
@@ -380,36 +357,6 @@ impl SessionManager {
             SessionStatus::Completed => "[completed]",
             SessionStatus::Failed => "[failed]",
         })
-    }
-
-    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        use ratatui::layout::{Constraint, Layout};
-        use ratatui::widgets::Paragraph;
-
-        // Split the given area (should be top 49% of screen) into sessions list and input box
-        let layout = Layout::vertical([Constraint::Percentage(49), Constraint::Percentage(51)]);
-        let [sessions_area, input_area] = layout.areas(area);
-
-        let session_items =
-            Self::create_session_list_items_with_selection(&self.sessions, self.selected_index);
-
-        let sessions_list = List::new(session_items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Agent sessions "),
-            )
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-
-        frame.render_stateful_widget(sessions_list, sessions_area, &mut self.list_state);
-
-        let ui_title = self
-            .get_selected_session()
-            .map(|s| format!(" Live UI: {} ", s.name))
-            .unwrap_or_else(|| " Live UI ".to_string());
-        let input = Paragraph::new("⌨ focus is shared with selected agent")
-            .block(Block::default().borders(Borders::ALL).title(ui_title));
-        frame.render_widget(input, input_area);
     }
 
     pub fn create_session_list_items_with_selection(

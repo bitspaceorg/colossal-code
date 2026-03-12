@@ -2,7 +2,7 @@ use super::{
     OrchestrationStatusLine, SpecPlanRenderParams, build_spec_plan_lines,
     build_tool_only_plan_lines, compose_tool_plan_view_lines,
 };
-use crate::{SessionRole, StepToolCallEntry, ToolCallStatus};
+use crate::app::{SessionRole, StepToolCallEntry, ToolCallStatus};
 use agent_core::{SpecSheet, SpecStep, StepStatus};
 use chrono::{TimeZone, Utc};
 use ratatui::{

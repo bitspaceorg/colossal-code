@@ -6,7 +6,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::App;
+use crate::app::App;
 
 use super::navigation::DrawAreaIndices;
 

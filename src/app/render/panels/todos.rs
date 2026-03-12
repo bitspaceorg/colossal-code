@@ -5,7 +5,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::{App, TodoItem};
+use crate::app::{App, TodoItem};
 
 fn todo_symbol(status: &str) -> &str {
     match status {
@@ -114,7 +114,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::count_todos;
-    use crate::TodoItem;
+    use crate::app::TodoItem;
 
     #[test]
     fn count_todos_counts_nested_items() {

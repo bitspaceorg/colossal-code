@@ -1,6 +1,9 @@
 pub mod agent_stream;
+mod agent_stream_handlers;
+mod agent_stream_policy;
 pub mod driver;
 pub mod event_loop;
+mod event_loop_handlers;
 pub mod git_ops;
 pub mod key_dispatch;
 pub mod r#loop;

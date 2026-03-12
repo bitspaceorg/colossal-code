@@ -1,6 +1,6 @@
 use ratatui::Frame;
 
-use crate::App;
+use crate::app::App;
 
 impl App {
     pub(crate) fn render_history_panel(&self, frame: &mut Frame, area: ratatui::layout::Rect) {

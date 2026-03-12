@@ -1,4 +1,4 @@
-use crate::SessionRole;
+use crate::app::SessionRole;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolCallStatus {

@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-use crate::{
+use crate::app::{
     APPROX_CHARS_PER_TOKEN, App, COMPACTION_HISTORY_RESERVE_TOKENS,
     DEFAULT_COMPACTION_HISTORY_BUDGET, FileChange, MIN_COMPACTION_HISTORY_BUDGET, MessageState,
     MessageType, RewindPoint, UIMessageMetadata, UiMessageEvent,
@@ -131,7 +131,7 @@ impl App {
         tokens.max(1)
     }
 
-    pub(crate) fn build_compact_prompt(&self, options: &crate::CompactOptions) -> String {
+    pub(crate) fn build_compact_prompt(&self, options: &crate::app::CompactOptions) -> String {
         let mut prompt = String::new();
 
         prompt.push_str(
@@ -284,7 +284,7 @@ Let me analyze the conversation chronologically:
 #[cfg(test)]
 mod tests {
     use super::App;
-    use crate::{MessageState, MessageType};
+    use crate::app::{MessageState, MessageType};
 
     #[test]
     fn snapshot_rewind_point_uses_latest_user_message_preview() {

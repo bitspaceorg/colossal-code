@@ -2,10 +2,11 @@ use color_eyre::Result;
 use serde_json::{Value, json};
 use std::time::SystemTime;
 
-use crate::{
+use crate::app::{
     App, ConversationMetadata, EnhancedSavedConversation, MessageState, MessageType,
-    SavedConversation, SavedUIMessage, app::persistence,
+    SavedConversation, SavedUIMessage,
 };
+use crate::app::persistence;
 
 impl App {
     pub(crate) fn initialize_conversations_dir() -> Result<()> {

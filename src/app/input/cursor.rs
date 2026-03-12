@@ -1,4 +1,4 @@
-use crate::{App, SLASH_COMMANDS};
+use crate::app::{App, SLASH_COMMANDS};
 use ratatui::crossterm::event::{Event, KeyEvent};
 
 fn cursor_position(input: &str, character_index: usize) -> (usize, usize) {

@@ -3,7 +3,7 @@ use color_eyre::Result;
 
 use crate::app::render::panels::survey::SurveyQuestion;
 use crate::app::state::ui_message_event::UiMessageEvent;
-use crate::{App, MessageState, MessageType, persistence};
+use crate::app::{App, MessageState, MessageType, persistence};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QueueChoiceAction {

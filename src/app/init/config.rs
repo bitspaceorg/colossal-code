@@ -1,6 +1,6 @@
 use color_eyre::Result;
 
-use crate::{
+use crate::app::{
     AUTO_SUMMARIZE_THRESHOLD_CONFIG_KEY, AUTO_SUMMARIZE_THRESHOLD_VERSION,
     AUTO_SUMMARIZE_THRESHOLD_VERSION_KEY, App, DEFAULT_AUTO_SUMMARIZE_THRESHOLD,
     LEGACY_AUTO_SUMMARIZE_THRESHOLD, MAX_AUTO_SUMMARIZE_THRESHOLD, MIN_AUTO_SUMMARIZE_THRESHOLD,
@@ -171,7 +171,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::resolve_auto_summarize_threshold;
-    use crate::{
+    use crate::app::{
         AUTO_SUMMARIZE_THRESHOLD_VERSION, DEFAULT_AUTO_SUMMARIZE_THRESHOLD,
         LEGACY_AUTO_SUMMARIZE_THRESHOLD,
     };

@@ -1,5 +1,5 @@
 use crate::app::render::thinking::encode_generation_stats_message;
-use crate::{AssistantMode, HelpTab, UiMessageEvent};
+use crate::app::{AssistantMode, HelpTab, UiMessageEvent};
 use agent_core::GenerationStats as AgentGenerationStats;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant, SystemTime};

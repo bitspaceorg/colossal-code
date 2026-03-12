@@ -4,7 +4,7 @@ use ratatui::{
     style::{Color, Style},
 };
 
-use crate::{App, Mode};
+use crate::app::{App, Mode};
 
 impl App {
     pub(crate) fn render_input_top_right_indicator(&self, frame: &mut Frame, input_area: Rect) {

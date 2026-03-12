@@ -4,7 +4,7 @@ use agent_core::{
 };
 use color_eyre::Result;
 
-use crate::App;
+use crate::app::App;
 use crate::app::orchestrator::lifecycle;
 
 impl App {

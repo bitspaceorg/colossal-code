@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, List, ListItem, Paragraph},
 };
 
-use crate::App;
+use crate::app::App;
 
 impl App {
     pub(crate) fn render_resume_panel(

@@ -1,6 +1,6 @@
 use color_eyre::Result;
 
-use crate::{
+use crate::app::{
     App, ConversationMetadata, EnhancedSavedConversation, SavedConversation, TodoItem, persistence,
 };
 

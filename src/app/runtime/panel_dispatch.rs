@@ -4,7 +4,7 @@ use agent_core::AgentMessage;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
 use crate::app::state::message::{MessageState, MessageType};
-use crate::{App, SLASH_COMMANDS};
+use crate::app::{App, SLASH_COMMANDS};
 
 impl App {
     pub(crate) fn handle_panel_dispatch_key(&mut self, key: &KeyEvent) -> bool {
@@ -95,12 +95,12 @@ impl App {
                 self.ui_state.help_tab = self.ui_state.help_tab.next();
                 self.help_commands_selected = 0;
             }
-            KeyCode::Up if self.ui_state.help_tab == crate::HelpTab::Commands => {
+            KeyCode::Up if self.ui_state.help_tab == crate::app::HelpTab::Commands => {
                 if self.help_commands_selected > 0 {
                     self.help_commands_selected -= 1;
                 }
             }
-            KeyCode::Down if self.ui_state.help_tab == crate::HelpTab::Commands => {
+            KeyCode::Down if self.ui_state.help_tab == crate::app::HelpTab::Commands => {
                 if self.help_commands_selected < SLASH_COMMANDS.len().saturating_sub(1) {
                     self.help_commands_selected += 1;
                 }

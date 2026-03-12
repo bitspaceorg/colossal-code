@@ -61,7 +61,7 @@ pub fn compose_tool_plan_view_lines(
 
 pub fn build_tool_only_plan_lines(
     spec: &SpecSheet,
-    step_tool_calls: &HashMap<String, Vec<crate::StepToolCallEntry>>,
+    step_tool_calls: &HashMap<String, Vec<crate::app::StepToolCallEntry>>,
     active_prefix: Option<&str>,
     max_width: usize,
 ) -> Vec<Line<'static>> {

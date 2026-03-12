@@ -4,7 +4,7 @@ use tokio::task;
 
 use crate::app::commands::{SlashCommandDispatch, dispatch_slash_command};
 use crate::app::runtime::r#loop::{apply_command_runtime_route, route_command_runtime};
-use crate::{App, AssistantMode, HelpTab, MessageState, MessageType, UiMessageEvent};
+use crate::app::{App, AssistantMode, HelpTab, MessageState, MessageType, UiMessageEvent};
 
 impl App {
     pub(crate) fn handle_slash_command(&mut self) {

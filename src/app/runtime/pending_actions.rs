@@ -8,7 +8,7 @@ use crate::app::runtime::agent_stream::AgentStreamOutcome;
 use crate::app::runtime::git_ops;
 use crate::app::state::message::{MessageState, MessageType};
 use crate::app::state::ui_message_event::UiMessageEvent;
-use crate::{App, CompactOptions};
+use crate::app::{App, CompactOptions};
 
 impl App {
     pub(crate) async fn process_pending_actions(&mut self, outcome: AgentStreamOutcome) {

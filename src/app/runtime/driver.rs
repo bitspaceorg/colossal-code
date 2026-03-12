@@ -2,7 +2,7 @@ use agent_core::orchestrator::OrchestratorEvent;
 use color_eyre::Result;
 use ratatui::{DefaultTerminal, crossterm::event};
 
-use crate::App;
+use crate::app::App;
 
 impl App {
     pub(crate) async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {

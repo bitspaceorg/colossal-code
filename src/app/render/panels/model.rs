@@ -1,4 +1,4 @@
-use crate::ModelInfo;
+use crate::app::ModelInfo;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -135,7 +135,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{primary_metadata_line, secondary_metadata_line, visible_model_bounds};
-    use crate::ModelInfo;
+    use crate::app::ModelInfo;
 
     fn sample_model() -> ModelInfo {
         ModelInfo {

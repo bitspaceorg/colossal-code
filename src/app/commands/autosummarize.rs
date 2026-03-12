@@ -1,4 +1,4 @@
-use crate::{
+use crate::app::{
     App, MAX_AUTO_SUMMARIZE_THRESHOLD, MIN_AUTO_SUMMARIZE_THRESHOLD, MessageState, MessageType,
 };
 

@@ -17,7 +17,7 @@ use tokio::{sync::mpsc, task};
 use crate::app::init::startup::Phase;
 use crate::app::input::vim_sync::RichEditor;
 use crate::app::render::panels::survey::Survey;
-use crate::{
+use crate::app::{
     AgentState, AppSnapshot, CompactOptions, CompactionEntry, ConversationMetadata, FileChange,
     MessageState, MessageType, ModelInfo, PersistenceState, RewindPoint, SafetyState,
     SessionManager, StepToolCallEntry, SubAgentContext, UIMessageMetadata,
@@ -216,7 +216,7 @@ pub(crate) struct App {
     // Background task viewer
     pub(crate) viewing_task: Option<(String, String, String, std::time::Instant)>, // (session_id, command, log_file, start_time)
     // Help panel state
-    pub(crate) ui_state: crate::UiState,
+    pub(crate) ui_state: crate::app::UiState,
     pub(crate) help_commands_selected: usize,
     // Resume panel state
     pub(crate) resume_conversations: Vec<ConversationMetadata>,
@@ -252,7 +252,7 @@ pub(crate) struct App {
     pub(crate) orchestrator_event_rx:
         Option<tokio::sync::mpsc::UnboundedReceiver<OrchestratorEvent>>,
     pub(crate) orchestrator_task: Option<task::JoinHandle<()>>, // Background task running orchestrator
-    pub(crate) orchestrator_sessions: HashMap<String, crate::OrchestratorEntry>,
+    pub(crate) orchestrator_sessions: HashMap<String, crate::app::OrchestratorEntry>,
     pub(crate) orchestrator_history: Vec<TaskSummary>, // History of completed task summaries
     pub(crate) latest_summaries: HashMap<String, TaskSummary>, // Latest summary per step index
     pub(crate) orchestrator_paused: bool,              // Whether orchestrator is currently paused

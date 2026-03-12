@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap},
 };
 
-use crate::{App, HelpTab, SLASH_COMMANDS};
+use crate::app::{App, HelpTab, SLASH_COMMANDS};
 
 impl App {
     pub(crate) fn render_model_selection_panel(

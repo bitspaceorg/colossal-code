@@ -6,7 +6,7 @@ use color_eyre::Result;
 use std::sync::Arc;
 use tokio::{sync::mpsc, task};
 
-use crate::App;
+use crate::app::App;
 
 impl App {
     pub(crate) fn start_orchestrator_run(&mut self, spec: SpecSheet) -> Result<()> {

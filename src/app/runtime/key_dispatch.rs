@@ -3,7 +3,7 @@ use std::{sync::Arc, time::SystemTime};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::task;
 
-use crate::App;
+use crate::app::App;
 use crate::app::state::message::{MessageState, MessageType};
 
 impl App {

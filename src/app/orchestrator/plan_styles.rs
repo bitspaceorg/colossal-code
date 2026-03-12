@@ -2,7 +2,7 @@ use agent_core::StepStatus;
 use ratatui::style::{Color, Style};
 use unicode_width::UnicodeWidthChar;
 
-use crate::{SessionRole, StepToolCallEntry, ToolCallStatus};
+use crate::app::{SessionRole, StepToolCallEntry, ToolCallStatus};
 
 pub(crate) fn format_tool_label(entry: &StepToolCallEntry, available: usize) -> String {
     let role_prefix = match entry.role {
