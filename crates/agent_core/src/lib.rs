@@ -83,7 +83,7 @@ fn preview_thinking(text: &str) -> String {
 }
 
 fn sandbox_policy_from_config(safety_config: &safety_config::SafetyConfig) -> SandboxPolicy {
-    let workspace_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let workspace_path = resolve_workspace_root();
     let mut writable_roots = vec![colossal_linux_sandbox::protocol::WritableRoot {
         root: workspace_path.clone(),
         recursive: true,
@@ -203,7 +203,7 @@ struct HtmlToTextResult {
 }
 
 async fn execute_tool_binary(args: Vec<String>, sandbox_policy: &SandboxPolicy) -> Result<String> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cwd = resolve_workspace_root();
 
     // 10 minute timeout for tool execution to allow cargo/npm/etc operations
     let timeout_duration = std::time::Duration::from_secs(600);
@@ -309,8 +309,7 @@ pub(crate) async fn get_or_create_shell_session() -> Result<(
     // 1. No session exists yet, OR
     // 2. Current session has a background process running
     if session_id_lock.is_none() || *has_background {
-        let workspace_path =
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let workspace_path = resolve_workspace_root();
 
         let shared_state = Arc::new(colossal_linux_sandbox::session::SharedSessionState::new(
             workspace_path.clone(),
@@ -332,7 +331,7 @@ pub(crate) async fn get_or_create_shell_session() -> Result<(
             .manager
             .exec_command_in_shell_session(
                 session_id.clone(),
-                format!("cd {}", workspace_path.display()),
+                format!("cd {}", escape(workspace_path.to_string_lossy())),
                 Some(5000),
                 1000,
                 None, // No approval needed for initial cd
@@ -1239,10 +1238,7 @@ impl Agent {
         } else {
             os_info.to_string()
         };
-        let workspace_path = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .display()
-            .to_string();
+        let workspace_path = resolve_workspace_root().display().to_string();
 
         let system_prompt_template =
             read_system_prompt().unwrap_or_else(|_e| get_default_niterules());
@@ -1345,10 +1341,7 @@ impl Agent {
         } else {
             os_info.to_string()
         };
-        let workspace_path = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .display()
-            .to_string();
+        let workspace_path = resolve_workspace_root().display().to_string();
 
         // Load safety configuration
         let safety_config = safety_config::SafetyConfig::load().unwrap_or_default();
@@ -1734,10 +1727,7 @@ impl Agent {
         } else {
             os_info.to_string()
         };
-        let workspace_path = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .display()
-            .to_string();
+        let workspace_path = resolve_workspace_root().display().to_string();
 
         // Read system prompt and apply new tools section
         let system_prompt_template = read_system_prompt().unwrap_or_else(|_e| {
