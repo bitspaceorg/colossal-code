@@ -1,5 +1,5 @@
 use crate::{
-    App, MessageState, MessageType, MAX_AUTO_SUMMARIZE_THRESHOLD, MIN_AUTO_SUMMARIZE_THRESHOLD,
+    App, MAX_AUTO_SUMMARIZE_THRESHOLD, MIN_AUTO_SUMMARIZE_THRESHOLD, MessageState, MessageType,
 };
 
 impl App {

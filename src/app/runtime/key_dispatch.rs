@@ -3,8 +3,8 @@ use std::{sync::Arc, time::SystemTime};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::task;
 
-use crate::app::state::message::{MessageState, MessageType};
 use crate::App;
+use crate::app::state::message::{MessageState, MessageType};
 
 impl App {
     pub(crate) fn is_shift_tab(key: &KeyEvent) -> bool {
@@ -17,7 +17,8 @@ impl App {
             self.safety_state.assistant_mode = self.safety_state.assistant_mode.next();
 
             if let Some(safety_mode) = self.safety_state.assistant_mode.to_safety_mode() {
-                let mut config = agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
+                let mut config =
+                    agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
                 config.set_mode(safety_mode);
                 let _ = config.save();
 

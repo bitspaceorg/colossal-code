@@ -1,7 +1,7 @@
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Color, Style},
-    Frame,
 };
 
 use crate::{App, Mode};

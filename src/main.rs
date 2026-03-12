@@ -19,8 +19,8 @@ pub use app::orchestrator::session_manager::{
 use app::persistence;
 use app::render::panels::survey::Survey;
 use app::render::thinking::{create_thinking_highlight_spans, encode_generation_stats_message};
-pub(crate) use app::state::*;
 pub(crate) use app::state::ui_message_event::UiMessageEvent;
+pub(crate) use app::state::*;
 
 /// Custom border set for messages
 const MESSAGE_BORDER_SET: symbols::border::Set = symbols::border::Set {

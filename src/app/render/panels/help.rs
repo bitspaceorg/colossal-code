@@ -1,8 +1,8 @@
 use ratatui::{
+    Frame,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap},
-    Frame,
 };
 
 use crate::{App, HelpTab, SLASH_COMMANDS};
