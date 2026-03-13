@@ -12,7 +12,8 @@ use either::Either;
 use futures::StreamExt;
 use indexmap::IndexMap;
 use mistralrs::{
-    ChatCompletionChunkResponse, Delta, Model, RequestBuilder, Response, TextMessageRole, Tool,
+    ChatCompletionChunkResponse, Delta, Model, RequestBuilder, RequestLike, Response,
+    TextMessageRole, Tool,
     ToolCallResponse, ToolChoice,
 };
 use mistralrs_core::MessageContent;
@@ -1879,7 +1880,7 @@ impl Agent {
         let conversation_guard = self.conversation.lock().await;
         if let Some(request_builder) = conversation_guard.as_ref() {
             // Get messages from RequestBuilder and serialize to JSON
-            let messages = request_builder.messages();
+            let messages = request_builder.messages_ref();
             if messages.is_empty() {
                 None
             } else {
@@ -2458,7 +2459,7 @@ impl Agent {
     /// Roughly estimate the prompt tokens for a pending request by flattening all messages.
     fn estimate_prompt_tokens(&self, request_builder: &RequestBuilder) -> usize {
         let mut flattened = String::new();
-        for message in request_builder.messages() {
+        for message in request_builder.messages_ref() {
             for (key, value) in message {
                 flattened.push_str(key);
                 flattened.push(':');

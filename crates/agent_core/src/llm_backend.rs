@@ -359,6 +359,7 @@ impl HttpBackend {
                 content: Some(content.clone()),
                 role: role.clone(),
                 tool_calls: tool_calls.clone(),
+                reasoning_content: None,
             },
             logprobs: None,
         };
@@ -399,6 +400,7 @@ impl HttpBackend {
                 content: Some(content.clone()),
                 role,
                 tool_calls,
+                reasoning_content: None,
             },
             logprobs: None,
         };
@@ -448,13 +450,13 @@ impl LLMBackend for HttpBackend {
         request: RequestBuilder,
     ) -> Result<Box<dyn FuturesStream<Item = Response> + Unpin + Send>> {
         let mut request_builder = request;
-        let enable_thinking = request_builder.is_thinking_enabled();
+        let enable_thinking: Option<bool> = None;
         let model_name = {
             let guard = self.model.lock().await;
             guard.clone()
         };
 
-        let openai_messages = serialize_messages(request_builder.messages());
+        let openai_messages = serialize_messages(request_builder.messages_ref());
         let tools_payload = request_builder.take_tools();
 
         let mut payload = json!({
@@ -1026,6 +1028,7 @@ fn send_final_done(
         content: Some(accumulated_content.to_string()),
         role: final_role.to_string(),
         tool_calls: finalize_stream_tool_calls(tool_state),
+        reasoning_content: None,
     };
 
     let choice = Choice {
@@ -1251,6 +1254,7 @@ async fn process_sse_stream(
                     } else {
                         Some(delta_tool_calls.clone())
                     },
+                    reasoning_content: None,
                 };
 
                 let chunk_choice = ChunkChoice {
