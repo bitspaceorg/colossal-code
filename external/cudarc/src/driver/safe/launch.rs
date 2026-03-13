@@ -273,13 +273,13 @@ impl LaunchArgs<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        driver::{CudaContext, DriverError},
-        nvrtc::compile_ptx_with_opts,
-    };
+    use crate::driver::{CudaContext, DriverError};
+    #[cfg(feature = "nvrtc")]
+    use crate::nvrtc::compile_ptx_with_opts;
 
     use super::*;
 
+    #[cfg(feature = "nvrtc")]
     #[test]
     fn test_launch_arrays() -> Result<(), DriverError> {
         #[repr(C)]
@@ -341,6 +341,7 @@ extern \"C\" __global__ void sin_kernel(float *out, const float *inp, size_t num
     }
 }";
 
+    #[cfg(feature = "nvrtc")]
     #[test]
     fn test_launch_with_mut_and_ref_cudarc() {
         let ctx = CudaContext::new(0).unwrap();
@@ -352,7 +353,7 @@ extern \"C\" __global__ void sin_kernel(float *out, const float *inp, size_t num
 
         let a_host = [-1.0f32, -0.8, -0.6, -0.4, -0.2, 0.0, 0.2, 0.4, 0.6, 0.8];
 
-        let a_dev = stream.memcpy_stod(&a_host).unwrap();
+        let a_dev = stream.clone_htod(&a_host).unwrap();
         let mut b_dev = a_dev.clone();
 
         unsafe {
@@ -365,7 +366,7 @@ extern \"C\" __global__ void sin_kernel(float *out, const float *inp, size_t num
         }
         .unwrap();
 
-        let b_host = stream.memcpy_dtov(&b_dev).unwrap();
+        let b_host = stream.clone_dtoh(&b_dev).unwrap();
 
         for (a_i, b_i) in a_host.iter().zip(b_host.iter()) {
             let expected = a_i.sin();
@@ -375,6 +376,7 @@ extern \"C\" __global__ void sin_kernel(float *out, const float *inp, size_t num
         drop(a_dev);
     }
 
+    #[cfg(feature = "nvrtc")]
     #[test]
     fn test_large_launches() {
         let ctx = CudaContext::new(0).unwrap();
@@ -388,7 +390,7 @@ extern \"C\" __global__ void sin_kernel(float *out, const float *inp, size_t num
             let mut a = Vec::with_capacity(numel);
             a.resize(numel, 1.0f32);
 
-            let a = stream.memcpy_stod(&a).unwrap();
+            let a = stream.clone_htod(&a).unwrap();
             let mut b = stream.alloc_zeros::<f32>(numel).unwrap();
             unsafe {
                 stream
@@ -400,13 +402,14 @@ extern \"C\" __global__ void sin_kernel(float *out, const float *inp, size_t num
             }
             .unwrap();
 
-            let b = stream.memcpy_dtov(&b).unwrap();
+            let b = stream.clone_dtoh(&b).unwrap();
             for v in b {
                 assert_eq!(v, 0.841471);
             }
         }
     }
 
+    #[cfg(feature = "nvrtc")]
     #[test]
     fn test_launch_with_views() {
         let ctx = CudaContext::new(0).unwrap();
@@ -417,7 +420,7 @@ extern \"C\" __global__ void sin_kernel(float *out, const float *inp, size_t num
         let f = module.load_function("sin_kernel").unwrap();
 
         let a_host = [-1.0f32, -0.8, -0.6, -0.4, -0.2, 0.0, 0.2, 0.4, 0.6, 0.8];
-        let a_dev = stream.memcpy_stod(&a_host).unwrap();
+        let a_dev = stream.clone_htod(&a_host).unwrap();
         let mut b_dev = a_dev.clone();
 
         for i in 0..5 {
@@ -436,7 +439,7 @@ extern \"C\" __global__ void sin_kernel(float *out, const float *inp, size_t num
             .unwrap();
         }
 
-        let b_host = stream.memcpy_dtov(&b_dev).unwrap();
+        let b_host = stream.clone_dtoh(&b_dev).unwrap();
 
         for (a_i, b_i) in a_host.iter().zip(b_host.iter()) {
             let expected = a_i.sin();
@@ -481,6 +484,7 @@ extern \"C\" __global__ void floating(float f, double d) {
 }
 ";
 
+    #[cfg(feature = "nvrtc")]
     #[test]
     fn test_launch_with_8bit() {
         let ctx = CudaContext::new(0).unwrap();
@@ -501,6 +505,7 @@ extern \"C\" __global__ void floating(float f, double d) {
         stream.synchronize().unwrap();
     }
 
+    #[cfg(feature = "nvrtc")]
     #[test]
     fn test_launch_with_16bit() {
         let ctx = CudaContext::new(0).unwrap();
@@ -521,6 +526,7 @@ extern \"C\" __global__ void floating(float f, double d) {
         stream.synchronize().unwrap();
     }
 
+    #[cfg(feature = "nvrtc")]
     #[test]
     fn test_launch_with_32bit() {
         let ctx = CudaContext::new(0).unwrap();
@@ -541,6 +547,7 @@ extern \"C\" __global__ void floating(float f, double d) {
         stream.synchronize().unwrap();
     }
 
+    #[cfg(feature = "nvrtc")]
     #[test]
     fn test_launch_with_64bit() {
         let ctx = CudaContext::new(0).unwrap();
@@ -561,6 +568,7 @@ extern \"C\" __global__ void floating(float f, double d) {
         stream.synchronize().unwrap();
     }
 
+    #[cfg(feature = "nvrtc")]
     #[test]
     fn test_launch_with_floats() {
         let ctx = CudaContext::new(0).unwrap();
@@ -626,6 +634,7 @@ extern \"C\" __global__ void slow_worker(const float *data, const size_t len, fl
 }
 ";
 
+    #[cfg(feature = "nvrtc")]
     #[test]
     fn test_par_launch() -> Result<(), DriverError> {
         let ptx = compile_ptx_with_opts(SLOW_KERNELS, Default::default()).unwrap();
@@ -698,6 +707,7 @@ extern \"C\" __global__ void slow_worker(const float *data, const size_t len, fl
         Ok(())
     }
 
+    #[cfg(feature = "nvrtc")]
     #[test]
     fn test_multi_stream_concurrent_reads() -> Result<(), DriverError> {
         let ptx = compile_ptx_with_opts(SLOW_KERNELS, Default::default()).unwrap();
@@ -739,6 +749,7 @@ extern \"C\" __global__ void slow_worker(const float *data, const size_t len, fl
         Ok(())
     }
 
+    #[cfg(feature = "nvrtc")]
     #[test]
     fn test_multi_stream_writes_block() -> Result<(), DriverError> {
         let ptx = compile_ptx_with_opts(SLOW_KERNELS, Default::default()).unwrap();
@@ -778,12 +789,13 @@ extern \"C\" __global__ void slow_worker(const float *data, const size_t len, fl
         Ok(())
     }
 
+    #[cfg(feature = "nvrtc")]
     #[test]
     #[ignore = "must be executed by itself"]
     fn test_device_side_assert() -> Result<(), DriverError> {
         let ctx = CudaContext::new(0)?;
         let stream = ctx.new_stream()?;
-        let inp = stream.memcpy_stod(&[1.0f32; 100])?;
+        let inp = stream.clone_htod(&[1.0f32; 100])?;
         let mut out = stream.alloc_zeros::<f32>(100)?;
         let ptx = crate::nvrtc::compile_ptx(
             "

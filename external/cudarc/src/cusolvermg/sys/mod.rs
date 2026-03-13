@@ -107,7 +107,12 @@ pub enum cudaDataType_t {
     CUDA_R_8F_E4M3 = 28,
     CUDA_R_8F_E5M2 = 29,
 }
-#[cfg(any(feature = "cuda-12080", feature = "cuda-12090", feature = "cuda-13000"))]
+#[cfg(any(
+    feature = "cuda-12080",
+    feature = "cuda-12090",
+    feature = "cuda-13000",
+    feature = "cuda-13010"
+))]
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum cudaDataType_t {
@@ -195,7 +200,12 @@ pub struct cusolverMgContext {
 impl cublasOperation_t {
     pub const CUBLAS_OP_HERMITAN: cublasOperation_t = cublasOperation_t::CUBLAS_OP_C;
 }
-#[cfg(any(feature = "cuda-12080", feature = "cuda-12090", feature = "cuda-13000"))]
+#[cfg(any(
+    feature = "cuda-12080",
+    feature = "cuda-12090",
+    feature = "cuda-13000",
+    feature = "cuda-13010"
+))]
 impl cudaDataType_t {
     pub const CUDA_R_8F_UE4M3: cudaDataType_t = cudaDataType_t::CUDA_R_8F_E4M3;
 }
@@ -1020,7 +1030,7 @@ mod loaded {
         where
             P: AsRef<::std::ffi::OsStr>,
         {
-            let library = ::libloading::Library::new(path)?;
+            let library = ::libloading::Library::new(path.as_ref())?;
             Self::from_library(library)
         }
         pub unsafe fn from_library<L>(library: L) -> Result<Self, ::libloading::Error>

@@ -1,19 +1,20 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::{Embedding, Module};
 use mistralrs_quant::{
-    distributed::layers::PackedExperts, linear_no_bias, ColumnParallelLayer, QuantMethod,
-    QuantizedConfig, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder, SumAllReduce,
+    linear_no_bias, ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer,
+    RowParallelLayer, ShardedVarBuilder,
 };
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::SdpaParams,
-    device_map::DeviceMapper,
+    device_map::{DeviceMappedMask, DeviceMapper},
     layers::{embedding, Activation, CausalMasker, Llama3RotaryEmbedding, RmsNorm, Sdpa},
     layers_masker::PastKvLenCache,
+    moe::{MoEExperts, MoEExpertsConfig},
     ops::{TopKLastDimOp, TopKOutput},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
@@ -99,7 +100,7 @@ impl CausalSelfAttention {
             comm,
             mapper.set_device(layer_idx, vb.pp("o_proj"), loading_isq),
         )?;
-        let use_rope = (layer_idx + 1) % 4 != 0;
+        let use_rope = !(layer_idx + 1).is_multiple_of(4);
         let head_dim = cfg.hidden_size / cfg.num_attention_heads;
         let norm = if cfg.use_qk_norm && use_rope {
             let vb = mapper.set_device(layer_idx, vb, false);
@@ -131,6 +132,7 @@ impl CausalSelfAttention {
                 softcap: None,
                 softmax_scale: 1.0 / (head_dim as f32).sqrt(),
                 sliding_window: None,
+                sinks: None,
             },
             norm,
             use_rope,
@@ -297,79 +299,9 @@ impl Mlp {
     }
 }
 
-struct TextExperts {
-    gate_proj: Vec<Arc<dyn QuantMethod>>,
-    up_proj: Vec<Arc<dyn QuantMethod>>,
-    down_proj: Vec<Arc<dyn QuantMethod>>,
-    act: Activation,
-    hidden_size: usize,
-    sum_all_reduce: SumAllReduce,
-}
-
-impl TextExperts {
-    fn new(
-        vb: ShardedVarBuilder,
-        cfg: &TextConfig,
-        quantization_config: &Option<QuantizedConfig>,
-        comm: &Arc<mistralrs_quant::Comm>,
-    ) -> Result<Self> {
-        let PackedExperts {
-            gate_proj,
-            up_proj,
-            down_proj,
-        } = PackedExperts::new(
-            cfg.num_local_experts,
-            cfg.hidden_size,
-            cfg.intermediate_size,
-            quantization_config,
-            false,
-            comm,
-            vb,
-        )?;
-        Ok(Self {
-            gate_proj,
-            up_proj,
-            down_proj,
-            act: cfg.hidden_act,
-            hidden_size: cfg.hidden_size,
-            sum_all_reduce: SumAllReduce::new(comm),
-        })
-    }
-
-    // xs: (bs * seq_len, hidden_size)
-    // expert indices: (bs * seq_len)
-    fn forward(&self, xs: &Tensor, indices: &Tensor) -> Result<Tensor> {
-        let xs = xs.unsqueeze(1)?;
-
-        if self.gate_proj.len() == 1 {
-            let gate = self.gate_proj[0].gather_forward_autocast(&xs, indices)?;
-            let up = self.up_proj[0].gather_forward_autocast(&xs, indices)?;
-            let mut xs = self.down_proj[0]
-                .gather_forward_autocast(&(up * gate.apply(&self.act)?)?, indices)?;
-            xs = self.sum_all_reduce.sum_all_reduce(&xs)?;
-            xs.reshape(((), self.hidden_size))
-        } else {
-            let indices = indices.to_vec1::<u32>()?;
-            let mut results = Vec::new();
-            for (tok, id) in indices.into_iter().enumerate() {
-                let xs = xs.i(tok)?.reshape((1, self.hidden_size))?;
-
-                let res = {
-                    let gate = self.gate_proj[id as usize].forward_autocast(&xs)?;
-                    let up = self.up_proj[id as usize].forward_autocast(&xs)?;
-                    self.down_proj[id as usize].forward_autocast(&(up * gate.apply(&self.act)?)?)?
-                };
-                results.push(res);
-            }
-            let mut xs = Tensor::cat(&results, 0)?;
-            xs = self.sum_all_reduce.sum_all_reduce(&xs)?;
-            xs.reshape(((), self.hidden_size))
-        }
-    }
-}
-
+/// MoE layer for Llama4 using the unified MoEExperts
 struct TextMoe {
-    experts: TextExperts,
+    experts: MoEExperts,
     shared_expert: Mlp,
     router: Arc<dyn QuantMethod>,
     topk: usize,
@@ -381,14 +313,33 @@ impl TextMoe {
         cfg: &TextConfig,
         quantization_config: &Option<QuantizedConfig>,
         comm: &Arc<mistralrs_quant::Comm>,
+        loading_isq: bool,
+        layer_device: Device,
     ) -> Result<Self> {
-        let experts = TextExperts::new(vb.pp("experts"), cfg, quantization_config, comm)?;
+        let moe_cfg = MoEExpertsConfig {
+            num_experts: cfg.num_local_experts,
+            num_experts_per_tok: cfg.num_experts_per_tok,
+            hidden_size: cfg.hidden_size,
+            moe_intermediate_size: cfg.intermediate_size,
+        };
+
+        let experts = MoEExperts::new(
+            &moe_cfg,
+            vb.clone(),
+            layer_device.clone(),
+            comm,
+            loading_isq,
+            quantization_config,
+            cfg.hidden_act,
+        )?;
+
         let router = linear_no_bias(
             cfg.hidden_size,
             cfg.num_local_experts,
             quantization_config,
-            vb.pp("router"),
+            vb.pp("router").set_device(layer_device),
         )?;
+
         let shared_expert = Mlp::new(
             vb.pp("shared_expert"),
             cfg.hidden_size,
@@ -397,6 +348,7 @@ impl TextMoe {
             cfg.hidden_act,
             comm,
         )?;
+
         Ok(Self {
             experts,
             shared_expert,
@@ -407,8 +359,8 @@ impl TextMoe {
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (bs, seq_len, hidden_dim) = xs.dims3()?;
-        let xs = xs.reshape(((), hidden_dim))?;
-        let router_logits = self.router.forward_autocast(&xs)?;
+        let xs_flat = xs.reshape(((), hidden_dim))?;
+        let router_logits = self.router.forward_autocast(&xs_flat)?;
 
         let TopKOutput {
             values: router_top_value,
@@ -418,14 +370,14 @@ impl TextMoe {
         let router_scores = candle_nn::ops::sigmoid(&router_top_value.to_dtype(DType::F32)?)?
             .to_dtype(router_top_value.dtype())?;
 
-        let routed_in = xs.broadcast_mul(&router_scores)?;
+        // Forward through routed experts (is_prefill determined internally)
         let routed_out = self
             .experts
-            .forward(&routed_in, &router_indices.squeeze(D::Minus1)?)?
+            .forward(xs, router_scores, &router_indices)?
             .reshape((bs, seq_len, hidden_dim))?;
-        let out = self
-            .shared_expert
-            .forward(&xs.reshape((bs, seq_len, hidden_dim))?)?;
+
+        // Forward through shared expert and add
+        let out = self.shared_expert.forward(xs)?;
 
         out + routed_out
     }
@@ -464,8 +416,9 @@ impl Block {
         rope: Arc<Llama3RotaryEmbedding>,
         paged_attn: Option<PagedAttention>,
         comm: &Arc<mistralrs_quant::Comm>,
+        real_device: Device,
     ) -> Result<Self> {
-        let use_chunked_attention = (layer_idx + 1) % 4 != 0;
+        let use_chunked_attention = !(layer_idx + 1).is_multiple_of(4);
         let attn = CausalSelfAttention::new(
             vb.pp("self_attn"),
             cfg,
@@ -477,12 +430,18 @@ impl Block {
             comm,
         )?;
         let is_moe_layer = cfg.moe_layers().contains(&layer_idx);
+        let layer_device = mapper
+            .device_for(layer_idx, false)
+            .cloned()
+            .unwrap_or(real_device);
         let ff = if is_moe_layer {
             let moe = TextMoe::new(
                 mapper.set_device(layer_idx, vb.pp("feed_forward"), loading_isq),
                 cfg,
                 &cfg.quantization_config,
                 comm,
+                loading_isq,
+                layer_device,
             )?;
             MoeOrMlp::Moe(moe)
         } else {
@@ -668,6 +627,7 @@ impl TextModel {
                 rotary_emb,
                 paged_attn,
                 &comm,
+                normal_loading_metadata.real_device.clone(),
             )
         })?;
 
@@ -691,6 +651,7 @@ impl TextModel {
                 sliding_window: None,
                 k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
                 v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+                kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
             },
             mapper,
             attention_chunk_size: cfg.attention_chunk_size,
@@ -750,15 +711,17 @@ impl TextModel {
                 .map(|(_, meta)| meta.is_first_prompt_chunk)
                 .unwrap_or(true)
         });
+        let mask = DeviceMappedMask::new(mask, &*self.mapper)?;
+        let chunked_mask = DeviceMappedMask::new(chunked_mask, &*self.mapper)?;
         for (block_idx, block) in self.blocks.iter().enumerate() {
             x = self.mapper.map(x, block_idx)?;
+            let mask_for_layer = mask.as_ref().map(|m| m.get(x.device()).clone());
+            let chunked_mask_for_layer = chunked_mask.as_ref().map(|m| m.get(x.device()).clone());
             x = block.forward(
                 &x,
                 &position_ids.to_device(x.device())?,
-                &mask.clone().map(|m| m.to_device(x.device()).unwrap()),
-                &chunked_mask
-                    .clone()
-                    .map(|m| m.to_device(x.device()).unwrap()),
+                &mask_for_layer,
+                &chunked_mask_for_layer,
                 seqlen_offsets,
                 &mut cache[block_idx],
                 metadata
@@ -767,10 +730,10 @@ impl TextModel {
                 flash_params,
             )?;
         }
-        let mut x = x.to_device(&self.device)?;
-        x = self.ln_f.forward(&x)?;
-        x = self.lm_head.forward_autocast(&x)?;
-        extract_logits(&x, context_lens)
+        let x = x.to_device(&self.device)?;
+        let x = self.ln_f.forward(&x)?;
+        let x = extract_logits(&x, context_lens)?;
+        self.lm_head.forward_autocast(&x)
     }
 
     pub fn residual_tensors_m(&self, uvb_m: UnVarBuilder) -> Vec<(String, Tensor)> {
@@ -809,14 +772,8 @@ impl IsqModel for TextModel {
                 }
                 MoeOrMlp::Moe(x) => {
                     tensors.push((&mut x.router, Some(i)));
-                    for g in &mut x.experts.gate_proj {
-                        tensors.push((g, Some(i)));
-                    }
-                    for u in &mut x.experts.up_proj {
-                        tensors.push((u, Some(i)));
-                    }
-                    for d in &mut x.experts.down_proj {
-                        tensors.push((d, Some(i)));
+                    for layer in x.experts.get_isq_layers() {
+                        tensors.push((layer, Some(i)));
                     }
                     tensors.push((&mut x.shared_expert.gate, Some(i)));
                     tensors.push((&mut x.shared_expert.up, Some(i)));

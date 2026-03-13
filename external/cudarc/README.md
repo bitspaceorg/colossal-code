@@ -6,21 +6,52 @@
 
 Checkout cudarc on [crates.io](https://crates.io/crates/cudarc) and [docs.rs](https://docs.rs/cudarc/latest/cudarc/).
 
-Safe CUDA wrappers for:
-1. [CUDA driver](https://docs.nvidia.com/cuda/cuda-driver-api/index.html)
-2. [NVRTC](https://docs.nvidia.com/cuda/nvrtc/index.html)
-3. [cuRAND](https://docs.nvidia.com/cuda/curand/index.html)
-4. [cuBLAS](https://docs.nvidia.com/cuda/cublas/index.html)
-5. [cuBLASLt](https://docs.nvidia.com/cuda/cublas/#using-the-cublaslt-api)
-6. [NCCL](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/)
-7. [cuDNN](https://docs.nvidia.com/deeplearning/cudnn/backend/latest/api/overview.html)
-8. [cuSPARSE](https://docs.nvidia.com/cuda/cusparse/)
-9. [cuSOLVER](https://docs.nvidia.com/cuda/cusolver/)
-10. [cuFILE](https://docs.nvidia.com/gpudirect-storage/api-reference-guide/index.html#introduction)
-
 **Contributions welcome!**
 
-# API 👀
+Safe CUDA wrappers for:
+
+| library | dynamic load | dynamic link | static link |
+| --- | --- | --- | --- |
+| [CUDA driver](https://docs.nvidia.com/cuda/cuda-driver-api/index.html) | ✅ | ✅ | N/A |
+| [NVRTC](https://docs.nvidia.com/cuda/nvrtc/index.html) | ✅ | ✅ | ✅ |
+| [cuRAND](https://docs.nvidia.com/cuda/curand/index.html) | ✅ | ✅ | ✅ |
+| [cuBLAS](https://docs.nvidia.com/cuda/cublas/index.html) | ✅ | ✅ | ✅ |
+| [cuBLASLt](https://docs.nvidia.com/cuda/cublas/#using-the-cublaslt-api) | ✅ | ✅ | ✅ |
+| [NCCL](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/) | ✅ | ✅ | ✅ |
+| [cuDNN](https://docs.nvidia.com/deeplearning/cudnn/backend/latest/api/overview.html) | ✅ | ✅ | ✅ |
+| [cuSPARSE](https://docs.nvidia.com/cuda/cusparse/) | ✅ | ✅ | ✅ |
+| [cuSOLVER](https://docs.nvidia.com/cuda/cusolver/) | ✅ | ✅ | N/A |
+| [cuFILE](https://docs.nvidia.com/gpudirect-storage/api-reference-guide/index.html#introduction) | ✅ | ✅ | ✅ |
+| [CUPTI](https://docs.nvidia.com/cupti/) | ✅ | ✅ | ✅ |
+| [nvtx](https://nvidia.github.io/NVTX/) | ✅ | ✅ | N/A |
+| [cuFFT](https://docs.nvidia.com/cuda/cufft/index.html) | ✅ | ❌ | ❌ |
+
+CUDA Versions supported
+- 11.4-11.8
+- 12.0-12.9
+- 13.0
+
+CUDNN versions supported:
+- 9.12.0
+
+NCCL versions supported:
+- 2.28.3
+
+# Configuring CUDA version
+
+Select cuda version with one of:
+- `-F cuda-version-from-build-system`: At build time will get the cuda toolkit version using `nvcc`
+    - `-F fallback-latest`: can be used to control behavior if this fails. default is not enabled, which will cause the build
+      script to panic. if `-F fallback-latest` is enabled, we will use the highest bindings we have.
+- `-F cuda-<major>0<minor>0` to build for a specific version of cuda
+
+# Configuring linking
+
+By default we use `-F dynamic-loading`, which will not require any libraries to be present at build time.
+
+You can also enable `-F dynamic-linking` or `-F static-linking` for your use case.
+
+# Getting started
 
 It's easy to create a new device and transfer data to the gpu:
 
@@ -30,7 +61,7 @@ let ctx = cudarc::driver::CudaContext::new(0)?;
 let stream = ctx.default_stream();
 
 // copy a rust slice to the device
-let inp = stream.memcpy_stod(&[1.0f32; 100])?;
+let inp = stream.clone_htod(&[1.0f32; 100])?;
 
 // or allocate directly
 let mut out = stream.alloc_zeros::<f32>(100)?;
@@ -65,7 +96,7 @@ unsafe { builder.launch(LaunchConfig::for_num_elems(100)) }?;
 And of course it's easy to copy things back to host after you're done:
 
 ```rust
-let out_host: Vec<f32> = stream.memcpy_dtov(&out)?;
+let out_host: Vec<f32> = stream.clone_dtoh(&out)?;
 assert_eq!(out_host, [1.0; 100].map(f32::sin));
 ```
 

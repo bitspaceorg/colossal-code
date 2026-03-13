@@ -200,6 +200,7 @@ pub mod device {
             feature = "cuda-11050",
             feature = "cuda-11040",
             feature = "cuda-13000",
+            feature = "cuda-13010",
         )))]
         unsafe {
             sys::cudaGetDeviceProperties_v2(prop.as_mut_ptr(), ordinal).result()?;
@@ -212,6 +213,7 @@ pub mod device {
             feature = "cuda-11050",
             feature = "cuda-11040",
             feature = "cuda-13000",
+            feature = "cuda-13010",
         ))]
         unsafe {
             sys::cudaGetDeviceProperties(prop.as_mut_ptr(), ordinal).result()?;
@@ -942,7 +944,9 @@ pub mod external_memory {
             type_: sys::cudaExternalMemoryHandleType::cudaExternalMemoryHandleTypeOpaqueFd,
             handle: sys::cudaExternalMemoryHandleDesc__bindgen_ty_1 { fd },
             size,
-            ..Default::default()
+            flags: 0,
+            #[cfg(any(feature = "cuda-13000", feature = "cuda-13010"))]
+            reserved: [0; 16],
         };
         sys::cudaImportExternalMemory(external_memory.as_mut_ptr(), &handle_description)
             .result()?;
@@ -972,7 +976,9 @@ pub mod external_memory {
                 },
             },
             size,
-            ..Default::default()
+            flags: 0,
+            #[cfg(any(feature = "cuda-13000", feature = "cuda-13010"))]
+            reserved: [0; 16],
         };
         sys::cudaImportExternalMemory(external_memory.as_mut_ptr(), &handle_description)
             .result()?;
@@ -1009,7 +1015,9 @@ pub mod external_memory {
         let buffer_description = sys::cudaExternalMemoryBufferDesc {
             offset,
             size,
-            ..Default::default()
+            flags: 0,
+            #[cfg(any(feature = "cuda-13000", feature = "cuda-13010"))]
+            reserved: [0; 16],
         };
         sys::cudaExternalMemoryGetMappedBuffer(
             device_ptr.as_mut_ptr(),

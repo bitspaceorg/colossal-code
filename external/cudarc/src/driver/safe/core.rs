@@ -105,6 +105,30 @@ impl CudaContext {
         result::device::get_uuid(self.cu_device)
     }
 
+    /// Get the compute capability of this device as a (major,minor) tuple
+    pub fn compute_capability(&self) -> Result<(i32, i32), result::DriverError> {
+        self.check_err()?;
+        let capability_major =
+            self.attribute(sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)?;
+        let capability_minor =
+            self.attribute(sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)?;
+
+        Ok((capability_major, capability_minor))
+    }
+
+    /// Get the total memory available on this device, in bytes.
+    pub fn total_mem(&self) -> Result<usize, DriverError> {
+        self.check_err()?;
+        unsafe { result::device::total_mem(self.cu_device) }
+    }
+
+    /// Returns the free and total device memory in bytes as a `(free, total)` tuple.
+    /// Note: this calls [CudaContext::bind_to_thread()] to ensure the query
+    /// runs against this device's context.
+    pub fn mem_get_info(&self) -> Result<(usize, usize), DriverError> {
+        self.bind_to_thread()?;
+        result::mem_get_info()
+    }
     /// Get the underlying [sys::CUdevice] of this [CudaContext].
     ///
     /// # Safety
@@ -181,6 +205,49 @@ impl CudaContext {
     pub fn set_flags(&self, flags: sys::CUctx_flags) -> Result<(), DriverError> {
         self.bind_to_thread()?;
         result::ctx::set_flags(flags)
+    }
+
+    /// Gets the value of a context limit.
+    ///
+    /// See [cuda docs](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__CTX.html#group__CUDA__CTX_1g9f2d47d1745752aa16da7ed0d111b6a8)
+    pub fn get_limit(&self, limit: sys::CUlimit) -> Result<usize, DriverError> {
+        self.bind_to_thread()?;
+        result::ctx::get_limit(limit)
+    }
+
+    /// Sets the value of a context limit.
+    ///
+    /// Common limits:
+    /// - `CU_LIMIT_STACK_SIZE` - Stack size for each thread
+    /// - `CU_LIMIT_PRINTF_FIFO_SIZE` - Size of printf buffer
+    /// - `CU_LIMIT_MALLOC_HEAP_SIZE` - Heap size for malloc() in kernels
+    ///
+    /// See [cuda docs](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__CTX.html#group__CUDA__CTX_1g0651954dfb9788173e60a9af7201e65a)
+    pub fn set_limit(&self, limit: sys::CUlimit, value: usize) -> Result<(), DriverError> {
+        self.bind_to_thread()?;
+        result::ctx::set_limit(limit, value)
+    }
+
+    /// Gets the L1/shared memory cache configuration preference.
+    ///
+    /// See [cuda docs](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__CTX.html#group__CUDA__CTX_1g40b6b141698f76744dea6e39b9a25360)
+    pub fn get_cache_config(&self) -> Result<sys::CUfunc_cache, DriverError> {
+        self.bind_to_thread()?;
+        result::ctx::get_cache_config()
+    }
+
+    /// Sets the L1/shared memory cache configuration preference.
+    ///
+    /// Options:
+    /// - `CU_FUNC_CACHE_PREFER_NONE` - No preference
+    /// - `CU_FUNC_CACHE_PREFER_SHARED` - Prefer larger shared memory, smaller L1
+    /// - `CU_FUNC_CACHE_PREFER_L1` - Prefer larger L1, smaller shared memory
+    /// - `CU_FUNC_CACHE_PREFER_EQUAL` - Equal split between L1 and shared
+    ///
+    /// See [cuda docs](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__CTX.html#group__CUDA__CTX_1g54699acf7e2ef27279d013ca2095f4a3)
+    pub fn set_cache_config(&self, config: sys::CUfunc_cache) -> Result<(), DriverError> {
+        self.bind_to_thread()?;
+        result::ctx::set_cache_config(config)
     }
 
     /// Whether multiple streams have been created in this context. If so,
@@ -379,10 +446,11 @@ unsafe impl Sync for CudaStream {}
 impl Drop for CudaStream {
     fn drop(&mut self) {
         self.ctx.record_err(self.ctx.bind_to_thread());
-        if !self.cu_stream.is_null() {
+        let cu_stream = std::mem::replace(&mut self.cu_stream, std::ptr::null_mut());
+        if !cu_stream.is_null() && cu_stream != (0x2 as _) {
             self.ctx.num_streams.fetch_sub(1, Ordering::Relaxed);
             self.ctx
-                .record_err(unsafe { result::stream::destroy(self.cu_stream) });
+                .record_err(unsafe { result::stream::destroy(cu_stream) });
         }
     }
 }
@@ -393,6 +461,15 @@ impl CudaContext {
     pub fn default_stream(self: &Arc<Self>) -> Arc<CudaStream> {
         Arc::new(CudaStream {
             cu_stream: std::ptr::null_mut(),
+            ctx: self.clone(),
+        })
+    }
+
+    /// Get's the per-thread stream handle. See https://docs.nvidia.com/cuda/cuda-runtime-api/stream-sync-behavior.html#stream-sync-behavior
+    pub fn per_thread_stream(self: &Arc<Self>) -> Arc<CudaStream> {
+        Arc::new(CudaStream {
+            // See https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html#group__CUDART__TYPES_1g7b7129befd6f52708309acafd1c46197
+            cu_stream: 0x2 as _,
             ctx: self.clone(),
         })
     }
@@ -512,7 +589,14 @@ impl<T> Drop for CudaSlice<T> {
         if let Some(write) = self.write.as_ref() {
             ctx.record_err(self.stream.wait(write));
         }
-        ctx.record_err(unsafe { result::free_async(self.cu_device_ptr, self.stream.cu_stream) });
+        if ctx.has_async_alloc {
+            ctx.record_err(unsafe {
+                result::free_async(self.cu_device_ptr, self.stream.cu_stream)
+            });
+        } else {
+            ctx.record_err(self.stream.synchronize());
+            ctx.record_err(unsafe { result::free_sync(self.cu_device_ptr) });
+        }
     }
 }
 
@@ -564,7 +648,7 @@ impl<T: DeviceRepr> Clone for CudaSlice<T> {
 impl<T: Clone + Default + DeviceRepr> TryFrom<CudaSlice<T>> for Vec<T> {
     type Error = result::DriverError;
     fn try_from(value: CudaSlice<T>) -> Result<Self, Self::Error> {
-        value.stream.memcpy_dtov(&value)
+        value.stream.clone_dtoh(&value)
     }
 }
 
@@ -649,21 +733,10 @@ impl<T> CudaViewMut<'_, T> {
     }
 
     /// Downgrade this to a `&[T]`
-    pub fn as_view(&self) -> CudaView<'_, T> {
+    pub fn as_view<'b>(&'b self) -> CudaView<'b, T> {
         CudaView {
             ptr: self.ptr,
             len: self.len,
-            read: self.read,
-            write: self.write,
-            stream: self.stream,
-            marker: PhantomData,
-        }
-    }
-
-    fn resize(&self, start: usize, end: usize) -> Self {
-        Self {
-            ptr: self.ptr + (start * std::mem::size_of::<T>()) as u64,
-            len: end - start,
             read: self.read,
             write: self.write,
             stream: self.stream,
@@ -766,6 +839,13 @@ unsafe impl ValidAsZeroBits for float4::F4E2M1 {}
 unsafe impl DeviceRepr for float4::E8M0 {}
 #[cfg(feature = "f4")]
 unsafe impl ValidAsZeroBits for float4::E8M0 {}
+
+#[cfg(feature = "f4")]
+unsafe impl DeviceRepr for float4::F4E2M1x2 {}
+#[cfg(feature = "f4")]
+unsafe impl ValidAsZeroBits for float4::F4E2M1x2 {}
+
+unsafe impl<const N: usize, T> DeviceRepr for [T; N] where T: DeviceRepr {}
 
 /// Base trait for abstracting over [CudaSlice]/[CudaView]/[CudaViewMut].
 ///
@@ -1044,7 +1124,7 @@ impl<T> HostSlice<T> for Vec<T> {
 /// it is page locked.
 ///
 /// Allocate this with [CudaContext::alloc_pinned()], and do device copies with
-/// [CudaStream::memcpy_stod()]/[CudaStream::memcpy_htod()]/[CudaStream::memcpy_dtoh()]
+/// [CudaStream::clone_htod()]/[CudaStream::memcpy_htod()]/[CudaStream::memcpy_dtoh()]
 #[derive(Debug)]
 pub struct PinnedHostSlice<T> {
     pub(crate) ptr: *mut T,
@@ -1231,6 +1311,7 @@ impl CudaStream {
         self: &Arc<Self>,
         dst: &mut Dst,
     ) -> Result<(), DriverError> {
+        self.ctx.bind_to_thread()?;
         let num_bytes = dst.num_bytes();
         let (dptr, _record) = dst.device_ptr_mut(self);
         unsafe { result::memset_d8_async(dptr, 0, num_bytes, self.cu_stream) }?;
@@ -1238,7 +1319,18 @@ impl CudaStream {
     }
 
     /// Copy a `[T]`/`Vec<T>`/[`PinnedHostSlice<T>`] to a new [`CudaSlice`].
+    #[deprecated = "Use clone_htod"]
     pub fn memcpy_stod<T: DeviceRepr, Src: HostSlice<T> + ?Sized>(
+        self: &Arc<Self>,
+        src: &Src,
+    ) -> Result<CudaSlice<T>, DriverError> {
+        let mut dst = unsafe { self.alloc(src.len()) }?;
+        self.memcpy_htod(src, &mut dst)?;
+        Ok(dst)
+    }
+
+    /// Copy a `[T]`/`Vec<T>`/[`PinnedHostSlice<T>`] to a new [`CudaSlice`].
+    pub fn clone_htod<T: DeviceRepr, Src: HostSlice<T> + ?Sized>(
         self: &Arc<Self>,
         src: &Src,
     ) -> Result<CudaSlice<T>, DriverError> {
@@ -1254,13 +1346,29 @@ impl CudaStream {
         dst: &mut Dst,
     ) -> Result<(), DriverError> {
         assert!(dst.len() >= src.len());
+        self.ctx.bind_to_thread()?;
         let (src, _record_src) = unsafe { src.stream_synced_slice(self) };
         let (dst, _record_dst) = dst.device_ptr_mut(self);
         unsafe { result::memcpy_htod_async(dst, src, self.cu_stream) }
     }
 
     /// Copy a [`CudaSlice`]/[`CudaView`] to a new [`Vec<T>`].
+    #[deprecated = "Use clone_dtoh"]
     pub fn memcpy_dtov<T: DeviceRepr, Src: DevicePtr<T>>(
+        self: &Arc<Self>,
+        src: &Src,
+    ) -> Result<Vec<T>, DriverError> {
+        let mut dst = Vec::with_capacity(src.len());
+        #[allow(clippy::uninit_vec)]
+        unsafe {
+            dst.set_len(src.len())
+        };
+        self.memcpy_dtoh(src, &mut dst)?;
+        Ok(dst)
+    }
+
+    /// Copy a [`CudaSlice`]/[`CudaView`] to a new [`Vec<T>`].
+    pub fn clone_dtoh<T: DeviceRepr, Src: DevicePtr<T>>(
         self: &Arc<Self>,
         src: &Src,
     ) -> Result<Vec<T>, DriverError> {
@@ -1280,6 +1388,7 @@ impl CudaStream {
         dst: &mut Dst,
     ) -> Result<(), DriverError> {
         assert!(dst.len() >= src.len());
+        self.ctx.bind_to_thread()?;
         let (src, _record_src) = src.device_ptr(self);
         let (dst, _record_dst) = unsafe { dst.stream_synced_mut_slice(self) };
         unsafe { result::memcpy_dtoh_async(dst, src, self.cu_stream) }
@@ -1292,10 +1401,30 @@ impl CudaStream {
         dst: &mut Dst,
     ) -> Result<(), DriverError> {
         assert!(dst.len() >= src.len());
+        self.ctx.bind_to_thread()?;
+
         let num_bytes = src.num_bytes();
+
+        let src_ctx = src.stream().context();
+        let dst_ctx = self.context();
+
         let (src, _record_src) = src.device_ptr(self);
         let (dst, _record_dst) = dst.device_ptr_mut(self);
-        unsafe { result::memcpy_dtod_async(dst, src, num_bytes, self.cu_stream) }
+
+        if src_ctx == dst_ctx {
+            unsafe { result::memcpy_dtod_async(dst, src, num_bytes, self.cu_stream) }
+        } else {
+            unsafe {
+                result::memcpy_peer_async(
+                    dst_ctx.cu_ctx,
+                    dst,
+                    src_ctx.cu_ctx,
+                    src,
+                    num_bytes,
+                    self.cu_stream,
+                )
+            }
+        }
     }
 
     /// Copy a [`CudaSlice`]/[`CudaView`] to a new [`CudaSlice`].
@@ -1397,7 +1526,14 @@ impl<T> CudaSlice<T> {
 
     /// Fallible version of [CudaSlice::slice_mut]
     pub fn try_slice_mut(&mut self, bounds: impl RangeBounds<usize>) -> Option<CudaViewMut<'_, T>> {
-        to_range(bounds, self.len).map(|(start, end)| self.as_view_mut().resize(start, end))
+        to_range(bounds, self.len).map(|(start, end)| CudaViewMut {
+            ptr: self.cu_device_ptr + (start * std::mem::size_of::<T>()) as u64,
+            len: end - start,
+            read: &self.read,
+            write: &self.write,
+            stream: &self.stream,
+            marker: PhantomData,
+        })
     }
 
     /// Reinterprets the slice of memory into a different type. `len` is the number
@@ -1408,16 +1544,7 @@ impl<T> CudaSlice<T> {
     /// This is unsafe because not the memory for the view may not be a valid interpretation
     /// for the type `S`.
     pub unsafe fn transmute<S>(&self, len: usize) -> Option<CudaView<'_, S>> {
-        (len * std::mem::size_of::<S>() <= self.len * std::mem::size_of::<T>()).then_some(
-            CudaView {
-                ptr: self.cu_device_ptr,
-                len,
-                read: &self.read,
-                write: &self.write,
-                stream: &self.stream,
-                marker: PhantomData,
-            },
-        )
+        self.as_view().transmute(len)
     }
 
     /// Reinterprets the slice of memory into a different type. `len` is the number
@@ -1441,15 +1568,12 @@ impl<T> CudaSlice<T> {
     }
 
     pub fn split_at(&self, mid: usize) -> (CudaView<'_, T>, CudaView<'_, T>) {
-        self.try_split_at(mid).unwrap()
+        self.as_view().split_at(mid)
     }
 
     /// Fallible version of [CudaSlice::split_at]. Returns `None` if `mid > self.len`.
     pub fn try_split_at(&self, mid: usize) -> Option<(CudaView<'_, T>, CudaView<'_, T>)> {
-        (mid <= self.len()).then(|| {
-            let view = self.as_view();
-            (view.resize(0, mid), view.resize(mid, self.len))
-        })
+        self.as_view().try_split_at(mid)
     }
 
     /// Splits the [CudaSlice] into two at the given index, returning two [CudaViewMut] for the two halves.
@@ -1480,8 +1604,23 @@ impl<T> CudaSlice<T> {
     ) -> Option<(CudaViewMut<'_, T>, CudaViewMut<'_, T>)> {
         let length = self.len;
         (mid <= length).then(|| {
-            let view = self.as_view_mut();
-            (view.resize(0, mid), view.resize(mid, length))
+            let a = CudaViewMut {
+                ptr: self.cu_device_ptr,
+                len: mid,
+                read: &self.read,
+                write: &self.write,
+                stream: &self.stream,
+                marker: PhantomData,
+            };
+            let b = CudaViewMut {
+                ptr: self.cu_device_ptr + (mid * std::mem::size_of::<T>()) as u64,
+                len: length - mid,
+                read: &self.read,
+                write: &self.write,
+                stream: &self.stream,
+                marker: PhantomData,
+            };
+            (a, b)
         })
     }
 }
@@ -1576,13 +1715,13 @@ impl<'a, T> CudaViewMut<'a, T> {
     /// do_something(view1, view2);
     /// ```
     /// If you need non-overlapping mutable views into a [CudaViewMut], you can use [CudaViewMut::split_at_mut()].
-    pub fn slice<'b: 'a>(&'b self, bounds: impl RangeBounds<usize>) -> CudaView<'a, T> {
+    pub fn slice<'b>(&'b self, bounds: impl RangeBounds<usize>) -> CudaView<'b, T> {
         self.try_slice(bounds).unwrap()
     }
 
     /// Fallible version of [CudaViewMut::slice]
-    pub fn try_slice<'b: 'a>(&'b self, bounds: impl RangeBounds<usize>) -> Option<CudaView<'a, T>> {
-        to_range(bounds, self.len).map(|(start, end)| self.as_view().resize(start, end))
+    pub fn try_slice<'b>(&'b self, bounds: impl RangeBounds<usize>) -> Option<CudaView<'b, T>> {
+        to_range(bounds, self.len).map(move |(start, end)| self.as_view().resize(start, end))
     }
 
     /// Reinterprets the slice of memory into a different type. `len` is the number
@@ -1592,7 +1731,7 @@ impl<'a, T> CudaViewMut<'a, T> {
     /// # Safety
     /// This is unsafe because not the memory for the view may not be a valid interpretation
     /// for the type `S`.
-    pub unsafe fn transmute<S>(&self, len: usize) -> Option<CudaView<'a, S>> {
+    pub unsafe fn transmute<'b, S>(&'b self, len: usize) -> Option<CudaView<'b, S>> {
         (len * std::mem::size_of::<S>() <= self.len * std::mem::size_of::<T>()).then_some(
             CudaView {
                 ptr: self.ptr,
@@ -1608,13 +1747,23 @@ impl<'a, T> CudaViewMut<'a, T> {
     /// Creates a [CudaViewMut] at the specified offset from the start of `self`.
     ///
     /// Panics if `range` and `0...self.len()` are not overlapping.
-    pub fn slice_mut(&mut self, bounds: impl RangeBounds<usize>) -> Self {
+    pub fn slice_mut<'b>(&'b mut self, bounds: impl RangeBounds<usize>) -> CudaViewMut<'b, T> {
         self.try_slice_mut(bounds).unwrap()
     }
 
     /// Fallible version of [CudaViewMut::slice_mut]
-    pub fn try_slice_mut(&mut self, bounds: impl RangeBounds<usize>) -> Option<Self> {
-        to_range(bounds, self.len).map(|(start, end)| self.resize(start, end))
+    pub fn try_slice_mut<'b>(
+        &'b mut self,
+        bounds: impl RangeBounds<usize>,
+    ) -> Option<CudaViewMut<'b, T>> {
+        to_range(bounds, self.len).map(|(start, end)| CudaViewMut {
+            ptr: self.ptr + (start * std::mem::size_of::<T>()) as u64,
+            len: end - start,
+            read: self.read,
+            write: self.write,
+            stream: self.stream,
+            marker: PhantomData,
+        })
     }
 
     /// Splits the [CudaViewMut] into two at the given index.
@@ -1632,15 +1781,37 @@ impl<'a, T> CudaViewMut<'a, T> {
     /// // split the view into two non-overlapping, mutable views
     /// let (mut view1, mut view2) = view.split_at_mut(25);
     /// do_something(view1, view2);
-    pub fn split_at_mut(&mut self, mid: usize) -> (Self, Self) {
+    pub fn split_at_mut<'b>(&'b mut self, mid: usize) -> (CudaViewMut<'b, T>, CudaViewMut<'b, T>) {
         self.try_split_at_mut(mid).unwrap()
     }
 
     /// Fallible version of [CudaViewMut::split_at_mut].
     ///
     /// Returns `None` if `mid > self.len`
-    pub fn try_split_at_mut(&mut self, mid: usize) -> Option<(Self, Self)> {
-        (mid <= self.len()).then(|| (self.resize(0, mid), self.resize(mid, self.len)))
+    pub fn try_split_at_mut<'b>(
+        &'b mut self,
+        mid: usize,
+    ) -> Option<(CudaViewMut<'b, T>, CudaViewMut<'b, T>)> {
+        let length = self.len;
+        (mid <= length).then(|| {
+            let a = CudaViewMut {
+                ptr: self.ptr,
+                len: mid,
+                read: self.read,
+                write: self.write,
+                stream: self.stream,
+                marker: PhantomData,
+            };
+            let b = CudaViewMut {
+                ptr: self.ptr + (mid * std::mem::size_of::<T>()) as u64,
+                len: length - mid,
+                read: self.read,
+                write: self.write,
+                stream: self.stream,
+                marker: PhantomData,
+            };
+            (a, b)
+        })
     }
 
     /// Reinterprets the slice of memory into a different type. `len` is the number
@@ -1650,7 +1821,7 @@ impl<'a, T> CudaViewMut<'a, T> {
     /// # Safety
     /// This is unsafe because not the memory for the view may not be a valid interpretation
     /// for the type `S`.
-    pub unsafe fn transmute_mut<S>(&mut self, len: usize) -> Option<CudaViewMut<'a, S>> {
+    pub unsafe fn transmute_mut<'b, S>(&'b mut self, len: usize) -> Option<CudaViewMut<'b, S>> {
         (len * std::mem::size_of::<S>() <= self.len * std::mem::size_of::<T>()).then_some(
             CudaViewMut {
                 ptr: self.ptr,
@@ -1664,7 +1835,7 @@ impl<'a, T> CudaViewMut<'a, T> {
     }
 }
 
-fn to_range(range: impl RangeBounds<usize>, len: usize) -> Option<(usize, usize)> {
+pub(super) fn to_range(range: impl RangeBounds<usize>, len: usize) -> Option<(usize, usize)> {
     let start = match range.start_bound() {
         Bound::Included(&n) => n,
         Bound::Excluded(&n) => n + 1,
@@ -1675,7 +1846,7 @@ fn to_range(range: impl RangeBounds<usize>, len: usize) -> Option<(usize, usize)
         Bound::Excluded(&n) => n,
         Bound::Unbounded => len,
     };
-    (end <= len).then_some((start, end))
+    (start <= end && end <= len).then_some((start, end))
 }
 
 /// Wrapper around [sys::CUmodule]. Create with [CudaContext::load_module()].
@@ -1702,6 +1873,7 @@ impl CudaContext {
     /// Dynamically load a compiled ptx into this context.
     ///
     /// - `ptx` contains the compiled ptx
+    #[cfg(feature = "nvrtc")]
     pub fn load_module(
         self: &Arc<Self>,
         ptx: crate::nvrtc::Ptx,
@@ -1720,6 +1892,9 @@ impl CudaContext {
                 let name_c = CString::new(path.to_str().unwrap()).unwrap();
                 result::module::load(name_c)
             }
+            crate::nvrtc::PtxKind::Binary(data) => unsafe {
+                result::module::load_data(data.as_ptr() as *const _)
+            },
         }?;
         Ok(Arc::new(CudaModule {
             cu_module,
@@ -1747,6 +1922,38 @@ impl CudaModule {
         Ok(CudaFunction {
             cu_function,
             module: self.clone(),
+        })
+    }
+
+    /// Gets a global/constant symbol from the loaded module as a [CudaSlice<u8>].
+    ///
+    /// This can be used to access `__constant__` memory declared in CUDA kernels.
+    /// The returned slice can be transmuted to the appropriate type via views.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // In CUDA: __constant__ float my_const[4];
+    /// let symbol = module.get_global("my_const", &stream)?;
+    /// let mut symbol_view = symbol.as_view_mut();
+    /// let mut symbol_f32 = unsafe { symbol_view.transmute_mut::<f32>(4).unwrap() };
+    /// stream.memcpy_htod(&[1.0f32, 2.0, 3.0, 4.0], &mut symbol_f32)?;
+    /// ```
+    pub fn get_global<'a>(
+        self: &'a Arc<Self>,
+        name: &str,
+        stream: &'a Arc<CudaStream>,
+    ) -> Result<CudaViewMut<'a, u8>, DriverError> {
+        let name_c =
+            CString::new(name).map_err(|_| DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE))?;
+        let (cu_device_ptr, bytes) = unsafe { result::module::get_global(self.cu_module, name_c) }?;
+        Ok(CudaViewMut {
+            ptr: cu_device_ptr,
+            len: bytes,
+            read: &None,
+            write: &None,
+            stream,
+            marker: PhantomData,
         })
     }
 }
@@ -1889,6 +2096,52 @@ impl CudaFunction {
         Ok(cluster_size as u32)
     }
 
+    /// Get the value of a specific attribute of this [CudaFunction].
+    ///
+    /// See [CUDA docs](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__EXEC.html#group__CUDA__EXEC_1g5e92a1b0d8d1b82cb00dcfb2de15961b)
+    pub fn get_attribute(
+        &self,
+        attribute: CUfunction_attribute_enum,
+    ) -> Result<i32, result::DriverError> {
+        self.module.ctx.bind_to_thread()?;
+        unsafe { result::function::get_function_attribute(self.cu_function, attribute) }
+    }
+
+    /// Get the number of registers used per thread.
+    pub fn num_regs(&self) -> Result<i32, result::DriverError> {
+        self.get_attribute(CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_NUM_REGS)
+    }
+
+    /// Get the size of statically-allocated shared memory in bytes.
+    pub fn shared_size_bytes(&self) -> Result<i32, result::DriverError> {
+        self.get_attribute(CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES)
+    }
+
+    /// Get the size of constant memory in bytes used by this function.
+    pub fn const_size_bytes(&self) -> Result<i32, result::DriverError> {
+        self.get_attribute(CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES)
+    }
+
+    /// Get the size of local memory in bytes used per thread.
+    pub fn local_size_bytes(&self) -> Result<i32, result::DriverError> {
+        self.get_attribute(CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES)
+    }
+
+    /// Get the maximum number of threads per block for this function.
+    pub fn max_threads_per_block(&self) -> Result<i32, result::DriverError> {
+        self.get_attribute(CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
+    }
+
+    /// Get the PTX virtual architecture version for which the function was compiled.
+    pub fn ptx_version(&self) -> Result<i32, result::DriverError> {
+        self.get_attribute(CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_PTX_VERSION)
+    }
+
+    /// Get the binary architecture version for which the function was compiled.
+    pub fn binary_version(&self) -> Result<i32, result::DriverError> {
+        self.get_attribute(CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_BINARY_VERSION)
+    }
+
     /// Set the value of a specific attribute of this [CudaFunction].
     pub fn set_attribute(
         &self,
@@ -1913,26 +2166,24 @@ impl<T> CudaSlice<T> {
     ///
     /// Drops the underlying host_buf if there is one.
     pub fn leak(self) -> sys::CUdeviceptr {
-        let ctx = &self.stream.ctx;
-        // drop self.read
-        if let Some(read) = self.read.as_ref() {
-            ctx.record_err(self.stream.wait(read));
-            ctx.record_err(unsafe { result::event::destroy(read.cu_event) });
-            unsafe { Arc::decrement_strong_count(Arc::as_ptr(&read.ctx)) };
+        let mut s = std::mem::ManuallyDrop::new(self);
+        let ptr = s.cu_device_ptr;
+
+        // Ensure pending operations are complete before resources are released.
+        if let Some(read) = s.read.as_ref() {
+            s.stream.ctx.record_err(s.stream.wait(read));
+        }
+        if let Some(write) = s.write.as_ref() {
+            s.stream.ctx.record_err(s.stream.wait(write));
         }
 
-        // drop self.write
-        if let Some(write) = self.write.as_ref() {
-            ctx.record_err(self.stream.wait(write));
-            ctx.record_err(unsafe { result::event::destroy(write.cu_event) });
-            unsafe { Arc::decrement_strong_count(Arc::as_ptr(&write.ctx)) };
+        // Manually drop fields that own resources.
+        unsafe {
+            std::ptr::drop_in_place(&mut s.read);
+            std::ptr::drop_in_place(&mut s.write);
+            std::ptr::drop_in_place(&mut s.stream);
         }
 
-        // drop self.stream
-        unsafe { Arc::decrement_strong_count(Arc::as_ptr(&self.stream)) };
-
-        let ptr = self.cu_device_ptr;
-        std::mem::forget(self);
         ptr
     }
 }
@@ -2047,17 +2298,17 @@ mod tests {
         let ctx = CudaContext::new(0).unwrap();
         let stream = ctx.default_stream();
 
-        let (free1, total1) = result::mem_get_info().unwrap();
+        let (free1, total1) = ctx.mem_get_info().unwrap();
 
-        let t = stream.memcpy_stod(&[0.0f32; 5]).unwrap();
-        let (free2, total2) = result::mem_get_info().unwrap();
+        let t = stream.clone_htod(&[0.0f32; 5]).unwrap();
+        let (free2, total2) = ctx.mem_get_info().unwrap();
         assert_eq!(total1, total2);
         assert!(free2 < free1);
 
         drop(t);
         ctx.synchronize().unwrap();
 
-        let (free3, total3) = result::mem_get_info().unwrap();
+        let (free3, total3) = ctx.mem_get_info().unwrap();
         assert_eq!(total2, total3);
         assert!(free3 > free2);
         assert_eq!(free3, free1);
@@ -2069,11 +2320,11 @@ mod tests {
         let stream = ctx.default_stream();
 
         let smalls = [
-            stream.memcpy_stod(&[-1.0f32, -0.8]).unwrap(),
-            stream.memcpy_stod(&[-0.6, -0.4]).unwrap(),
-            stream.memcpy_stod(&[-0.2, 0.0]).unwrap(),
-            stream.memcpy_stod(&[0.2, 0.4]).unwrap(),
-            stream.memcpy_stod(&[0.6, 0.8]).unwrap(),
+            stream.clone_htod(&[-1.0f32, -0.8]).unwrap(),
+            stream.clone_htod(&[-0.6, -0.4]).unwrap(),
+            stream.clone_htod(&[-0.2, 0.0]).unwrap(),
+            stream.clone_htod(&[0.2, 0.4]).unwrap(),
+            stream.clone_htod(&[0.6, 0.8]).unwrap(),
         ];
         let mut big = stream.alloc_zeros::<f32>(10).unwrap();
 
@@ -2085,7 +2336,7 @@ mod tests {
         }
 
         assert_eq!(
-            stream.memcpy_dtov(&big).unwrap(),
+            stream.clone_dtoh(&big).unwrap(),
             [-1.0, -0.8, -0.6, -0.4, -0.2, 0.0, 0.2, 0.4, 0.6, 0.8]
         );
     }
@@ -2095,22 +2346,22 @@ mod tests {
         let ctx = CudaContext::new(0).unwrap();
         let stream = ctx.default_stream();
 
-        let a = stream.memcpy_stod(&[1.0f32, 2.0, 3.0, 4.0, 5.0]).unwrap();
+        let a = stream.clone_htod(&[1.0f32, 2.0, 3.0, 4.0, 5.0]).unwrap();
 
         let ptr = a.leak();
         let b = unsafe { stream.upgrade_device_ptr::<f32>(ptr, 3) };
-        assert_eq!(stream.memcpy_dtov(&b).unwrap(), &[1.0, 2.0, 3.0]);
+        assert_eq!(stream.clone_dtoh(&b).unwrap(), &[1.0, 2.0, 3.0]);
 
         let ptr = b.leak();
         let c = unsafe { stream.upgrade_device_ptr::<f32>(ptr, 5) };
-        assert_eq!(stream.memcpy_dtov(&c).unwrap(), &[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(stream.clone_dtoh(&c).unwrap(), &[1.0, 2.0, 3.0, 4.0, 5.0]);
     }
 
-    /// See https://github.com/coreylowman/cudarc/issues/160
+    /// See https://github.com/chelsea0x3b/cudarc/issues/160
     #[test]
     fn test_slice_is_freed_with_correct_context() {
         let ctx0 = CudaContext::new(0).unwrap();
-        let slice = ctx0.default_stream().memcpy_stod(&[1.0; 10]).unwrap();
+        let slice = ctx0.default_stream().clone_htod(&[1.0; 10]).unwrap();
         let ctx1 = CudaContext::new(0).unwrap();
         ctx1.bind_to_thread().unwrap();
         drop(ctx0);
@@ -2118,13 +2369,13 @@ mod tests {
         drop(ctx1);
     }
 
-    /// See https://github.com/coreylowman/cudarc/issues/161
+    /// See https://github.com/chelsea0x3b/cudarc/issues/161
     #[test]
     fn test_copy_uses_correct_context() {
         let ctx0 = CudaContext::new(0).unwrap();
         let _ctx1 = CudaContext::new(0).unwrap();
-        let slice = ctx0.default_stream().memcpy_stod(&[1.0; 10]).unwrap();
-        let _out = ctx0.default_stream().memcpy_dtov(&slice).unwrap();
+        let slice = ctx0.default_stream().clone_htod(&[1.0; 10]).unwrap();
+        let _out = ctx0.default_stream().clone_dtoh(&slice).unwrap();
     }
 
     #[test]
@@ -2135,8 +2386,8 @@ mod tests {
         let mut pinned = unsafe { ctx.alloc_pinned::<f32>(10) }.unwrap();
         pinned.as_mut_slice().unwrap().clone_from_slice(&truth);
         assert_eq!(pinned.as_slice().unwrap(), &truth);
-        let dst = stream.memcpy_stod(&pinned).unwrap();
-        let host = stream.memcpy_dtov(&dst).unwrap();
+        let dst = stream.clone_htod(&pinned).unwrap();
+        let host = stream.clone_dtoh(&dst).unwrap();
         assert_eq!(&host, &truth);
     }
 
@@ -2151,7 +2402,7 @@ mod tests {
 
         let start = Instant::now();
         for _ in 0..n_samples {
-            let _ = stream.memcpy_stod(&not_pinned).unwrap();
+            let _ = stream.clone_htod(&not_pinned).unwrap();
             stream.synchronize().unwrap();
         }
         let unpinned_elapsed = start.elapsed() / n_samples;
@@ -2160,7 +2411,7 @@ mod tests {
 
         let start = Instant::now();
         for _ in 0..n_samples {
-            let _ = stream.memcpy_stod(&pinned).unwrap();
+            let _ = stream.clone_htod(&pinned).unwrap();
             stream.synchronize().unwrap();
         }
         let pinned_elapsed = start.elapsed() / n_samples;

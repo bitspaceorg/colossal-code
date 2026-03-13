@@ -101,6 +101,10 @@ pub unsafe fn read(
     file_offset: i64,
     buf_ptr_offset: i64,
 ) -> Result<isize, CufileError> {
+    let file_offset = sys::off_t::try_from(file_offset)
+        .expect("Casting file_offset to platform specific size failed.");
+    let buf_ptr_offset = sys::off_t::try_from(buf_ptr_offset)
+        .expect("Casting buf_ptr_offset to platform specific size failed.");
     let bytes_read = sys::cuFileRead(fh, buf_ptr_base, size, file_offset, buf_ptr_offset);
 
     if bytes_read == -1 {
@@ -126,6 +130,11 @@ pub unsafe fn write(
     file_offset: i64,
     buf_ptr_offset: i64,
 ) -> Result<isize, CufileError> {
+    let file_offset = sys::off_t::try_from(file_offset)
+        .expect("Casting file_offset to platform specific size failed.");
+    let buf_ptr_offset = sys::off_t::try_from(buf_ptr_offset)
+        .expect("Casting buf_ptr_offset to platform specific size failed.");
+
     let bytes_written = sys::cuFileWrite(fh, buf_ptr_base, size, file_offset, buf_ptr_offset);
 
     if bytes_written == -1 {
@@ -267,21 +276,7 @@ pub unsafe fn write_async(
 #[cfg(any(feature = "cuda-11040", feature = "cuda-11050"))]
 mod batch_io {}
 
-#[cfg(any(
-    feature = "cuda-11060",
-    feature = "cuda-11070",
-    feature = "cuda-11080",
-    feature = "cuda-12000",
-    feature = "cuda-12010",
-    feature = "cuda-12020",
-    feature = "cuda-12030",
-    feature = "cuda-12040",
-    feature = "cuda-12050",
-    feature = "cuda-12060",
-    feature = "cuda-12080",
-    feature = "cuda-12090",
-    feature = "cuda-13000",
-))]
+#[cfg(not(any(feature = "cuda-11040", feature = "cuda-11050")))]
 mod batch_io {
     use super::*;
 

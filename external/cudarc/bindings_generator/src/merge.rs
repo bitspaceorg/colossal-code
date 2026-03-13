@@ -193,7 +193,9 @@ impl BindingMerger {
                                     .or_default()
                                     .insert(version, func.clone());
                             }
-                            other => panic!("Unhandled foreign item {other:?}"),
+                            other => println!(
+                                "WARNING: Unhandled foreign item {other:?} in {path:?}... SKIPPING"
+                            ),
                         }
                     }
                 }
@@ -430,7 +432,7 @@ impl BindingMerger {
                 where
                     P: AsRef<::std::ffi::OsStr>,
                 {
-                    let library = ::libloading::Library::new(path)?;
+                    let library = ::libloading::Library::new(path.as_ref())?;
                     Self::from_library(library)
                 }
                 pub unsafe fn from_library<L>(library: L) -> Result<Self, ::libloading::Error>
@@ -517,7 +519,7 @@ pub fn merge_bindings(modules: &[ModuleConfig]) -> Result<()> {
         merge(
             format!("out/{}/sys/linked", config.cudarc_name),
             format!("../src/{}/sys/mod.rs", config.cudarc_name),
-            config.libs.clone(),
+            config.libs.iter().map(|&s| s.into()).collect(),
         )?;
     }
     Ok(())

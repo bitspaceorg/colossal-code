@@ -23,7 +23,9 @@ struct PagedAttention {
     context_lens: Tensor,
     alibi_slopes: Option<Tensor>,
     max_context_len: usize,
-    k_v_scale: Option<(Tensor, Tensor)>,
+    k_scale: Option<Tensor>,
+    v_scale: Option<Tensor>,
+    sinks: Option<Tensor>,
 }
 
 impl PagedAttention {
@@ -128,30 +130,44 @@ impl PagedAttention {
             std::ptr::null()
         };
 
-        let (k_scale_ptr, v_scale_ptr) = if let Some((k_scale, v_scale)) = self.k_v_scale.as_ref() {
-            if !crate::cuda::USE_FP8 {
-                candle::bail!("FP8 is not supported on this system.");
-            }
+        let (k_scale_ptr, v_scale_ptr) =
+            if let (Some(k_scale), Some(v_scale)) = (&self.k_scale, &self.v_scale) {
+                if !crate::cuda::USE_FP8 {
+                    candle::bail!("FP8 is not supported on this system.");
+                }
 
-            let (ks, ks_l) = k_scale.storage_and_layout();
-            let ks = match &*ks {
-                Storage::Cuda(ks) => ks,
-                _ => candle::bail!("k_scale must be a cuda tensor"),
+                let (ks, ks_l) = k_scale.storage_and_layout();
+                let ks = match &*ks {
+                    Storage::Cuda(ks) => ks,
+                    _ => candle::bail!("k_scale must be a cuda tensor"),
+                };
+                let ks = ks.as_cuda_slice::<f32>()?;
+                let (ks, _ks_guard) = slice_ptr(ks, ks_l.start_offset());
+
+                let (vs, vs_l) = v_scale.storage_and_layout();
+                let vs = match &*vs {
+                    Storage::Cuda(vs) => vs,
+                    _ => candle::bail!("v_scale must be a cuda tensor"),
+                };
+                let vs = vs.as_cuda_slice::<f32>()?;
+                let (vs, _vs_guard) = slice_ptr(vs, vs_l.start_offset());
+
+                (ks as *const f32, vs as *const f32)
+            } else {
+                (std::ptr::null(), std::ptr::null())
             };
-            let ks = ks.as_cuda_slice::<f32>()?;
-            let (ks, _ks_guard) = slice_ptr(ks, ks_l.start_offset());
 
-            let (vs, vs_l) = v_scale.storage_and_layout();
-            let vs = match &*vs {
-                Storage::Cuda(vs) => vs,
-                _ => candle::bail!("v_scale must be a cuda tensor"),
+        let sinks_ptr = if let Some(sinks) = self.sinks.as_ref() {
+            let (s, s_l) = sinks.storage_and_layout();
+            let s = match &*s {
+                Storage::Cuda(s) => s,
+                _ => candle::bail!("sinks must be a cuda tensor"),
             };
-            let vs = vs.as_cuda_slice::<f32>()?;
-            let (vs, _vs_guard) = slice_ptr(vs, vs_l.start_offset());
-
-            (ks as *const f32, vs as *const f32)
+            let s = s.as_cuda_slice::<f32>()?;
+            let (s_ptr, _s_guard) = slice_ptr(s, s_l.start_offset());
+            s_ptr as *const f32
         } else {
-            (std::ptr::null(), std::ptr::null())
+            std::ptr::null()
         };
 
         let (num_seqs, num_heads, head_size) = q_l.shape().dims3()?;
@@ -250,6 +266,7 @@ impl PagedAttention {
                     cache_dtype,
                     k_scale_ptr,
                     v_scale_ptr,
+                    sinks_ptr,
                 )
             }
         } else {
@@ -297,6 +314,7 @@ impl PagedAttention {
                     cache_dtype,
                     k_scale_ptr,
                     v_scale_ptr,
+                    sinks_ptr,
                 )
             }
         }
@@ -350,7 +368,8 @@ impl candle::CustomOp1 for PagedAttention {
 #[allow(clippy::too_many_arguments)]
 pub fn paged_attention(
     q: &Tensor,
-    k_v_scale: Option<&(Tensor, Tensor)>,
+    k_scale: Option<&Tensor>,
+    v_scale: Option<&Tensor>,
     key_cache: &Tensor,
     value_cache: &Tensor,
     block_tables: &Tensor,
@@ -359,6 +378,7 @@ pub fn paged_attention(
     max_context_len: usize,
     softmax_scale: f32,
     softcapping: f32,
+    sinks: Option<&Tensor>,
 ) -> Result<Tensor> {
     let op = PagedAttention {
         softmax_scale,
@@ -369,7 +389,11 @@ pub fn paged_attention(
         max_context_len,
         softcapping,
         alibi_slopes: alibi_slopes.cloned(),
-        k_v_scale: k_v_scale.cloned(),
+        k_scale: k_scale.cloned(),
+        v_scale: v_scale.cloned(),
+        sinks: sinks
+            .map(|s| s.to_dtype(candle_core::DType::F32))
+            .transpose()?,
     };
     q.apply_op1(op)
 }
@@ -379,7 +403,8 @@ fn update_cache<
 >(
     key: &Tensor,
     value: &Tensor,
-    k_v_scale: Option<&(Tensor, Tensor)>,
+    k_scale: Option<&Tensor>,
+    v_scale: Option<&Tensor>,
     key_cache: &Tensor,
     value_cache: &Tensor,
     slot_mapping: &Tensor,
@@ -487,7 +512,7 @@ fn update_cache<
     let v = v.slice(v_l.start_offset()..);
     let s = s.slice(s_l.start_offset()..);
 
-    let (k_scale_ptr, v_scale_ptr) = if let Some((k_scale, v_scale)) = k_v_scale.as_ref() {
+    let (k_scale_ptr, v_scale_ptr) = if let (Some(k_scale), Some(v_scale)) = (k_scale, v_scale) {
         if !crate::cuda::USE_FP8 {
             candle::bail!("FP8 is not supported on this system.");
         }
@@ -587,21 +612,40 @@ fn update_cache<
 pub fn reshape_and_cache(
     key: &Tensor,
     value: &Tensor,
-    k_v_scale: Option<&(Tensor, Tensor)>,
+    k_scale: Option<&Tensor>,
+    v_scale: Option<&Tensor>,
     key_cache: &Tensor,
     value_cache: &Tensor,
     slot_mapping: &Tensor,
 ) -> Result<()> {
     match key.dtype() {
-        DType::F16 => {
-            update_cache::<f16>(key, value, k_v_scale, key_cache, value_cache, slot_mapping)
-        }
-        DType::BF16 => {
-            update_cache::<bf16>(key, value, k_v_scale, key_cache, value_cache, slot_mapping)
-        }
-        DType::F32 => {
-            update_cache::<f32>(key, value, k_v_scale, key_cache, value_cache, slot_mapping)
-        }
+        DType::F16 => update_cache::<f16>(
+            key,
+            value,
+            k_scale,
+            v_scale,
+            key_cache,
+            value_cache,
+            slot_mapping,
+        ),
+        DType::BF16 => update_cache::<bf16>(
+            key,
+            value,
+            k_scale,
+            v_scale,
+            key_cache,
+            value_cache,
+            slot_mapping,
+        ),
+        DType::F32 => update_cache::<f32>(
+            key,
+            value,
+            k_scale,
+            v_scale,
+            key_cache,
+            value_cache,
+            slot_mapping,
+        ),
         dt => {
             candle::bail!("reshape_and_cache is only supported for f32, f16 and bf16 ({dt:?})")
         }

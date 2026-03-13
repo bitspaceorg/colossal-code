@@ -1,14 +1,14 @@
 [package]
 name = "cudarc"
-version = "0.17.3"
+version = "0.19.3"
 edition = "2021"
-authors = ["Corey Lowman <clowman1993@gmail.com>"]
+authors = ["Chelsea Lowman <clowman1993@gmail.com>"]
 license = "MIT OR Apache-2.0"
 
 description = "Safe and minimal CUDA bindings"
-homepage = "https://github.com/coreylowman/cudarc"
+homepage = "https://github.com/chelsea0x3b/cudarc"
 documentation = "https://docs.rs/cudarc"
-repository = "https://github.com/coreylowman/cudarc"
+repository = "https://github.com/chelsea0x3b/cudarc"
 readme = "README.md"
 
 keywords = ["cuda", "nvidia", "gpu", "cudnn", "cublas"]
@@ -24,14 +24,19 @@ categories = [
 
 [package.metadata.docs.rs]
 features = [
-    "cuda-12090",
+    "cuda-13010",
     "f16",
     "cudnn",
     "nccl",
+    "cupti",
     "cusparse",
     "cusolver",
     "cusolvermg",
     "cufile",
+    "nvtx",
+    "cupti",
+    "cutensor",
+    "cufft",
 ]
 
 [features]
@@ -43,9 +48,10 @@ default = [
     "driver",
     "runtime",
     "nvrtc",
-    "dynamic-loading",
+    "fallback-dynamic-loading",
 ]
 
+fallback-latest = []
 cuda-version-from-build-system = []
 cuda-11040 = []
 cuda-11050 = []
@@ -62,13 +68,15 @@ cuda-12060 = []
 cuda-12080 = []
 cuda-12090 = []
 cuda-13000 = []
+cuda-13010 = []
 
+fallback-dynamic-loading = []
 dynamic-loading = []
 dynamic-linking = []
 static-linking = []
 
+driver = []
 nvrtc = []
-driver = ["nvrtc"]
 cublas = ["driver"]
 cublaslt = ["driver"]
 runtime = ["driver"]
@@ -79,6 +87,10 @@ cusparse = ["driver"]
 cusolver = ["driver", "cublas", "cublaslt", "cusparse"]
 cusolvermg = ["cusolver"]
 cufile = ["driver"]
+nvtx = ["driver"]
+cupti = ["runtime", "driver"]
+cutensor = ["driver"]
+cufft = ["driver"]
 
 std = []
 no-std = ["no-std-compat/std"]
@@ -92,6 +104,6 @@ half = { version = "2", optional = true, default-features = false, features = [
     "num-traits",
     "rand_distr",
 ] }
-float8 = { version = "0.3.0", optional = true }
-float4 = { version = "0.1.0", optional = true }
-libloading = "0.8"
+float8 = { version = "0.7.0", optional = true }
+float4 = { version = "0.2.0", optional = true }
+libloading = "0.9.0"

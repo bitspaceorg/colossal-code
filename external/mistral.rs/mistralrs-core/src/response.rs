@@ -33,6 +33,10 @@ pub struct ResponseMessage {
     pub content: Option<String>,
     pub role: String,
     pub tool_calls: Option<Vec<ToolCallResponse>>,
+    /// Reasoning/analysis content from Harmony format (separate from final content).
+    /// This contains chain-of-thought reasoning that is not intended for end users.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 generate_repr!(ResponseMessage);
@@ -45,6 +49,10 @@ pub struct Delta {
     pub content: Option<String>,
     pub role: String,
     pub tool_calls: Option<Vec<ToolCallResponse>>,
+    /// Reasoning/analysis content delta from Harmony format.
+    /// This contains incremental chain-of-thought reasoning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 generate_repr!(Delta);
@@ -169,7 +177,7 @@ pub struct CompletionChoice {
     pub finish_reason: String,
     pub index: usize,
     pub text: String,
-    pub logprobs: Option<()>,
+    pub logprobs: Option<Logprobs>,
 }
 
 generate_repr!(CompletionChoice);
@@ -208,31 +216,6 @@ generate_repr!(CompletionChunkResponse);
 #[cfg_attr(feature = "pyo3_macros", pyclass)]
 #[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
-/// Embedding response payload compatible with OpenAI embeddings API.
-pub struct EmbeddingResponse {
-    pub id: String,
-    pub object: String,
-    pub model: String,
-    pub data: Vec<EmbeddingData>,
-    pub usage: Usage,
-}
-
-generate_repr!(EmbeddingResponse);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
-#[derive(Debug, Clone, Serialize)]
-pub struct EmbeddingData {
-    pub object: String,
-    pub embedding: Vec<f32>,
-    pub index: usize,
-}
-
-generate_repr!(EmbeddingData);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
-#[derive(Debug, Clone, Serialize)]
 pub struct ImageChoice {
     pub url: Option<String>,
     pub b64_json: Option<String>,
@@ -265,8 +248,6 @@ pub enum Response {
     CompletionModelError(String, CompletionResponse),
     CompletionDone(CompletionResponse),
     CompletionChunk(CompletionChunkResponse),
-    // Embeddings
-    Embedding(EmbeddingResponse),
     // Image generation
     ImageGeneration(ImageGenerationResponse),
     // Speech generation
@@ -279,6 +260,11 @@ pub enum Response {
     Raw {
         logits_chunks: Vec<Tensor>,
         tokens: Vec<u32>,
+    },
+    Embeddings {
+        embeddings: Vec<f32>,
+        prompt_tokens: usize,
+        total_tokens: usize,
     },
 }
 
@@ -290,8 +276,6 @@ pub enum ResponseOk {
     // Completion
     CompletionDone(CompletionResponse),
     CompletionChunk(CompletionChunkResponse),
-    // Embeddings
-    Embedding(EmbeddingResponse),
     // Image generation
     ImageGeneration(ImageGenerationResponse),
     // Speech generation
@@ -304,6 +288,12 @@ pub enum ResponseOk {
     Raw {
         logits_chunks: Vec<Tensor>,
         tokens: Vec<u32>,
+    },
+    // Embeddings
+    Embeddings {
+        embeddings: Vec<f32>,
+        prompt_tokens: usize,
+        total_tokens: usize,
     },
 }
 
@@ -360,7 +350,6 @@ impl Response {
             Self::Chunk(x) => Ok(ResponseOk::Chunk(x)),
             Self::CompletionDone(x) => Ok(ResponseOk::CompletionDone(x)),
             Self::CompletionChunk(x) => Ok(ResponseOk::CompletionChunk(x)),
-            Self::Embedding(x) => Ok(ResponseOk::Embedding(x)),
             Self::InternalError(e) => Err(Box::new(ResponseErr::InternalError(e))),
             Self::ValidationError(e) => Err(Box::new(ResponseErr::ValidationError(e))),
             Self::ModelError(e, x) => Err(Box::new(ResponseErr::ModelError(e, x))),
@@ -383,6 +372,15 @@ impl Response {
             } => Ok(ResponseOk::Raw {
                 logits_chunks,
                 tokens,
+            }),
+            Self::Embeddings {
+                embeddings,
+                prompt_tokens,
+                total_tokens,
+            } => Ok(ResponseOk::Embeddings {
+                embeddings,
+                prompt_tokens,
+                total_tokens,
             }),
         }
     }

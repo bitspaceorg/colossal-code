@@ -1,7 +1,7 @@
 use crate::{
     pipeline::NormalCache,
     prefix_cacher::MatchingCache,
-    request::{DetokenizationRequest, EmbeddingRequest, NormalRequest, TokenizationRequest},
+    request::{DetokenizationRequest, NormalRequest, TokenizationRequest},
     sequence::SeqStepType,
     tools::{ToolCallingMatcher, ToolChoice},
     ModelCategory, RequestMessage, Response,
@@ -29,16 +29,18 @@ impl Engine {
     pub async fn handle_request(self: Arc<Self>, request: Request) {
         match request {
             Request::Normal(request) => {
-                if matches!(
-                    request.messages,
+                let is_chat = matches!(
+                    &request.messages,
                     RequestMessage::Chat { .. } | RequestMessage::VisionChat { .. }
-                ) && request.web_search_options.is_some()
-                    || !self.tool_callbacks.is_empty()
-                    || !self.tool_callbacks_with_tools.is_empty()
-                {
+                );
+                let has_tooling =
+                    !self.tool_callbacks.is_empty() || !self.tool_callbacks_with_tools.is_empty();
+                let has_search = request.web_search_options.is_some();
+
+                if is_chat && (has_search || has_tooling) {
                     search_request::search_request(self.clone(), *request).await;
                 } else {
-                    self.add_request(*request).await
+                    self.add_request(*request).await;
                 }
             }
             Request::ReIsq(level) => {
@@ -48,7 +50,6 @@ impl Engine {
             }
             Request::Tokenize(req) => self.tokenize_text(req).await,
             Request::Detokenize(req) => self.detokenize_text(req).await,
-            Request::Embedding(req) => self.handle_embedding_request(req).await,
             Request::Terminate => (),
             Request::TerminateAllSeqsNextStep => {
                 TERMINATE_ALL_NEXT_STEP.store(true, Ordering::SeqCst)
@@ -75,8 +76,11 @@ impl Engine {
             | RequestMessage::CompletionTokens(_)
             | RequestMessage::VisionChat { .. }
             | RequestMessage::ImageGeneration { .. }
-            | RequestMessage::SpeechGeneration { .. } => None,
+            | RequestMessage::SpeechGeneration { .. }
+            | RequestMessage::Embedding { .. }
+            | RequestMessage::EmbeddingTokens { .. } => None,
         };
+        let truncate_sequence = request.truncate_sequence;
         if is_chat
             && !get_mut_arcmutex!(self.pipeline)
                 .get_chat_template()
@@ -107,6 +111,10 @@ impl Engine {
             ) => (),
             (ModelCategory::Diffusion, RequestMessage::ImageGeneration { .. }) => (),
             (ModelCategory::Speech, RequestMessage::SpeechGeneration { .. }) => (),
+            (
+                ModelCategory::Embedding,
+                RequestMessage::Embedding { .. } | RequestMessage::EmbeddingTokens { .. },
+            ) => (),
             _ => {
                 request
                     .response
@@ -120,25 +128,15 @@ impl Engine {
         }
 
         let images = match request.messages {
-            RequestMessage::VisionChat {
-                ref images,
-                messages: _,
-                enable_thinking: _,
-                audios: _,
-            } => Some(images.clone()),
+            RequestMessage::VisionChat { ref images, .. } => Some(images.clone()),
             _ => None,
         };
 
         let audios = match request.messages {
-            RequestMessage::VisionChat {
-                images: _,
-                messages: _,
-                enable_thinking: _,
-                ref audios,
-            } => Some(audios.clone()),
+            RequestMessage::VisionChat { ref audios, .. } => Some(audios.clone()),
             _ => None,
         };
-
+        let has_tools = request.tools.as_ref().is_some_and(|t| !t.is_empty());
         let matcher = Arc::new(handle_seq_error!(
             ToolCallingMatcher::new(request.tool_choice.unwrap_or(ToolChoice::Auto),),
             request.response
@@ -150,9 +148,10 @@ impl Engine {
         };
 
         let seq_step_type = match &request.messages {
-            RequestMessage::ImageGeneration { .. } | RequestMessage::SpeechGeneration { .. } => {
-                SeqStepType::OneShot
-            }
+            RequestMessage::ImageGeneration { .. }
+            | RequestMessage::SpeechGeneration { .. }
+            | RequestMessage::Embedding { .. }
+            | RequestMessage::EmbeddingTokens { .. } => SeqStepType::OneShot,
             _ => SeqStepType::PromptAndDecode,
         };
 
@@ -163,16 +162,24 @@ impl Engine {
             _ => None,
         };
 
+        let image_gen_save_file = match &request.messages {
+            RequestMessage::ImageGeneration { save_file, .. } => save_file.clone(),
+            _ => None,
+        };
+        let mut added_seq = false;
+
         let (mut prompt_tokens, prompt_text) = match request.messages {
             RequestMessage::Chat {
                 messages,
                 enable_thinking,
+                reasoning_effort,
             }
             | RequestMessage::VisionChat {
                 images: _,
                 audios: _,
                 messages,
                 enable_thinking,
+                reasoning_effort,
             } => {
                 let pipeline = &*get_mut_arcmutex!(self.pipeline);
                 let tools = request.tools.unwrap_or_default();
@@ -182,11 +189,13 @@ impl Engine {
                     true,
                     true,
                     enable_thinking,
+                    reasoning_effort,
                     tools,
                 );
                 handle_seq_error!(template, request.response)
             }
-            RequestMessage::Completion { text, .. } => {
+            RequestMessage::Completion { text, .. }
+            | RequestMessage::Embedding { prompt: text } => {
                 let Some(tokenizer) = &get_mut_arcmutex!(self.pipeline).tokenizer() else {
                     request
                         .response
@@ -209,7 +218,8 @@ impl Engine {
             }
             RequestMessage::ImageGeneration { prompt, .. }
             | RequestMessage::SpeechGeneration { prompt } => (vec![u32::MAX], prompt),
-            RequestMessage::CompletionTokens(it) => {
+            RequestMessage::CompletionTokens(it)
+            | RequestMessage::EmbeddingTokens { prompt: it } => {
                 let Some(tokenizer) = &get_mut_arcmutex!(self.pipeline).tokenizer() else {
                     request
                         .response
@@ -237,8 +247,15 @@ impl Engine {
             return;
         }
 
-        if prompt_tokens.len() > get_mut_arcmutex!(self.pipeline).get_metadata().max_seq_len {
-            if !self.truncate_sequence {
+        if matches!(
+            get_mut_arcmutex!(self.pipeline).category(),
+            ModelCategory::Text | ModelCategory::Vision { .. } | ModelCategory::Embedding
+        ) && prompt_tokens.len() > get_mut_arcmutex!(self.pipeline).get_metadata().max_seq_len
+        {
+            // text/vision => truncate from start
+            // embedding => truncate from end
+            let category = get_mut_arcmutex!(self.pipeline).category();
+            if !truncate_sequence {
                 request
                     .response
                     .send(Response::ValidationError(
@@ -247,21 +264,36 @@ impl Engine {
                     .await
                     .unwrap_or_else(|_| warn!("Receiver disconnected"));
                 return;
+            } else if matches!(category, ModelCategory::Text | ModelCategory::Vision { .. }) {
+                let prompt_len = prompt_tokens.len();
+                let max_len = get_mut_arcmutex!(self.pipeline).get_metadata().max_seq_len;
+                let currently_over = prompt_len - max_len;
+
+                // Reserve space for generation tokens
+                // If user specified max_len (generation length), reserve that many tokens (capped to max_len)
+                // Otherwise, reserve just 1 token minimum to allow at least some generation
+                let sampling_max = if let Some(sampling_max) = request.sampling_params.max_len {
+                    sampling_max.min(max_len)
+                } else {
+                    1
+                };
+
+                // Calculate how many prompt tokens to keep: max_len - sampling_max
+                // This ensures we have room for generation
+                let tokens_to_keep = max_len.saturating_sub(sampling_max);
+
+                // Safely calculate slice start position - keep the end of the prompt
+                let slice_start = prompt_len.saturating_sub(tokens_to_keep);
+
+                prompt_tokens = prompt_tokens[slice_start..].to_vec();
+                warn!("Prompt for request {} was {currently_over} tokens over the model maximum length. The first {slice_start} tokens were truncated to make space for generation.", request.id);
             } else {
                 let prompt_len = prompt_tokens.len();
                 let max_len = get_mut_arcmutex!(self.pipeline).get_metadata().max_seq_len;
                 let currently_over = prompt_len - max_len;
-                let sampling_max = if let Some(sampling_max) = request.sampling_params.max_len {
-                    if currently_over + sampling_max >= prompt_len {
-                        10
-                    } else {
-                        sampling_max
-                    }
-                } else {
-                    10
-                };
-                prompt_tokens = prompt_tokens[(currently_over + sampling_max)..].to_vec();
-                warn!("Prompt for request {} was {} tokens over the model maximum length. The last {} tokens were truncated to make space for generation.", request.id, currently_over, prompt_len - prompt_tokens.len());
+
+                prompt_tokens = prompt_tokens[..max_len].to_vec();
+                warn!("Prompt for request {} was {currently_over} tokens over the model maximum length. The last {currently_over} tokens were truncated to make space for generation.", request.id);
             }
         }
 
@@ -414,7 +446,11 @@ impl Engine {
                 .eos_tok
                 .clone();
 
-            let seq_preallocated_cache = if get_mut_arcmutex!(self.pipeline).do_preallocated_cache()
+            let seq_preallocated_cache = if matches!(
+                get_mut_arcmutex!(self.pipeline).category(),
+                ModelCategory::Text | ModelCategory::Vision { .. }
+            ) && get_mut_arcmutex!(self.pipeline)
+                .do_preallocated_cache()
             {
                 let metadata = get_mut_arcmutex!(self.pipeline).get_metadata();
                 let model_metadata = metadata
@@ -514,10 +550,15 @@ impl Engine {
                 images.clone(),
                 audios.clone(),
                 block_size,
-                Some(matcher.clone()),
+                if has_tools {
+                    Some(matcher.clone())
+                } else {
+                    None
+                },
                 image_generation_format,
                 seq_step_type,
                 diffusion_params.clone(),
+                image_gen_save_file.clone(),
                 seq_preallocated_cache,
                 request.return_raw_logits,
                 eos_toks,
@@ -526,6 +567,43 @@ impl Engine {
             // Only "track" a new sequence if it is a traditional one
             if matches!(seq_step_type, SeqStepType::PromptAndDecode) {
                 self.logger.add_new_sequence();
+            }
+
+            // Enable Harmony mode if the chat template uses Harmony format
+            {
+                let pipeline = get_mut_arcmutex!(self.pipeline);
+                if let Some(chat_template) = pipeline.get_chat_template() {
+                    if chat_template.is_harmony_format() {
+                        // Pre-warm the Harmony encoding if not already done.
+                        // This must be done in a blocking context because openai-harmony
+                        // uses reqwest::blocking which creates its own tokio runtime.
+                        if !crate::harmony::is_harmony_encoding_ready() {
+                            if let Err(e) = tokio::task::block_in_place(|| {
+                                crate::harmony::prewarm_harmony_encoding();
+                                Ok::<(), anyhow::Error>(())
+                            }) {
+                                warn!("Failed to initialize Harmony encoding: {e}");
+                            }
+                        }
+                        if let Err(e) = seq.enable_harmony_mode() {
+                            warn!("Failed to enable Harmony mode: {e}");
+                        }
+                    } else if chat_template.uses_think_tags() {
+                        // Enable think tag mode if the chat template uses <think> tags
+                        seq.enable_think_tag_mode();
+                    }
+                }
+            }
+
+            // Allocate Mamba state pool slot for hybrid models
+            {
+                let pipeline = get_mut_arcmutex!(self.pipeline);
+                if !pipeline.get_metadata().no_kv_cache && pipeline.cache().is_hybrid() {
+                    let mut hybrid_cache = pipeline.cache().hybrid();
+                    if let Some(slot_idx) = hybrid_cache.allocate_seq() {
+                        seq.set_mamba_state_idx(Some(slot_idx));
+                    }
+                }
             }
 
             // Run the inputs processor to update the prompt for multimodal models.
@@ -569,25 +647,15 @@ impl Engine {
                     seq.keep_num_audios(audios_to_keep);
                     seq.prefill_v2_normal(normal, toks, offset)
                 }
-                Some(MatchingCache::Paged {
-                    logical_blocks,
-                    physical_blocks,
-                    images_to_keep,
-                    audios_to_keep,
-                    toks,
-                    offset,
-                }) => {
-                    self.logger.add_prefix_cache_hit();
-
-                    seq.keep_num_images(images_to_keep);
-                    seq.keep_num_audios(audios_to_keep);
-                    seq.prefill_v2_paged(logical_blocks, physical_blocks, toks, offset)
-                }
                 None => seq,
             };
 
             *get_mut_arcmutex!(self.id) += 1;
             get_mut_arcmutex!(self.scheduler).add_seq(seq);
+            added_seq = true;
+        }
+        if added_seq {
+            self.pending_notify.notify_one();
         }
     }
 
@@ -602,6 +670,7 @@ impl Engine {
                     request.add_generation_prompt,
                     request.add_special_tokens,
                     request.enable_thinking,
+                    request.reasoning_effort,
                     tools,
                 );
                 let toks = match template {
@@ -691,61 +760,5 @@ impl Engine {
             .send(Ok(txt))
             .await
             .expect("Sender disconnected unexpectedly!");
-    }
-
-    async fn handle_embedding_request(&self, request: EmbeddingRequest) {
-        let EmbeddingRequest {
-            inputs,
-            normalize,
-            id,
-            model_id,
-            response,
-        } = request;
-        let mut guard = get_mut_arcmutex!(self.bert_pipeline);
-        let Some(pipeline) = guard.as_mut() else {
-            let err = anyhow::Error::msg("embedding model not configured");
-            let _ = response
-                .send(Response::ValidationError(err.into()))
-                .await;
-            return;
-        };
-        match pipeline.embed(&inputs, normalize) {
-            Ok((vectors, counts)) => {
-                let prompt_tokens = counts.iter().sum();
-                let usage = crate::response::Usage {
-                    completion_tokens: 0,
-                    prompt_tokens,
-                    total_tokens: prompt_tokens,
-                    avg_tok_per_sec: 0.0,
-                    avg_prompt_tok_per_sec: 0.0,
-                    avg_compl_tok_per_sec: 0.0,
-                    total_time_sec: 0.0,
-                    total_prompt_time_sec: 0.0,
-                    total_completion_time_sec: 0.0,
-                };
-                let data = vectors
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, embedding)| crate::response::EmbeddingData {
-                        object: "embedding".to_string(),
-                        embedding,
-                        index,
-                    })
-                    .collect();
-                let resp = crate::response::EmbeddingResponse {
-                    id: format!("emb-{id}"),
-                    object: "list".to_string(),
-                    model: model_id.unwrap_or_else(|| "unknown".to_string()),
-                    data,
-                    usage,
-                };
-                let _ = response.send(Response::Embedding(resp)).await;
-            }
-            Err(err) => {
-                let _ = response
-                    .send(Response::InternalError(err.into()))
-                    .await;
-            }
-        }
     }
 }

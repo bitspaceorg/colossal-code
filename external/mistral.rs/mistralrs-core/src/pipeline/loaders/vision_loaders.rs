@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::{fmt::Debug, str::FromStr};
 
@@ -62,6 +63,12 @@ use crate::vision_models::qwen2_5_vl::{
     Config as Qwen2_5VLConfig, Qwen2_5VLModel, Qwen2_5VLProcessor,
 };
 use crate::vision_models::qwen2vl::{Config as Qwen2VLConfig, Qwen2VLModel, Qwen2VLProcessor};
+use crate::vision_models::qwen3_vl::{Config as Qwen3VLConfig, Qwen3VLModel, Qwen3VLProcessor};
+use crate::vision_models::qwen3_vl_moe::{
+    Config as Qwen3VLMoEConfig, Qwen3VLMoEModel, Qwen3VLMoEProcessor,
+};
+use crate::vision_models::voxtral::config::VoxtralConfig;
+use crate::vision_models::voxtral::{VoxtralModel, VoxtralProcessor};
 use crate::vision_models::{minicpmo, phi4};
 
 pub trait VisionModel: IsqModel + AnyMoeBaseModelMixin {
@@ -85,6 +92,13 @@ pub trait VisionModel: IsqModel + AnyMoeBaseModelMixin {
     fn config(&self) -> &ModelConfigMetadata;
     /// For a prompt without images. Requires batch size of 1!
     fn default_model_specific_args(&self, input_ids: &Tensor) -> Box<dyn Any>;
+    /// Return encoder cache hit/miss counters (hits, misses) if this model has an encoder cache.
+    fn encoder_cache_counters(&self) -> Option<(Arc<AtomicUsize>, Arc<AtomicUsize>)> {
+        None
+    }
+    /// Reset model-specific state (e.g. cached audio embeddings) between requests.
+    /// Called when the pipeline's non-granular state is reset.
+    fn reset_model_specific_state(&self) {}
 }
 
 pub trait VisionModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoader {
@@ -111,6 +125,19 @@ pub trait VisionModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoa
     }
     fn modalities(&self, config: &str) -> Result<Modalities>;
     fn prefixer(&self, config: &str) -> Arc<dyn MultimodalPromptPrefixer>;
+    /// Return a default chat template (Jinja string) for models that don't ship a
+    /// `tokenizer_config.json` or `chat_template.jinja`. Returns `None` by default.
+    /// The `config` parameter is the raw model config JSON, used by `AutoVisionLoader`
+    /// to delegate to the correct concrete loader.
+    fn default_chat_template(&self, _config: &str) -> Option<String> {
+        None
+    }
+    /// Return default (bos_token, eos_token) strings for models that don't ship a
+    /// `tokenizer_config.json`. Used to populate the chat template context and
+    /// EOS token detection. Returns `None` by default.
+    fn default_bos_eos(&self, _config: &str) -> Option<(String, String)> {
+        None
+    }
     fn get_device_for_tensor(
         &self,
         config: &str,
@@ -141,7 +168,7 @@ pub trait VisionModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoa
 }
 
 #[cfg_attr(feature = "pyo3_macros", pyclass(eq, eq_int))]
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq)]
 /// The architecture to load the vision model as.
 pub enum VisionLoaderType {
     #[serde(rename = "phi3v")]
@@ -172,6 +199,12 @@ pub enum VisionLoaderType {
     Llama4,
     #[serde(rename = "gemma3n")]
     Gemma3n,
+    #[serde(rename = "qwen3vl")]
+    Qwen3VL,
+    #[serde(rename = "qwen3vlmoe")]
+    Qwen3VLMoE,
+    #[serde(rename = "voxtral")]
+    Voxtral,
 }
 
 // https://github.com/huggingface/transformers/blob/cff06aac6fad28019930be03f5d467055bf62177/src/transformers/models/auto/modeling_auto.py#L448
@@ -192,6 +225,10 @@ impl VisionLoaderType {
             "Mistral3ForConditionalGeneration" => Ok(Self::Mistral3),
             "Llama4ForConditionalGeneration" => Ok(Self::Llama4),
             "Gemma3nForConditionalGeneration" => Ok(Self::Gemma3n),
+            "Qwen3VLForConditionalGeneration" => Ok(Self::Qwen3VL),
+            "Qwen3VLMoeForConditionalGeneration" => Ok(Self::Qwen3VLMoE),
+            "VoxtralForConditionalGeneration"
+            | "VoxtralRealtimeForConditionalGeneration" => Ok(Self::Voxtral),
             other => anyhow::bail!(
                 "Unsupported Hugging Face Transformers -CausalLM model class `{other}`. Please raise an issue."
             ),
@@ -217,7 +254,10 @@ impl FromStr for VisionLoaderType {
             "mistral3" => Ok(Self::Mistral3),
             "llama4" => Ok(Self::Llama4),
             "gemma3n" => Ok(Self::Gemma3n),
-            a => Err(format!("Unknown architecture `{a}`. Possible architectures: `phi3v`, `idefics2`, `llava_next`, `llava`, `vllama`, `qwen2vl`, `idefics3`, `minicpmo`, `phi4mm`, `qwen2_5vl`, `gemma3`, `mistral3`, `llama4`, `gemma3n`.")),
+            "qwen3vl" => Ok(Self::Qwen3VL),
+            "qwen3vlmoe" => Ok(Self::Qwen3VLMoE),
+            "voxtral" => Ok(Self::Voxtral),
+            a => Err(format!("Unknown architecture `{a}`. Possible architectures: `phi3v`, `idefics2`, `llava_next`, `llava`, `vllama`, `qwen2vl`, `idefics3`, `minicpmo`, `phi4mm`, `qwen2_5vl`, `gemma3`, `mistral3`, `llama4`, `gemma3n`, `qwen3vl`, `qwen3vlmoe`, `voxtral`.")),
         }
     }
 }
@@ -239,6 +279,9 @@ impl std::fmt::Display for VisionLoaderType {
             VisionLoaderType::Mistral3 => "mistral3",
             VisionLoaderType::Llama4 => "llama4",
             VisionLoaderType::Gemma3n => "gemma3n",
+            VisionLoaderType::Qwen3VL => "qwen3vl",
+            VisionLoaderType::Qwen3VLMoE => "qwen3vlmoe",
+            VisionLoaderType::Voxtral => "voxtral",
         };
         write!(f, "{name}")
     }
@@ -246,7 +289,11 @@ impl std::fmt::Display for VisionLoaderType {
 
 #[derive(Deserialize)]
 struct AutoVisionLoaderConfig {
+    #[serde(default)]
     architectures: Vec<String>,
+    /// Voxtral params.json uses a `multimodal` key instead of `architectures`.
+    #[serde(default)]
+    multimodal: Option<serde_json::Value>,
 }
 
 /// Automatically selects a VisionModelLoader implementation based on the JSON `architectures` field.
@@ -255,6 +302,13 @@ pub struct AutoVisionLoader;
 impl AutoVisionLoader {
     fn get_loader(config: &str) -> Result<Box<dyn VisionModelLoader>> {
         let auto_cfg: AutoVisionLoaderConfig = serde_json::from_str(config)?;
+
+        // Voxtral: params.json has `multimodal` but no `architectures`
+        if auto_cfg.multimodal.is_some() && auto_cfg.architectures.is_empty() {
+            once_log_info("Automatic loader type determined to be `voxtral`");
+            return Ok(Box::new(VoxtralLoader));
+        }
+
         if auto_cfg.architectures.len() != 1 {
             anyhow::bail!("Expected exactly one architecture in config");
         }
@@ -280,6 +334,9 @@ impl AutoVisionLoader {
             VisionLoaderType::Mistral3 => Box::new(Mistral3Loader),
             VisionLoaderType::Llama4 => Box::new(VLlama4Loader),
             VisionLoaderType::Gemma3n => Box::new(Gemma3nLoader),
+            VisionLoaderType::Qwen3VL => Box::new(Qwen3VLLoader),
+            VisionLoaderType::Qwen3VLMoE => Box::new(Qwen3VLMoELoader),
+            VisionLoaderType::Voxtral => Box::new(VoxtralLoader),
         })
     }
 }
@@ -339,6 +396,14 @@ impl VisionModelLoader for AutoVisionLoader {
             .prefixer(config)
     }
 
+    fn default_chat_template(&self, config: &str) -> Option<String> {
+        Self::get_loader(config).ok()?.default_chat_template(config)
+    }
+
+    fn default_bos_eos(&self, config: &str) -> Option<(String, String)> {
+        Self::get_loader(config).ok()?.default_bos_eos(config)
+    }
+
     fn get_device_for_tensor(
         &self,
         config: &str,
@@ -355,6 +420,12 @@ impl IsqModelLoader for AutoVisionLoader {
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
         Self::get_loader(config)?.immediate_isq_predicates(config)
+    }
+    fn isq_layer_regexes_moqe(&self, config: &str) -> Result<Vec<Regex>> {
+        Self::get_loader(config)?.isq_layer_regexes_moqe(config)
+    }
+    fn immediate_isq_predicates_moqe(&self, config: &str) -> Result<Vec<Regex>> {
+        Self::get_loader(config)?.immediate_isq_predicates_moqe(config)
     }
 }
 
@@ -466,7 +537,7 @@ fn get_clip_vit_num_elems(cfg: &ClipConfig) -> usize {
 
 /// [`VisionLoader`] for a Phi 3 Vision model.
 ///
-/// [`VisionLoader`]: https://ericlbuehler.github.io/mistral.rs/mistralrs/struct.VisionLoader.html
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
 pub struct Phi3VLoader;
 
 pub struct Phi3VPrefixer;
@@ -733,6 +804,7 @@ impl DeviceMappedModelLoader for Phi3VLoader {
             sliding_window: cfg.sliding_window,
             k_head_dim: cfg.head_dim(),
             v_head_dim: cfg.head_dim(),
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
         Ok(Box::new(cfg))
@@ -747,7 +819,7 @@ impl DeviceMappedModelLoader for Phi3VLoader {
 
 /// [`VisionLoader`] for an Idefics 2 Vision model.
 ///
-/// [`VisionLoader`]: https://ericlbuehler.github.io/mistral.rs/mistralrs/struct.VisionLoader.html
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
 pub struct Idefics2Loader;
 
 pub struct Idefics2Prefixer;
@@ -1083,6 +1155,7 @@ impl DeviceMappedModelLoader for Idefics2Loader {
             sliding_window: cfg.sliding_window,
             k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
             v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
         Ok(Box::new(cfg))
@@ -1097,7 +1170,7 @@ impl DeviceMappedModelLoader for Idefics2Loader {
 
 /// [`VisionLoader`] for an LLaVANext Vision model.
 ///
-/// [`VisionLoader`]: https://ericlbuehler.github.io/mistral.rs/mistralrs/struct.VisionLoader.html
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
 pub struct LLaVANextLoader;
 
 pub struct LLaVANextPrefixer;
@@ -1352,6 +1425,7 @@ impl DeviceMappedModelLoader for LLaVANextLoader {
             sliding_window: cfg.sliding_window,
             k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
             v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
         Ok(Box::new(cfg))
@@ -1366,7 +1440,7 @@ impl DeviceMappedModelLoader for LLaVANextLoader {
 
 /// [`VisionLoader`] for an LLaVA Vision model.
 ///
-/// [`VisionLoader`]: https://ericlbuehler.github.io/mistral.rs/mistralrs/struct.VisionLoader.html
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
 pub struct LLaVALoader;
 
 pub struct LLaVAPrefixer;
@@ -1613,6 +1687,7 @@ impl DeviceMappedModelLoader for LLaVALoader {
             sliding_window: cfg.sliding_window,
             k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
             v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
         Ok(Box::new(cfg))
@@ -1627,7 +1702,7 @@ impl DeviceMappedModelLoader for LLaVALoader {
 
 /// [`VisionLoader`] for an Llama Vision model.
 ///
-/// [`VisionLoader`]: https://ericlbuehler.github.io/mistral.rs/mistralrs/struct.VisionLoader.html
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
 pub struct VLlamaLoader;
 
 pub struct VLlamaPrefixer;
@@ -1998,6 +2073,7 @@ impl DeviceMappedModelLoader for VLlamaLoader {
             sliding_window: None,
             k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
             v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
         Ok(Box::new(cfg))
@@ -2012,7 +2088,7 @@ impl DeviceMappedModelLoader for VLlamaLoader {
 
 /// [`VisionLoader`] for an Qwen2-VL model.
 ///
-/// [`VisionLoader`]: https://ericlbuehler.github.io/mistral.rs/mistralrs/struct.VisionLoader.html
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
 pub struct Qwen2VLLoader;
 
 pub struct Qwen2VLPrefixer;
@@ -2117,14 +2193,16 @@ impl DeviceMappedModelLoader for Qwen2VLLoader {
 
         let cfg: Qwen2VLConfig = serde_json::from_str(config)?;
 
+        // For images, grid_t=1. After spatial merging, grid_h and grid_w are reduced.
         let img_seq_len = {
             let cfg = &cfg.vision_config;
-            let grid_t = max_num_images / cfg.temporal_patch_size;
-            let grid_h = max_image_shape.0 / cfg.patch_size;
-            let grid_w = max_image_shape.1 / cfg.patch_size;
-            grid_t * grid_h * grid_w
+            // grid_t is 1 for images (temporal dimension is for video only)
+            let grid_t = 1;
+            // After patch embedding and spatial merge, the effective grid dimensions are reduced
+            let grid_h = (max_image_shape.0 / cfg.patch_size) / cfg.spatial_merge_size;
+            let grid_w = (max_image_shape.1 / cfg.patch_size) / cfg.spatial_merge_size;
+            grid_t * grid_h * grid_w * max_num_images
         };
-        let img_seq_len = img_seq_len * max_num_images;
 
         let max_text_attn = {
             // This model injects the vision information directly into the input embeddings
@@ -2152,9 +2230,11 @@ impl DeviceMappedModelLoader for Qwen2VLLoader {
 
         let cfg: Qwen2VLConfig = serde_json::from_str(config)?;
 
+        // For the vision encoder, before spatial merging
         let img_seq_len = {
             let cfg = &cfg.vision_config;
-            let grid_t = max_num_images / cfg.temporal_patch_size;
+            // grid_t is 1 for images
+            let grid_t = 1;
             let grid_h = max_image_shape.0 / cfg.patch_size;
             let grid_w = max_image_shape.1 / cfg.patch_size;
             grid_t * grid_h * grid_w
@@ -2294,6 +2374,7 @@ impl DeviceMappedModelLoader for Qwen2VLLoader {
             sliding_window: cfg.sliding_window,
             k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
             v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
         Ok(Box::new(cfg))
@@ -2308,7 +2389,7 @@ impl DeviceMappedModelLoader for Qwen2VLLoader {
 
 /// [`VisionLoader`] for an Idefics 3 Vision model.
 ///
-/// [`VisionLoader`]: https://ericlbuehler.github.io/mistral.rs/mistralrs/struct.VisionLoader.html
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
 pub struct Idefics3Loader;
 
 pub struct Idefics3Prefixer;
@@ -2611,6 +2692,7 @@ impl DeviceMappedModelLoader for Idefics3Loader {
             sliding_window: None,
             k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
             v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
         Ok(Box::new(cfg))
@@ -2625,7 +2707,7 @@ impl DeviceMappedModelLoader for Idefics3Loader {
 
 /// [`VisionLoader`] for an MiniCpm-O model.
 ///
-/// [`VisionLoader`]: https://ericlbuehler.github.io/mistral.rs/mistralrs/struct.VisionLoader.html
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
 pub struct MiniCpmOLoader;
 
 pub struct MiniCpmOPrefixer;
@@ -2893,6 +2975,7 @@ impl DeviceMappedModelLoader for MiniCpmOLoader {
             sliding_window: None,
             k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
             v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
         Ok(Box::new(cfg))
@@ -2903,7 +2986,7 @@ impl DeviceMappedModelLoader for MiniCpmOLoader {
 
 /// [`VisionLoader`] for a Phi 4MM Vision model.
 ///
-/// [`VisionLoader`]: https://ericlbuehler.github.io/mistral.rs/mistralrs/struct.VisionLoader.html
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
 pub struct Phi4MMLoader;
 
 pub struct Phi4MMPrefixer;
@@ -3234,6 +3317,7 @@ impl DeviceMappedModelLoader for Phi4MMLoader {
             sliding_window: cfg.sliding_window,
             k_head_dim: cfg.head_dim(),
             v_head_dim: cfg.head_dim(),
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
         Ok(Box::new(cfg))
@@ -3248,7 +3332,7 @@ impl DeviceMappedModelLoader for Phi4MMLoader {
 
 /// [`VisionLoader`] for an Qwen2_5VL model.
 ///
-/// [`VisionLoader`]: https://ericlbuehler.github.io/mistral.rs/mistralrs/struct.VisionLoader.html
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
 pub struct Qwen2_5VLLoader;
 
 pub struct Qwen2_5VLPrefixer;
@@ -3529,6 +3613,7 @@ impl DeviceMappedModelLoader for Qwen2_5VLLoader {
             sliding_window: cfg.sliding_window,
             k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
             v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
         Ok(Box::new(cfg))
@@ -3543,7 +3628,7 @@ impl DeviceMappedModelLoader for Qwen2_5VLLoader {
 
 /// [`VisionLoader`] for an Gemma 3 model.
 ///
-/// [`VisionLoader`]: https://ericlbuehler.github.io/mistral.rs/mistralrs/struct.VisionLoader.html
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
 pub struct Gemma3Loader;
 
 pub struct Gemma3Prefixer;
@@ -3867,6 +3952,7 @@ impl DeviceMappedModelLoader for Gemma3Loader {
             sliding_window: None, // None to be more forgiving, some do not
             k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
             v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
         Ok(Box::new(cfg))
@@ -3881,7 +3967,7 @@ impl DeviceMappedModelLoader for Gemma3Loader {
 
 /// [`VisionLoader`] for an Mistral 3 model.
 ///
-/// [`VisionLoader`]: https://ericlbuehler.github.io/mistral.rs/mistralrs/struct.VisionLoader.html
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
 pub struct Mistral3Loader;
 
 pub struct Mistral3Prefixer;
@@ -3900,7 +3986,8 @@ impl VisionModelLoader for Mistral3Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn VisionModel + Send + Sync>> {
-        let cfg: crate::vision_models::mistral3::Mistral3Config = serde_json::from_str(config)?;
+        let mut cfg: crate::vision_models::mistral3::Mistral3Config = serde_json::from_str(config)?;
+        cfg.propagate_quantization_config();
         Ok(Box::new(Mistral3Model::new(
             &cfg,
             vb,
@@ -4190,6 +4277,7 @@ impl DeviceMappedModelLoader for Mistral3Loader {
             sliding_window: cfg.sliding_window,
             k_head_dim: cfg.head_dim(),
             v_head_dim: cfg.head_dim(),
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
         Ok(Box::new(cfg))
@@ -4204,7 +4292,7 @@ impl DeviceMappedModelLoader for Mistral3Loader {
 
 /// [`VisionLoader`] for an Llama Vision model.
 ///
-/// [`VisionLoader`]: https://ericlbuehler.github.io/mistral.rs/mistralrs/struct.VisionLoader.html
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
 pub struct VLlama4Loader;
 
 pub struct VLlama4Prefixer;
@@ -4226,7 +4314,8 @@ impl VisionModelLoader for VLlama4Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn VisionModel + Send + Sync>> {
-        let cfg: crate::vision_models::llama4::Llama4Config = serde_json::from_str(config)?;
+        let mut cfg: crate::vision_models::llama4::Llama4Config = serde_json::from_str(config)?;
+        cfg.propagate_quantization_config();
         Ok(Box::new(Llama4Model::new(
             &cfg,
             vb,
@@ -4239,7 +4328,8 @@ impl VisionModelLoader for VLlama4Loader {
         false
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg: crate::vision_models::llama4::Llama4Config = serde_json::from_str(config)?;
+        let mut cfg: crate::vision_models::llama4::Llama4Config = serde_json::from_str(config)?;
+        cfg.propagate_quantization_config();
         Ok(Box::new(cfg))
     }
     fn get_processor(
@@ -4593,6 +4683,7 @@ impl DeviceMappedModelLoader for VLlama4Loader {
             sliding_window: None,
             k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
             v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
         Ok(Box::new(cfg))
@@ -4607,7 +4698,7 @@ impl DeviceMappedModelLoader for VLlama4Loader {
 
 /// [`VisionLoader`] for an Gemma 3n model.
 ///
-/// [`VisionLoader`]: https://ericlbuehler.github.io/mistral.rs/mistralrs/struct.VisionLoader.html
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
 pub struct Gemma3nLoader;
 
 #[allow(dead_code)]
@@ -5467,6 +5558,7 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
             sliding_window: None, // None to be more forgiving, some do not
             k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
             v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
         Ok(Box::new(cfg))
@@ -5474,5 +5566,941 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
 
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
         Some(vec![NonMappedSubModel::Vision, NonMappedSubModel::Audio])
+    }
+}
+
+// ======================== Qwen3VL Loader
+
+/// [`VisionLoader`] for an Qwen3VL model.
+///
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
+pub struct Qwen3VLLoader;
+
+pub struct Qwen3VLPrefixer;
+
+impl MultimodalPromptPrefixer for Qwen3VLPrefixer {
+    // No-op: With MessagesAction::Keep, the chat template handles image tokens
+    // when it sees {"type": "image"} entries in the content.
+}
+
+impl VisionModelLoader for Qwen3VLLoader {
+    fn load(
+        &self,
+        config: &str,
+        vb: ShardedVarBuilder,
+        normal_loading_metadata: NormalLoadingMetadata,
+        attention_mechanism: AttentionImplementation,
+    ) -> Result<Box<dyn VisionModel + Send + Sync>> {
+        let cfg: Qwen3VLConfig = serde_json::from_str(config)?;
+        Ok(Box::new(Qwen3VLModel::new(
+            &cfg,
+            vb,
+            self.is_gptx(config),
+            normal_loading_metadata,
+            attention_mechanism,
+        )?))
+    }
+    fn is_gptx(&self, _config: &str) -> bool {
+        true
+    }
+    fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
+        let config: Qwen3VLConfig = serde_json::from_str(config)?;
+        Ok(Box::new(config))
+    }
+    fn get_processor(
+        &self,
+        _model_config: &str,
+        _processor_config: Option<ProcessorConfig>,
+        _preprocessor_config: PreProcessorConfig,
+        max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        Arc::new(Qwen3VLProcessor::new(max_edge))
+    }
+    fn supports_paged_attention(&self, _config: &str) -> bool {
+        true
+    }
+    fn supports_prefix_cacher(&self, _config: &str) -> bool {
+        true
+    }
+    fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
+        Arc::new(Qwen3VLPrefixer)
+    }
+    fn modalities(&self, _config: &str) -> Result<Modalities> {
+        Ok(Modalities {
+            input: vec![SupportedModality::Text, SupportedModality::Vision],
+            output: vec![SupportedModality::Text],
+        })
+    }
+}
+
+impl IsqModelLoader for Qwen3VLLoader {
+    fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
+        Ok(vec![
+            Regex::new(r"lm_head\.(weight|bias)$")?,
+            // Attention
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$")?,
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$")?,
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$")?,
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$")?,
+            // MLP
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$")?,
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$")?,
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$")?,
+        ])
+    }
+    fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
+        self.isq_layer_regexes(config)
+    }
+}
+
+impl DeviceMappedModelLoader for Qwen3VLLoader {
+    fn mapped_max_act_size_elems(
+        &self,
+        config: &str,
+        params: &AutoDeviceMapParams,
+    ) -> Result<usize> {
+        let AutoDeviceMapParams::Vision {
+            max_seq_len,
+            max_batch_size,
+            max_image_shape,
+            max_num_images,
+        } = params
+        else {
+            anyhow::bail!("Expected vision AutoDeviceMapParams for this model!")
+        };
+
+        let cfg: Qwen3VLConfig = serde_json::from_str(config)?;
+
+        // For images, grid_t=1. After spatial merging, grid_h and grid_w are reduced.
+        let img_seq_len = {
+            let cfg = &cfg.vision_config;
+            // grid_t is 1 for images (temporal dimension is for video only)
+            let grid_t = 1;
+            // After patch embedding and spatial merge, the effective grid dimensions are reduced
+            let grid_h = (max_image_shape.0 / cfg.patch_size) / cfg.spatial_merge_size;
+            let grid_w = (max_image_shape.1 / cfg.patch_size) / cfg.spatial_merge_size;
+            grid_t * grid_h * grid_w * max_num_images
+        };
+
+        let max_text_attn = {
+            let cfg = &cfg.text_config;
+            // This model injects the vision information directly into the input embeddings
+            let max_seq_len = img_seq_len + max_seq_len.min(&ATTENTION_CHUNK_SIZE);
+            max_batch_size * cfg.num_attention_heads * max_seq_len * max_seq_len
+        };
+
+        Ok(max_text_attn)
+    }
+
+    fn non_mapped_max_act_size_elems(
+        &self,
+        config: &str,
+        params: &AutoDeviceMapParams,
+    ) -> Result<usize> {
+        let AutoDeviceMapParams::Vision {
+            max_seq_len: _,
+            max_batch_size,
+            max_image_shape,
+            max_num_images,
+        } = params
+        else {
+            anyhow::bail!("Expected vision AutoDeviceMapParams for this model!")
+        };
+
+        let cfg: Qwen3VLConfig = serde_json::from_str(config)?;
+
+        // For the vision encoder, before spatial merging
+        let img_seq_len = {
+            let cfg = &cfg.vision_config;
+            // grid_t is 1 for images
+            let grid_t = 1;
+            let grid_h = max_image_shape.0 / cfg.patch_size;
+            let grid_w = max_image_shape.1 / cfg.patch_size;
+            grid_t * grid_h * grid_w
+        };
+
+        let max_vision_attn = {
+            let cfg = &cfg.vision_config;
+            (max_batch_size * max_num_images) * cfg.num_heads * img_seq_len * img_seq_len
+        };
+
+        Ok(max_vision_attn)
+    }
+
+    fn non_mapped_size_in_bytes(
+        &self,
+        config: &str,
+        dtype: DType,
+        weight_pack_factor: usize,
+        _matformer_config: Option<&MatformerSliceConfig>,
+    ) -> Result<usize> {
+        let cfg: Qwen3VLConfig = serde_json::from_str(config)?;
+        let tie = cfg.tie_word_embeddings;
+        let text_elems = {
+            let cfg = &cfg.text_config;
+            let embed_tokens = cfg.hidden_size * cfg.vocab_size / weight_pack_factor;
+            // If embeddings are tied and no packing, reuse weights -> no separate lm_head needed
+            let lm_head = if !tie || weight_pack_factor != 1 {
+                cfg.hidden_size * cfg.vocab_size / weight_pack_factor
+            } else {
+                0
+            };
+            let norm = cfg.hidden_size;
+            embed_tokens + lm_head + norm
+        };
+
+        let (patch_merger, deepstack_mergers) = {
+            let cfg = &cfg.vision_config;
+            let hidden_size = cfg.hidden_size * cfg.spatial_merge_size.pow(2);
+
+            let mlp0 = hidden_size * hidden_size + hidden_size;
+            let mlp2 = hidden_size * cfg.out_hidden_size + cfg.out_hidden_size;
+
+            // Main merger: norm uses cfg.hidden_size
+            let ln_q = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
+            let merger = mlp0 + mlp2 + ln_q;
+
+            // Deepstack mergers: norm uses merged hidden_size
+            let ds_ln = hidden_size + bias_if!(true, hidden_size);
+            let ds_merger = mlp0 + mlp2 + ds_ln;
+            let deepstack = cfg.deepstack_visual_indexes.len() * ds_merger;
+
+            (merger, deepstack)
+        };
+
+        let patch_embed = {
+            let cfg = &cfg.vision_config;
+            let conv_cfg = Conv3dConfig {
+                stride: cfg.patch_size,
+                ..Default::default()
+            };
+            let kernel_sizes = [cfg.temporal_patch_size, cfg.patch_size, cfg.patch_size];
+            let weight = cfg.in_chans * cfg.hidden_size / conv_cfg.groups
+                * kernel_sizes[0]
+                * kernel_sizes[1]
+                * kernel_sizes[2];
+            let bias = cfg.hidden_size;
+            weight + bias
+        };
+
+        let pos_embed = {
+            let cfg = &cfg.vision_config;
+            cfg.num_position_embeddings * cfg.hidden_size
+        };
+
+        let encoder_layer = {
+            let cfg = &cfg.vision_config;
+            let norm1 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
+            let norm2 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
+
+            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+            let fc1 = cfg.hidden_size * cfg.intermediate_size + cfg.intermediate_size;
+            let fc2 = cfg.hidden_size * cfg.intermediate_size + cfg.hidden_size;
+
+            let qkv = cfg.hidden_size * cfg.hidden_size * 3 + cfg.hidden_size * 3;
+            let out = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
+
+            norm1 + norm2 + fc1 + fc2 + qkv + out
+        };
+
+        let elems = text_elems
+            + patch_merger
+            + deepstack_mergers
+            + patch_embed
+            + pos_embed
+            + encoder_layer * cfg.vision_config.depth;
+
+        Ok(elems * dtype.size_in_bytes())
+    }
+
+    fn layer_sizes_in_bytes(
+        &self,
+        config: &str,
+        dtype: DType,
+        weight_pack_factor: usize,
+        _matformer_config: Option<&MatformerSliceConfig>,
+    ) -> Result<Vec<usize>> {
+        let cfg: Qwen3VLConfig = serde_json::from_str(config)?;
+        let per_layer_elems = {
+            let cfg = &cfg.text_config;
+            let input_layernorm = cfg.hidden_size;
+            let post_attention_layernorm = cfg.hidden_size;
+
+            let size_in = cfg.hidden_size;
+            let size_q = cfg.head_dim * cfg.num_attention_heads;
+            let size_kv = cfg.head_dim * cfg.num_key_value_heads;
+            let q_proj = size_in * size_q / weight_pack_factor;
+            let k_proj = size_in * size_kv / weight_pack_factor;
+            let v_proj = size_in * size_kv / weight_pack_factor;
+            let o_proj = size_q * size_in / weight_pack_factor;
+
+            let q_norm = cfg.head_dim;
+            let k_norm = cfg.head_dim;
+
+            let h_size = cfg.hidden_size;
+            let i_size = cfg.intermediate_size;
+            let gate_proj = h_size * i_size / weight_pack_factor;
+            let up_proj = h_size * i_size / weight_pack_factor;
+            let down_proj = i_size * h_size / weight_pack_factor;
+
+            input_layernorm
+                + post_attention_layernorm
+                + q_proj
+                + k_proj
+                + v_proj
+                + o_proj
+                + q_norm
+                + k_norm
+                + gate_proj
+                + up_proj
+                + down_proj
+        };
+        Ok(vec![
+            per_layer_elems * dtype.size_in_bytes();
+            cfg.text_config.num_hidden_layers
+        ])
+    }
+
+    fn num_layers(&self, config: &str) -> Result<usize> {
+        let cfg: Qwen3VLConfig = serde_json::from_str(config)?;
+        let cfg = &cfg.text_config;
+        Ok(cfg.num_hidden_layers)
+    }
+
+    fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
+        let cfg: Qwen3VLConfig = serde_json::from_str(config)?;
+        let cfg = &cfg.text_config;
+
+        let cfg = ModelConfigMetadata {
+            max_seq_len: cfg.max_position_embeddings,
+            num_layers: cfg.num_hidden_layers,
+            hidden_size: cfg.hidden_size,
+            num_kv_heads: cfg.num_key_value_heads,
+            num_attn_heads: cfg.num_attention_heads,
+            sliding_window: cfg.sliding_window,
+            k_head_dim: cfg.head_dim,
+            v_head_dim: cfg.head_dim,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
+        };
+
+        Ok(Box::new(cfg))
+    }
+
+    fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
+        Some(vec![NonMappedSubModel::Vision])
+    }
+}
+
+// ======================== Qwen3VLMoE Loader
+
+/// [`VisionLoader`] for a Qwen3VLMoE model.
+///
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
+pub struct Qwen3VLMoELoader;
+
+pub struct Qwen3VLMoEPrefixer;
+
+impl MultimodalPromptPrefixer for Qwen3VLMoEPrefixer {
+    // No-op: With MessagesAction::Keep, the chat template handles image tokens
+    // when it sees {"type": "image"} entries in the content.
+}
+
+impl VisionModelLoader for Qwen3VLMoELoader {
+    fn load(
+        &self,
+        config: &str,
+        vb: ShardedVarBuilder,
+        normal_loading_metadata: NormalLoadingMetadata,
+        attention_mechanism: AttentionImplementation,
+    ) -> Result<Box<dyn VisionModel + Send + Sync>> {
+        let cfg: Qwen3VLMoEConfig = serde_json::from_str(config)?;
+        Ok(Box::new(Qwen3VLMoEModel::new(
+            &cfg,
+            vb,
+            self.is_gptx(config),
+            normal_loading_metadata,
+            attention_mechanism,
+        )?))
+    }
+    fn is_gptx(&self, _config: &str) -> bool {
+        true
+    }
+    fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
+        let config: Qwen3VLMoEConfig = serde_json::from_str(config)?;
+        Ok(Box::new(config))
+    }
+    fn get_processor(
+        &self,
+        _model_config: &str,
+        _processor_config: Option<ProcessorConfig>,
+        _preprocessor_config: PreProcessorConfig,
+        max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        Arc::new(Qwen3VLMoEProcessor::new(max_edge))
+    }
+    fn supports_paged_attention(&self, _config: &str) -> bool {
+        true
+    }
+    fn supports_prefix_cacher(&self, _config: &str) -> bool {
+        true
+    }
+    fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
+        Arc::new(Qwen3VLMoEPrefixer)
+    }
+    fn modalities(&self, _config: &str) -> Result<Modalities> {
+        Ok(Modalities {
+            input: vec![SupportedModality::Text, SupportedModality::Vision],
+            output: vec![SupportedModality::Text],
+        })
+    }
+}
+
+impl IsqModelLoader for Qwen3VLMoELoader {
+    fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
+        Ok(vec![
+            Regex::new(r"lm_head\.(weight|bias)$")?,
+            // Attention
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$")?,
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$")?,
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$")?,
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$")?,
+            // MLP (dense layers)
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$")?,
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$")?,
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$")?,
+            // MoE router
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.mlp\.gate\.(weight|bias)$")?,
+            // MoE experts - now unpacked into individual experts
+            Regex::new(
+                r"model\.language_model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.gate_proj\.(weight|bias)$",
+            )?,
+            Regex::new(
+                r"model\.language_model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.up_proj\.(weight|bias)$",
+            )?,
+            Regex::new(
+                r"model\.language_model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.(weight|bias)$",
+            )?,
+        ])
+    }
+    fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
+        self.isq_layer_regexes(config)
+    }
+    fn isq_layer_regexes_moqe(&self, _config: &str) -> Result<Vec<Regex>> {
+        Ok(vec![
+            Regex::new(r"lm_head\.(weight|bias)$")?,
+            // MLP (dense layers)
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$")?,
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$")?,
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$")?,
+            // MoE router
+            Regex::new(r"model\.language_model\.layers\.(\d+)\.mlp\.gate\.(weight|bias)$")?,
+            // MoE experts
+            Regex::new(
+                r"model\.language_model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.gate_proj\.(weight|bias)$",
+            )?,
+            Regex::new(
+                r"model\.language_model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.up_proj\.(weight|bias)$",
+            )?,
+            Regex::new(
+                r"model\.language_model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.(weight|bias)$",
+            )?,
+        ])
+    }
+    fn immediate_isq_predicates_moqe(&self, config: &str) -> Result<Vec<Regex>> {
+        self.isq_layer_regexes_moqe(config)
+    }
+}
+
+impl DeviceMappedModelLoader for Qwen3VLMoELoader {
+    fn mapped_max_act_size_elems(
+        &self,
+        config: &str,
+        params: &AutoDeviceMapParams,
+    ) -> Result<usize> {
+        let AutoDeviceMapParams::Vision {
+            max_seq_len,
+            max_batch_size,
+            max_image_shape,
+            max_num_images,
+        } = params
+        else {
+            anyhow::bail!("Expected vision AutoDeviceMapParams for this model!")
+        };
+
+        let cfg: Qwen3VLMoEConfig = serde_json::from_str(config)?;
+
+        // For images, grid_t=1. After spatial merging, grid_h and grid_w are reduced.
+        let img_seq_len = {
+            let cfg = &cfg.vision_config;
+            // grid_t is 1 for images (temporal dimension is for video only)
+            let grid_t = 1;
+            // After patch embedding and spatial merge, the effective grid dimensions are reduced
+            let grid_h = (max_image_shape.0 / cfg.patch_size) / cfg.spatial_merge_size;
+            let grid_w = (max_image_shape.1 / cfg.patch_size) / cfg.spatial_merge_size;
+            grid_t * grid_h * grid_w * max_num_images
+        };
+
+        let max_text_attn = {
+            let cfg = &cfg.text_config;
+            // This model injects the vision information directly into the input embeddings
+            let max_seq_len = img_seq_len + max_seq_len.min(&ATTENTION_CHUNK_SIZE);
+            max_batch_size * cfg.num_attention_heads * max_seq_len * max_seq_len
+        };
+
+        Ok(max_text_attn)
+    }
+
+    fn non_mapped_max_act_size_elems(
+        &self,
+        config: &str,
+        params: &AutoDeviceMapParams,
+    ) -> Result<usize> {
+        let AutoDeviceMapParams::Vision {
+            max_seq_len: _,
+            max_batch_size,
+            max_image_shape,
+            max_num_images,
+        } = params
+        else {
+            anyhow::bail!("Expected vision AutoDeviceMapParams for this model!")
+        };
+
+        let cfg: Qwen3VLMoEConfig = serde_json::from_str(config)?;
+
+        // For the vision encoder, before spatial merging
+        let img_seq_len = {
+            let cfg = &cfg.vision_config;
+            // grid_t is 1 for images
+            let grid_t = 1;
+            let grid_h = max_image_shape.0 / cfg.patch_size;
+            let grid_w = max_image_shape.1 / cfg.patch_size;
+            grid_t * grid_h * grid_w
+        };
+
+        let max_vision_attn = {
+            let cfg = &cfg.vision_config;
+            (max_batch_size * max_num_images) * cfg.num_heads * img_seq_len * img_seq_len
+        };
+
+        Ok(max_vision_attn)
+    }
+
+    fn non_mapped_size_in_bytes(
+        &self,
+        config: &str,
+        dtype: DType,
+        weight_pack_factor: usize,
+        _matformer_config: Option<&MatformerSliceConfig>,
+    ) -> Result<usize> {
+        let cfg: Qwen3VLMoEConfig = serde_json::from_str(config)?;
+        let tie = cfg.tie_word_embeddings;
+        let text_elems = {
+            let cfg = &cfg.text_config;
+            let embed_tokens = cfg.hidden_size * cfg.vocab_size / weight_pack_factor;
+            // If embeddings are tied and no packing, reuse weights -> no separate lm_head needed
+            let lm_head = if !tie || weight_pack_factor != 1 {
+                cfg.hidden_size * cfg.vocab_size / weight_pack_factor
+            } else {
+                0
+            };
+            let norm = cfg.hidden_size;
+            embed_tokens + lm_head + norm
+        };
+
+        let (patch_merger, deepstack_mergers) = {
+            let cfg = &cfg.vision_config;
+            let hidden_size = cfg.hidden_size * cfg.spatial_merge_size.pow(2);
+
+            let mlp0 = hidden_size * hidden_size + hidden_size;
+            let mlp2 = hidden_size * cfg.out_hidden_size + cfg.out_hidden_size;
+
+            // Main merger: norm uses cfg.hidden_size
+            let ln_q = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
+            let merger = mlp0 + mlp2 + ln_q;
+
+            // Deepstack mergers: norm uses merged hidden_size
+            let ds_ln = hidden_size + bias_if!(true, hidden_size);
+            let ds_merger = mlp0 + mlp2 + ds_ln;
+            let deepstack = cfg.deepstack_visual_indexes.len() * ds_merger;
+
+            (merger, deepstack)
+        };
+
+        let patch_embed = {
+            let cfg = &cfg.vision_config;
+            let conv_cfg = Conv3dConfig {
+                stride: cfg.patch_size,
+                ..Default::default()
+            };
+            let kernel_sizes = [cfg.temporal_patch_size, cfg.patch_size, cfg.patch_size];
+            let weight = cfg.in_chans * cfg.hidden_size / conv_cfg.groups
+                * kernel_sizes[0]
+                * kernel_sizes[1]
+                * kernel_sizes[2];
+            let bias = cfg.hidden_size;
+            weight + bias
+        };
+
+        let pos_embed = {
+            let cfg = &cfg.vision_config;
+            cfg.num_position_embeddings * cfg.hidden_size
+        };
+
+        let encoder_layer = {
+            let cfg = &cfg.vision_config;
+            let norm1 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
+            let norm2 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
+
+            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+            let fc1 = cfg.hidden_size * cfg.intermediate_size + cfg.intermediate_size;
+            let fc2 = cfg.hidden_size * cfg.intermediate_size + cfg.hidden_size;
+
+            let qkv = cfg.hidden_size * cfg.hidden_size * 3 + cfg.hidden_size * 3;
+            let out = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
+
+            norm1 + norm2 + fc1 + fc2 + qkv + out
+        };
+
+        let elems = text_elems
+            + patch_merger
+            + deepstack_mergers
+            + patch_embed
+            + pos_embed
+            + encoder_layer * cfg.vision_config.depth;
+
+        Ok(elems * dtype.size_in_bytes())
+    }
+
+    fn layer_sizes_in_bytes(
+        &self,
+        config: &str,
+        dtype: DType,
+        weight_pack_factor: usize,
+        _matformer_config: Option<&MatformerSliceConfig>,
+    ) -> Result<Vec<usize>> {
+        let cfg: Qwen3VLMoEConfig = serde_json::from_str(config)?;
+        let text_cfg = &cfg.text_config;
+
+        let mut layer_sizes = Vec::with_capacity(text_cfg.num_hidden_layers);
+
+        for layer_idx in 0..text_cfg.num_hidden_layers {
+            let input_layernorm = text_cfg.hidden_size;
+            let post_attention_layernorm = text_cfg.hidden_size;
+
+            let size_in = text_cfg.hidden_size;
+            let size_q = text_cfg.head_dim * text_cfg.num_attention_heads;
+            let size_kv = text_cfg.head_dim * text_cfg.num_key_value_heads;
+            let q_proj = size_in * size_q / weight_pack_factor;
+            let k_proj = size_in * size_kv / weight_pack_factor;
+            let v_proj = size_in * size_kv / weight_pack_factor;
+            let o_proj = size_q * size_in / weight_pack_factor;
+
+            let q_norm = text_cfg.head_dim;
+            let k_norm = text_cfg.head_dim;
+
+            // Check if this is a MoE layer
+            let is_moe = !text_cfg.mlp_only_layers.contains(&layer_idx)
+                && (text_cfg.num_experts > 0
+                    && (layer_idx + 1) % text_cfg.decoder_sparse_step == 0);
+
+            let mlp_elems = if is_moe {
+                // MoE layer: gate + experts
+                let gate = text_cfg.hidden_size * text_cfg.num_experts;
+                let per_expert = {
+                    let h_size = text_cfg.hidden_size;
+                    let i_size = text_cfg.moe_intermediate_size;
+                    let gate_proj = h_size * i_size / weight_pack_factor;
+                    let up_proj = h_size * i_size / weight_pack_factor;
+                    let down_proj = i_size * h_size / weight_pack_factor;
+                    gate_proj + up_proj + down_proj
+                };
+                gate + per_expert * text_cfg.num_experts
+            } else {
+                // Dense MLP layer
+                let h_size = text_cfg.hidden_size;
+                let i_size = text_cfg.intermediate_size;
+                let gate_proj = h_size * i_size / weight_pack_factor;
+                let up_proj = h_size * i_size / weight_pack_factor;
+                let down_proj = i_size * h_size / weight_pack_factor;
+                gate_proj + up_proj + down_proj
+            };
+
+            let per_layer_elems = input_layernorm
+                + post_attention_layernorm
+                + q_proj
+                + k_proj
+                + v_proj
+                + o_proj
+                + q_norm
+                + k_norm
+                + mlp_elems;
+
+            layer_sizes.push(per_layer_elems * dtype.size_in_bytes());
+        }
+
+        Ok(layer_sizes)
+    }
+
+    fn num_layers(&self, config: &str) -> Result<usize> {
+        let cfg: Qwen3VLMoEConfig = serde_json::from_str(config)?;
+        let cfg = &cfg.text_config;
+        Ok(cfg.num_hidden_layers)
+    }
+
+    fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
+        let cfg: Qwen3VLMoEConfig = serde_json::from_str(config)?;
+        let cfg = &cfg.text_config;
+
+        let cfg = ModelConfigMetadata {
+            max_seq_len: cfg.max_position_embeddings,
+            num_layers: cfg.num_hidden_layers,
+            hidden_size: cfg.hidden_size,
+            num_kv_heads: cfg.num_key_value_heads,
+            num_attn_heads: cfg.num_attention_heads,
+            sliding_window: cfg.sliding_window,
+            k_head_dim: cfg.head_dim,
+            v_head_dim: cfg.head_dim,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
+        };
+
+        Ok(Box::new(cfg))
+    }
+
+    fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
+        Some(vec![NonMappedSubModel::Vision])
+    }
+}
+
+// ─── Voxtral ────────────────────────────────────────────────────────────────
+
+/// [`VisionLoader`] for a Voxtral model.
+///
+/// [`VisionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.VisionLoader.html
+pub struct VoxtralLoader;
+
+pub struct VoxtralPrefixer;
+
+impl MultimodalPromptPrefixer for VoxtralPrefixer {
+    fn prefix_image(&self, _image_indexes: Vec<usize>, prompt: &str) -> String {
+        prompt.to_string()
+    }
+}
+
+impl VisionModelLoader for VoxtralLoader {
+    fn load(
+        &self,
+        config: &str,
+        vb: ShardedVarBuilder,
+        normal_loading_metadata: NormalLoadingMetadata,
+        attention_mechanism: AttentionImplementation,
+    ) -> Result<Box<dyn VisionModel + Send + Sync>> {
+        let cfg: VoxtralConfig = serde_json::from_str(config)?;
+        Ok(Box::new(VoxtralModel::new(
+            &cfg,
+            vb,
+            self.is_gptx(config),
+            normal_loading_metadata,
+            attention_mechanism,
+        )?))
+    }
+    fn is_gptx(&self, _config: &str) -> bool {
+        true
+    }
+    fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
+        let cfg: VoxtralConfig = serde_json::from_str(config)?;
+        Ok(Box::new(cfg))
+    }
+    fn get_processor(
+        &self,
+        model_config: &str,
+        _processor_config: Option<ProcessorConfig>,
+        _preprocessor_config: PreProcessorConfig,
+        _max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        let cfg: VoxtralConfig =
+            serde_json::from_str(model_config).expect("Failed to parse VoxtralConfig");
+        Arc::new(VoxtralProcessor::new(&cfg))
+    }
+    fn supports_paged_attention(&self, _config: &str) -> bool {
+        false
+    }
+    fn supports_prefix_cacher(&self, _config: &str) -> bool {
+        false
+    }
+    fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
+        Arc::new(VoxtralPrefixer)
+    }
+    fn modalities(&self, _config: &str) -> Result<Modalities> {
+        Ok(Modalities {
+            input: vec![SupportedModality::Text, SupportedModality::Audio],
+            output: vec![SupportedModality::Text],
+        })
+    }
+    fn default_chat_template(&self, _config: &str) -> Option<String> {
+        // Mistral v7 instruct format using [INST]/[/INST] tokens
+        Some("{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token + ' ' }}{% else %}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}".to_string())
+    }
+    fn default_bos_eos(&self, _config: &str) -> Option<(String, String)> {
+        // Mistral tekken tokenizer: <s> = ID 1, </s> = ID 2
+        Some(("<s>".to_string(), "</s>".to_string()))
+    }
+}
+
+impl IsqModelLoader for VoxtralLoader {
+    fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
+        Ok(vec![
+            // Output / lm_head (tied with tok_embeddings)
+            Regex::new(r"lm_head\.(weight|bias)$")?,
+            // Decoder attention (Mistral-native naming)
+            Regex::new(r"layers\.(\d+)\.attention\.wq\.(weight|bias)$")?,
+            Regex::new(r"layers\.(\d+)\.attention\.wk\.(weight|bias)$")?,
+            Regex::new(r"layers\.(\d+)\.attention\.wv\.(weight|bias)$")?,
+            Regex::new(r"layers\.(\d+)\.attention\.wo\.(weight|bias)$")?,
+            // Decoder MLP (Mistral-native naming)
+            Regex::new(r"layers\.(\d+)\.feed_forward\.w1\.(weight|bias)$")?,
+            Regex::new(r"layers\.(\d+)\.feed_forward\.w3\.(weight|bias)$")?,
+            Regex::new(r"layers\.(\d+)\.feed_forward\.w2\.(weight|bias)$")?,
+        ])
+    }
+    fn immediate_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
+        Ok(vec![
+            Regex::new(r"tok_embeddings\.(weight|bias)$")?,
+            // Decoder attention
+            Regex::new(r"layers\.(\d+)\.attention\.wq\.(weight|bias)$")?,
+            Regex::new(r"layers\.(\d+)\.attention\.wk\.(weight|bias)$")?,
+            Regex::new(r"layers\.(\d+)\.attention\.wv\.(weight|bias)$")?,
+            Regex::new(r"layers\.(\d+)\.attention\.wo\.(weight|bias)$")?,
+            // Decoder MLP
+            Regex::new(r"layers\.(\d+)\.feed_forward\.w1\.(weight|bias)$")?,
+            Regex::new(r"layers\.(\d+)\.feed_forward\.w3\.(weight|bias)$")?,
+            Regex::new(r"layers\.(\d+)\.feed_forward\.w2\.(weight|bias)$")?,
+        ])
+    }
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+impl DeviceMappedModelLoader for VoxtralLoader {
+    fn mapped_max_act_size_elems(
+        &self,
+        config: &str,
+        params: &AutoDeviceMapParams,
+    ) -> Result<usize> {
+        let AutoDeviceMapParams::Vision {
+            max_seq_len,
+            max_batch_size,
+            ..
+        } = params
+        else {
+            anyhow::bail!("Expected vision AutoDeviceMapParams for this model!")
+        };
+
+        let cfg: VoxtralConfig = serde_json::from_str(config)?;
+
+        // Audio tokens are prepended: max audio len + text seq len
+        // Audio: ~30s at 16kHz = 480k samples, /160 hop = 3000 frames, /2 conv stride = 1500, /4 adapter = 375 tokens
+        let max_audio_tokens = 375;
+        let total_seq = max_audio_tokens + *max_seq_len.min(&ATTENTION_CHUNK_SIZE);
+        Ok(max_batch_size * cfg.n_heads * total_seq * total_seq)
+    }
+
+    fn non_mapped_max_act_size_elems(
+        &self,
+        config: &str,
+        params: &AutoDeviceMapParams,
+    ) -> Result<usize> {
+        let AutoDeviceMapParams::Vision { max_batch_size, .. } = params else {
+            anyhow::bail!("Expected vision AutoDeviceMapParams for this model!")
+        };
+
+        let cfg: VoxtralConfig = serde_json::from_str(config)?;
+        let enc = &cfg.multimodal.whisper_model_args.encoder_args;
+        // Encoder max activation: attention matrix
+        // ~3000 mel frames, encoder has 32 heads, seq_len^2
+        let max_enc_seq = 3000usize;
+        Ok(max_batch_size * enc.n_heads * max_enc_seq * max_enc_seq)
+    }
+
+    fn non_mapped_size_in_bytes(
+        &self,
+        config: &str,
+        dtype: DType,
+        _weight_pack_factor: usize,
+        _matformer_config: Option<&MatformerSliceConfig>,
+    ) -> Result<usize> {
+        let cfg: VoxtralConfig = serde_json::from_str(config)?;
+        let enc = &cfg.multimodal.whisper_model_args.encoder_args;
+        let ds = &cfg.multimodal.whisper_model_args.downsample_args;
+
+        let elem = dtype.size_in_bytes();
+
+        // Encoder conv layers
+        let conv1 = enc.dim * enc.audio_encoding_args.num_mel_bins * 3 + enc.dim; // weight + bias
+        let conv2 = enc.dim * enc.dim * 3 + enc.dim;
+
+        // Encoder layers
+        let enc_attn_per_layer = 4 * enc.dim * enc.dim; // wq, wk, wv, wo (full heads)
+        let enc_mlp_per_layer = 3 * enc.dim * enc.hidden_dim; // w1, w2, w3
+        let enc_norm_per_layer = 2 * enc.dim; // attention_norm, ffn_norm
+        let enc_layers =
+            enc.n_layers * (enc_attn_per_layer + enc_mlp_per_layer + enc_norm_per_layer);
+        let enc_final_norm = enc.dim;
+
+        // Adapter
+        let adapter_in_features = enc.dim * ds.downsample_factor;
+        let adapter = adapter_in_features * cfg.dim + cfg.dim + cfg.dim * cfg.dim + cfg.dim;
+
+        let total_encoder = conv1 + conv2 + enc_layers + enc_final_norm + adapter;
+
+        // Decoder embeddings
+        let embeddings = cfg.vocab_size * cfg.dim;
+
+        Ok((total_encoder + embeddings) * elem)
+    }
+
+    fn layer_sizes_in_bytes(
+        &self,
+        config: &str,
+        dtype: DType,
+        weight_pack_factor: usize,
+        _matformer_config: Option<&MatformerSliceConfig>,
+    ) -> Result<Vec<usize>> {
+        let cfg: VoxtralConfig = serde_json::from_str(config)?;
+        let elem = dtype.size_in_bytes();
+
+        let attn = (cfg.dim * cfg.n_heads * cfg.head_dim
+            + cfg.dim * cfg.n_kv_heads * cfg.head_dim
+            + cfg.dim * cfg.n_kv_heads * cfg.head_dim
+            + cfg.n_heads * cfg.head_dim * cfg.dim)
+            / weight_pack_factor;
+        let mlp = (cfg.dim * cfg.hidden_dim + cfg.hidden_dim * cfg.dim + cfg.dim * cfg.hidden_dim)
+            / weight_pack_factor;
+        let norms = 2 * cfg.dim; // attention_norm + ffn_norm
+
+        let per_layer = (attn + mlp + norms) * elem;
+
+        Ok(vec![per_layer; cfg.n_layers])
+    }
+
+    fn num_layers(&self, config: &str) -> Result<usize> {
+        let cfg: VoxtralConfig = serde_json::from_str(config)?;
+        Ok(cfg.n_layers)
+    }
+
+    fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
+        let cfg: VoxtralConfig = serde_json::from_str(config)?;
+
+        let cfg = ModelConfigMetadata {
+            max_seq_len: cfg.model_max_length,
+            num_layers: cfg.n_layers,
+            hidden_size: cfg.dim,
+            num_kv_heads: cfg.n_kv_heads,
+            num_attn_heads: cfg.n_heads,
+            sliding_window: cfg.sliding_window,
+            k_head_dim: cfg.head_dim,
+            v_head_dim: cfg.head_dim,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
+        };
+
+        Ok(Box::new(cfg))
     }
 }

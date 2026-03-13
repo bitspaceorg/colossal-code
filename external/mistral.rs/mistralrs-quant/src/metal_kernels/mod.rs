@@ -1,8 +1,13 @@
+// Portions of this file are adapted from Apple's MLX framework
+// (https://github.com/ml-explore/mlx)
+// Licensed under the Apache License 2.0
+// Copyright © 2023 Apple Inc.
+
 use candle_core::{DType, MetalDevice};
-use metal::{
-    Buffer, ComputeCommandEncoderRef, ComputePipelineState, Device, Function,
-    FunctionConstantValues, Library, MTLSize,
+use candle_metal_kernels::metal::{
+    Buffer, ComputeCommandEncoder, ComputePipeline, ConstantValues, Device, Function, Library,
 };
+use objc2_metal::{MTLCompileOptions, MTLDevice, MTLMathMode, MTLSize};
 use std::os::raw::c_void;
 use std::sync::{Arc, RwLock};
 use std::{collections::HashMap, sync::OnceLock};
@@ -10,22 +15,26 @@ use std::{collections::HashMap, sync::OnceLock};
 pub mod utils;
 use utils::{
     get_2d_grid_dims, get_2d_grid_dims_divisor, get_block_dims, linear_split, EncoderParam,
-    EncoderProvider,
+    EncoderProvider, RawBytesEncoder,
 };
 
 use crate::set_params;
+
+// Backward-compatible aliases to ease the transition from the `metal` crate API.
+type ComputeCommandEncoderRef = ComputeCommandEncoder;
+type ComputePipelineState = ComputePipeline;
 
 #[cfg(target_os = "macos")]
 const KERNELS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mistralrs_quant.metallib"));
 #[cfg(target_os = "ios")]
 const KERNELS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mistralrs_quant_ios.metallib"));
+#[cfg(target_os = "tvos")]
+const KERNELS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mistralrs_quant_tvos.metallib"));
 
 #[derive(thiserror::Error, Debug)]
 pub enum MetalKernelError {
     #[error("Could not lock kernel map: {0}")]
     LockError(String),
-    #[error("Error while loading library: {0}")]
-    LoadLibraryError(String),
     #[error("Error while loading function: {0:?}")]
     LoadFunctionError(String),
     #[error("Failed to create pipeline")]
@@ -42,7 +51,7 @@ impl<T> From<std::sync::PoisonError<T>> for MetalKernelError {
     }
 }
 
-type Pipelines = HashMap<String, ComputePipelineState>;
+type Pipelines = HashMap<String, ComputePipeline>;
 
 static LIBRARY: OnceLock<Library> = OnceLock::new();
 
@@ -63,24 +72,34 @@ impl Kernels {
         Self { pipelines }
     }
 
-    /// Load the give library from its [`source`].
+    /// Load the library from precompiled metallib, falling back to runtime compilation if needed.
     /// If this has been previously loaded it will just fetch it from cache.
+    #[allow(clippy::const_is_empty)] // KERNELS can be empty when MISTRALRS_METAL_PRECOMPILE=0
     pub fn load_library(&self, device: &Device) -> Result<Library, MetalKernelError> {
         if let Some(lib) = LIBRARY.get() {
             Ok(lib.clone())
         } else {
-            let source_data = KERNELS;
-            // Check if the precompiled library is empty (which indicates runtime compilation is needed)
-            let lib = if source_data.is_empty() {
-                // Runtime compilation path
-                self.compile_kernels_at_runtime(device)?
+            // Try to load precompiled metallib first (faster startup)
+            let lib = if !KERNELS.is_empty() {
+                // Load precompiled metallib directly from embedded bytes via DispatchData.
+                // This avoids writing to a temp file, which can fail in sandboxed
+                // environments (e.g. macOS apps distributed via TestFlight).
+                // https://github.com/EricLBuehler/mistral.rs/issues/1897
+                let data = dispatch2::DispatchData::from_static_bytes(KERNELS);
+
+                let raw_lib = device
+                    .as_ref()
+                    .newLibraryWithData_error(&data)
+                    .map_err(|e| {
+                        MetalKernelError::CompilationError(format!(
+                            "Failed to load precompiled metallib: {e}"
+                        ))
+                    })?;
+                Library::new(raw_lib)
             } else {
-                // Precompiled path
-                device.new_library_with_data(source_data).map_err(|e| {
-                    MetalKernelError::LoadLibraryError(format!(
-                        "Metal requires macosx > 13.0 or higher, cannot load candle metal library: {e}"
-                    ))
-                })?
+                // Fall back to runtime compilation if precompiled lib is not available
+                // (e.g., when MISTRALRS_METAL_PRECOMPILE=0)
+                self.compile_kernels_at_runtime(device)?
             };
             Ok(LIBRARY.get_or_init(|| lib).clone())
         }
@@ -94,7 +113,9 @@ impl Kernels {
         file_system.insert("bitwise.metal", include_str!("bitwise.metal"));
         file_system.insert("blockwise_fp8.metal", include_str!("blockwise_fp8.metal"));
         file_system.insert("bnb_dequantize.metal", include_str!("bnb_dequantize.metal"));
+        file_system.insert("fused_glu.metal", include_str!("fused_glu.metal"));
         file_system.insert("hqq_dequantize.metal", include_str!("hqq_dequantize.metal"));
+        file_system.insert("mxfp4.metal", include_str!("mxfp4.metal"));
         file_system.insert("quantized.metal", include_str!("quantized.metal"));
         file_system.insert("scan.metal", include_str!("scan.metal"));
         file_system.insert("sort.metal", include_str!("sort.metal"));
@@ -106,6 +127,15 @@ impl Kernels {
         file_system.insert("copy_impl.metal", include_str!("copy_impl.metal"));
         file_system.insert("float8.metal", include_str!("float8.metal"));
         file_system.insert("float4.metal", include_str!("float4.metal"));
+        file_system.insert("scalar_fp8.metal", include_str!("scalar_fp8.metal"));
+        file_system.insert(
+            "sdpa_with_sinks.metal",
+            include_str!("sdpa_with_sinks.metal"),
+        );
+        file_system.insert(
+            "softmax_with_sinks.metal",
+            include_str!("softmax_with_sinks.metal"),
+        );
 
         // Recursive include preprocessor
         fn preprocess_includes(
@@ -222,7 +252,9 @@ impl Kernels {
             "bitwise.metal",        // Bitwise operations
             "blockwise_fp8.metal",  // FP8 blockwise operations (includes float8.metal, utils.metal)
             "bnb_dequantize.metal", // BitsAndBytes dequantization (includes utils.metal)
+            "fused_glu.metal",      // Fused GLU operations (activation(a) * b)
             "hqq_dequantize.metal", // HQQ dequantization
+            "mxfp4.metal",          // MXFP4 kernels
             "quantized.metal",      // Quantization operations (includes utils.metal)
             "copy.metal",           // Copy operations (includes utils.metal, copy_impl.metal)
             "scan.metal",           // Scan operations (includes utils.metal, scan_impl.metal)
@@ -254,9 +286,13 @@ impl Kernels {
         }
 
         // Compile the preprocessed source
-        let compile_options = metal::CompileOptions::new();
+        let compile_options = {
+            let opts = MTLCompileOptions::new();
+            opts.setMathMode(MTLMathMode::Fast);
+            opts
+        };
         device
-            .new_library_with_source(&main_source, &compile_options)
+            .new_library_with_source(&main_source, Some(&compile_options))
             .map_err(|e| {
                 MetalKernelError::CompilationError(format!(
                     "Failed to compile Metal kernels at runtime: {e}"
@@ -268,7 +304,7 @@ impl Kernels {
         &self,
         device: &Device,
         name: impl ToString,
-        constants: Option<FunctionConstantValues>,
+        constants: Option<&ConstantValues>,
     ) -> Result<Function, MetalKernelError> {
         let func = self
             .load_library(device)?
@@ -868,7 +904,7 @@ pub fn call_affine_quantize(
 
     let thread_group_size = (pipeline.max_total_threads_per_threadgroup() as usize).min(nthreads);
     let group_dims = MTLSize {
-        width: thread_group_size as u64,
+        width: thread_group_size as usize,
         height: 1,
         depth: 1,
     };
@@ -883,7 +919,7 @@ pub fn call_affine_quantize(
         get_2d_grid_dims(&grid_shape, input_strides)
     } else {
         MTLSize {
-            width: nthreads as u64,
+            width: nthreads,
             height: 1,
             depth: 1,
         }
@@ -962,14 +998,14 @@ pub fn call_afq_qmm(
             let simdgroup_size = 32;
             quad = true;
             let group_dims = MTLSize {
-                width: simdgroup_size as u64,
+                width: simdgroup_size as usize,
                 height: 1,
                 depth: 1,
             };
             let grid_dims = MTLSize {
-                width: o.div_ceil(bo) as u64,
-                height: b as u64,
-                depth: n as u64,
+                width: o.div_ceil(bo),
+                height: b,
+                depth: n,
             };
             (group_dims, grid_dims)
         } else if b < 6 && o % 8 == 0 && d % 512 == 0 && d >= 512 {
@@ -982,9 +1018,9 @@ pub fn call_afq_qmm(
                 depth: 1,
             };
             let grid_dims = MTLSize {
-                width: (o / bo) as u64,
-                height: b as u64,
-                depth: n as u64,
+                width: (o / bo),
+                height: b,
+                depth: n,
             };
             (group_dims, grid_dims)
         } else if b < 6 {
@@ -997,9 +1033,9 @@ pub fn call_afq_qmm(
                 depth: 1,
             };
             let grid_dims = MTLSize {
-                width: o.div_ceil(bo) as u64,
-                height: b as u64,
-                depth: n as u64,
+                width: o.div_ceil(bo),
+                height: b,
+                depth: n,
             };
             (group_dims, grid_dims)
         } else {
@@ -1010,13 +1046,13 @@ pub fn call_afq_qmm(
             let bn = 32;
             let group_dims = MTLSize {
                 width: 32,
-                height: wn as u64,
-                depth: wm as u64,
+                height: wn as usize,
+                depth: wm as usize,
             };
             let grid_dims = MTLSize {
-                width: o.div_ceil(bn) as u64,
-                height: b.div_ceil(bm) as u64,
-                depth: n as u64,
+                width: o.div_ceil(bn),
+                height: b.div_ceil(bm),
+                depth: n,
             };
             matrix = true;
             aligned = true;
@@ -1036,9 +1072,9 @@ pub fn call_afq_qmm(
                 depth: 1,
             };
             let grid_dims = MTLSize {
-                width: (o / bo) as u64,
-                height: b as u64,
-                depth: n as u64,
+                width: (o / bo),
+                height: b,
+                depth: n,
             };
             (group_dims, grid_dims)
         } else {
@@ -1049,13 +1085,13 @@ pub fn call_afq_qmm(
             let bn = 32;
             let group_dims = MTLSize {
                 width: 32,
-                height: wn as u64,
-                depth: wm as u64,
+                height: wn as usize,
+                depth: wm as usize,
             };
             let grid_dims = MTLSize {
-                width: (o / bn) as u64,
-                height: b.div_ceil(bm) as u64,
-                depth: n as u64,
+                width: (o / bn),
+                height: b.div_ceil(bm),
+                depth: n,
             };
             matrix = true;
             if o % bn != 0 {
@@ -1099,7 +1135,7 @@ pub fn call_afq_qmm(
     encoder.set_buffer(0, Some(w), 0);
     encoder.set_buffer(1, Some(scales), 0);
     encoder.set_buffer(2, Some(biases), 0);
-    encoder.set_buffer(3, Some(x), x_offset as u64);
+    encoder.set_buffer(3, Some(x), x_offset);
     encoder.set_buffer(4, Some(out), 0);
     <i32 as EncoderParam>::set_param(encoder, 5, d as i32);
     <i32 as EncoderParam>::set_param(encoder, 6, o as i32);
@@ -1178,6 +1214,162 @@ pub fn call_afq_qmm(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn call_mxfp4_matmul(
+    device: &Device,
+    ep: impl EncoderProvider,
+    kernels: &Kernels,
+    ty: DType,
+    x: (&Buffer, usize),
+    w: (&Buffer, usize),
+    scales: (&Buffer, usize),
+    bias: (&Buffer, usize),
+    out: &Buffer,
+    m: usize,
+    n: usize,
+    k: usize,
+    has_bias: bool,
+) -> Result<(), MetalKernelError> {
+    let name = match ty {
+        DType::F16 => "mxfp4_matmul_f16",
+        DType::BF16 => "mxfp4_matmul_bf16",
+        other => {
+            return Err(MetalKernelError::DTypeMismatch {
+                expected: vec![DType::F16, DType::BF16],
+                got: other,
+            })
+        }
+    };
+
+    let pipeline = kernels.load_pipeline(device, name)?;
+
+    let encoder = ep.encoder();
+    let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    set_params!(
+        encoder,
+        (
+            x,
+            w,
+            scales,
+            bias,
+            out,
+            m as i32,
+            n as i32,
+            k as i32,
+            has_bias as i32
+        )
+    );
+
+    // 8 simdgroups * 32 = 256 threads. Grid.x tiles N in blocks of 8.
+    let group_dims = MTLSize {
+        width: 256,
+        height: 1,
+        depth: 1,
+    };
+    let grid_dims = MTLSize {
+        width: n.div_ceil(8),
+        height: m,
+        depth: 1,
+    };
+    encoder.dispatch_thread_groups(grid_dims, group_dims);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn call_mxfp4_moe_gemm(
+    device: &Device,
+    ep: impl EncoderProvider,
+    kernels: &Kernels,
+    ty: DType,
+    x: (&Buffer, usize),
+    w: (&Buffer, usize),
+    scales: (&Buffer, usize),
+    biases: (&Buffer, usize),
+    indices: (&Buffer, usize),
+    out: &Buffer,
+    num_tokens: usize,
+    topk: usize,
+    num_experts: usize,
+    n: usize,
+    k: usize,
+    has_bias: bool,
+    input_has_topk_dim: bool,
+    reuse_topk: bool,
+) -> Result<(), MetalKernelError> {
+    let name = match (reuse_topk, ty) {
+        (true, DType::F16) => "mxfp4_moe_gemm_reuse_f16",
+        (true, DType::BF16) => "mxfp4_moe_gemm_reuse_bf16",
+        (false, DType::F16) => "mxfp4_moe_gemm_split_f16",
+        (false, DType::BF16) => "mxfp4_moe_gemm_split_bf16",
+        (_, other) => {
+            return Err(MetalKernelError::DTypeMismatch {
+                expected: vec![DType::F16, DType::BF16],
+                got: other,
+            })
+        }
+    };
+
+    let pipeline = kernels.load_pipeline(device, name)?;
+
+    let encoder = ep.encoder();
+    let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    if reuse_topk {
+        set_params!(
+            encoder,
+            (
+                x,
+                w,
+                scales,
+                biases,
+                indices,
+                out,
+                num_tokens as i32,
+                topk as i32,
+                num_experts as i32,
+                n as i32,
+                k as i32,
+                has_bias as i32
+            )
+        );
+    } else {
+        set_params!(
+            encoder,
+            (
+                x,
+                w,
+                scales,
+                biases,
+                indices,
+                out,
+                num_tokens as i32,
+                topk as i32,
+                num_experts as i32,
+                n as i32,
+                k as i32,
+                has_bias as i32,
+                input_has_topk_dim as i32
+            )
+        );
+    }
+
+    let group_dims = MTLSize {
+        width: 256,
+        height: 1,
+        depth: 1,
+    };
+    let grid_dims = MTLSize {
+        width: n.div_ceil(8),
+        height: num_tokens,
+        depth: if reuse_topk { 1 } else { topk },
+    };
+    encoder.dispatch_thread_groups(grid_dims, group_dims);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn call_dequant_blockwise_fp8(
     device: &Device,
     ep: impl EncoderProvider,
@@ -1230,11 +1422,11 @@ pub fn call_dequant_blockwise_fp8(
     };
 
     impl EncoderParam for &DequantParams {
-        fn set_param(encoder: &ComputeCommandEncoderRef, position: u64, data: Self) {
-            encoder.set_bytes(
+        fn set_param(encoder: &ComputeCommandEncoderRef, position: usize, data: Self) {
+            encoder.set_bytes_raw(
                 position,
-                core::mem::size_of_val(data) as u64,
-                &data as *const _ as *const c_void,
+                core::mem::size_of_val(data),
+                data as *const _ as *const c_void,
             );
         }
     }
@@ -1247,8 +1439,8 @@ pub fn call_dequant_blockwise_fp8(
         depth: 1,
     };
     let blocks = MTLSize {
-        width: weight_width.div_ceil(dequant_params.block_size_x) as u64,
-        height: weight_height.div_ceil(dequant_params.block_size_y) as u64,
+        width: weight_width.div_ceil(dequant_params.block_size_x) as usize,
+        height: weight_height.div_ceil(dequant_params.block_size_y) as usize,
         depth: 1,
     };
 
@@ -1336,13 +1528,13 @@ pub fn call_scan(
     encoder.set_compute_pipeline_state(&pipeline);
 
     if contiguous {
-        encoder.set_buffer(0, Some(xs), xs_offset as u64);
+        encoder.set_buffer(0, Some(xs), xs_offset);
         encoder.set_buffer(1, Some(output), 0);
 
         let size = shape[axis];
-        encoder.set_bytes(
+        encoder.set_bytes_raw(
             2,
-            std::mem::size_of::<usize>() as u64,
+            std::mem::size_of::<usize>(),
             &size as *const usize as *const _,
         );
 
@@ -1350,23 +1542,22 @@ pub fn call_scan(
         let n_reads = if ty.size_in_bytes() <= 4 { 4 } else { 2 };
         let simd_size = 32;
         let elements_per_simd = n_reads * simd_size;
-        let mut thread_group_size = pipeline.max_total_threads_per_threadgroup() as usize;
+        let mut thread_group_size = pipeline.max_total_threads_per_threadgroup();
         if size <= n_reads * 1024 {
             thread_group_size = size.div_ceil(elements_per_simd) * simd_size;
         } else if size <= n_reads * 2048 {
             thread_group_size = (size / 2).div_ceil(elements_per_simd) * simd_size;
         }
-        thread_group_size =
-            thread_group_size.min(pipeline.max_total_threads_per_threadgroup() as usize);
+        thread_group_size = thread_group_size.min(pipeline.max_total_threads_per_threadgroup());
         let tmp_grid_dims = get_2d_grid_dims_divisor(shape, strides, size);
 
         let grid_dims = MTLSize {
-            width: thread_group_size as u64,
+            width: thread_group_size,
             height: tmp_grid_dims.width,
             depth: tmp_grid_dims.height,
         };
         let group_dims = MTLSize {
-            width: thread_group_size as u64,
+            width: thread_group_size,
             height: 1,
             depth: 1,
         };
@@ -1379,22 +1570,22 @@ pub fn call_scan(
         let bn = 32;
         let stride_blocks = stride.div_ceil(bn);
 
-        encoder.set_buffer(0, Some(xs), xs_offset as u64);
+        encoder.set_buffer(0, Some(xs), xs_offset);
         encoder.set_buffer(1, Some(output), 0);
 
-        encoder.set_bytes(
+        encoder.set_bytes_raw(
             2,
-            std::mem::size_of::<usize>() as u64,
+            std::mem::size_of::<usize>(),
             &size as *const usize as *const _,
         );
-        encoder.set_bytes(
+        encoder.set_bytes_raw(
             3,
-            std::mem::size_of::<usize>() as u64,
+            std::mem::size_of::<usize>(),
             &stride as *const usize as *const _,
         );
-        encoder.set_bytes(
+        encoder.set_bytes_raw(
             4,
-            std::mem::size_of::<usize>() as u64,
+            std::mem::size_of::<usize>(),
             &stride_blocks as *const usize as *const _,
         );
 
@@ -1403,19 +1594,19 @@ pub fn call_scan(
         let n_simdgroups = bn / n_reads;
         let thread_group_size = n_simdgroups * 32;
         let mut tmp_grid_dims = get_2d_grid_dims_divisor(shape, strides, size * stride);
-        if tmp_grid_dims.width <= (u32::MAX as u64) / (stride_blocks as u64) {
-            tmp_grid_dims.width *= stride_blocks as u64;
+        if tmp_grid_dims.width <= (u32::MAX as usize) / stride_blocks {
+            tmp_grid_dims.width *= stride_blocks;
         } else {
-            tmp_grid_dims.height *= stride_blocks as u64;
+            tmp_grid_dims.height *= stride_blocks;
         }
 
         let grid_dims = MTLSize {
-            width: thread_group_size as u64,
+            width: thread_group_size,
             height: tmp_grid_dims.width,
             depth: tmp_grid_dims.height,
         };
         let group_dims = MTLSize {
-            width: thread_group_size as u64,
+            width: thread_group_size,
             height: 1,
             depth: 1,
         };
@@ -1736,8 +1927,8 @@ fn call_copy_gpu_inplace(
     // === Buffers (slots 0/1) =================================================
     let byte_offset_src = src_offset * ty.size_in_bytes();
     let byte_offset_dst = dst_offset * ty.size_in_bytes();
-    encoder.set_buffer(0, Some(src), byte_offset_src as u64);
-    encoder.set_buffer(1, Some(dst), byte_offset_dst as u64);
+    encoder.set_buffer(0, Some(src), byte_offset_src);
+    encoder.set_buffer(1, Some(dst), byte_offset_dst);
 
     // === Specialisation for each CopyType ===================================
     match copy_type {
@@ -1752,11 +1943,11 @@ fn call_copy_gpu_inplace(
 
             // Grid
             let nthreads = ceil_div(elem_count, work_per_thread);
-            let tg_size = pipeline.max_total_threads_per_threadgroup() as usize;
+            let tg_size = pipeline.max_total_threads_per_threadgroup();
             let tg_size = tg_size.min(nthreads);
 
             let group_dims = MTLSize {
-                width: tg_size as u64,
+                width: tg_size,
                 height: 1,
                 depth: 1,
             };
@@ -1765,7 +1956,7 @@ fn call_copy_gpu_inplace(
                 get_2d_grid_dims_divisor(shape, dst_strides, work_per_thread)
             } else {
                 MTLSize {
-                    width: nthreads as u64,
+                    width: nthreads,
                     height: 1,
                     depth: 1,
                 }
@@ -1780,17 +1971,17 @@ fn call_copy_gpu_inplace(
             // ---- Shape / stride descriptors ---------------------------------
             if shape.len() > 3 {
                 let shape_i32: Vec<i32> = shape.iter().map(|&x| x as i32).collect();
-                encoder.set_bytes(
+                encoder.set_bytes_raw(
                     2,
-                    (std::mem::size_of::<i32>() * shape_i32.len()) as u64,
+                    std::mem::size_of::<i32>() * shape_i32.len(),
                     shape_i32.as_ptr() as *const _,
                 );
             }
             // Strides – always required (slot 3)
             let strides_in_i64: Vec<i64> = src_strides.iter().map(|&x| x as i64).collect();
-            encoder.set_bytes(
+            encoder.set_bytes_raw(
                 3,
-                (std::mem::size_of::<i64>() * strides_in_i64.len()) as u64,
+                std::mem::size_of::<i64>() * strides_in_i64.len(),
                 strides_in_i64.as_ptr() as *const _,
             );
 
@@ -1818,9 +2009,9 @@ fn call_copy_gpu_inplace(
             );
             let group_dims = get_block_dims(dim0, dim1, rest, 10);
             let grid_dims = MTLSize {
-                width: dim0 as u64,
-                height: dim1 as u64,
-                depth: rest as u64,
+                width: dim0,
+                height: dim1,
+                depth: rest,
             };
             encoder.dispatch_threads(grid_dims, group_dims);
         }
@@ -1905,7 +2096,7 @@ fn call_single_block_sort<'a>(
     encoder.set_compute_pipeline_state(&pipeline);
 
     // Buffers
-    encoder.set_buffer(0, Some(src), src_offset as u64);
+    encoder.set_buffer(0, Some(src), src_offset);
     encoder.set_buffer(1, Some(dst), 0);
 
     // Scalar params
@@ -1942,19 +2133,19 @@ fn call_single_block_sort<'a>(
             <i64 as EncoderParam>::set_param(encoder, 7, stride);
             <i64 as EncoderParam>::set_param(encoder, 8, stride);
         } else {
-            encoder.set_bytes(
+            encoder.set_bytes_raw(
                 6,
-                (std::mem::size_of::<i32>() * nc_shape.len()) as u64,
+                std::mem::size_of::<i32>() * nc_shape.len(),
                 nc_shape.as_ptr() as *const _,
             );
-            encoder.set_bytes(
+            encoder.set_bytes_raw(
                 7,
-                (std::mem::size_of::<i64>() * in_nc_str.len()) as u64,
+                std::mem::size_of::<i64>() * in_nc_str.len(),
                 in_nc_str.as_ptr() as *const _,
             );
-            encoder.set_bytes(
+            encoder.set_bytes_raw(
                 8,
-                (std::mem::size_of::<i64>() * out_nc_str.len()) as u64,
+                std::mem::size_of::<i64>() * out_nc_str.len(),
                 out_nc_str.as_ptr() as *const _,
             );
         }
@@ -1962,13 +2153,13 @@ fn call_single_block_sort<'a>(
 
     // Dispatch
     let group_dims = MTLSize {
-        width: bn as u64,
+        width: bn,
         height: 1,
         depth: 1,
     };
     let grid_dims = MTLSize {
         width: 1,
-        height: n_rows as u64,
+        height: n_rows,
         depth: 1,
     };
     encoder.dispatch_thread_groups(grid_dims, group_dims);
@@ -2040,32 +2231,32 @@ fn call_multi_block_sort<'a>(
         let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
         encoder.set_compute_pipeline_state(&pipeline);
 
-        encoder.set_buffer(0, Some(src), src_offset as u64);
+        encoder.set_buffer(0, Some(src), src_offset);
         encoder.set_buffer(1, Some(&*dev_vals_0), 0);
         encoder.set_buffer(2, Some(&*dev_idxs_0), 0);
         <i32 as EncoderParam>::set_param(encoder, 3, size_sorted_axis as i32);
         <i32 as EncoderParam>::set_param(encoder, 4, stride_sorted_axis as i32);
         <i32 as EncoderParam>::set_param(encoder, 5, nc_dim as i32);
-        encoder.set_bytes(
+        encoder.set_bytes_raw(
             6,
-            (std::mem::size_of::<i32>() * nc_shape.len()) as u64,
+            std::mem::size_of::<i32>() * nc_shape.len(),
             nc_shape.as_ptr() as *const _,
         );
-        encoder.set_bytes(
+        encoder.set_bytes_raw(
             7,
-            (std::mem::size_of::<i64>() * nc_str.len()) as u64,
+            std::mem::size_of::<i64>() * nc_str.len(),
             nc_str.as_ptr() as *const _,
         );
 
         // Dispatch
         let group_dims = MTLSize {
-            width: bn as u64,
+            width: bn,
             height: 1,
             depth: 1,
         };
         let grid_dims = MTLSize {
-            width: n_blocks as u64,
-            height: n_rows as u64,
+            width: n_blocks,
+            height: n_rows,
             depth: 1,
         };
         encoder.dispatch_thread_groups(grid_dims, group_dims);
@@ -2129,13 +2320,13 @@ fn call_multi_block_sort<'a>(
 
             // Dispatch
             let group_dims = MTLSize {
-                width: n_thread_per_group as u64,
+                width: n_thread_per_group as usize,
                 height: 1,
                 depth: 1,
             };
             let grid_dims = MTLSize {
                 width: 1,
-                height: n_rows as u64,
+                height: n_rows,
                 depth: 1,
             };
             encoder.dispatch_thread_groups(grid_dims, group_dims);
@@ -2166,13 +2357,13 @@ fn call_multi_block_sort<'a>(
 
             // Dispatch
             let group_dims = MTLSize {
-                width: bn as u64,
+                width: bn,
                 height: 1,
                 depth: 1,
             };
             let grid_dims = MTLSize {
-                width: n_blocks as u64,
-                height: n_rows as u64,
+                width: n_blocks,
+                height: n_rows,
                 depth: 1,
             };
             encoder.dispatch_thread_groups(grid_dims, group_dims);
@@ -2272,10 +2463,10 @@ pub fn call_hqq_pack_8bit(
     let pipeline = kernels.load_pipeline(device, "pack_8bit")?;
     encoder.set_compute_pipeline_state(&pipeline);
 
-    set_params!(encoder, (input, output, num_elements as u64));
+    set_params!(encoder, (input, output, num_elements));
 
     let grid_size = MTLSize {
-        width: ((num_elements + 255) / 256) as u64,
+        width: num_elements.div_ceil(256),
         height: 1,
         depth: 1,
     };
@@ -2303,12 +2494,12 @@ pub fn call_hqq_pack_4bit(
     let pipeline = kernels.load_pipeline(device, "pack_4bit")?;
     encoder.set_compute_pipeline_state(&pipeline);
 
-    set_params!(encoder, (input, output, height as u64, width as u64));
+    set_params!(encoder, (input, output, height, width));
 
     let step = height / 2;
     let grid_size = MTLSize {
-        width: ((step + 15) / 16) as u64,
-        height: ((width + 15) / 16) as u64,
+        width: step.div_ceil(16),
+        height: width.div_ceil(16),
         depth: 1,
     };
     let threadgroup_size = MTLSize {
@@ -2336,12 +2527,12 @@ pub fn call_hqq_pack_2bit(
     let pipeline = kernels.load_pipeline(device, "pack_2bit")?;
     encoder.set_compute_pipeline_state(&pipeline);
 
-    set_params!(encoder, (input, output, height as u64, width as u64));
+    set_params!(encoder, (input, output, height, width));
 
     let step = height / 4;
     let grid_size = MTLSize {
-        width: ((step + 15) / 16) as u64,
-        height: ((width + 15) / 16) as u64,
+        width: step.div_ceil(16),
+        height: width.div_ceil(16),
         depth: 1,
     };
     let threadgroup_size = MTLSize {
@@ -2369,12 +2560,12 @@ pub fn call_hqq_pack_3bit(
     let pipeline = kernels.load_pipeline(device, "pack_3bit")?;
     encoder.set_compute_pipeline_state(&pipeline);
 
-    set_params!(encoder, (input, output, height as u64, width as u64));
+    set_params!(encoder, (input, output, height, width));
 
     let step = height / 10;
     let grid_size = MTLSize {
-        width: ((step + 15) / 16) as u64,
-        height: ((width + 15) / 16) as u64,
+        width: step.div_ceil(16),
+        height: width.div_ceil(16),
         depth: 1,
     };
     let threadgroup_size = MTLSize {
@@ -2402,12 +2593,12 @@ pub fn call_hqq_pack_1bit(
     let pipeline = kernels.load_pipeline(device, "pack_1bit")?;
     encoder.set_compute_pipeline_state(&pipeline);
 
-    set_params!(encoder, (input, output, height as u64, width as u64));
+    set_params!(encoder, (input, output, height, width));
 
     let step = height / 8;
     let grid_size = MTLSize {
-        width: ((step + 15) / 16) as u64,
-        height: ((width + 15) / 16) as u64,
+        width: step.div_ceil(16),
+        height: width.div_ceil(16),
         depth: 1,
     };
     let threadgroup_size = MTLSize {
@@ -2417,5 +2608,649 @@ pub fn call_hqq_pack_1bit(
     };
 
     encoder.dispatch_thread_groups(grid_size, threadgroup_size);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn call_fused_glu(
+    device: &Device,
+    ep: impl EncoderProvider,
+    kernels: &Kernels,
+    ty: DType,
+    a: &Buffer,
+    b: &Buffer,
+    a_offset: usize,
+    b_offset: usize,
+    n_elements: usize,
+    activation: i32,
+    output: &Buffer,
+) -> Result<(), MetalKernelError> {
+    let name = match ty {
+        DType::F32 => "fused_glu_float",
+        DType::F16 => "fused_glu_half",
+        DType::BF16 => "fused_glu_bfloat",
+        other => {
+            return Err(MetalKernelError::DTypeMismatch {
+                expected: vec![DType::F32, DType::F16, DType::BF16],
+                got: other,
+            })
+        }
+    };
+    let pipeline = kernels.load_pipeline(device, name)?;
+
+    let encoder = ep.encoder();
+    let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    set_params!(
+        encoder,
+        (
+            (a, a_offset),
+            (b, b_offset),
+            output,
+            n_elements as u32,
+            activation
+        )
+    );
+
+    let (thread_group_count, thread_group_size) = linear_split(&pipeline, n_elements);
+    encoder.dispatch_thread_groups(thread_group_count, thread_group_size);
+    Ok(())
+}
+
+// ============================================================================
+// Softmax with sinks kernel
+// ============================================================================
+
+#[allow(clippy::too_many_arguments)]
+pub fn call_softmax_with_sinks(
+    device: &Device,
+    ep: impl EncoderProvider,
+    kernels: &Kernels,
+    ty: DType,
+    logits: &Buffer,
+    logits_offset: usize,
+    sinks: &Buffer,
+    sinks_offset: usize,
+    output: &Buffer,
+    num_heads: u32,
+    q_len: u32,
+    k_len: u32,
+    total_rows: usize,
+) -> Result<(), MetalKernelError> {
+    let name = match ty {
+        DType::F32 => "softmax_with_sinks_float",
+        DType::F16 => "softmax_with_sinks_half",
+        DType::BF16 => "softmax_with_sinks_bfloat",
+        other => {
+            return Err(MetalKernelError::DTypeMismatch {
+                expected: vec![DType::F32, DType::F16, DType::BF16],
+                got: other,
+            })
+        }
+    };
+    let pipeline = kernels.load_pipeline(device, name)?;
+
+    let encoder = ep.encoder();
+    let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    // Choose thread group size based on k_len
+    let threads_per_group: usize = if k_len <= 64 {
+        64
+    } else if k_len <= 128 {
+        128
+    } else if k_len <= 256 {
+        256
+    } else {
+        512
+    };
+
+    // Shared memory: s_max(1) + s_sum(1) + warp_scratch(threads_per_group / 32)
+    let num_simdgroups = (threads_per_group + 31) / 32;
+    let shared_mem_size = (2 + num_simdgroups) * std::mem::size_of::<f32>();
+    encoder.set_threadgroup_memory_length(0, shared_mem_size);
+
+    set_params!(
+        encoder,
+        (
+            (logits, logits_offset),
+            (sinks, sinks_offset),
+            output,
+            num_heads,
+            q_len,
+            k_len
+        )
+    );
+
+    let thread_groups_count = MTLSize {
+        width: total_rows,
+        height: 1,
+        depth: 1,
+    };
+    let thread_group_size = MTLSize {
+        width: threads_per_group,
+        height: 1,
+        depth: 1,
+    };
+    encoder.dispatch_thread_groups(thread_groups_count, thread_group_size);
+    Ok(())
+}
+
+// ============================================================================
+// SDPA with sinks (fused attention) kernels
+// ============================================================================
+
+fn sdpa_with_sinks_dtype_name(ty: DType) -> Result<&'static str, MetalKernelError> {
+    match ty {
+        DType::F32 => Ok("float"),
+        DType::F16 => Ok("half"),
+        DType::BF16 => Ok("bfloat16_t"),
+        other => Err(MetalKernelError::DTypeMismatch {
+            expected: vec![DType::F32, DType::F16, DType::BF16],
+            got: other,
+        }),
+    }
+}
+
+/// Fused SDPA with sinks for decode (q_len == 1, single-pass).
+/// Dispatches `sdpa_vector_with_sinks` Metal kernel.
+#[allow(clippy::too_many_arguments)]
+pub fn call_sdpa_vector_with_sinks(
+    device: &Device,
+    ep: impl EncoderProvider,
+    kernels: &Kernels,
+    ty: DType,
+    q_buffer: &Buffer,
+    q_offset: usize,
+    k_buffer: &Buffer,
+    k_offset: usize,
+    v_buffer: &Buffer,
+    v_offset: usize,
+    sinks_buffer: &Buffer,
+    sinks_offset: usize,
+    output: &Buffer,
+    head_dim: usize,
+    gqa_factor: i32,
+    n: i32, // k_len
+    k_stride: usize,
+    v_stride: usize,
+    scale: f32,
+    b: usize, // batch * num_heads
+) -> Result<(), MetalKernelError> {
+    let type_name = sdpa_with_sinks_dtype_name(ty)?;
+    let name = format!("sdpa_vector_with_sinks_{type_name}_{head_dim}");
+
+    let pipeline = kernels.load_pipeline(device, &name)?;
+
+    let encoder = ep.encoder();
+    let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    let k_stride = k_stride as u64;
+    let v_stride = v_stride as u64;
+
+    set_params!(
+        encoder,
+        (
+            (q_buffer, q_offset),
+            (k_buffer, k_offset),
+            (v_buffer, v_offset),
+            (sinks_buffer, sinks_offset),
+            output,
+            gqa_factor,
+            n,
+            k_stride,
+            v_stride,
+            scale
+        )
+    );
+
+    let grid_dims = MTLSize {
+        width: 1,
+        height: b,
+        depth: 1,
+    };
+    let group_dims = MTLSize {
+        width: 1024, // 32 simdgroups * 32 threads
+        height: 1,
+        depth: 1,
+    };
+    encoder.dispatch_thread_groups(grid_dims, group_dims);
+    Ok(())
+}
+
+/// Fused SDPA with sinks for decode, two-pass variant (k_len >= 1024).
+#[allow(clippy::too_many_arguments)]
+pub fn call_sdpa_vector_with_sinks_2pass(
+    device: &Device,
+    ep: impl EncoderProvider,
+    kernels: &Kernels,
+    ty: DType,
+    q_buffer: &Buffer,
+    q_offset: usize,
+    k_buffer: &Buffer,
+    k_offset: usize,
+    v_buffer: &Buffer,
+    v_offset: usize,
+    sinks_buffer: &Buffer,
+    sinks_offset: usize,
+    output: &Buffer,
+    intermediate: &Buffer,
+    sums: &Buffer,
+    maxs: &Buffer,
+    head_dim: usize,
+    gqa_factor: i32,
+    n: i32, // k_len
+    k_stride: usize,
+    v_stride: usize,
+    scale: f32,
+    b: usize, // batch * num_heads
+) -> Result<(), MetalKernelError> {
+    let type_name = sdpa_with_sinks_dtype_name(ty)?;
+    let blocks: u64 = 32;
+
+    // Pass 1: compute partial outputs per block
+    {
+        let name = format!("sdpa_vector_with_sinks_2pass_1_{type_name}_{head_dim}");
+        let pipeline = kernels.load_pipeline(device, &name)?;
+
+        let encoder = ep.encoder();
+        let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
+        encoder.set_compute_pipeline_state(&pipeline);
+
+        let k_stride = k_stride as u64;
+        let v_stride = v_stride as u64;
+
+        set_params!(
+            encoder,
+            (
+                (q_buffer, q_offset),
+                (k_buffer, k_offset),
+                (v_buffer, v_offset),
+                intermediate,
+                sums,
+                maxs,
+                gqa_factor,
+                n,
+                k_stride,
+                v_stride,
+                scale
+            )
+        );
+
+        let grid_dims = MTLSize {
+            width: 1,
+            height: b,
+            depth: blocks as usize,
+        };
+        let group_dims = MTLSize {
+            width: 8 * 32, // BN=8 simdgroups * 32 threads
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(grid_dims, group_dims);
+    }
+
+    // Pass 2: reduce across blocks, integrate sinks
+    {
+        let name = format!("sdpa_vector_with_sinks_2pass_2_{type_name}_{head_dim}");
+        let pipeline = kernels.load_pipeline(device, &name)?;
+
+        let encoder = ep.encoder();
+        let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
+        encoder.set_compute_pipeline_state(&pipeline);
+
+        set_params!(
+            encoder,
+            (
+                intermediate,
+                sums,
+                maxs,
+                (sinks_buffer, sinks_offset),
+                output
+            )
+        );
+
+        let grid_dims = MTLSize {
+            width: 1,
+            height: b,
+            depth: 1,
+        };
+        let group_dims = MTLSize {
+            width: 1024, // 32 * 32
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(grid_dims, group_dims);
+    }
+
+    Ok(())
+}
+
+/// Fused flash attention with sinks for prefill (q_len > 1).
+/// Dispatches `flash_attn_sinks_kernel` Metal kernel.
+#[allow(clippy::too_many_arguments)]
+pub fn call_flash_attn_sinks_prefill(
+    device: &Device,
+    ep: impl EncoderProvider,
+    kernels: &Kernels,
+    ty: DType,
+    q_buffer: &Buffer,
+    q_offset: usize,
+    k_buffer: &Buffer,
+    k_offset: usize,
+    v_buffer: &Buffer,
+    v_offset: usize,
+    sinks_buffer: &Buffer,
+    sinks_offset: usize,
+    output: &Buffer,
+    scale: f32,
+    batch_size: usize,
+    q_len: usize,
+    k_len: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    window_size: usize,
+) -> Result<(), MetalKernelError> {
+    let type_name = sdpa_with_sinks_dtype_name(ty)?;
+
+    let br: usize = 8; // simdgroups per threadgroup
+    let bc: usize = match head_dim {
+        64 => 64,
+        80 | 96 | 112 | 128 => 32,
+        192 | 256 => 16,
+        _ => {
+            return Err(MetalKernelError::CompilationError(format!(
+                "flash_attn_sinks: unsupported head_dim={head_dim}"
+            )))
+        }
+    };
+
+    let name = format!("flash_attn_sinks_{type_name}_hd{head_dim}_br{br}_bc{bc}");
+    let pipeline = kernels.load_pipeline(device, &name)?;
+
+    let encoder = ep.encoder();
+    let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    // Shared memory: k_smem[BC * D_PAD] + v_smem[BC * D_PAD] in float32
+    let d_pad = ((head_dim + 31) / 32) * 32;
+    let shared_mem_size = 2 * bc * d_pad * std::mem::size_of::<f32>();
+    encoder.set_threadgroup_memory_length(0, shared_mem_size);
+
+    let q_len_i32 = q_len as i32;
+    let k_len_i32 = k_len as i32;
+    let num_heads_i32 = num_heads as i32;
+    let num_kv_heads_i32 = num_kv_heads as i32;
+    let window_size_i32 = window_size as i32;
+
+    set_params!(
+        encoder,
+        (
+            (q_buffer, q_offset),
+            (k_buffer, k_offset),
+            (v_buffer, v_offset),
+            (sinks_buffer, sinks_offset),
+            output,
+            scale,
+            q_len_i32,
+            k_len_i32,
+            num_heads_i32,
+            num_kv_heads_i32,
+            window_size_i32
+        )
+    );
+
+    let grid_dims = MTLSize {
+        width: num_heads,
+        height: batch_size,
+        depth: (q_len + br - 1) / br,
+    };
+    let group_dims = MTLSize {
+        width: br * 32,
+        height: 1,
+        depth: 1,
+    };
+    encoder.dispatch_thread_groups(grid_dims, group_dims);
+    Ok(())
+}
+
+/// Dispatches `flash_attn_sinks_varlen_kernel` Metal kernel.
+#[allow(clippy::too_many_arguments)]
+pub fn call_flash_attn_sinks_varlen_prefill(
+    device: &Device,
+    ep: impl EncoderProvider,
+    kernels: &Kernels,
+    ty: DType,
+    q_buffer: &Buffer,
+    q_offset: usize,
+    k_buffer: &Buffer,
+    k_offset: usize,
+    v_buffer: &Buffer,
+    v_offset: usize,
+    sinks_buffer: &Buffer,
+    sinks_offset: usize,
+    output: &Buffer,
+    cu_seqlens_q_buffer: &Buffer,
+    cu_seqlens_q_offset: usize,
+    cu_seqlens_k_buffer: &Buffer,
+    cu_seqlens_k_offset: usize,
+    scale: f32,
+    batch_size: usize,
+    max_q_len: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    window_size: usize,
+) -> Result<(), MetalKernelError> {
+    let type_name = sdpa_with_sinks_dtype_name(ty)?;
+
+    let br: usize = 8;
+    let bc: usize = match head_dim {
+        64 => 64,
+        80 | 96 | 112 | 128 => 32,
+        192 | 256 => 16,
+        _ => {
+            return Err(MetalKernelError::CompilationError(format!(
+                "flash_attn_sinks_varlen: unsupported head_dim={head_dim}"
+            )))
+        }
+    };
+
+    let name = format!("flash_attn_sinks_varlen_{type_name}_hd{head_dim}_br{br}_bc{bc}");
+    let pipeline = kernels.load_pipeline(device, &name)?;
+
+    let encoder = ep.encoder();
+    let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    let d_pad = ((head_dim + 31) / 32) * 32;
+    let shared_mem_size = 2 * bc * d_pad * std::mem::size_of::<f32>();
+    encoder.set_threadgroup_memory_length(0, shared_mem_size);
+
+    let max_q_len_i32 = max_q_len as i32;
+    let num_heads_i32 = num_heads as i32;
+    let num_kv_heads_i32 = num_kv_heads as i32;
+    let window_size_i32 = window_size as i32;
+
+    set_params!(
+        encoder,
+        (
+            (q_buffer, q_offset),
+            (k_buffer, k_offset),
+            (v_buffer, v_offset),
+            (sinks_buffer, sinks_offset),
+            output,
+            (cu_seqlens_q_buffer, cu_seqlens_q_offset),
+            (cu_seqlens_k_buffer, cu_seqlens_k_offset),
+            scale,
+            max_q_len_i32,
+            num_heads_i32,
+            num_kv_heads_i32,
+            window_size_i32
+        )
+    );
+
+    let grid_dims = MTLSize {
+        width: num_heads,
+        height: batch_size,
+        depth: (max_q_len + br - 1) / br,
+    };
+    let group_dims = MTLSize {
+        width: br * 32,
+        height: 1,
+        depth: 1,
+    };
+    encoder.dispatch_thread_groups(grid_dims, group_dims);
+    Ok(())
+}
+
+// ============================================================================
+// Scalar FP8 conversion kernels
+// ============================================================================
+
+/// Convert FP8 E4M3 tensor to another dtype (F32, F16, BF16)
+#[allow(clippy::too_many_arguments)]
+pub fn call_fp8_to_dtype(
+    device: &Device,
+    ep: impl EncoderProvider,
+    kernels: &Kernels,
+    out_ty: DType,
+    input: &Buffer,
+    output: &Buffer,
+    num_elements: usize,
+) -> Result<(), MetalKernelError> {
+    let name = match out_ty {
+        DType::F32 => "fp8_to_dtype_float",
+        DType::F16 => "fp8_to_dtype_half",
+        DType::BF16 => "fp8_to_dtype_bfloat16_t",
+        other => {
+            return Err(MetalKernelError::DTypeMismatch {
+                expected: vec![DType::F32, DType::F16, DType::BF16],
+                got: other,
+            })
+        }
+    };
+    let pipeline = kernels.load_pipeline(device, name)?;
+
+    let encoder = ep.encoder();
+    let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    set_params!(encoder, (input, output, num_elements as u32));
+
+    let (thread_group_count, thread_group_size) = linear_split(&pipeline, num_elements);
+    encoder.dispatch_thread_groups(thread_group_count, thread_group_size);
+    Ok(())
+}
+
+/// Convert tensor (F32, F16, BF16) to FP8 E4M3 with clamping
+#[allow(clippy::too_many_arguments)]
+pub fn call_dtype_to_fp8(
+    device: &Device,
+    ep: impl EncoderProvider,
+    kernels: &Kernels,
+    in_ty: DType,
+    input: &Buffer,
+    output: &Buffer,
+    num_elements: usize,
+) -> Result<(), MetalKernelError> {
+    let name = match in_ty {
+        DType::F32 => "dtype_to_fp8_float",
+        DType::F16 => "dtype_to_fp8_half",
+        DType::BF16 => "dtype_to_fp8_bfloat16_t",
+        other => {
+            return Err(MetalKernelError::DTypeMismatch {
+                expected: vec![DType::F32, DType::F16, DType::BF16],
+                got: other,
+            })
+        }
+    };
+    let pipeline = kernels.load_pipeline(device, name)?;
+
+    let encoder = ep.encoder();
+    let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    set_params!(encoder, (input, output, num_elements as u32));
+
+    let (thread_group_count, thread_group_size) = linear_split(&pipeline, num_elements);
+    encoder.dispatch_thread_groups(thread_group_count, thread_group_size);
+    Ok(())
+}
+
+/// Per-tensor FP8 dequantization: output = fp8_weight * scale_inv
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+pub fn call_fp8_pertensor_dequant(
+    device: &Device,
+    ep: impl EncoderProvider,
+    kernels: &Kernels,
+    out_ty: DType,
+    weight: &Buffer,
+    scale_inv: &Buffer,
+    output: &Buffer,
+    num_elements: usize,
+) -> Result<(), MetalKernelError> {
+    let name = match out_ty {
+        DType::F32 => "fp8_pertensor_dequant_float",
+        DType::F16 => "fp8_pertensor_dequant_half",
+        DType::BF16 => "fp8_pertensor_dequant_bfloat16_t",
+        other => {
+            return Err(MetalKernelError::DTypeMismatch {
+                expected: vec![DType::F32, DType::F16, DType::BF16],
+                got: other,
+            })
+        }
+    };
+    let pipeline = kernels.load_pipeline(device, name)?;
+
+    let encoder = ep.encoder();
+    let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    set_params!(encoder, (weight, scale_inv, output, num_elements as u32));
+
+    let (thread_group_count, thread_group_size) = linear_split(&pipeline, num_elements);
+    encoder.dispatch_thread_groups(thread_group_count, thread_group_size);
+    Ok(())
+}
+
+/// Vector FP8 dequantization: output[i] = fp8_weight[i] * scale[i / 128]
+/// Each group of 128 elements shares one scale
+#[allow(clippy::too_many_arguments)]
+pub fn call_fp8_vector_dequant(
+    device: &Device,
+    ep: impl EncoderProvider,
+    kernels: &Kernels,
+    out_ty: DType,
+    weight: &Buffer,
+    scale: &Buffer,
+    output: &Buffer,
+    num_elements: usize,
+) -> Result<(), MetalKernelError> {
+    let name = match out_ty {
+        DType::F32 => "fp8_vector_dequant_float",
+        DType::F16 => "fp8_vector_dequant_half",
+        DType::BF16 => "fp8_vector_dequant_bfloat16_t",
+        other => {
+            return Err(MetalKernelError::DTypeMismatch {
+                expected: vec![DType::F32, DType::F16, DType::BF16],
+                got: other,
+            })
+        }
+    };
+    let pipeline = kernels.load_pipeline(device, name)?;
+
+    let encoder = ep.encoder();
+    let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    set_params!(encoder, (weight, scale, output, num_elements as u32));
+
+    let (thread_group_count, thread_group_size) = linear_split(&pipeline, num_elements);
+    encoder.dispatch_thread_groups(thread_group_count, thread_group_size);
     Ok(())
 }

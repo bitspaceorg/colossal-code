@@ -210,6 +210,7 @@ impl Comm {
 }
 
 impl Comm {
+    /// Send data to one peer, see [cuda docs](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/api/p2p.html#ncclsend)
     pub fn send<S: DevicePtr<T>, T: NcclType>(
         &self,
         data: &S,
@@ -229,6 +230,7 @@ impl Comm {
         Ok(())
     }
 
+    /// Receive data from one peer, see [cuda docs](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/api/p2p.html#ncclrecv)
     pub fn recv<R: DevicePtrMut<T>, T: NcclType>(
         &self,
         buff: &mut R,
@@ -475,12 +477,12 @@ mod tests {
                     let ctx = CudaContext::new(i).unwrap();
                     let stream = ctx.default_stream();
                     let comm = Comm::from_rank(stream.clone(), i, n_devices, id).unwrap();
-                    let slice = stream.memcpy_stod(&vec![(i + 1) as f32 * 1.0; n]).unwrap();
+                    let slice = stream.clone_htod(&vec![(i + 1) as f32 * 1.0; n]).unwrap();
                     let mut slice_receive = stream.alloc_zeros::<f32>(n).unwrap();
                     comm.all_reduce(&slice, &mut slice_receive, &ReduceOp::Sum)
                         .unwrap();
 
-                    let out = stream.memcpy_dtov(&slice_receive).unwrap();
+                    let out = stream.clone_dtoh(&slice_receive).unwrap();
 
                     assert_eq!(out, vec![(n_devices * (n_devices + 1)) as f32 / 2.0; n]);
                 })
@@ -504,7 +506,7 @@ mod tests {
                     let ctx = CudaContext::new(i).unwrap();
                     let stream = ctx.default_stream();
                     let comm = Comm::from_rank(stream.clone(), i, n_devices, id).unwrap();
-                    let slice = stream.memcpy_stod(&vec![(i + 1) as f32 * 1.0; n]).unwrap();
+                    let slice = stream.clone_htod(&vec![(i + 1) as f32 * 1.0; n]).unwrap();
                     let mut slice_receive = stream.alloc_zeros::<f32>(n).unwrap();
                     let slice_view = slice.slice(..);
                     let mut slice_receive_view = slice_receive.slice_mut(..);
@@ -512,7 +514,7 @@ mod tests {
                     comm.all_reduce(&slice_view, &mut slice_receive_view, &ReduceOp::Sum)
                         .unwrap();
 
-                    let out = stream.memcpy_dtov(&slice_receive).unwrap();
+                    let out = stream.clone_dtoh(&slice_receive).unwrap();
 
                     assert_eq!(out, vec![(n_devices * (n_devices + 1)) as f32 / 2.0; n]);
                 })

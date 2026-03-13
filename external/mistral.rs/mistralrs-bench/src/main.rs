@@ -11,7 +11,7 @@ use mistralrs_core::{
 use std::fmt::Display;
 use std::sync::Arc;
 use tokio::sync::mpsc::channel;
-use tracing::info;
+use tracing::{info, warn};
 
 enum TestName {
     Prompt(usize),
@@ -86,6 +86,7 @@ async fn run_bench(
         return_raw_logits: false,
         web_search_options: None,
         model_id: None,
+        truncate_sequence: false,
     }));
 
     let mut usages = Vec::new();
@@ -120,6 +121,7 @@ async fn run_bench(
                     Response::ImageGeneration(_) => unreachable!(),
                     Response::Speech { .. } => unreachable!(),
                     Response::Raw { .. } => unreachable!(),
+                    Response::Embeddings { .. } => unreachable!(),
                 },
                 None => unreachable!("Expected a Done response, got None",),
             }
@@ -249,6 +251,7 @@ async fn warmup_run(mistralrs: Arc<MistralRs>) {
         return_raw_logits: false,
         web_search_options: None,
         model_id: None,
+        truncate_sequence: false,
     }));
 
     if sender.send(req.clone()).await.is_err() {
@@ -344,6 +347,10 @@ async fn main() -> anyhow::Result<()> {
     let mut args = Args::parse();
     initialize_logging();
 
+    warn!(
+        "mistralrs-bench is deprecated. Please use `mistralrs bench` from mistralrs-cli instead."
+    );
+
     args.concurrency = Some(args.concurrency.unwrap_or(vec![1]));
 
     let dtype = get_model_dtype(&args.model)?;
@@ -422,8 +429,6 @@ async fn main() -> anyhow::Result<()> {
         true
     };
 
-    // Allocate 0.5 GB of CPU memory just as a placeholder.
-    // Nothing happens here as we have no `swap_out`, see `_preempt_by_swap`.
     let cache_config = match (
         args.paged_attn_block_size,
         args.paged_attn_gpu_mem,
@@ -434,25 +439,21 @@ async fn main() -> anyhow::Result<()> {
     ) {
         (block_size, None, None, None, true, false) => Some(PagedAttentionConfig::new(
             block_size,
-            512,
             MemoryGpuConfig::ContextSize(max_seq_len),
             args.cache_type.unwrap_or_default(),
         )?),
         (block_size, None, None, Some(ctxt), true, false) => Some(PagedAttentionConfig::new(
             block_size,
-            512,
             MemoryGpuConfig::ContextSize(ctxt),
             args.cache_type.unwrap_or_default(),
         )?),
         (block_size, None, Some(f), None, true, false) => Some(PagedAttentionConfig::new(
             block_size,
-            512,
             MemoryGpuConfig::Utilization(f),
             args.cache_type.unwrap_or_default(),
         )?),
         (block_size, Some(m), None, None, true, false) => Some(PagedAttentionConfig::new(
             block_size,
-            512,
             MemoryGpuConfig::MbAmount(m),
             args.cache_type.unwrap_or_default(),
         )?),
@@ -460,7 +461,6 @@ async fn main() -> anyhow::Result<()> {
             info!("Both memory size, and usage were specified, defaulting to the usage value.");
             Some(PagedAttentionConfig::new(
                 block_size,
-                512,
                 MemoryGpuConfig::Utilization(f),
                 args.cache_type.unwrap_or_default(),
             )?)
@@ -469,7 +469,6 @@ async fn main() -> anyhow::Result<()> {
             info!("All memory size and ctxt len, defaulting to the context len value.");
             Some(PagedAttentionConfig::new(
                 block_size,
-                512,
                 MemoryGpuConfig::ContextSize(ctxt),
                 args.cache_type.unwrap_or_default(),
             )?)
@@ -478,7 +477,6 @@ async fn main() -> anyhow::Result<()> {
             info!("Both ctxt len and usage were specified, defaulting to the usage value.");
             Some(PagedAttentionConfig::new(
                 block_size,
-                512,
                 MemoryGpuConfig::Utilization(f),
                 args.cache_type.unwrap_or_default(),
             )?)

@@ -219,10 +219,12 @@
 //! }
 //! ```
 
+pub mod background_tasks;
 pub mod cached_responses;
 pub mod chat_completion;
 mod completion_core;
 pub mod completions;
+pub mod embeddings;
 pub mod handler_core;
 mod handlers;
 pub mod image_generation;
@@ -231,6 +233,7 @@ pub mod mistralrs_server_router_builder;
 pub mod openai;
 pub mod openapi_doc;
 pub mod responses;
+pub mod responses_types;
 pub mod speech_generation;
 pub mod streaming;
 pub mod types;

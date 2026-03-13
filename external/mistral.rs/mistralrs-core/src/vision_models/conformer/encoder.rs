@@ -1,14 +1,15 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use candle_core::{DType, IndexOp, Result, Tensor, D};
 use candle_nn::{BatchNorm, Conv1d, Conv1dConfig, LayerNorm, Linear, ModuleT};
-use mistralrs_quant::{QuantMethod, ShardedVarBuilder};
+use mistralrs_quant::{Convolution, QuantMethod, ShardedVarBuilder};
 
 use crate::{
     attention::SdpaParams,
     layers::{self, Activation, Sdpa},
+    pipeline::text_models_inputs_processor::FlashParams,
     vision_models::conformer::{
         nemo::NemoConvSubsampling,
         pos_embed::{AbsolutePositionalEncoding, T5RelativeAttentionLogitBias},
@@ -99,17 +100,26 @@ impl Attention {
             (None, None) => None,
             (None, Some(relative_attention_bias)) => Some(relative_attention_bias.contiguous()?),
         };
+        let flash_params = FlashParams {
+            max_q: 0,
+            max_k: 0,
+            cumulative_seqlens_q: HashMap::new(),
+            cumulative_seqlens_k: HashMap::new(),
+            causal: false,
+        };
+
         let attn_weights = Sdpa.run_attention(
             &q.contiguous()?,
             &k.contiguous()?,
             &v.contiguous()?,
             attention_mask.as_ref(),
-            None,
+            Some(&flash_params),
             &SdpaParams {
                 n_kv_groups: 1,
                 sliding_window: None,
                 softcap: None,
                 softmax_scale: self.scale,
+                sinks: None,
             },
         )?;
 
@@ -204,15 +214,16 @@ impl DepthWiseSeperableConv1d {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let mut xs = xs
-            .to_dtype(DType::F32)?
-            .apply(&self.dw_conv)?
-            .to_dtype(xs.dtype())?;
+        let original_dtype = xs.dtype();
+        let xs_f32 = xs.to_dtype(DType::F32)?;
+        let mut xs = Convolution
+            .forward_1d(&self.dw_conv, &xs_f32)?
+            .to_dtype(original_dtype)?;
         if let Some(pw_conv) = &self.pw_conv {
-            xs = xs
-                .to_dtype(DType::F32)?
-                .apply(pw_conv)?
-                .to_dtype(xs.dtype())?;
+            let xs_f32 = xs.to_dtype(DType::F32)?;
+            xs = Convolution
+                .forward_1d(pw_conv, &xs_f32)?
+                .to_dtype(original_dtype)?;
         }
 
         Ok(xs)
@@ -275,10 +286,11 @@ impl GLUPointWiseConv {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         // Input is (B, T, D), need (B, D, T) for conv1d
         let x = x.transpose(1, 2)?;
-        let x = x
-            .to_dtype(DType::F32)?
-            .apply(&self.ext_pw_conv_1d)?
-            .to_dtype(x.dtype())?;
+        let original_dtype = x.dtype();
+        let x_f32 = x.to_dtype(DType::F32)?;
+        let x = Convolution
+            .forward_1d(&self.ext_pw_conv_1d, &x_f32)?
+            .to_dtype(original_dtype)?;
 
         // Split for GLU
         let chunks = x.chunk(2, 1)?; // Split along channel dim
@@ -447,10 +459,11 @@ impl ConvModule {
 
         x = x.apply(&self.act)?;
 
-        x = x
-            .to_dtype(DType::F32)?
-            .apply(&self.ext_pw_conv_1d)?
-            .to_dtype(x.dtype())?;
+        let original_dtype = x.dtype();
+        let x_f32 = x.to_dtype(DType::F32)?;
+        x = Convolution
+            .forward_1d(&self.ext_pw_conv_1d, &x_f32)?
+            .to_dtype(original_dtype)?;
         if self.fix_len1 {
             let seq_len = x.dim(2)?;
             x = x.i((.., .., ..(seq_len - (self.cfg.ext_pw_kernel_size - 1))))?;

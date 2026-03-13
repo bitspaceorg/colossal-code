@@ -1,3 +1,8 @@
+// Portions of this file are adapted from the vLLM project
+// (https://github.com/vllm-project/vllm)
+// Licensed under the Apache License 2.0
+// Copyright contributors to the vLLM project
+
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -12,7 +17,7 @@ use candle_core::{
         },
         CudaStorageSlice, WrapErr,
     },
-    from_storage_no_op, Context, CudaStorage, DType, Device, Result, Shape, Storage, Tensor, D,
+    Context, CudaStorage, DType, Device, Result, Shape, Storage, Tensor, D,
 };
 use half::f16;
 
@@ -284,7 +289,7 @@ impl GptqLayer {
         };
         let storage = Storage::Cuda(storage);
 
-        Ok(from_storage_no_op(storage, c_shape, false))
+        Ok(Tensor::from((storage, c_shape)))
     }
 }
 
@@ -335,6 +340,7 @@ impl QuantMethod for GptqLayer {
             | QuantMethodConfig::FP8 { .. }
             | QuantMethodConfig::Bnb { .. }
             | QuantMethodConfig::BlockwiseFP8 { .. }
+            | QuantMethodConfig::PerTensorFP8 { .. }
             | QuantMethodConfig::Afq { .. }
             | QuantMethodConfig::MXFP4 { .. } => {
                 unreachable!()

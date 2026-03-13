@@ -16,7 +16,9 @@ struct PagedAttention {
     alibi_slopes: Option<Tensor>,
     max_context_len: usize,
 
-    k_v_scale: Option<(Tensor, Tensor)>,
+    k_scale: Option<Tensor>,
+    v_scale: Option<Tensor>,
+    sinks: Option<Tensor>,
 }
 
 impl candle_core::CustomOp1 for PagedAttention {
@@ -156,7 +158,7 @@ impl candle_core::CustomOp1 for PagedAttention {
             )
         }
 
-        let k_v_scale = if let Some((k_scale, v_scale)) = &self.k_v_scale {
+        let k_v_scale = if let (Some(k_scale), Some(v_scale)) = (&self.k_scale, &self.v_scale) {
             if k_scale.elem_count() != 1 || v_scale.elem_count() != 1 {
                 candle_core::bail!("k_scale and v_scale must be scalars");
             }
@@ -181,6 +183,20 @@ impl candle_core::CustomOp1 for PagedAttention {
             None
         };
 
+        let sinks_storage_and_offset = if let Some(sinks) = self.sinks.as_ref() {
+            let (s, s_l) = sinks.storage_and_layout();
+            let s = match &*s {
+                Storage::Metal(s) => s,
+                _ => candle_core::bail!("sinks must be a metal tensor"),
+            };
+            Some((
+                s.buffer().clone(),
+                s_l.start_offset() * s.dtype().size_in_bytes(),
+            ))
+        } else {
+            None
+        };
+
         let q_stride = q_l.stride()[0];
         let kv_block_stride = kc_l.stride()[0];
         let kv_head_stride = kc_l.stride()[1];
@@ -192,15 +208,15 @@ impl candle_core::CustomOp1 for PagedAttention {
 
         let elem_count = out_shape.elem_count();
 
-        let command_buffer = dev.command_buffer()?;
-        command_buffer.set_label("paged-attention");
+        let encoder = dev.command_encoder()?;
+        encoder.set_label("paged-attention");
 
         let out = dev.new_buffer(elem_count, q.dtype(), "paged-attention-out")?;
 
         if use_v1 {
             kernels::call_paged_attention_v1(
                 dev.device(),
-                &command_buffer,
+                &encoder,
                 &kernels::Kernels::new(),
                 ty,
                 cache_ty,
@@ -229,6 +245,9 @@ impl candle_core::CustomOp1 for PagedAttention {
                 q_stride as i32,
                 kv_block_stride as i32,
                 kv_head_stride as i32,
+                sinks_storage_and_offset
+                    .as_ref()
+                    .map(|(b, o)| (b as &_, *o)),
             )
             .map_err(candle_core::Error::wrap)?;
         } else {
@@ -252,7 +271,7 @@ impl candle_core::CustomOp1 for PagedAttention {
 
             kernels::call_paged_attention_v2(
                 dev.device(),
-                &command_buffer,
+                &encoder,
                 &kernels::Kernels::new(),
                 ty,
                 cache_ty,
@@ -284,6 +303,9 @@ impl candle_core::CustomOp1 for PagedAttention {
                 q_stride as i32,
                 kv_block_stride as i32,
                 kv_head_stride as i32,
+                sinks_storage_and_offset
+                    .as_ref()
+                    .map(|(b, o)| (b as &_, *o)),
             )
             .map_err(candle_core::Error::wrap)?;
         }
@@ -317,7 +339,8 @@ impl candle_core::CustomOp1 for PagedAttention {
 #[allow(clippy::too_many_arguments)]
 pub fn paged_attention(
     q: &Tensor,
-    k_v_scale: Option<&(Tensor, Tensor)>,
+    k_scale: Option<&Tensor>,
+    v_scale: Option<&Tensor>,
     key_cache: &Tensor,
     value_cache: &Tensor,
     block_tables: &Tensor,
@@ -326,6 +349,7 @@ pub fn paged_attention(
     max_context_len: usize,
     softmax_scale: f32,
     softcapping: f32,
+    sinks: Option<&Tensor>,
 ) -> Result<Tensor> {
     let op = PagedAttention {
         softmax_scale,
@@ -336,7 +360,11 @@ pub fn paged_attention(
         max_context_len,
         softcapping,
         alibi_slopes: alibi_slopes.cloned(),
-        k_v_scale: k_v_scale.cloned(),
+        k_scale: k_scale.cloned(),
+        v_scale: v_scale.cloned(),
+        sinks: sinks
+            .map(|s| s.to_dtype(candle_core::DType::F32))
+            .transpose()?,
     };
     q.apply_op1(op)
 }
@@ -354,7 +382,8 @@ pub fn paged_attention(
 pub fn reshape_and_cache(
     key: &Tensor,
     value: &Tensor,
-    k_v_scale: Option<&(Tensor, Tensor)>,
+    k_scale: Option<&Tensor>,
+    v_scale: Option<&Tensor>,
     key_cache: &Tensor,
     value_cache: &Tensor,
     slot_mapping: &Tensor,
@@ -403,7 +432,7 @@ pub fn reshape_and_cache(
         _ => candle_core::bail!("slot_mapping must be a metal tensor"),
     };
 
-    let k_v_scale = if let Some((k_scale, v_scale)) = k_v_scale {
+    let k_v_scale = if let (Some(k_scale), Some(v_scale)) = (k_scale, v_scale) {
         if k_scale.elem_count() != 1 || v_scale.elem_count() != 1 {
             candle_core::bail!("k_scale and v_scale must be scalars");
         }
@@ -488,12 +517,12 @@ pub fn reshape_and_cache(
 
     let dev = key.device().as_metal_device()?;
 
-    let command_buffer = dev.command_buffer()?;
-    command_buffer.set_label("reshape-and-cache");
+    let encoder = dev.command_encoder()?;
+    encoder.set_label("reshape-and-cache");
 
     kernels::call_reshape_and_cache(
         dev.device(),
-        &command_buffer,
+        &encoder,
         &kernels::Kernels::new(),
         kv_ty,
         cache_ty,

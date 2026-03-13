@@ -10,15 +10,16 @@ use super::{
     IsqPipelineMixin, MetadataMixin, ModelCategory, PreProcessingMixin,
 };
 use super::{
-    AutoNormalLoader, DeepSeekV2Loader, DeepSeekV3Loader, GLM4Loader, Gemma2Loader, GemmaLoader,
-    LlamaLoader, MistralLoader, MixtralLoader, NormalLoaderType, Phi2Loader, Phi3Loader,
-    Phi3_5MoELoader, Qwen2Loader, Qwen3Loader, Qwen3MoELoader, SmolLm3Loader, Starcoder2Loader,
+    AutoNormalLoader, DeepSeekV2Loader, DeepSeekV3Loader, GLM4Loader, GLM4MoeLiteLoader,
+    GLM4MoeLoader, Gemma2Loader, GemmaLoader, GptOssLoader, GraniteMoeHybridLoader, LlamaLoader,
+    MistralLoader, MixtralLoader, NormalLoaderType, Phi2Loader, Phi3Loader, Phi3_5MoELoader,
+    Qwen2Loader, Qwen3Loader, Qwen3MoELoader, Qwen3NextLoader, SmolLm3Loader, Starcoder2Loader,
 };
 use crate::amoe::AnyMoeExpertType;
 use crate::attention::ATTENTION_CHUNK_SIZE;
 use crate::device_map::{self, DeviceMapper};
 use crate::distributed::{self, WorkerTransferData};
-use crate::kv_cache::{FullCacheManager, NormalCacheManager};
+use crate::kv_cache::{FullCacheManager, HybridCacheManager, NormalCacheManager};
 use crate::lora::Ordering;
 use crate::paged_attention::{calculate_cache_config, AttentionImplementation, CacheEngine};
 use crate::pipeline::chat_template::{calculate_eos_tokens, GenerationConfig};
@@ -33,7 +34,11 @@ use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::tokenizer::get_tokenizer;
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
-use crate::utils::{tokens::get_token, varbuilder_utils::from_mmaped_safetensors};
+use crate::utils::{
+    progress::{new_multi_progress, ProgressScopeGuard},
+    tokens::get_token,
+    varbuilder_utils::from_mmaped_safetensors,
+};
 use crate::xlora_models::NonGranularState;
 use crate::{
     api_dir_list, api_get_file, get_mut_arcmutex, get_paths, get_uqff_paths, lora_model_loader,
@@ -44,9 +49,10 @@ use anyhow::Result;
 use candle_core::{Device, Tensor, Var};
 use hf_hub::Cache;
 use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
-use indicatif::MultiProgress;
 use mistralrs_quant::log::once_log_info;
-use mistralrs_quant::{AfqLayer, GgufMatMul, HqqLayer, IsqType, QuantizedSerdeType};
+use mistralrs_quant::{
+    AfqLayer, GgufMatMul, HqqLayer, ImmediateIsqOverride, IsqType, QuantizedSerdeType,
+};
 use rand_isaac::Isaac64Rng;
 use regex_automata::meta::Regex;
 use std::any::Any;
@@ -223,8 +229,13 @@ impl NormalLoaderBuilder {
             Some(NormalLoaderType::DeepSeekV3) => Box::new(DeepSeekV3Loader),
             Some(NormalLoaderType::Qwen3) => Box::new(Qwen3Loader),
             Some(NormalLoaderType::GLM4) => Box::new(GLM4Loader),
+            Some(NormalLoaderType::GLM4MoeLite) => Box::new(GLM4MoeLiteLoader),
+            Some(NormalLoaderType::GLM4Moe) => Box::new(GLM4MoeLoader),
             Some(NormalLoaderType::Qwen3Moe) => Box::new(Qwen3MoELoader),
             Some(NormalLoaderType::SmolLm3) => Box::new(SmolLm3Loader),
+            Some(NormalLoaderType::GraniteMoeHybrid) => Box::new(GraniteMoeHybridLoader),
+            Some(NormalLoaderType::GptOss) => Box::new(GptOssLoader),
+            Some(NormalLoaderType::Qwen3Next) => Box::new(Qwen3NextLoader),
             None => Box::new(AutoNormalLoader),
         };
         Ok(Box::new(NormalLoader {
@@ -261,6 +272,7 @@ impl Loader for NormalLoader {
         in_situ_quant: Option<IsqType>,
         paged_attn_config: Option<PagedAttentionConfig>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let _progress_guard = ProgressScopeGuard::new(silent);
         let cache = self
             .hf_cache_path
             .clone()
@@ -305,9 +317,10 @@ impl Loader for NormalLoader {
         device: &Device,
         silent: bool,
         mut mapper: DeviceMapSetting,
-        mut in_situ_quant: Option<IsqType>,
+        in_situ_quant: Option<IsqType>,
         mut paged_attn_config: Option<PagedAttentionConfig>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let _progress_guard = ProgressScopeGuard::new(silent);
         let config = std::fs::read_to_string(paths.get_config_filename())?;
 
         if !self.inner.supports_paged_attention(&config)? {
@@ -340,18 +353,15 @@ impl Loader for NormalLoader {
         };
 
         // If auto, convert to Map if not using nccl
+        let mut max_kv_tokens: Option<usize> = None;
         if use_nccl || cfg!(feature = "ring") {
             mapper = DeviceMapSetting::DummyNccl {
                 nm_device: available_devices[0].clone(),
             };
         } else if let DeviceMapSetting::Auto(params) = mapper.clone() {
+            max_kv_tokens = Some(params.max_seq_len() * params.max_batch_size());
             // Initial dtype
             let dtype = dtype.try_into_dtype(&available_devices.iter().collect::<Vec<_>>())?;
-
-            // Disable ISQ if we are loading a prequantized model.
-            if QuantizationConfigShim::get_quant_config_pack_factor(&config, dtype)? != 1 {
-                in_situ_quant = None;
-            }
 
             // ISQ or UQFF: quantized path
             // Match logic below where UQFF has priority
@@ -383,6 +393,7 @@ impl Loader for NormalLoader {
                                     AfqLayer::get_isq_type_from_uqff(Cow::Borrowed(artifact))?
                                         .pack_factor(dtype)
                                 }
+                                QuantizedSerdeType::F8Q8 => IsqType::F8Q8.pack_factor(dtype),
                             };
                             total_pack_factors += pack_factor;
                         }
@@ -471,11 +482,13 @@ impl Loader for NormalLoader {
             self.inner.num_layers(&config)?,
             &device,
             self.config.topology.as_ref(),
+            &available_devices,
         )?;
         let mapper = mapper.into_mapper(
             self.inner.num_layers(&config)?,
             &device,
             self.config.topology.as_ref(),
+            &available_devices,
         )?;
         let mut layer_devices = Vec::new();
         for layer in 0..self.inner.num_layers(&config)? {
@@ -497,35 +510,74 @@ impl Loader for NormalLoader {
             once_log_info("FlashAttention is enabled.");
         }
 
-        // Logic for ISQ here: if no calibration (i.e imatrix), then allow immediate ISQ. Otherwise, back to normal.
-        let mut loading_isq = if self.config.imatrix.is_none()
+        let topology_overrides = self
+            .config
+            .topology
+            .as_ref()
+            .map(|topology| {
+                topology
+                    .pattern_overrides()
+                    .into_iter()
+                    .map(|(regex, layer)| ImmediateIsqOverride {
+                        predicate: regex,
+                        ty: layer.isq,
+                        device: layer.device.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let has_override_isq = topology_overrides
+            .iter()
+            .any(|override_entry| override_entry.ty.is_some());
+        let topology_requires_post_quant = self
+            .config
+            .topology
+            .as_ref()
+            .is_some_and(|topology| topology.requires_post_quantization());
+
+        let allow_immediate_cli = self.config.imatrix.is_none()
             && self.config.calibration_file.is_none()
-            && !device.is_cuda()
-            && self.config.write_uqff.is_none()
-            && in_situ_quant.is_some()
-        {
-            let predicates = if matches!(self.config.organization, IsqOrganization::MoeExpertsOnly)
-            {
-                self.inner.immediate_isq_predicates_moqe(&config)?
-            } else {
-                self.inner.immediate_isq_predicates(&config)?
-            };
+            && in_situ_quant.is_some();
+
+        let mut immediate_ty = None;
+        let mut immediate_predicates = Vec::new();
+        if allow_immediate_cli {
+            immediate_ty = in_situ_quant;
+            immediate_predicates =
+                if matches!(self.config.organization, IsqOrganization::MoeExpertsOnly) {
+                    self.inner.immediate_isq_predicates_moqe(&config)?
+                } else {
+                    self.inner.immediate_isq_predicates(&config)?
+                };
             info!("Applying ISQ to {in_situ_quant:?}");
-            if predicates.is_empty() {
+            if immediate_predicates.is_empty() {
                 warn!("No predicates for this model and ISQ setting detected. ISQ will not be applied to any weights!");
             }
-            mistralrs_quant::set_immediate_isq(in_situ_quant, predicates);
+        }
+
+        let use_immediate = allow_immediate_cli || has_override_isq;
+        if use_immediate {
+            let (pool, num_threads) = mistralrs_quant::create_isq_thread_pool(immediate_ty);
+            info!("Applying immediate ISQ in parallel on {num_threads} threads.");
+            mistralrs_quant::set_immediate_isq_with_pool(
+                immediate_ty,
+                immediate_predicates.clone(),
+                topology_overrides.clone(),
+                pool,
+            );
+        }
+
+        // Logic for ISQ here: if no calibration (i.e imatrix), then allow immediate ISQ. Otherwise, back to normal.
+        let mut loading_isq = if use_immediate {
             false
         } else {
             in_situ_quant.is_some()
         };
-
-        if let Some(ref topology) = self.config.topology {
-            loading_isq |= topology
-                .0
-                .iter()
-                .any(|layer| layer.as_ref().is_some_and(|layer| layer.isq.is_some()));
+        if self.config.imatrix.is_some() || self.config.calibration_file.is_some() {
+            loading_isq = true;
         }
+        loading_isq |= topology_requires_post_quant;
+        loading_isq |= self.config.from_uqff.is_some();
 
         if self.config.imatrix.is_some() && self.config.calibration_file.is_some() {
             anyhow::bail!(
@@ -533,10 +585,18 @@ impl Loader for NormalLoader {
             );
         }
 
-        // Load onto the regular device if not using isq or if the calibration file is specified
+        // Load onto the regular device if not using isq or if the calibration file is specified.
+        // For immediate ISQ on discrete GPUs, load to CPU: the mapper will set the correct target
+        // device per-layer, and linear constructors will override to CPU for ISQ-targeted weights.
+        // On integrated/unified memory systems (e.g. Grace Blackwell), CPU and GPU share memory,
+        // so we load directly to the device.
         let load_device = if !loading_isq || self.config.calibration_file.is_some() {
             loading_isq = false;
-            device.clone()
+            if use_immediate && !crate::utils::normal::is_integrated_gpu(&device) {
+                Device::Cpu
+            } else {
+                device.clone()
+            }
         } else {
             Device::Cpu
         };
@@ -549,7 +609,7 @@ impl Loader for NormalLoader {
             AttentionImplementation::Eager
         };
 
-        let multi_progress = Arc::new(MultiProgress::new());
+        let multi_progress = Arc::new(new_multi_progress());
 
         // Load matformer slicing config if provided
         let matformer_slicing_config = if let Some(matformer_path) =
@@ -730,10 +790,10 @@ impl Loader for NormalLoader {
                 calibration_file.display(),
                 tokens.len()
             );
-            let bos_toks = chat_template.bos_tok().map(|b| vec![b]).unwrap_or_default();
-            let bos_tok_id = tokenizer
-                .token_to_id(&bos_toks[0])
-                .expect("Somehow the bos token is not present.");
+            let bos_tok_id = chat_template
+                .bos_tok()
+                .as_deref()
+                .and_then(|tok| tokenizer.token_to_id(tok));
 
             match self.config.organization {
                 IsqOrganization::Default => model.begin_track_stats()?,
@@ -744,7 +804,10 @@ impl Loader for NormalLoader {
             let n_chunks = tokens.len().div_ceil(CHUNK_SIZE);
             let start = Instant::now();
             for (i, chunk) in tokens.chunks(CHUNK_SIZE).enumerate() {
-                let chunk = [vec![bos_tok_id], chunk.to_vec()].concat();
+                let mut chunk = chunk.to_vec();
+                if let Some(bos_tok_id) = bos_tok_id {
+                    chunk.insert(0, bos_tok_id);
+                }
                 let chunk_len = chunk.len();
 
                 let start = Instant::now();
@@ -757,6 +820,7 @@ impl Loader for NormalLoader {
                     false,
                     None,
                     Some(pipeline_mapper.as_ref()),
+                    None,
                 )?;
 
                 model.forward(
@@ -779,6 +843,9 @@ impl Loader for NormalLoader {
                             layer.reset();
                         }
                     }
+                    EitherCache::Hybrid(hybrid) => {
+                        hybrid.lock().unwrap().reset();
+                    }
                 }
 
                 let end = Instant::now();
@@ -797,20 +864,31 @@ impl Loader for NormalLoader {
         }
 
         // Only if loading from UQFF
-        if (loading_isq || self.config.topology.is_some()) && self.config.from_uqff.is_none() {
-            let imatrix_source = match (
-                self.config.imatrix.as_ref(),
-                self.config.calibration_file.is_some(),
-            ) {
-                (None, false) => None,
-                (Some(file), false) => Some(ImatrixDataSource::File(file)),
-                (None, true) => Some(ImatrixDataSource::Collected),
-                (Some(_), true) => unreachable!(),
+        let should_serialize = self.config.write_uqff.is_some();
+        let should_quantize_pass = loading_isq;
+
+        if (should_quantize_pass || should_serialize) && self.config.from_uqff.is_none() {
+            let imatrix_source = if should_quantize_pass {
+                match (
+                    self.config.imatrix.as_ref(),
+                    self.config.calibration_file.is_some(),
+                ) {
+                    (None, false) => None,
+                    (Some(file), false) => Some(ImatrixDataSource::File(file)),
+                    (None, true) => Some(ImatrixDataSource::Collected),
+                    (Some(_), true) => unreachable!(),
+                }
+            } else {
+                None
             };
 
-            info!("Applying ISQ to all ranks.");
+            if should_quantize_pass {
+                info!("Applying ISQ to all ranks.");
+            } else {
+                info!("Serializing existing ISQ tensors without additional quantization.");
+            }
 
-            let multi_progress = Arc::new(MultiProgress::new());
+            let multi_progress = Arc::new(new_multi_progress());
 
             model.quantize(
                 in_situ_quant,
@@ -819,6 +897,7 @@ impl Loader for NormalLoader {
                 silent,
                 imatrix_source,
                 self.config.organization,
+                should_quantize_pass,
                 self.config.write_uqff.as_ref(),
                 UqffFullSer {
                     tokenizer: &tokenizer,
@@ -827,6 +906,8 @@ impl Loader for NormalLoader {
                     config: config.clone(),
                     processor_filename: &None,
                     preprocessor_filename: &None,
+                    modules: None,
+                    module_paths: None,
                 },
                 multi_progress.clone(),
             )?;
@@ -856,7 +937,6 @@ impl Loader for NormalLoader {
         let (cache_config, cache_engine) = if let Some(paged_attn_config) = paged_attn_config {
             let cache_config = calculate_cache_config(
                 paged_attn_config.mem_gpu,
-                paged_attn_config.mem_cpu,
                 paged_attn_config.block_size,
                 dtype,
                 paged_attn_config.cache_type,
@@ -868,6 +948,8 @@ impl Loader for NormalLoader {
                     .map(Some)
                     .collect::<Vec<_>>(),
                 silent,
+                None,
+                max_kv_tokens,
             )?;
 
             let mut layer_devices = Vec::new();
@@ -893,6 +975,7 @@ impl Loader for NormalLoader {
         let num_hidden_layers = match model.cache() {
             EitherCache::Full(full) => full.lock().len(),
             EitherCache::Normal(normal) => normal.lock().unwrap().0.len(),
+            EitherCache::Hybrid(hybrid) => hybrid.lock().unwrap().num_layers(),
         };
         let eos = calculate_eos_tokens(&chat_template, gen_conf, &tokenizer);
         let sliding_window = model.config().sliding_window;
@@ -961,7 +1044,7 @@ impl PreProcessingMixin for NormalPipeline {
 impl IsqPipelineMixin for NormalPipeline {
     fn re_isq_model(&mut self, dtype: IsqType) -> Result<()> {
         let device = self.device().clone();
-        let multi_progress = Arc::new(MultiProgress::new());
+        let multi_progress = Arc::new(new_multi_progress());
         self.model.quantize(
             Some(dtype),
             device.clone(),
@@ -969,6 +1052,7 @@ impl IsqPipelineMixin for NormalPipeline {
             self.silent,
             self.imatrix.as_ref().map(ImatrixDataSource::File),
             self.organization,
+            true,
             None,
             UqffFullSer {
                 tokenizer: &self.tokenizer,
@@ -977,6 +1061,8 @@ impl IsqPipelineMixin for NormalPipeline {
                 config: self.config.clone(),
                 processor_filename: &None,
                 preprocessor_filename: &None,
+                modules: None,
+                module_paths: None,
             },
             multi_progress.clone(),
         )?;
@@ -986,17 +1072,17 @@ impl IsqPipelineMixin for NormalPipeline {
 
 impl CacheManagerMixin for NormalPipeline {
     fn clone_in_cache(&self, seqs: &mut [&mut Sequence]) {
-        if matches!(self.model.cache(), EitherCache::Full(_)) {
-            FullCacheManager.clone_in_cache(self, seqs, false)
-        } else {
-            NormalCacheManager.clone_in_cache(self, seqs, false)
+        match self.model.cache() {
+            EitherCache::Full(_) => FullCacheManager.clone_in_cache(self, seqs, false),
+            EitherCache::Normal(_) => NormalCacheManager.clone_in_cache(self, seqs, false),
+            EitherCache::Hybrid(_) => HybridCacheManager.clone_in_cache(self, seqs, false),
         }
     }
     fn clone_out_cache(&self, seqs: &mut [&mut Sequence]) {
-        if matches!(self.model.cache(), EitherCache::Full(_)) {
-            FullCacheManager.clone_out_cache(self, seqs, false)
-        } else {
-            NormalCacheManager.clone_out_cache(self, seqs, false)
+        match self.model.cache() {
+            EitherCache::Full(_) => FullCacheManager.clone_out_cache(self, seqs, false),
+            EitherCache::Normal(_) => NormalCacheManager.clone_out_cache(self, seqs, false),
+            EitherCache::Hybrid(_) => HybridCacheManager.clone_out_cache(self, seqs, false),
         }
     }
     fn set_none_cache(
@@ -1006,15 +1092,22 @@ impl CacheManagerMixin for NormalPipeline {
         modify_draft_cache: bool,
         load_preallocated_cache: bool,
     ) {
-        if matches!(self.model.cache(), EitherCache::Full(_)) {
-            FullCacheManager.set_none_cache(self, seqs, modify_draft_cache, false);
-        } else {
-            NormalCacheManager.set_none_cache(
+        match self.model.cache() {
+            EitherCache::Full(_) => {
+                FullCacheManager.set_none_cache(self, seqs, modify_draft_cache, false)
+            }
+            EitherCache::Normal(_) => NormalCacheManager.set_none_cache(
                 self,
                 seqs,
                 modify_draft_cache,
                 load_preallocated_cache,
-            );
+            ),
+            EitherCache::Hybrid(_) => HybridCacheManager.set_none_cache(
+                self,
+                seqs,
+                modify_draft_cache,
+                load_preallocated_cache,
+            ),
         }
         if reset_non_granular {
             self.reset_non_granular_state()
@@ -1169,8 +1262,8 @@ impl AnyMoePipelineMixin for NormalPipeline {
                 let mut api = ApiBuilder::from_cache(cache)
                     .with_progress(!silent)
                     .with_token(get_token(token).map_err(candle_core::Error::msg)?);
-                if let Ok(x) = std::env::var("HF_HUB_CACHE") {
-                    api = api.with_cache_dir(x.into());
+                if let Some(cache_dir) = crate::hf_hub_cache_dir() {
+                    api = api.with_cache_dir(cache_dir);
                 }
                 api.build().map_err(candle_core::Error::msg)?
             };
@@ -1227,8 +1320,8 @@ impl AnyMoePipelineMixin for NormalPipeline {
                 let mut api = ApiBuilder::from_cache(cache)
                     .with_progress(!silent)
                     .with_token(get_token(token).map_err(candle_core::Error::msg)?);
-                if let Ok(x) = std::env::var("HF_HUB_CACHE") {
-                    api = api.with_cache_dir(x.into());
+                if let Some(cache_dir) = crate::hf_hub_cache_dir() {
+                    api = api.with_cache_dir(cache_dir);
                 }
                 api.build().map_err(candle_core::Error::msg)?
             };

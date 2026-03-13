@@ -28,12 +28,15 @@ pub async fn send_image_responses(
             .unwrap_or(ImageGenerationResponseFormat::Url)
         {
             ImageGenerationResponseFormat::Url => {
-                let saved_path = format!("image-generation-{}.png", Uuid::new_v4());
+                let saved_file = match seq.image_gen_save_file() {
+                    Some(path) => path.to_string_lossy().into_owned(),
+                    None => format!("image-generation-{}.png", Uuid::new_v4()),
+                };
                 image
-                    .save_with_format(&saved_path, image::ImageFormat::Png)
+                    .save_with_format(&saved_file, image::ImageFormat::Png)
                     .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
                 ImageChoice {
-                    url: Some(saved_path),
+                    url: Some(saved_file),
                     b64_json: None,
                 }
             }
@@ -124,6 +127,29 @@ pub async fn send_raw_responses(
         .map_err(candle_core::Error::msg)?;
 
     seq.set_state(SequenceState::Done(StopReason::Length(0)));
+
+    Ok(())
+}
+
+pub async fn send_embedding_responses(
+    input_seqs: &mut [&mut Sequence],
+    embedings: Vec<Vec<f32>>,
+) -> candle_core::Result<()> {
+    if embedings.len() != input_seqs.len() {
+        candle_core::bail!("Number of embeddings must match number of sequences..");
+    }
+
+    for (seq, embeddings) in input_seqs.iter_mut().zip(embedings) {
+        seq.add_embedding_choice_to_group(embeddings);
+
+        let group = seq.get_mut_group();
+        group
+            .maybe_send_embedding_done_response(seq.responder())
+            .await
+            .map_err(candle_core::Error::msg)?;
+
+        seq.set_state(SequenceState::Done(StopReason::Length(0)));
+    }
 
     Ok(())
 }

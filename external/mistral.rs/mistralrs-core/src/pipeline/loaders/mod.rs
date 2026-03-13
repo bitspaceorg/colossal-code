@@ -1,5 +1,6 @@
 pub(crate) mod auto_device_map;
 mod diffusion_loaders;
+mod embedding_loaders;
 mod normal_loaders;
 mod vision_loaders;
 pub use auto_device_map::AutoDeviceMapParams;
@@ -20,16 +21,24 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 pub use normal_loaders::{
-    AutoNormalLoader, DeepSeekV2Loader, DeepSeekV3Loader, GLM4Loader, Gemma2Loader, GemmaLoader,
-    LlamaLoader, MistralLoader, MixtralLoader, NormalLoaderType, NormalLoadingMetadata,
-    NormalModel, NormalModelLoader, Phi2Loader, Phi3Loader, Phi3_5MoELoader, Qwen2Loader,
-    Qwen3Loader, Qwen3MoELoader, SmolLm3Loader, Starcoder2Loader,
+    AutoNormalLoader, DeepSeekV2Loader, DeepSeekV3Loader, GLM4Loader, GLM4MoeLiteLoader,
+    GLM4MoeLoader, Gemma2Loader, GemmaLoader, GptOssLoader, GraniteMoeHybridLoader, LlamaLoader,
+    MistralLoader, MixtralLoader, NormalLoaderType, NormalLoadingMetadata, NormalModel,
+    NormalModelLoader, Phi2Loader, Phi3Loader, Phi3_5MoELoader, Qwen2Loader, Qwen3Loader,
+    Qwen3MoELoader, Qwen3NextLoader, SmolLm3Loader, Starcoder2Loader,
 };
 
 pub use vision_loaders::{
     AutoVisionLoader, Gemma3Loader, Gemma3nLoader, Idefics2Loader, Idefics3Loader, LLaVALoader,
     LLaVANextLoader, MiniCpmOLoader, Mistral3Loader, Phi3VLoader, Phi4MMLoader, Qwen2VLLoader,
-    Qwen2_5VLLoader, VLlama4Loader, VLlamaLoader, VisionLoaderType, VisionModel, VisionModelLoader,
+    Qwen2_5VLLoader, Qwen3VLLoader, Qwen3VLMoELoader, VLlama4Loader, VLlamaLoader,
+    VisionLoaderType, VisionModel, VisionModelLoader, VoxtralLoader,
+};
+
+pub use embedding_loaders::{
+    AutoEmbeddingLoader, EmbeddingGemmaLoader, EmbeddingLoaderType, EmbeddingModel,
+    EmbeddingModelLoader, EmbeddingModule, EmbeddingModulePaths, EmbeddingModuleType,
+    Qwen3EmbeddingLoader,
 };
 
 pub use diffusion_loaders::{
@@ -79,6 +88,9 @@ pub trait ModelPaths: AsAny + Debug + Send + Sync {
 
     /// Get adapter paths.
     fn get_adapter_paths(&self) -> &AdapterPaths;
+
+    /// Get embedding model `modules.json` compatible with sentence-transformers
+    fn get_modules(&self) -> Option<&[EmbeddingModulePaths]>;
 }
 
 #[derive(Clone, Debug)]
@@ -150,9 +162,74 @@ impl ModelPaths for LocalModelPaths<PathBuf> {
     fn get_adapter_paths(&self) -> &AdapterPaths {
         &self.adapter_paths
     }
+    fn get_modules(&self) -> Option<&[EmbeddingModulePaths]> {
+        None
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
+/// All local paths and metadata necessary to load an embedding model.
+pub struct EmbeddingModelPaths<P: Debug> {
+    pub tokenizer_filename: P,
+    pub config_filename: P,
+    pub modules: Vec<EmbeddingModulePaths>,
+    pub filenames: Vec<P>,
+    pub adapter_paths: AdapterPaths,
+}
+
+impl<P: Debug> EmbeddingModelPaths<P> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        tokenizer_filename: P,
+        config_filename: P,
+        filenames: Vec<P>,
+        adapter_paths: AdapterPaths,
+        modules: Vec<EmbeddingModulePaths>,
+    ) -> Self {
+        Self {
+            tokenizer_filename,
+            config_filename,
+            filenames,
+            adapter_paths,
+            modules,
+        }
+    }
+}
+
+impl ModelPaths for EmbeddingModelPaths<PathBuf> {
+    fn get_config_filename(&self) -> &PathBuf {
+        &self.config_filename
+    }
+    fn get_tokenizer_filename(&self) -> &PathBuf {
+        &self.tokenizer_filename
+    }
+    fn get_weight_filenames(&self) -> &[PathBuf] {
+        &self.filenames
+    }
+    fn get_template_filename(&self) -> &Option<PathBuf> {
+        &None
+    }
+    fn get_gen_conf_filename(&self) -> Option<&PathBuf> {
+        None
+    }
+    fn get_preprocessor_config(&self) -> &Option<PathBuf> {
+        &None
+    }
+    fn get_processor_config(&self) -> &Option<PathBuf> {
+        &None
+    }
+    fn get_chat_template_explicit(&self) -> &Option<PathBuf> {
+        &None
+    }
+    fn get_adapter_paths(&self) -> &AdapterPaths {
+        &self.adapter_paths
+    }
+    fn get_modules(&self) -> Option<&[EmbeddingModulePaths]> {
+        Some(&self.modules)
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 /// The source of the HF token.
 pub enum TokenSource {
     Literal(String),

@@ -7,16 +7,16 @@ use axum::{
     extract::{Json, State},
     http::{self},
     response::{
-        sse::{Event, KeepAlive},
-        IntoResponse, Response as AxumResponse, Sse,
+        sse::{Event, KeepAlive, KeepAliveStream},
+        IntoResponse, Sse,
     },
 };
 use either::Either;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use mistralrs_core::{
-    ChatCompletionChunkResponse, ChatCompletionResponse, Constraint, MistralRs, NormalRequest,
-    Request, RequestMessage, Response as CoreResponse, SamplingParams,
+    ChatCompletionChunkResponse, ChatCompletionResponse, Constraint, MistralRs, ModelCategory,
+    NormalRequest, ReasoningEffort, Request, RequestMessage, Response, SamplingParams,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -117,7 +117,7 @@ impl futures::Stream for ChatCompletionStreamer {
 
         match self.rx.poll_recv(cx) {
             Poll::Ready(Some(resp)) => match resp {
-                CoreResponse::ModelError(msg, _) => {
+                Response::ModelError(msg, _) => {
                     MistralRs::maybe_log_error(
                         self.state.clone(),
                         &ModelErrorMessage(msg.to_string()),
@@ -126,16 +126,20 @@ impl futures::Stream for ChatCompletionStreamer {
                     self.done_state = DoneState::SendingDone;
                     Poll::Ready(Some(Ok(Event::default().data(msg))))
                 }
-                CoreResponse::ValidationError(e) => Poll::Ready(Some(Ok(
-                    Event::default().data(sanitize_error_message(e.as_ref()))
-                ))),
-                CoreResponse::InternalError(e) => {
-                    MistralRs::maybe_log_error(self.state.clone(), &*e);
+                Response::ValidationError(e) => {
+                    self.done_state = DoneState::SendingDone;
                     Poll::Ready(Some(Ok(
                         Event::default().data(sanitize_error_message(e.as_ref()))
                     )))
                 }
-                CoreResponse::Chunk(mut response) => {
+                Response::InternalError(e) => {
+                    MistralRs::maybe_log_error(self.state.clone(), &*e);
+                    self.done_state = DoneState::SendingDone;
+                    Poll::Ready(Some(Ok(
+                        Event::default().data(sanitize_error_message(e.as_ref()))
+                    )))
+                }
+                Response::Chunk(mut response) => {
                     if response.choices.iter().all(|x| x.finish_reason.is_some()) {
                         self.done_state = DoneState::SendingDone;
                     }
@@ -152,31 +156,33 @@ impl futures::Stream for ChatCompletionStreamer {
 
                     Poll::Ready(Some(Event::default().json_data(response)))
                 }
-                CoreResponse::Done(_) => unreachable!(),
-                CoreResponse::CompletionDone(_) => unreachable!(),
-                CoreResponse::CompletionModelError(_, _) => unreachable!(),
-                CoreResponse::CompletionChunk(_) => unreachable!(),
-                CoreResponse::ImageGeneration(_) => unreachable!(),
-                CoreResponse::Speech { .. } => unreachable!(),
-                CoreResponse::Raw { .. } => unreachable!(),
-                CoreResponse::Embedding(_) => unreachable!(),
+                Response::Done(_) => unreachable!(),
+                Response::CompletionDone(_) => unreachable!(),
+                Response::CompletionModelError(_, _) => unreachable!(),
+                Response::CompletionChunk(_) => unreachable!(),
+                Response::ImageGeneration(_) => unreachable!(),
+                Response::Speech { .. } => unreachable!(),
+                Response::Raw { .. } => unreachable!(),
+                Response::Embeddings { .. } => unreachable!(),
             },
-            Poll::Pending | Poll::Ready(None) => Poll::Pending,
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
 
 /// Represents different types of chat completion responses.
-pub type ChatCompletionResponder = BaseCompletionResponder<ChatCompletionResponse>;
+pub type ChatCompletionResponder =
+    BaseCompletionResponder<ChatCompletionResponse, KeepAliveStream<ChatCompletionStreamer>>;
 
 type JsonModelError = BaseJsonModelError<ChatCompletionResponse>;
 impl ErrorToResponse for JsonModelError {}
 
 impl IntoResponse for ChatCompletionResponder {
     /// Converts the chat completion responder into an HTTP response.
-    fn into_response(self) -> AxumResponse {
+    fn into_response(self) -> axum::response::Response {
         match self {
-            ChatCompletionResponder::Sse(resp) => resp,
+            ChatCompletionResponder::Sse(s) => s.into_response(),
             ChatCompletionResponder::Json(s) => Json(s).into_response(),
             ChatCompletionResponder::InternalError(e) => {
                 JsonError::new(sanitize_error_message(e.as_ref()))
@@ -194,6 +200,18 @@ impl IntoResponse for ChatCompletionResponder {
     }
 }
 
+/// Parse reasoning_effort string to ReasoningEffort enum
+fn parse_reasoning_effort(effort: &Option<String>) -> Option<ReasoningEffort> {
+    effort
+        .as_ref()
+        .and_then(|e| match e.to_lowercase().as_str() {
+            "low" => Some(ReasoningEffort::Low),
+            "medium" => Some(ReasoningEffort::Medium),
+            "high" => Some(ReasoningEffort::High),
+            _ => None,
+        })
+}
+
 /// Parses and validates a chat completion request.
 ///
 /// This function transforms an OpenAI-compatible chat completion request into the
@@ -201,13 +219,16 @@ impl IntoResponse for ChatCompletionResponder {
 pub async fn parse_request(
     oairequest: ChatCompletionRequest,
     state: SharedMistralRsState,
-    tx: Sender<CoreResponse>,
+    tx: Sender<Response>,
 ) -> Result<(Request, bool)> {
     let repr = serde_json::to_string(&oairequest).expect("Serialization of request failed.");
     MistralRs::maybe_log_request(state.clone(), repr);
 
     // Validate that the requested model matches the loaded model
     validate_model_name(&oairequest.model, state.clone())?;
+
+    // Parse reasoning effort for Harmony-format models
+    let reasoning_effort = parse_reasoning_effort(&oairequest.reasoning_effort);
 
     let stop_toks = convert_stop_tokens(oairequest.stop_seqs);
 
@@ -241,8 +262,57 @@ pub async fn parse_request(
                             String,
                             Either<String, Vec<IndexMap<String, Value>>>,
                         > = IndexMap::new();
-                        message_map.insert("role".to_string(), Either::Left(message.role));
+                        message_map.insert("role".to_string(), Either::Left(message.role.clone()));
                         message_map.insert("content".to_string(), Either::Left(content.clone()));
+
+                        // Add tool_calls for assistant messages that have them
+                        if let Some(ref tool_calls) = message.tool_calls {
+                            // Convert tool_calls to Vec<IndexMap<String, Value>> for Jinja template
+                            let tool_calls_vec: Vec<IndexMap<String, Value>> = tool_calls
+                                .iter()
+                                .map(|tc| {
+                                    let mut tc_map = IndexMap::new();
+                                    // Use provided ID or fallback to function name
+                                    let id =
+                                        tc.id.clone().unwrap_or_else(|| tc.function.name.clone());
+                                    tc_map.insert("id".to_string(), Value::String(id));
+                                    tc_map.insert(
+                                        "type".to_string(),
+                                        Value::String("function".to_string()),
+                                    );
+                                    let mut function_map = serde_json::Map::new();
+                                    function_map.insert(
+                                        "name".to_string(),
+                                        Value::String(tc.function.name.clone()),
+                                    );
+                                    function_map.insert(
+                                        "arguments".to_string(),
+                                        Value::String(tc.function.arguments.clone()),
+                                    );
+                                    tc_map.insert(
+                                        "function".to_string(),
+                                        Value::Object(function_map),
+                                    );
+                                    tc_map
+                                })
+                                .collect();
+                            message_map
+                                .insert("tool_calls".to_string(), Either::Right(tool_calls_vec));
+                        }
+
+                        // Add tool_call_id for tool messages
+                        if let Some(ref tool_call_id) = message.tool_call_id {
+                            message_map.insert(
+                                "tool_call_id".to_string(),
+                                Either::Left(tool_call_id.clone()),
+                            );
+                        }
+
+                        // Add name for tool messages
+                        if let Some(ref name) = message.name {
+                            message_map.insert("name".to_string(), Either::Left(name.clone()));
+                        }
+
                         messages.push(message_map);
                     }
                     Either::Right(image_messages) => {
@@ -345,6 +415,40 @@ pub async fn parse_request(
                             })
                             .collect::<Vec<_>>();
 
+                        // Apply prefixer to text content if this is a vision model with images/audio
+                        // This matches the behavior of interactive mode which auto-inserts media tokens
+                        let text_content = if !image_urls_iter.is_empty()
+                            || !audio_urls_iter.is_empty()
+                        {
+                            if let Ok(ModelCategory::Vision { prefixer }) =
+                                state.get_model_category(None)
+                            {
+                                let mut prefixed = text_content;
+
+                                // Apply image prefixer
+                                if !image_urls_iter.is_empty() {
+                                    let start_idx = image_urls.len();
+                                    let image_indices: Vec<usize> =
+                                        (start_idx..start_idx + image_urls_iter.len()).collect();
+                                    prefixed = prefixer.prefix_image(image_indices, &prefixed);
+                                }
+
+                                // Apply audio prefixer
+                                if !audio_urls_iter.is_empty() {
+                                    let start_idx = audio_urls.len();
+                                    let audio_indices: Vec<usize> =
+                                        (start_idx..start_idx + audio_urls_iter.len()).collect();
+                                    prefixed = prefixer.prefix_audio(audio_indices, &prefixed);
+                                }
+
+                                prefixed
+                            } else {
+                                text_content
+                            }
+                        } else {
+                            text_content
+                        };
+
                         let mut message_map: IndexMap<
                             String,
                             Either<String, Vec<IndexMap<String, Value>>>,
@@ -404,11 +508,13 @@ pub async fn parse_request(
                     images,
                     audios,
                     enable_thinking: oairequest.enable_thinking,
+                    reasoning_effort,
                 }
             } else {
                 RequestMessage::Chat {
                     messages,
                     enable_thinking: oairequest.enable_thinking,
+                    reasoning_effort,
                 }
             }
         }
@@ -422,6 +528,7 @@ pub async fn parse_request(
             RequestMessage::Chat {
                 messages,
                 enable_thinking: oairequest.enable_thinking,
+                reasoning_effort,
             }
         }
     };
@@ -487,6 +594,7 @@ pub async fn parse_request(
             } else {
                 Some(oairequest.model.clone())
             },
+            truncate_sequence: oairequest.truncate_sequence.unwrap_or(false),
         })),
         is_streaming,
     ))
@@ -539,54 +647,50 @@ pub fn handle_error(
 
 /// Creates a SSE streamer for chat completions with optional callbacks.
 pub fn create_streamer(
-    rx: Receiver<CoreResponse>,
+    rx: Receiver<Response>,
     state: SharedMistralRsState,
     on_chunk: Option<ChatCompletionOnChunkCallback>,
     on_done: Option<ChatCompletionOnDoneCallback>,
-) -> AxumResponse {
+) -> Sse<KeepAliveStream<ChatCompletionStreamer>> {
     let streamer = base_create_streamer(rx, state, on_chunk, on_done);
     let keep_alive_interval = get_keep_alive_interval();
 
     Sse::new(streamer)
         .keep_alive(KeepAlive::new().interval(Duration::from_millis(keep_alive_interval)))
-        .into_response()
 }
 
 /// Process non-streaming chat completion responses.
 pub async fn process_non_streaming_response(
-    rx: &mut Receiver<CoreResponse>,
+    rx: &mut Receiver<Response>,
     state: SharedMistralRsState,
 ) -> ChatCompletionResponder {
     base_process_non_streaming_response(rx, state, match_responses, handle_error).await
 }
 
 /// Matches and processes different types of model responses into appropriate chat completion responses.
-pub fn match_responses(
-    state: SharedMistralRsState,
-    response: CoreResponse,
-) -> ChatCompletionResponder {
+pub fn match_responses(state: SharedMistralRsState, response: Response) -> ChatCompletionResponder {
     match response {
-        CoreResponse::InternalError(e) => {
+        Response::InternalError(e) => {
             MistralRs::maybe_log_error(state, &*e);
             ChatCompletionResponder::InternalError(e)
         }
-        CoreResponse::ModelError(msg, response) => {
+        Response::ModelError(msg, response) => {
             MistralRs::maybe_log_error(state.clone(), &ModelErrorMessage(msg.to_string()));
             MistralRs::maybe_log_response(state, &response);
             ChatCompletionResponder::ModelError(msg, response)
         }
-        CoreResponse::ValidationError(e) => ChatCompletionResponder::ValidationError(e),
-        CoreResponse::Done(response) => {
+        Response::ValidationError(e) => ChatCompletionResponder::ValidationError(e),
+        Response::Done(response) => {
             MistralRs::maybe_log_response(state, &response);
             ChatCompletionResponder::Json(response)
         }
-        CoreResponse::Chunk(_) => unreachable!(),
-        CoreResponse::CompletionDone(_) => unreachable!(),
-        CoreResponse::CompletionModelError(_, _) => unreachable!(),
-        CoreResponse::CompletionChunk(_) => unreachable!(),
-        CoreResponse::ImageGeneration(_) => unreachable!(),
-        CoreResponse::Speech { .. } => unreachable!(),
-        CoreResponse::Raw { .. } => unreachable!(),
-        CoreResponse::Embedding(_) => unreachable!(),
+        Response::Chunk(_) => unreachable!(),
+        Response::CompletionDone(_) => unreachable!(),
+        Response::CompletionModelError(_, _) => unreachable!(),
+        Response::CompletionChunk(_) => unreachable!(),
+        Response::ImageGeneration(_) => unreachable!(),
+        Response::Speech { .. } => unreachable!(),
+        Response::Raw { .. } => unreachable!(),
+        Response::Embeddings { .. } => unreachable!(),
     }
 }

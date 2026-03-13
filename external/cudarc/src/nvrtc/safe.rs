@@ -27,7 +27,17 @@ impl Ptx {
         Self(PtxKind::Src(src.into()))
     }
 
+    /// Creates a Ptx from binary CUBIN data.
+    pub fn from_binary(data: Vec<u8>) -> Self {
+        Self(PtxKind::Binary(data))
+    }
+
     /// Get the compiled source as a string.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the Ptx was created from binary CUBIN data, as CUBIN cannot be
+    /// converted to a string representation.
     pub fn to_src(&self) -> String {
         match &self.0 {
             PtxKind::Image(bytes) => unsafe { CStr::from_ptr(bytes.as_ptr()) }
@@ -38,6 +48,22 @@ impl Ptx {
             PtxKind::File(path) => {
                 std::fs::read_to_string(path).expect("Unable to read ptx from file.")
             }
+            PtxKind::Binary(_) => {
+                panic!("Cannot convert binary CUBIN data to string. Use from_src() or from_file() for PTX data.")
+            }
+        }
+    }
+
+    /// If `self` is a compiled image (obtained using [compile_ptx] or [compile_ptx_with_opts]), get as bytes.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match &self.0 {
+            PtxKind::Image(bytes) => unsafe {
+                Some(std::slice::from_raw_parts(
+                    bytes.as_ptr().cast(),
+                    bytes.len(),
+                ))
+            },
+            _ => None,
         }
     }
 }
@@ -56,8 +82,11 @@ pub(crate) enum PtxKind {
     /// Content of a pre compiled ptx file
     Src(String),
 
-    /// Path to a compiled ptx
+    /// Path to a compiled ptx or cubin file
     File(PathBuf),
+
+    /// Binary CUBIN data
+    Binary(Vec<u8>),
 }
 
 /// Calls [compile_ptx_with_opts] with no options. `src` is the source string
