@@ -1,0 +1,16 @@
+---
+title: "Layer Boundaries"
+description: "How source modules are split by responsibility"
+slug: "architecture-layers"
+author: "kpprasanna"
+date: "13 MAR 2026"
+tags: ["architecture", "layers"]
+---
+
+Core boundary rules:
+
+- `src/main.rs` starts the app and delegates to `app::run()`.
+- `src/app/runtime/**` handles event handling and side-effect orchestration.
+- `src/app/render/**` handles drawing and UI composition only.
+- `src/app/state/**` stores state containers and state helpers.
+- `src/app/orchestrator/**` owns spec/orchestration control and related formatting.

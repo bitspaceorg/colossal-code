@@ -1,0 +1,18 @@
+---
+title: "Runtime Event Handling"
+description: "Runtime event routing and handler decomposition"
+slug: "reference-runtime-events"
+author: "kpprasanna"
+date: "13 MAR 2026"
+tags: ["reference", "runtime"]
+---
+
+Runtime event routing starts in `src/app/runtime/event_loop.rs` and delegates into `src/app/runtime/event_loop_handlers/**`.
+
+Current handler groups:
+
+- paste handling
+- normal mode key handling
+- navigation/visual/search mode handling
+- command mode handling
+- session window handling

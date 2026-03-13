@@ -1,0 +1,21 @@
+---
+title: "Docs Indexing"
+description: "How docs metadata and data.json are generated"
+slug: "development-docs-indexing"
+author: "kpprasanna"
+date: "13 MAR 2026"
+tags: ["development", "docs"]
+---
+
+Docs indexing workflow:
+
+1. Validate MDX frontmatter and internal slug links.
+2. Build `docs/data.json` from MDX metadata.
+3. Stage generated `docs/data.json` in pre-commit.
+
+Scripts live in `utils/docs/`:
+
+- `validate.py`
+- `build_index.py`
+- `utils.py`
+- `hook.sh`

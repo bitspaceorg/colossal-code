@@ -1,0 +1,76 @@
+stages:
+  - fmt
+  - build
+  - test
+  - package
+
+variables:
+  GIT_DEPTH: 1
+  CARGO_TERM_COLOR: always
+  NIX_CONFIG: "experimental-features = nix-command flakes"
+
+.nix_rust_template: &nix_rust_template
+  image: nixos/nix:2.24.11
+  before_script:
+    - nix --version
+    - nix flake show --no-write-lock-file >/dev/null
+
+.rules_first_party: &rules_first_party
+  - changes:
+      - src/**/*
+      - crates/**/*
+      - tests/**/*
+      - docs/**/*
+      - utils/docs/**/*
+      - Cargo.toml
+      - Cargo.lock
+      - flake.nix
+      - flake.lock
+      - nix/**/*
+      - .pre-commit-config.yaml
+      - .gitlab-ci.yml
+  - when: never
+
+fmt:rust:
+  <<: *nix_rust_template
+  stage: fmt
+  rules: *rules_first_party
+  script:
+    - nix develop --accept-flake-config -c cargo fmt --all --check
+
+build:check:
+  <<: *nix_rust_template
+  stage: build
+  rules: *rules_first_party
+  script:
+    - nix develop --accept-flake-config -c cargo check --all-targets
+
+build:clippy:
+  <<: *nix_rust_template
+  stage: build
+  rules: *rules_first_party
+  script:
+    - nix develop --accept-flake-config -c cargo clippy --all-targets --no-deps -- -D warnings
+
+test:all-targets:
+  <<: *nix_rust_template
+  stage: test
+  rules: *rules_first_party
+  script:
+    - nix develop --accept-flake-config -c cargo test --all-targets
+
+docs:index:
+  <<: *nix_rust_template
+  stage: test
+  rules: *rules_first_party
+  script:
+    - nix develop --accept-flake-config -c python utils/docs/validate.py
+    - nix develop --accept-flake-config -c python utils/docs/build_index.py
+    - git diff --exit-code docs/data.json
+
+package:nix:
+  <<: *nix_rust_template
+  stage: package
+  rules: *rules_first_party
+  script:
+    - nix build --accept-flake-config --print-build-logs .#default

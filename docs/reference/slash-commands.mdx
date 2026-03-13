@@ -1,0 +1,16 @@
+---
+title: "Slash Commands"
+description: "Command catalog, parsing, and dispatch behavior"
+slug: "reference-slash-commands"
+author: "kpprasanna"
+date: "13 MAR 2026"
+tags: ["reference", "commands"]
+---
+
+Slash command definitions live in `src/app/commands/catalog.rs`.
+
+Dispatch flow:
+
+- Input parse: `src/app/commands/parse.rs`
+- Slash dispatch: `src/app/commands/dispatch.rs`
+- Specialized command handlers: `src/app/commands/*`

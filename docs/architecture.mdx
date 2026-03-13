@@ -1,0 +1,17 @@
+---
+title: "Architecture"
+description: "System architecture, domain boundaries, and execution model"
+slug: "architecture"
+author: "kpprasanna"
+date: "13 MAR 2026"
+tags: ["architecture", "design"]
+---
+
+Colossal Code follows a layered architecture where `src/main.rs` is the entry point and `src/app/**` holds domain logic.
+
+## Subsections
+
+| Page                                            | Topic                                                   |
+| ----------------------------------------------- | ------------------------------------------------------- |
+| [Layer Boundaries](architecture-layers)         | Ownership boundaries between runtime, render, and state |
+| [Frame Lifecycle](architecture-frame-lifecycle) | Event loop to render lifecycle in one tick              |

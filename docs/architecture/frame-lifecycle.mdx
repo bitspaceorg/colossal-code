@@ -1,0 +1,16 @@
+---
+title: "Frame Lifecycle"
+description: "What happens from one runtime tick to one rendered frame"
+slug: "architecture-frame-lifecycle"
+author: "kpprasanna"
+date: "13 MAR 2026"
+tags: ["architecture", "runtime", "render"]
+---
+
+At a high level each cycle does:
+
+1. Poll terminal/runtime events.
+2. Dispatch input and runtime events into state transitions.
+3. Process pending actions and agent stream messages.
+4. Compose lines/panels from current state.
+5. Render frame and update cursor/overlays.

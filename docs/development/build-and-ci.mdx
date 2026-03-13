@@ -1,0 +1,17 @@
+---
+title: "Build and CI"
+description: "Local and CI build strategy for Colossal Code"
+slug: "development-build-and-ci"
+author: "kpprasanna"
+date: "13 MAR 2026"
+tags: ["development", "ci", "build"]
+---
+
+Primary quality gates:
+
+- `cargo fmt --all --check`
+- `cargo check --all-targets`
+- `cargo clippy --all-targets --no-deps -- -D warnings`
+- `cargo test --all-targets`
+
+GitLab CI mirrors these checks through `.gitlab-ci.yml`.
