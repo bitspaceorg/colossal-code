@@ -38,6 +38,7 @@
                     pkg-config
                     rustc
                     cargo
+                    clippy
                     python
                 ];
                 buildInputs = with pkgs; [
