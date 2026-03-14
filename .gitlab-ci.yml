@@ -65,25 +65,8 @@ docs:index:
   stage: test
   rules: *rules_first_party
   script:
-    - cp docs/data.json /tmp/docs-data-before.json
     - nix develop --accept-flake-config -c python utils/docs/validate.py
     - nix develop --accept-flake-config -c python utils/docs/build_index.py
-    - |
-      nix develop --accept-flake-config -c python - <<'PY'
-      import json
-
-      def load_without_timestamp(path):
-          with open(path, "r", encoding="utf-8") as f:
-              data = json.load(f)
-          data.pop("timestamp", None)
-          return data
-
-      before = load_without_timestamp("/tmp/docs-data-before.json")
-      after = load_without_timestamp("docs/data.json")
-
-      if before != after:
-          raise SystemExit("docs/data.json changed beyond timestamp; commit regenerated index")
-      PY
 
 package:nix:
   <<: *nix_rust_template

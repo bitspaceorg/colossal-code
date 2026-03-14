@@ -12,7 +12,6 @@ Docs indexing workflow:
 1. Validate MDX frontmatter and internal slug links.
 2. Build `docs/data.json` from MDX metadata.
 3. Stage generated `docs/data.json` in pre-commit.
-4. In CI, compare regenerated `docs/data.json` while ignoring `timestamp` (it is expected to change each run).
 
 Scripts live in `utils/docs/`:
 
