@@ -15,21 +15,22 @@ variables:
     - nix --version
     - nix flake show --no-write-lock-file >/dev/null
 
-.rules_first_party: &rules_first_party
-  - changes:
-      - src/**/*
-      - crates/**/*
-      - tests/**/*
-      - docs/**/*
-      - utils/docs/**/*
-      - Cargo.toml
-      - Cargo.lock
-      - flake.nix
-      - flake.lock
-      - nix/**/*
-      - .pre-commit-config.yaml
-      - .gitlab-ci.yml
-  - when: never
+.rules_first_party:
+  rules: &rules_first_party
+    - changes:
+        - src/**/*
+        - crates/**/*
+        - tests/**/*
+        - docs/**/*
+        - utils/docs/**/*
+        - Cargo.toml
+        - Cargo.lock
+        - flake.nix
+        - flake.lock
+        - nix/**/*
+        - .pre-commit-config.yaml
+        - .gitlab-ci.yml
+    - when: never
 
 fmt:rust:
   <<: *nix_rust_template
