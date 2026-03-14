@@ -94,7 +94,9 @@ impl App {
             let elapsed = if snapshot.thinking_indicator_active {
                 snapshot.thinking_elapsed_secs
             } else {
-                self.thinking_start_time.map(|t| t.elapsed().as_secs()).unwrap_or(0)
+                self.thinking_start_time
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(0)
             };
             let mins = elapsed / 60;
             let secs = elapsed % 60;
@@ -125,7 +127,11 @@ impl App {
         lines
     }
 
-    pub(crate) fn render_normal_input_area(&self, frame: &mut Frame, input_area: ratatui::layout::Rect) {
+    pub(crate) fn render_normal_input_area(
+        &self,
+        frame: &mut Frame,
+        input_area: ratatui::layout::Rect,
+    ) {
         let prompt_spans: Vec<Span> = vec![
             Span::raw(" "),
             Span::styled(">", Style::default().fg(Color::Magenta)),
@@ -227,11 +233,13 @@ impl App {
         } else {
             0
         };
-        let input = Paragraph::new(Text::from(lines)).scroll((scroll_y, 0)).block(
-            ratatui::widgets::Block::bordered()
-                .border_type(ratatui::widgets::BorderType::Rounded)
-                .border_style(Style::default().fg(self.get_mode_border_color())),
-        );
+        let input = Paragraph::new(Text::from(lines))
+            .scroll((scroll_y, 0))
+            .block(
+                ratatui::widgets::Block::bordered()
+                    .border_type(ratatui::widgets::BorderType::Rounded)
+                    .border_style(Style::default().fg(self.get_mode_border_color())),
+            );
         frame.render_widget(input, input_area);
 
         let visible_cursor_row = cursor_row.saturating_sub(scroll_y);

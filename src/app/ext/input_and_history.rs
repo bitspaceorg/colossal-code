@@ -1,6 +1,6 @@
 use crate::app;
-use crate::app::commands::ReviewOptions;
 use crate::app::App;
+use crate::app::commands::ReviewOptions;
 use color_eyre::Result;
 use ratatui::crossterm::event::KeyEvent;
 

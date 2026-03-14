@@ -69,37 +69,36 @@ impl App {
         let messages_area_idx = area_indices.messages_area_idx;
         let min_areas = area_indices.min_areas;
 
-        let (mode, cursor_row, cursor_col, scroll_offset) = if self.phase == Phase::Input
-            && areas.len() >= min_areas
-        {
-            if spec_tree_view_active
-                || self.mode == Mode::Normal
-                || self.mode == Mode::SessionWindow
-            {
-                (Mode::Normal, 0, 0, 0)
-            } else {
-                let cursor_row = self.editor.state.cursor.row;
-                let cursor_col = self.editor.state.cursor.col;
-                let messages_area = areas[messages_area_idx];
-                let visible_lines = messages_area.height as usize;
-                let max_width = messages_area.width.saturating_sub(4) as usize;
-                let message_lines = self.compose_main_message_lines(max_width, true, false);
-
-                let total_lines = message_lines.len();
-                let scroll = if total_lines <= visible_lines {
-                    0
-                } else if cursor_row < visible_lines / 2 {
-                    0
-                } else if cursor_row >= total_lines.saturating_sub(visible_lines / 2) {
-                    total_lines.saturating_sub(visible_lines)
+        let (mode, cursor_row, cursor_col, scroll_offset) =
+            if self.phase == Phase::Input && areas.len() >= min_areas {
+                if spec_tree_view_active
+                    || self.mode == Mode::Normal
+                    || self.mode == Mode::SessionWindow
+                {
+                    (Mode::Normal, 0, 0, 0)
                 } else {
-                    cursor_row.saturating_sub(visible_lines / 2)
-                };
-                (self.mode, cursor_row, cursor_col, scroll)
-            }
-        } else {
-            (Mode::Normal, 0, 0, 0)
-        };
+                    let cursor_row = self.editor.state.cursor.row;
+                    let cursor_col = self.editor.state.cursor.col;
+                    let messages_area = areas[messages_area_idx];
+                    let visible_lines = messages_area.height as usize;
+                    let max_width = messages_area.width.saturating_sub(4) as usize;
+                    let message_lines = self.compose_main_message_lines(max_width, true, false);
+
+                    let total_lines = message_lines.len();
+                    let scroll = if total_lines <= visible_lines {
+                        0
+                    } else if cursor_row < visible_lines / 2 {
+                        0
+                    } else if cursor_row >= total_lines.saturating_sub(visible_lines / 2) {
+                        total_lines.saturating_sub(visible_lines)
+                    } else {
+                        cursor_row.saturating_sub(visible_lines / 2)
+                    };
+                    (self.mode, cursor_row, cursor_col, scroll)
+                }
+            } else {
+                (Mode::Normal, 0, 0, 0)
+            };
 
         self.render_status_bar(
             frame,
@@ -119,8 +118,7 @@ impl App {
             {
                 let max_width = messages_area.width.saturating_sub(4) as usize;
                 let append_plan = self.current_spec.is_some() && self.allow_plan_tree_render();
-                let message_lines =
-                    self.compose_main_message_lines(max_width, append_plan, true);
+                let message_lines = self.compose_main_message_lines(max_width, append_plan, true);
 
                 let total_lines = message_lines.len();
                 let visible_lines = messages_area.height as usize;

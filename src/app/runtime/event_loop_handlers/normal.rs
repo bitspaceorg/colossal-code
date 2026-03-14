@@ -20,9 +20,11 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
         }
     }
 
-    if key.code == KeyCode::Esc && (app.agent_state.agent_processing || app.thinking_indicator_active)
+    if key.code == KeyCode::Esc
+        && (app.agent_state.agent_processing || app.thinking_indicator_active)
     {
-        if let Some((current_summary, token_count, chunk_count)) = app.thinking_current_summary.take()
+        if let Some((current_summary, token_count, chunk_count)) =
+            app.thinking_current_summary.take()
         {
             if let Some(last_msg) = app.messages.last()
                 && matches!(
@@ -278,7 +280,9 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Enter if app.phase == Phase::Input && app.show_background_tasks => {
-            if !app.background_tasks.is_empty() && app.background_tasks_selected < app.background_tasks.len() {
+            if !app.background_tasks.is_empty()
+                && app.background_tasks_selected < app.background_tasks.len()
+            {
                 let task = &app.background_tasks[app.background_tasks_selected];
                 app.viewing_task = Some((task.0.clone(), task.1.clone(), task.2.clone(), task.3));
                 app.show_background_tasks = false;
@@ -290,7 +294,11 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
         KeyCode::Tab if app.phase == Phase::Input && app.autocomplete_active => {
             app.apply_autocomplete_selection();
         }
-        KeyCode::Enter if app.phase == Phase::Input && !app.show_background_tasks && app.viewing_task.is_none() => {
+        KeyCode::Enter
+            if app.phase == Phase::Input
+                && !app.show_background_tasks
+                && app.viewing_task.is_none() =>
+        {
             if !app.autocomplete_active || !app.apply_autocomplete_selection() {
                 app.submit_message();
             }

@@ -3,8 +3,8 @@ mod tests {
     use std::{collections::HashMap, time::SystemTime};
 
     use agent_core::{
-        SpecSheet, SpecStep, StepStatus, TaskSummary, TaskVerification, TestRun, VerificationStatus,
-        orchestrator::OrchestratorControl,
+        SpecSheet, SpecStep, StepStatus, TaskSummary, TaskVerification, TestRun,
+        VerificationStatus, orchestrator::OrchestratorControl,
     };
     use agent_protocol::types::spec::TestResult;
     use anyhow::Result;

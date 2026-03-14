@@ -4,9 +4,9 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::app::App;
 use crate::app::render::thinking::create_thinking_highlight_spans;
 use crate::app::state::message::AgentConnector;
-use crate::app::App;
 
 impl App {
     pub(crate) fn wrap_text(text: &str, max_width: usize) -> Vec<String> {

@@ -22,7 +22,8 @@ pub(crate) async fn execute(
 
 fn show_spec(ctx: &mut SpecCliContext<'_>) {
     if let Some(spec) = ctx.current_spec.as_ref() {
-        ctx.message_log.push(spec_messages::format_spec_overview(spec));
+        ctx.message_log
+            .push(spec_messages::format_spec_overview(spec));
     } else {
         ctx.message_log.push(
             "[SPEC] No spec loaded. Use /spec <path|goal> to load or create one.".to_string(),
@@ -79,8 +80,9 @@ async fn split_step(
                     }
                 }
             } else {
-                ctx.message_log
-                    .push("[SPEC ERROR] No orchestrator control available to inject split".to_string());
+                ctx.message_log.push(
+                    "[SPEC ERROR] No orchestrator control available to inject split".to_string(),
+                );
             }
         }
         Err(e) => {
@@ -159,7 +161,8 @@ fn resume_run(ctx: &mut SpecCliContext<'_>) {
                 .push(format!("[SPEC ERROR] Failed to resume: {}", e));
         } else {
             *ctx.orchestrator_paused = false;
-            ctx.message_log.push("[SPEC] Orchestrator resumed.".to_string());
+            ctx.message_log
+                .push("[SPEC] Orchestrator resumed.".to_string());
             *ctx.status_message = Some("Resumed orchestrator".to_string());
         }
     } else {

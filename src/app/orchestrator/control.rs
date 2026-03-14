@@ -1,8 +1,6 @@
 use std::time::SystemTime;
 
-use agent_core::{
-    Agent, SpecSheet, SpecStep, TaskSummary, orchestrator::OrchestratorControl,
-};
+use agent_core::{Agent, SpecSheet, SpecStep, TaskSummary, orchestrator::OrchestratorControl};
 use anyhow::Result;
 use async_trait::async_trait;
 

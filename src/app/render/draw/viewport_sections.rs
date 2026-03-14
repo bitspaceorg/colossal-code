@@ -88,21 +88,34 @@ impl App {
         for &match_pos in self.editor.state.search_matches() {
             let row = match_pos.row;
             let col = match_pos.col;
-            if row >= scroll_offset && row < scroll_offset + visible_lines && row < message_lines.len() {
+            if row >= scroll_offset
+                && row < scroll_offset + visible_lines
+                && row < message_lines.len()
+            {
                 let visible_row = row - scroll_offset;
                 let y = messages_area.y + visible_row as u16;
                 let line = &message_lines[row];
-                let cursor_in_match =
-                    cursor_pos.row == row && cursor_pos.col >= col && cursor_pos.col < col + pattern_len;
-                let highlight_color = if cursor_in_match { Color::Magenta } else { Color::Cyan };
+                let cursor_in_match = cursor_pos.row == row
+                    && cursor_pos.col >= col
+                    && cursor_pos.col < col + pattern_len;
+                let highlight_color = if cursor_in_match {
+                    Color::Magenta
+                } else {
+                    Color::Cyan
+                };
                 let mut x = messages_area.x;
                 let mut char_idx = 0;
                 for span in &line.spans {
                     let span_chars: Vec<char> = span.content.chars().collect();
                     for _ch in &span_chars {
-                        if char_idx >= col && char_idx < col + pattern_len && x < messages_area.right() {
+                        if char_idx >= col
+                            && char_idx < col + pattern_len
+                            && x < messages_area.right()
+                        {
                             if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
-                                cell.set_style(Style::default().bg(highlight_color).fg(Color::Black));
+                                cell.set_style(
+                                    Style::default().bg(highlight_color).fg(Color::Black),
+                                );
                             }
                         }
                         x += 1;
@@ -139,7 +152,10 @@ impl App {
             (sel_end, sel_start)
         };
         for row in start.row..=end.row {
-            if row >= scroll_offset && row < scroll_offset + visible_lines && row < message_lines.len() {
+            if row >= scroll_offset
+                && row < scroll_offset + visible_lines
+                && row < message_lines.len()
+            {
                 let visible_row = row - scroll_offset;
                 let y = messages_area.y + visible_row as u16;
                 let line = &message_lines[row];
@@ -156,7 +172,8 @@ impl App {
                 };
                 let mut x = messages_area.x;
                 let mut char_idx = 0;
-                let line_is_empty = line.spans.is_empty() || line.spans.iter().all(|s| s.content.is_empty());
+                let line_is_empty =
+                    line.spans.is_empty() || line.spans.iter().all(|s| s.content.is_empty());
                 if line_is_empty && start_col == 0 {
                     if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
                         cell.set_style(Style::default().bg(Color::Yellow).fg(Color::Black));
@@ -165,9 +182,14 @@ impl App {
                     for span in &line.spans {
                         let span_chars: Vec<char> = span.content.chars().collect();
                         for _ch in &span_chars {
-                            if char_idx >= start_col && char_idx <= end_col && x < messages_area.right() {
+                            if char_idx >= start_col
+                                && char_idx <= end_col
+                                && x < messages_area.right()
+                            {
                                 if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
-                                    cell.set_style(Style::default().bg(Color::Yellow).fg(Color::Black));
+                                    cell.set_style(
+                                        Style::default().bg(Color::Yellow).fg(Color::Black),
+                                    );
                                 }
                             }
                             x += 1;
@@ -205,7 +227,10 @@ impl App {
             (sel_end, sel_start)
         };
         for row in start.row..=end.row {
-            if row >= scroll_offset && row < scroll_offset + visible_lines && row < message_lines.len() {
+            if row >= scroll_offset
+                && row < scroll_offset + visible_lines
+                && row < message_lines.len()
+            {
                 let visible_row = row - scroll_offset;
                 let y = messages_area.y + visible_row as u16;
                 let line = &message_lines[row];
@@ -223,7 +248,8 @@ impl App {
 
                 let mut x = messages_area.x;
                 let mut char_idx = 0;
-                let line_is_empty = line.spans.is_empty() || line.spans.iter().all(|s| s.content.is_empty());
+                let line_is_empty =
+                    line.spans.is_empty() || line.spans.iter().all(|s| s.content.is_empty());
                 if line_is_empty && start_col == 0 {
                     if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
                         cell.set_style(Style::default().bg(Color::Cyan).fg(Color::Black));
@@ -232,9 +258,14 @@ impl App {
                     for span in &line.spans {
                         let span_chars: Vec<char> = span.content.chars().collect();
                         for _ch in &span_chars {
-                            if char_idx >= start_col && char_idx <= end_col && x < messages_area.right() {
+                            if char_idx >= start_col
+                                && char_idx <= end_col
+                                && x < messages_area.right()
+                            {
                                 if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
-                                    cell.set_style(Style::default().bg(Color::Cyan).fg(Color::Black));
+                                    cell.set_style(
+                                        Style::default().bg(Color::Cyan).fg(Color::Black),
+                                    );
                                 }
                             }
                             x += 1;
@@ -256,8 +287,8 @@ impl App {
     ) {
         let cursor_row = self.editor.state.cursor.row;
         let cursor_col = self.editor.state.cursor.col;
-        let should_show_cursor =
-            self.nav_snapshot.is_some() || (!self.agent_state.agent_processing && !self.thinking_indicator_active);
+        let should_show_cursor = self.nav_snapshot.is_some()
+            || (!self.agent_state.agent_processing && !self.thinking_indicator_active);
         if !(should_show_cursor
             && cursor_row >= scroll_offset
             && cursor_row < scroll_offset + visible_lines)
@@ -274,14 +305,16 @@ impl App {
         let line = &message_lines[cursor_row];
         let mut x_pos = 0;
         let mut char_count = 0;
-        let line_is_empty = line.spans.is_empty() || line.spans.iter().all(|s| s.content.is_empty());
+        let line_is_empty =
+            line.spans.is_empty() || line.spans.iter().all(|s| s.content.is_empty());
         if !line_is_empty || cursor_col != 0 {
             for span in &line.spans {
                 let span_text = span.content.as_ref();
                 let span_chars: Vec<char> = span_text.chars().collect();
                 if char_count + span_chars.len() > cursor_col {
                     let chars_into_span = cursor_col - char_count;
-                    let text_before_cursor: String = span_chars.iter().take(chars_into_span).collect();
+                    let text_before_cursor: String =
+                        span_chars.iter().take(chars_into_span).collect();
                     x_pos += text_before_cursor.width();
                     break;
                 } else {

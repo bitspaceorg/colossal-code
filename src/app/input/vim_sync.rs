@@ -4,7 +4,7 @@ use ratatui::crossterm::event::Event;
 use ratatui::text::Line;
 
 pub use crate::app::input::transcript_lines::{
-    create_plain_content_for_editor, create_rich_content_from_messages, ThinkingContext,
+    ThinkingContext, create_plain_content_for_editor, create_rich_content_from_messages,
 };
 
 /// A struct that combines edtui functionality with rich formatting

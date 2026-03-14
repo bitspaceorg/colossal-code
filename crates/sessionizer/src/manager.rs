@@ -400,7 +400,8 @@ impl SessionManager {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+                    let _ =
+                        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
                 }
             }
 
@@ -534,8 +535,7 @@ impl SessionManager {
         &self,
         session_id: SessionId,
     ) -> Result<String, ColossalErr> {
-        let log_file_path =
-            background_log_path(&session_id);
+        let log_file_path = background_log_path(&session_id);
 
         // Wait for log file to be created (up to 2 seconds) - handles race condition
         // where read_output is called before the background task creates the file

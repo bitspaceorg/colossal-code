@@ -1,14 +1,14 @@
 use ratatui::{
+    Frame,
     style::Style,
     text::Text,
     widgets::{Block, BorderType, Paragraph},
-    Frame,
 };
 
 use crate::app;
 use crate::app::init::startup::tips;
-use crate::app::input::vim_sync::{create_rich_content_from_messages, ThinkingContext};
-use crate::app::{App, MessageType, MESSAGE_BORDER_SET};
+use crate::app::input::vim_sync::{ThinkingContext, create_rich_content_from_messages};
+use crate::app::{App, MESSAGE_BORDER_SET, MessageType};
 
 impl App {
     pub(crate) fn render_navigation_mode_view(

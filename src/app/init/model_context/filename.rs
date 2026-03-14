@@ -1,7 +1,6 @@
 pub fn extract_quantization(filename: &str) -> Option<String> {
     let patterns = [
-        "Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q3_K_M", "Q3_K_S",
-        "Q2_K",
+        "Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q3_K_M", "Q3_K_S", "Q2_K",
     ];
     for pattern in patterns {
         if filename.to_uppercase().contains(pattern) {
@@ -69,7 +68,8 @@ pub fn extract_parameter_count(filename: &str) -> Option<String> {
             let end = start + pattern.len();
 
             let before_ok = start == 0 || !normalized.as_bytes()[start - 1].is_ascii_alphanumeric();
-            let after_ok = end == normalized.len() || !normalized.as_bytes()[end].is_ascii_alphanumeric();
+            let after_ok =
+                end == normalized.len() || !normalized.as_bytes()[end].is_ascii_alphanumeric();
 
             if before_ok && after_ok {
                 return Some(value.to_string());

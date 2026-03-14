@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Instant};
 
-use agent_core::{orchestrator::StepRole, StepStatus};
+use agent_core::{StepStatus, orchestrator::StepRole};
 
 use crate::app::orchestrator::session_manager::{
     OrchestratorEntry, SessionManager, SessionRole, SessionStatus,
@@ -81,7 +81,7 @@ fn step_status_to_session_status(status: StepStatus) -> SessionStatus {
 mod tests {
     use super::update_session_for_step;
     use crate::app::orchestrator::session_manager::{SessionManager, SessionRole, SessionStatus};
-    use agent_core::{orchestrator::StepRole, StepStatus};
+    use agent_core::{StepStatus, orchestrator::StepRole};
     use std::collections::HashMap;
 
     #[test]

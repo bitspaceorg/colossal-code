@@ -13,8 +13,7 @@ use futures::StreamExt;
 use indexmap::IndexMap;
 use mistralrs::{
     ChatCompletionChunkResponse, Delta, Model, RequestBuilder, RequestLike, Response,
-    TextMessageRole, Tool,
-    ToolCallResponse, ToolChoice,
+    TextMessageRole, Tool, ToolCallResponse, ToolChoice,
 };
 use mistralrs_core::MessageContent;
 use once_cell::sync::OnceCell;
@@ -391,11 +390,10 @@ async fn execute_tool_call(
                     drop(has_background); // Release lock
 
                     // Create log file for background output
-                    let log_file_path = colossal_linux_sandbox::manager::background_log_path(
-                        &session_id,
-                    )
-                    .display()
-                    .to_string();
+                    let log_file_path =
+                        colossal_linux_sandbox::manager::background_log_path(&session_id)
+                            .display()
+                            .to_string();
 
                     // Run command in background with output redirected to log file
                     // Strip trailing & if present since we'll add it with redirection
@@ -1096,7 +1094,11 @@ impl Agent {
                     content
                         .lines()
                         .find(|line| line.starts_with("PRETTY_NAME="))
-                        .map(|line| line.trim_start_matches("PRETTY_NAME=").trim_matches('"').to_string())
+                        .map(|line| {
+                            line.trim_start_matches("PRETTY_NAME=")
+                                .trim_matches('"')
+                                .to_string()
+                        })
                 })
                 .unwrap_or_else(|| "Linux".to_string())
         } else {
@@ -1130,18 +1132,19 @@ impl Agent {
 
     fn model_label_from_backend(backend_config: &BackendConfig) -> String {
         match backend_config {
-            BackendConfig::Local { model_path, model_files } => {
-                model_files
-                    .first()
-                    .map(|filename| Self::label_from_filename(filename))
-                    .or_else(|| {
-                        std::path::Path::new(model_path)
-                            .file_stem()
-                            .and_then(OsStr::to_str)
-                            .map(|s| s.to_string())
-                    })
-                    .unwrap_or_else(|| "local model".to_string())
-            }
+            BackendConfig::Local {
+                model_path,
+                model_files,
+            } => model_files
+                .first()
+                .map(|filename| Self::label_from_filename(filename))
+                .or_else(|| {
+                    std::path::Path::new(model_path)
+                        .file_stem()
+                        .and_then(OsStr::to_str)
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| "local model".to_string()),
             BackendConfig::Http { model, .. } => model.clone(),
         }
     }

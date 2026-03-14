@@ -1,7 +1,7 @@
-mod paste;
-mod normal;
-mod navigation;
 mod command;
+mod navigation;
+mod normal;
+mod paste;
 mod session_window;
 
 pub(crate) use command::handle_runtime_key_command;

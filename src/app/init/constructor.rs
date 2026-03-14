@@ -10,7 +10,6 @@ use crate::app::{
 };
 
 impl App {
-
     pub(crate) async fn new() -> Result<Self> {
         let title_lines = Self::create_title_lines();
         let visible_chars = vec![0; title_lines.len()];

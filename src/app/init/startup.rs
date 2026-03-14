@@ -10,8 +10,8 @@ use ratatui::{
 };
 use std::time::{Duration, Instant};
 
-use crate::app::{App, Mode};
 use crate::app::render::tips_format::render_tip_line;
+use crate::app::{App, Mode};
 
 pub(crate) const TIPS: &[&str] = &[
     "Tips for getting started:",

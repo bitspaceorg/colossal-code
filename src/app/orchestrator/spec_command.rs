@@ -44,7 +44,7 @@ pub(crate) fn parse(command: &str) -> Option<ParsedSpecCommand> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, ParsedSpecCommand};
+    use super::{ParsedSpecCommand, parse};
 
     #[test]
     fn parses_split_with_and_without_index() {

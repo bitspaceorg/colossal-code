@@ -2,10 +2,10 @@ use crate::app;
 use crate::app::{App, CompactOptions, MessageState, MessageType, UiMessageEvent};
 use agent_core::AgentMessage;
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout},
     style::{Color, Style},
     text::{Line, Span},
-    Frame,
 };
 use std::time::{Instant, SystemTime};
 

@@ -1,6 +1,6 @@
 use crate::app::{
-    encode_generation_stats_message, AgentConnector, App, MessageState, MessageType,
-    UIMessageMetadata, UiMessageEvent, SUMMARY_BANNER_PREFIX,
+    AgentConnector, App, MessageState, MessageType, SUMMARY_BANNER_PREFIX, UIMessageMetadata,
+    UiMessageEvent, encode_generation_stats_message,
 };
 use agent_core::GenerationStats as AgentGenerationStats;
 use ratatui::text::Line;

@@ -53,9 +53,7 @@ impl App {
     }
 
     pub(crate) fn should_skip_token(token: &str) -> bool {
-        matches!(token, "&&" | "||" | "|" | ";")
-            || token.starts_with('>')
-            || token.starts_with('<')
+        matches!(token, "&&" | "||" | "|" | ";") || token.starts_with('>') || token.starts_with('<')
     }
 
     pub(crate) fn format_tool_arguments(_tool_name: &str, arguments_json: &str) -> String {

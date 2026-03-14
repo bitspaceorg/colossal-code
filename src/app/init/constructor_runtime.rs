@@ -24,7 +24,9 @@ impl App {
                             let agent = agent_clone.clone();
                             let tx = output_tx_clone.clone();
                             tokio::task::spawn_local(async move {
-                                if let Err(e) = agent.process_message(user_message, tx.clone()).await {
+                                if let Err(e) =
+                                    agent.process_message(user_message, tx.clone()).await
+                                {
                                     let _ = tx.send(AgentMessage::Error(format!(
                                         "Agent failed to process request: {}",
                                         e

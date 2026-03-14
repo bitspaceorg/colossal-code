@@ -36,7 +36,7 @@ fn apply_linux_landlock_policy(
     sandbox_policy: &SandboxPolicy,
     cwd: &Path,
 ) -> Result<(), ColossalErr> {
-    use landlock::{Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI};
+    use landlock::{ABI, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr};
 
     match sandbox_policy {
         SandboxPolicy::WorkspaceWrite {
