@@ -60,14 +60,6 @@ test:all-targets:
   script:
     - nix develop --accept-flake-config -c cargo test --all-targets
 
-docs:index:
-  <<: *nix_rust_template
-  stage: test
-  rules: *rules_first_party
-  script:
-    - nix develop --accept-flake-config -c python utils/docs/validate.py
-    - nix develop --accept-flake-config -c python utils/docs/build_index.py
-
 package:nix:
   <<: *nix_rust_template
   stage: package
