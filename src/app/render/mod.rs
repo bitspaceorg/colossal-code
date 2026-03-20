@@ -1,4 +1,5 @@
 pub mod draw;
+pub mod edit_file_diff;
 mod message_helpers;
 pub mod messages;
 pub mod panels;
