@@ -164,7 +164,12 @@ impl SubAgentContext {
         );
     }
 
-    pub fn complete_tool_call(&mut self, tool_name: &str, formatted_result: String) {
+    pub fn complete_tool_call(
+        &mut self,
+        tool_name: &str,
+        formatted_result: String,
+        raw_arguments: Option<String>,
+    ) {
         for message in self.messages.iter_mut().rev() {
             let Some(UiMessageEvent::ToolCallStarted {
                 tool_name: started_tool,
@@ -178,6 +183,7 @@ impl SubAgentContext {
                     tool_name: tool_name.to_string(),
                     args,
                     result: formatted_result,
+                    raw_arguments,
                 }
                 .to_message();
                 break;

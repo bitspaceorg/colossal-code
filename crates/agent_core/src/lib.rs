@@ -3022,14 +3022,22 @@ impl Agent {
                                     }
 
                                     for tool_call in tool_calls {
-                                        let is_new =
-                                            !accumulated_tool_calls.contains_key(&tool_call.index);
+                                        let previous_args = accumulated_tool_calls
+                                            .get(&tool_call.index)
+                                            .map(|existing| existing.function.arguments.clone());
+                                        let is_new = previous_args.is_none();
                                         accumulated_tool_calls
                                             .insert(tool_call.index, tool_call.clone());
-                                        if is_new {
+                                        let args_now = tool_call.function.arguments.clone();
+                                        let args_changed = previous_args
+                                            .as_ref()
+                                            .map(|prev| prev != &args_now)
+                                            .unwrap_or(true);
+
+                                        if is_new || args_changed {
                                             let _ = tx.send(AgentMessage::ToolCallStarted(
                                                 tool_call.function.name.clone(),
-                                                tool_call.function.arguments.clone(),
+                                                args_now,
                                             ));
                                         }
                                     }

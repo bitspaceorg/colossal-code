@@ -56,46 +56,71 @@ impl App {
         matches!(token, "&&" | "||" | "|" | ";") || token.starts_with('>') || token.starts_with('<')
     }
 
-    pub(crate) fn format_tool_arguments(_tool_name: &str, arguments_json: &str) -> String {
-        if let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments_json)
-            && let Some(obj) = args.as_object()
+    pub(crate) fn format_tool_arguments(tool_name: &str, arguments_json: &str) -> String {
+        if tool_name == "edit_file"
+            && let Some(path) = Self::extract_edit_file_inputs(arguments_json).map(|args| args.path)
         {
-            let mut parts = Vec::new();
-            for (k, v) in obj {
-                let val_str = match v {
-                    serde_json::Value::String(s) => {
-                        if s.chars().count() > 100 {
-                            let truncated: String = s.chars().take(97).collect();
-                            format!("\"{}...\"", truncated)
-                        } else {
-                            format!("\"{}\"", s)
-                        }
-                    }
-                    serde_json::Value::Number(n) => n.to_string(),
-                    serde_json::Value::Bool(b) => b.to_string(),
-                    serde_json::Value::Array(arr) => {
-                        let items: Vec<String> = arr
-                            .iter()
-                            .take(3)
-                            .map(|item| match item {
-                                serde_json::Value::String(s) => format!("\"{}\"", s),
-                                _ => format!("{}", item),
-                            })
-                            .collect();
-                        format!("[{}]", items.join(", "))
-                    }
-                    serde_json::Value::Null => "null".to_string(),
-                    serde_json::Value::Object(_) => "{...}".to_string(),
-                };
-                parts.push(format!("{}: {}", k, val_str));
-            }
-            return parts.join(", ");
+            return format!("\"{}\"", path);
         }
 
-        "".to_string()
+        if let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments_json) {
+            if let Some(obj) = args.as_object() {
+                let mut parts = Vec::new();
+                for (k, v) in obj {
+                    let val_str = match v {
+                        serde_json::Value::String(s) => {
+                            if s.chars().count() > 100 {
+                                let truncated: String = s.chars().take(97).collect();
+                                format!("\"{}...\"", truncated)
+                            } else {
+                                format!("\"{}\"", s)
+                            }
+                        }
+                        serde_json::Value::Number(n) => n.to_string(),
+                        serde_json::Value::Bool(b) => b.to_string(),
+                        serde_json::Value::Array(arr) => {
+                            let items: Vec<String> = arr
+                                .iter()
+                                .take(3)
+                                .map(|item| match item {
+                                    serde_json::Value::String(s) => format!("\"{}\"", s),
+                                    _ => format!("{}", item),
+                                })
+                                .collect();
+                            format!("[{}]", items.join(", "))
+                        }
+                        serde_json::Value::Null => "null".to_string(),
+                        serde_json::Value::Object(_) => "{...}".to_string(),
+                    };
+                    parts.push(format!("{}: {}", k, val_str));
+                }
+                return parts.join(", ");
+            }
+
+            let compact = args.to_string();
+            if compact.chars().count() > 140 {
+                let truncated: String = compact.chars().take(137).collect();
+                return format!("{}...", truncated);
+            }
+            return compact;
+        }
+
+        let trimmed = arguments_json.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+        if trimmed.chars().count() > 140 {
+            let truncated: String = trimmed.chars().take(137).collect();
+            return format!("{}...", truncated);
+        }
+        trimmed.to_string()
     }
 
-    pub(crate) fn format_tool_result(tool_name: &str, result_yaml: &str) -> String {
+    pub(crate) fn format_tool_result(
+        tool_name: &str,
+        result_yaml: &str,
+        arguments_json: Option<&str>,
+    ) -> String {
         if let Ok(result) = serde_yaml::from_str::<serde_yaml::Value>(result_yaml)
             && let Some(obj) = result.as_mapping()
             && let Some(status) = obj
@@ -103,7 +128,8 @@ impl App {
                 .and_then(|v| v.as_str())
         {
             if status == "Success" {
-                if let Some(text) = Self::format_success_tool_result(tool_name, obj) {
+                if let Some(text) = Self::format_success_tool_result(tool_name, obj, arguments_json)
+                {
                     return text;
                 }
                 return "Success".to_string();
@@ -114,13 +140,17 @@ impl App {
             if status == "orchestration_requested" {
                 return String::new();
             }
-            return Self::format_failed_tool_result(obj);
+            return Self::format_failed_tool_result(tool_name, obj);
         }
 
         Self::format_tool_result_fallback(result_yaml)
     }
 
-    fn format_success_tool_result(tool_name: &str, obj: &serde_yaml::Mapping) -> Option<String> {
+    fn format_success_tool_result(
+        tool_name: &str,
+        obj: &serde_yaml::Mapping,
+        arguments_json: Option<&str>,
+    ) -> Option<String> {
         match tool_name {
             "read_file" => obj
                 .get(serde_yaml::Value::String("content".to_string()))
@@ -184,9 +214,162 @@ impl App {
                         format!("{} lines of output", lines)
                     }
                 }),
+            "edit_file" => Some(Self::format_edit_file_success(obj, arguments_json)),
             "write_file" => Some("File written successfully".to_string()),
             _ => None,
         }
+    }
+
+    fn format_edit_file_success(obj: &serde_yaml::Mapping, arguments_json: Option<&str>) -> String {
+        let result_path = obj
+            .get(serde_yaml::Value::String("path".to_string()))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let message = obj
+            .get(serde_yaml::Value::String("message".to_string()))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let parsed_args = arguments_json.and_then(Self::extract_edit_file_inputs);
+
+        let path = if !result_path.is_empty() {
+            result_path.to_string()
+        } else {
+            parsed_args
+                .as_ref()
+                .map(|args| args.path.clone())
+                .unwrap_or_else(|| "<path>".to_string())
+        };
+
+        if message.eq_ignore_ascii_case("File created") {
+            let added = parsed_args
+                .as_ref()
+                .map(|args| Self::count_changed_lines(&args.new_string))
+                .unwrap_or(0);
+            return format!("Created {} • +{} -0", path, added);
+        }
+
+        if let Some(args) = parsed_args {
+            if args.old_string == args.new_string {
+                return "No changes".to_string();
+            }
+
+            let added = Self::count_changed_lines(&args.new_string);
+            let removed = Self::count_changed_lines(&args.old_string);
+            if added == 0 && removed == 0 {
+                return "No changes".to_string();
+            }
+
+            let hunk_count = 1;
+            let hunk_label = if hunk_count == 1 { "hunk" } else { "hunks" };
+            return format!(
+                "Updated {} • +{} -{} • {} {}",
+                path, added, removed, hunk_count, hunk_label
+            );
+        }
+
+        format!("Updated {}", path)
+    }
+
+    pub(crate) fn extract_edit_file_inputs(arguments_json: &str) -> Option<EditFileArgs> {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(arguments_json) {
+            return Some(EditFileArgs {
+                path: parsed.get("path")?.as_str()?.to_string(),
+                old_string: parsed
+                    .get("old_string")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                new_string: parsed
+                    .get("new_string")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            });
+        }
+
+        let path =
+            Self::extract_jsonish_field(arguments_json, "path", &["old_string", "new_string"])?;
+        let old_string = Self::extract_jsonish_field(arguments_json, "old_string", &["new_string"])
+            .unwrap_or_default();
+        let new_string =
+            Self::extract_jsonish_field(arguments_json, "new_string", &[]).unwrap_or_default();
+
+        Some(EditFileArgs {
+            path,
+            old_string,
+            new_string,
+        })
+    }
+
+    fn extract_jsonish_field(input: &str, key: &str, next_keys: &[&str]) -> Option<String> {
+        let key_marker = format!("\"{}\"", key);
+        let key_start = input.find(&key_marker)?;
+        let after_key = &input[key_start + key_marker.len()..];
+        let colon_idx = after_key.find(':')?;
+        let mut value = after_key[colon_idx + 1..].trim_start();
+        if !value.starts_with('"') {
+            return None;
+        }
+        value = &value[1..];
+
+        if next_keys.is_empty() {
+            if let Some(stripped) = value.strip_suffix("\"}") {
+                return Some(Self::decode_jsonish_string(stripped));
+            }
+            if let Some(end) = value.rfind('"') {
+                return Some(Self::decode_jsonish_string(&value[..end]));
+            }
+            return Some(Self::decode_jsonish_string(value));
+        }
+
+        for next_key in next_keys {
+            let next_marker = format!("\",\"{}\"", next_key);
+            if let Some(end) = value.find(&next_marker) {
+                return Some(Self::decode_jsonish_string(&value[..end]));
+            }
+            let spaced_next_marker = format!("\", \"{}\"", next_key);
+            if let Some(end) = value.find(&spaced_next_marker) {
+                return Some(Self::decode_jsonish_string(&value[..end]));
+            }
+        }
+
+        value
+            .find('"')
+            .map(|end| Self::decode_jsonish_string(&value[..end]))
+    }
+
+    fn decode_jsonish_string(input: &str) -> String {
+        let mut out = String::new();
+        let mut chars = input.chars();
+
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                match chars.next() {
+                    Some('n') => out.push('\n'),
+                    Some('r') => out.push('\r'),
+                    Some('t') => out.push('\t'),
+                    Some('"') => out.push('"'),
+                    Some('\\') => out.push('\\'),
+                    Some('/') => out.push('/'),
+                    Some(other) => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                    None => out.push('\\'),
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+
+        out
+    }
+
+    fn count_changed_lines(content: &str) -> usize {
+        if content.is_empty() {
+            return 0;
+        }
+        content.lines().count().max(1)
     }
 
     fn format_background_tool_result(obj: &serde_yaml::Mapping) -> String {
@@ -199,7 +382,7 @@ impl App {
         "Started in background".to_string()
     }
 
-    fn format_failed_tool_result(obj: &serde_yaml::Mapping) -> String {
+    fn format_failed_tool_result(tool_name: &str, obj: &serde_yaml::Mapping) -> String {
         if let Some(msg) = obj
             .get(serde_yaml::Value::String("message".to_string()))
             .and_then(|v| v.as_str())
@@ -208,6 +391,9 @@ impl App {
             && msg != "|-"
             && msg != "|"
         {
+            if tool_name == "edit_file" {
+                return format!("Failed: {}", msg);
+            }
             return format!("Error: {}", msg);
         }
         "Failed".to_string()
@@ -358,5 +544,64 @@ impl App {
             }
         }
         "Updated todos".to_string()
+    }
+}
+
+pub(crate) struct EditFileArgs {
+    pub(crate) path: String,
+    pub(crate) old_string: String,
+    pub(crate) new_string: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::App;
+
+    #[test]
+    fn edit_file_arguments_render_as_path_only() {
+        let args = r#"{"path":"src/main.rs","old_string":"a","new_string":"b"}"#;
+        assert_eq!(
+            App::format_tool_arguments("edit_file", args),
+            "\"src/main.rs\""
+        );
+    }
+
+    #[test]
+    fn edit_file_success_formats_created_summary() {
+        let args = r#"{"path":"src/main.rs","old_string":"","new_string":"line1\nline2"}"#;
+        let result = "status: Success\npath: src/main.rs\nmessage: File created\n";
+        assert_eq!(
+            App::format_tool_result("edit_file", result, Some(args)),
+            "Created src/main.rs • +2 -0"
+        );
+    }
+
+    #[test]
+    fn edit_file_success_formats_updated_summary() {
+        let args = r#"{"path":"src/main.rs","old_string":"old\ntext","new_string":"new"}"#;
+        let result = "status: Success\npath: src/main.rs\n";
+        assert_eq!(
+            App::format_tool_result("edit_file", result, Some(args)),
+            "Updated src/main.rs • +1 -2 • 1 hunk"
+        );
+    }
+
+    #[test]
+    fn edit_file_success_formats_created_summary_from_jsonish_arguments() {
+        let args = "{\"path\":\"src/main.rs\",\"old_string\":\"\",\"new_string\":\"line1\nline2\"}";
+        let result = "status: Success\npath: src/main.rs\nmessage: File created\n";
+        assert_eq!(
+            App::format_tool_result("edit_file", result, Some(args)),
+            "Created src/main.rs • +2 -0"
+        );
+    }
+
+    #[test]
+    fn edit_file_failure_formats_failed_prefix() {
+        let result = "status: Failure\npath: src/main.rs\nmessage: file already has content; provide old_string\n";
+        assert_eq!(
+            App::format_tool_result("edit_file", result, None),
+            "Failed: file already has content; provide old_string"
+        );
     }
 }

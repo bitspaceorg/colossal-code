@@ -3,11 +3,125 @@ use ratatui::{
     text::{Line, Span, Text},
 };
 
+use crate::app::render::edit_file_diff::render_edit_file_diff_lines;
 use crate::app::render::tool_format::tool_result_color;
 use crate::app::state::message::AgentConnector;
 use crate::app::{App, MESSAGE_BORDER_SET, SUMMARY_BANNER_PREFIX, UiMessageEvent};
 
 impl App {
+    fn render_edit_file_result_spans(first_line: &str, result_color: Color) -> Vec<Span<'static>> {
+        let mut spans = Vec::new();
+
+        for (idx, segment) in first_line.split(" • ").enumerate() {
+            if idx > 0 {
+                spans.push(Span::styled(" • ", Style::default().fg(Color::DarkGray)));
+            }
+
+            let color = if segment.starts_with('+') {
+                Color::Green
+            } else if segment.starts_with('-') {
+                Color::Red
+            } else {
+                result_color
+            };
+
+            spans.push(Span::styled(
+                segment.to_string(),
+                Style::default().fg(color),
+            ));
+        }
+
+        spans
+    }
+
+    pub(crate) fn approval_note_label(message: &str) -> Option<&'static str> {
+        match message.trim() {
+            "⎿ Approved" => Some("Approved"),
+            "⎿ Denied" => Some("Denied"),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn render_tool_call_completed_with_note(
+        &self,
+        tool_name: &str,
+        args: &str,
+        result: &str,
+        raw_arguments: Option<&str>,
+        max_width: usize,
+        connector: AgentConnector,
+        note: Option<&str>,
+    ) -> Text<'static> {
+        let bullet_color = tool_result_color(result);
+        let result_color = bullet_color;
+
+        let mut lines = Vec::new();
+        lines.push(Line::from(vec![
+            Self::connector_prefix(connector, true),
+            Span::styled("● ", Style::default().fg(bullet_color)),
+            Span::styled(tool_name.to_string(), Style::default().fg(Color::Cyan)),
+            Span::raw("("),
+            Span::styled(args.to_string(), Style::default().fg(Color::Yellow)),
+            Span::raw(")"),
+        ]));
+
+        let mut result_iter = result.lines();
+        if let Some(first_line) = result_iter.next() {
+            let mut spans = vec![
+                Self::connector_prefix(connector, false),
+                Span::styled("  ⎿  ", Style::default().fg(Color::DarkGray)),
+            ];
+            if tool_name == "edit_file" {
+                spans.extend(Self::render_edit_file_result_spans(
+                    first_line,
+                    result_color,
+                ));
+            } else {
+                spans.push(Span::styled(
+                    first_line.to_string(),
+                    Style::default().fg(result_color),
+                ));
+            }
+            if let Some(note_text) = note {
+                spans.push(Span::styled(" • ", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    note_text.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+        for extra_line in result_iter {
+            lines.push(Line::from(vec![
+                Self::connector_prefix(connector, false),
+                Span::styled("     ", Style::default().fg(Color::DarkGray)),
+                Span::styled(extra_line.to_string(), Style::default().fg(result_color)),
+            ]));
+        }
+
+        if tool_name == "edit_file"
+            && let Some(raw_args) = raw_arguments
+            && (result.starts_with("Created ") || result.starts_with("Updated "))
+            && let Some((path, old_string, new_string)) =
+                Self::extract_edit_file_diff_inputs(raw_args)
+        {
+            lines.extend(render_edit_file_diff_lines(
+                &old_string,
+                &new_string,
+                &path,
+                max_width,
+                Self::connector_prefix(connector, false),
+            ));
+        }
+
+        Text::from(lines)
+    }
+
+    fn extract_edit_file_diff_inputs(raw_args: &str) -> Option<(String, String, String)> {
+        let parsed = Self::extract_edit_file_inputs(raw_args)?;
+        Some((parsed.path, parsed.old_string, parsed.new_string))
+    }
+
     pub(crate) fn format_thinking_tree_line(
         summary: String,
         _token_count: usize,
@@ -28,7 +142,7 @@ impl App {
     ) -> Text<'static> {
         if message == "● Interrupted" {
             return Text::from(vec![Line::from(vec![
-                Span::raw(" "),
+                Self::connector_prefix(connector, true),
                 Span::styled("● ", Style::default().fg(Color::Red)),
                 Span::styled("Interrupted", Style::default().fg(Color::Red)),
             ])]);
@@ -102,38 +216,18 @@ impl App {
                 tool_name,
                 args,
                 result,
+                raw_arguments,
             }) = parsed_event.as_ref()
         {
-            let bullet_color = tool_result_color(result);
-            let result_color = bullet_color;
-
-            let mut lines = Vec::new();
-            lines.push(Line::from(vec![
-                Self::connector_prefix(connector, true),
-                Span::styled("● ", Style::default().fg(bullet_color)),
-                Span::styled(tool_name.clone(), Style::default().fg(Color::Cyan)),
-                Span::raw("("),
-                Span::styled(args.clone(), Style::default().fg(Color::Yellow)),
-                Span::raw(")"),
-            ]));
-
-            let mut result_iter = result.lines();
-            if let Some(first_line) = result_iter.next() {
-                lines.push(Line::from(vec![
-                    Self::connector_prefix(connector, false),
-                    Span::styled("  ⎿  ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(first_line.to_string(), Style::default().fg(result_color)),
-                ]));
-            }
-            for extra_line in result_iter {
-                lines.push(Line::from(vec![
-                    Self::connector_prefix(connector, false),
-                    Span::styled("     ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(extra_line.to_string(), Style::default().fg(result_color)),
-                ]));
-            }
-
-            return Text::from(lines);
+            return self.render_tool_call_completed_with_note(
+                tool_name,
+                args,
+                result,
+                raw_arguments.as_deref(),
+                max_width,
+                connector,
+                None,
+            );
         }
 
         if is_agent
@@ -309,6 +403,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::App;
+    use ratatui::style::Color;
 
     #[test]
     fn format_thinking_tree_line_uses_expected_branch_prefix() {
@@ -334,5 +429,28 @@ mod tests {
         let line = rendered.lines[0].to_string();
         assert_eq!(line.chars().count(), 18);
         assert!(line.contains(" Summary "));
+    }
+
+    #[test]
+    fn edit_file_result_colors_additions_and_subtractions() {
+        let spans = App::render_edit_file_result_spans(
+            "Updated /tmp/file • +33 • -30 • 1 hunk",
+            Color::Cyan,
+        );
+
+        assert_eq!(spans[0].content.as_ref(), "Updated /tmp/file");
+        assert_eq!(spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(spans[1].content.as_ref(), " • ");
+        assert_eq!(spans[1].style.fg, Some(Color::DarkGray));
+        assert_eq!(spans[2].content.as_ref(), "+33");
+        assert_eq!(spans[2].style.fg, Some(Color::Green));
+        assert_eq!(spans[3].content.as_ref(), " • ");
+        assert_eq!(spans[3].style.fg, Some(Color::DarkGray));
+        assert_eq!(spans[4].content.as_ref(), "-30");
+        assert_eq!(spans[4].style.fg, Some(Color::Red));
+        assert_eq!(spans[5].content.as_ref(), " • ");
+        assert_eq!(spans[5].style.fg, Some(Color::DarkGray));
+        assert_eq!(spans[6].content.as_ref(), "1 hunk");
+        assert_eq!(spans[6].style.fg, Some(Color::Cyan));
     }
 }

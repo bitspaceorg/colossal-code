@@ -25,9 +25,45 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                             &mut app.generation_stats_rendered,
                             stats,
                         );
+
+                        if !app.agent_state.agent_processing && !app.thinking_indicator_active {
+                            App::ensure_generation_stats_marker_fields(
+                                &mut app.messages,
+                                &mut app.message_types,
+                                &mut app.message_states,
+                                &mut app.message_metadata,
+                                &mut app.message_timestamps,
+                                &app.generation_stats,
+                                &mut app.generation_stats_rendered,
+                            );
+                        }
                     }
                     AgentMessage::Done => {
+                        App::remove_thinking_animation_placeholder(
+                            &mut app.messages,
+                            &mut app.message_types,
+                        );
+                        app.thinking_indicator_active = false;
+                        app.is_thinking = false;
+                        app.thinking_start_time = None;
+                        app.thinking_current_summary = None;
+                        app.thinking_token_count = 0;
+
+                        App::ensure_generation_stats_marker_fields(
+                            &mut app.messages,
+                            &mut app.message_types,
+                            &mut app.message_states,
+                            &mut app.message_metadata,
+                            &mut app.message_timestamps,
+                            &app.generation_stats,
+                            &mut app.generation_stats_rendered,
+                        );
+
                         app.agent_state.agent_interrupted = false;
+                        app.safety_state.show_approval_prompt = false;
+                        app.safety_state.approval_prompt_content.clear();
+                        app.safety_state.show_sandbox_prompt = false;
+                        app.safety_state.sandbox_blocked_path.clear();
                         // Still check for auto-summarization even after interruption
                         // If context is low, we should summarize regardless
                         outcome.check_auto_summarize = true;
@@ -197,9 +233,13 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                         // When a thinking summary was just rendered, force a fresh bubble
                         true
                     } else if let Some(last_msg) = app.messages.last() {
-                        // Already started - check if last message is a special marker
-                        // If last message starts with '[', it's a tool call or error, so create new
+                        // Already started - create a new bubble if the last row is a
+                        // structured UI/event line, not plain assistant prose.
                         last_msg.starts_with('[')
+                            || last_msg.starts_with(" ⎿ ")
+                            || last_msg == "● Interrupted"
+                            || last_msg.starts_with("├── ")
+                            || last_msg.starts_with("└── ")
                     } else {
                         true
                     };
@@ -246,14 +286,35 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
 
                     // Format arguments for display
                     let formatted_args = App::format_tool_arguments(&tool_name, &arguments);
-                    app.messages.push(
-                        UiMessageEvent::ToolCallStarted {
-                            tool_name: tool_name.clone(),
-                            args: formatted_args,
+                    let started_event = UiMessageEvent::ToolCallStarted {
+                        tool_name: tool_name.clone(),
+                        args: formatted_args.clone(),
+                    }
+                    .to_message();
+
+                    let mut updated_existing_started = false;
+                    for msg in app.messages.iter_mut().rev() {
+                        let Some(UiMessageEvent::ToolCallStarted {
+                            tool_name: started_tool,
+                            args: existing_args,
+                        }) = UiMessageEvent::parse(msg)
+                        else {
+                            continue;
+                        };
+
+                        if started_tool == tool_name {
+                            if existing_args != formatted_args {
+                                *msg = started_event.clone();
+                            }
+                            updated_existing_started = true;
+                            break;
                         }
-                        .to_message(),
-                    );
-                    app.message_types.push(MessageType::Agent);
+                    }
+
+                    if !updated_existing_started {
+                        app.messages.push(started_event);
+                        app.message_types.push(MessageType::Agent);
+                    }
                     app.thinking_indicator_active = true;
 
                     if app.current_spec.is_some() {
@@ -405,7 +466,9 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                         &mut app.message_types,
                     );
 
-                    // Find and replace the started message with completed
+                    // Find and replace the started message with completed.
+                    // If no started entry is present (stream ordering/race), append completed.
+                    let mut replaced_started = false;
                     for msg in app.messages.iter_mut().rev() {
                         let Some(UiMessageEvent::ToolCallStarted {
                             tool_name: started_tool,
@@ -415,15 +478,49 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                             continue;
                         };
                         if started_tool == tool_name {
-                            let formatted_result = App::format_tool_result(&tool_name, &result);
+                            let raw_args = app
+                                .last_tool_args
+                                .as_ref()
+                                .filter(|(stored_tool, _)| stored_tool == &tool_name)
+                                .map(|(_, args)| args.as_str());
+                            let formatted_result =
+                                App::format_tool_result(&tool_name, &result, raw_args);
                             *msg = UiMessageEvent::ToolCallCompleted {
                                 tool_name: tool_name.clone(),
                                 args,
                                 result: formatted_result,
+                                raw_arguments: raw_args.map(str::to_string),
                             }
                             .to_message();
+                            replaced_started = true;
                             break;
                         }
+                    }
+
+                    if !replaced_started {
+                        let fallback_args = app
+                            .last_tool_args
+                            .as_ref()
+                            .filter(|(stored_tool, _)| stored_tool == &tool_name)
+                            .map(|(_, args)| App::format_tool_arguments(&tool_name, args))
+                            .unwrap_or_default();
+                        let raw_args = app
+                            .last_tool_args
+                            .as_ref()
+                            .filter(|(stored_tool, _)| stored_tool == &tool_name)
+                            .map(|(_, args)| args.as_str());
+                        let formatted_result =
+                            App::format_tool_result(&tool_name, &result, raw_args);
+                        app.messages.push(
+                            UiMessageEvent::ToolCallCompleted {
+                                tool_name: tool_name.clone(),
+                                args: fallback_args,
+                                result: formatted_result,
+                                raw_arguments: raw_args.map(str::to_string),
+                            }
+                            .to_message(),
+                        );
+                        app.message_types.push(MessageType::Agent);
                     }
 
                     // Re-add thinking animation at the bottom while tool results stream
@@ -462,6 +559,10 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                     app.agent_state.agent_processing = false;
                     app.is_thinking = false;
                     app.thinking_indicator_active = false;
+                    app.safety_state.show_approval_prompt = false;
+                    app.safety_state.approval_prompt_content.clear();
+                    app.safety_state.show_sandbox_prompt = false;
+                    app.safety_state.sandbox_blocked_path.clear();
                     app.thinking_start_time = None;
                     app.thinking_token_count = 0;
                     app.agent_state.agent_response_started = false;
@@ -473,6 +574,18 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                         &mut app.generation_stats_rendered,
                         stats,
                     );
+
+                    if !app.agent_state.agent_processing && !app.thinking_indicator_active {
+                        App::ensure_generation_stats_marker_fields(
+                            &mut app.messages,
+                            &mut app.message_types,
+                            &mut app.message_states,
+                            &mut app.message_metadata,
+                            &mut app.message_timestamps,
+                            &app.generation_stats,
+                            &mut app.generation_stats_rendered,
+                        );
+                    }
                 }
                 AgentMessage::BackgroundTaskStarted(session_id, command, log_file) => {
                     // Add background task to the list with current time as start time
@@ -520,6 +633,10 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                     app.agent_state.agent_processing = false;
                     app.is_thinking = false;
                     app.thinking_indicator_active = false;
+                    app.safety_state.show_approval_prompt = false;
+                    app.safety_state.approval_prompt_content.clear();
+                    app.safety_state.show_sandbox_prompt = false;
+                    app.safety_state.sandbox_blocked_path.clear();
                     app.thinking_start_time = None;
                     app.thinking_token_count = 0;
                     app.streaming_completion_tokens = 0; // Reset for next turn

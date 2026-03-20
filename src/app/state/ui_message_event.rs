@@ -17,10 +17,25 @@ pub(crate) enum UiMessageEvent {
         tool_name: String,
         args: String,
         result: String,
+        raw_arguments: Option<String>,
     },
 }
 
 impl UiMessageEvent {
+    fn escape_field(value: &str) -> String {
+        value
+            .replace('\\', "\\\\")
+            .replace('|', "\\u{007C}")
+            .replace(']', "\\u{005D}")
+    }
+
+    fn unescape_field(value: &str) -> String {
+        value
+            .replace("\\u{005D}", "]")
+            .replace("\\u{007C}", "|")
+            .replace("\\\\", "\\")
+    }
+
     pub(crate) fn parse(message: &str) -> Option<Self> {
         if message == "[THINKING_ANIMATION]" {
             return Some(Self::ThinkingAnimation);
@@ -62,7 +77,7 @@ impl UiMessageEvent {
                     completion_tokens,
                     prompt_tokens,
                     time_to_first_token_sec,
-                    stop_reason: reason.replace("\\u{007C}", "|"),
+                    stop_reason: Self::unescape_field(reason),
                 });
             }
             return None;
@@ -72,13 +87,14 @@ impl UiMessageEvent {
             let parts: Vec<&str> = message
                 .trim_start_matches("[TOOL_CALL_COMPLETED:")
                 .trim_end_matches(']')
-                .splitn(3, '|')
+                .splitn(4, '|')
                 .collect();
-            if parts.len() == 3 {
+            if parts.len() >= 3 {
                 return Some(Self::ToolCallCompleted {
-                    tool_name: parts[0].to_string(),
-                    args: parts[1].to_string(),
-                    result: parts[2].to_string(),
+                    tool_name: Self::unescape_field(parts[0]),
+                    args: Self::unescape_field(parts[1]),
+                    result: Self::unescape_field(parts[2]),
+                    raw_arguments: parts.get(3).map(|raw| Self::unescape_field(raw)),
                 });
             }
             return None;
@@ -92,8 +108,8 @@ impl UiMessageEvent {
                 .collect();
             if parts.len() == 2 {
                 return Some(Self::ToolCallStarted {
-                    tool_name: parts[0].to_string(),
-                    args: parts[1].to_string(),
+                    tool_name: Self::unescape_field(parts[0]),
+                    args: Self::unescape_field(parts[1]),
                 });
             }
         }
@@ -117,16 +133,27 @@ impl UiMessageEvent {
                 completion_tokens,
                 prompt_tokens,
                 time_to_first_token_sec,
-                stop_reason.replace('|', "\\u{007C}")
+                Self::escape_field(stop_reason)
             ),
             Self::ToolCallStarted { tool_name, args } => {
-                format!("[TOOL_CALL_STARTED:{}|{}]", tool_name, args)
+                format!(
+                    "[TOOL_CALL_STARTED:{}|{}]",
+                    Self::escape_field(tool_name),
+                    Self::escape_field(args)
+                )
             }
             Self::ToolCallCompleted {
                 tool_name,
                 args,
                 result,
-            } => format!("[TOOL_CALL_COMPLETED:{}|{}|{}]", tool_name, args, result),
+                raw_arguments,
+            } => format!(
+                "[TOOL_CALL_COMPLETED:{}|{}|{}|{}]",
+                Self::escape_field(tool_name),
+                Self::escape_field(args),
+                Self::escape_field(result),
+                Self::escape_field(raw_arguments.as_deref().unwrap_or(""))
+            ),
         }
     }
 }
@@ -176,7 +203,26 @@ mod tests {
                 tool_name,
                 args,
                 result,
-            }) if tool_name == "bash" && args == "ls -la" && result == "ok"
+                raw_arguments,
+            }) if tool_name == "bash"
+                && args == "ls -la"
+                && result == "ok"
+                && raw_arguments.is_none()
+        ));
+    }
+
+    #[test]
+    fn roundtrips_tool_call_fields_with_delimiters() {
+        let started = UiMessageEvent::ToolCallStarted {
+            tool_name: "bash|runner]".to_string(),
+            args: "path: /tmp/a|b]\\c".to_string(),
+        }
+        .to_message();
+
+        assert!(matches!(
+            UiMessageEvent::parse(&started),
+            Some(UiMessageEvent::ToolCallStarted { tool_name, args })
+                if tool_name == "bash|runner]" && args == "path: /tmp/a|b]\\c"
         ));
     }
 
