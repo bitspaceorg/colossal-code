@@ -139,6 +139,7 @@ fn workspace_root() -> Result<PathBuf, String> {
 
 fn checked_path(path: &Path, must_exist: bool) -> Result<PathBuf, String> {
     let root = workspace_root()?;
+    let is_absolute_input = path.is_absolute();
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -161,7 +162,9 @@ fn checked_path(path: &Path, must_exist: bool) -> Result<PathBuf, String> {
         absolute
     };
 
-    if resolved.starts_with(&root) {
+    // Absolute paths are allowed here; sandbox policy enforces read/write boundaries.
+    // Relative paths remain confined to the workspace root.
+    if is_absolute_input || resolved.starts_with(&root) {
         Ok(resolved)
     } else {
         Err(format!(
@@ -590,9 +593,20 @@ fn edit_file(target_file: &Path, old_string: &str, new_string: &str) -> EditResu
             }
         };
 
-        // If old_string is empty, append new_string to the file
+        // If old_string is empty, only allow writing when file is empty.
         let new_content = if old_string.is_empty() {
-            format!("{}{}", content, new_string)
+            if content.trim().is_empty() {
+                new_string.to_string()
+            } else {
+                return EditResult {
+                    path: target_file.display().to_string(),
+                    status: EditStatus::Failure,
+                    message: Some(
+                        "file already has content; provide old_string to replace specific text"
+                            .to_string(),
+                    ),
+                };
+            }
         } else {
             let occurrences = content.match_indices(old_string).count();
             if occurrences == 0 {

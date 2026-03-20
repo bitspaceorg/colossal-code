@@ -114,7 +114,7 @@ You have tools at your disposal to solve the coding task. Follow these rules reg
 When making code changes, you have the edit_file tool available for direct file modifications. This tool can:
 - Find and replace text in existing files (provide old_string and new_string)
 - Create new files (use empty old_string with the full file content in new_string)
-- Append to existing files (use empty old_string with content to append in new_string)
+- Initialize empty existing files (use empty old_string with full file content in new_string)
 
 For simple edits, prefer edit_file over shell commands. For complex multi-line changes, you can use exec_command with shell utilities (sed, echo >>, etc.) or suggest the changes to the USER.
 Use edit_file or shell commands at most once per turn for modifications.

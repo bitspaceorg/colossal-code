@@ -289,7 +289,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
             tp: ToolType::Function,
             function: Function {
                 name: "edit_file".to_string(),
-                description: Some("Edit or create a file. If the file exists, finds old_string and replaces it with new_string. If the file doesn't exist and old_string is empty, creates a new file with new_string as content. If old_string is empty for an existing file, appends new_string to the file.".to_string()),
+                description: Some("Edit or create a file. If the file exists, finds old_string and replaces it with new_string. If the file doesn't exist and old_string is empty, creates a new file with new_string as content. If old_string is empty for an existing file, it succeeds only when the file is empty; otherwise it fails and asks for a specific old_string.".to_string()),
                 parameters: Some({
                     let mut params = HashMap::new();
                     params.insert("type".to_string(), json!("object"));
@@ -302,7 +302,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                             },
                             "old_string": {
                                 "type": "string",
-                                "description": "The text to find in the file. Use empty string to create a new file or append to existing file."
+                                "description": "The text to find in the file. Use empty string only for new files or when an existing file is empty."
                             },
                             "new_string": {
                                 "type": "string",
