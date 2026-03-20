@@ -26,7 +26,7 @@ impl App {
         has_approval_prompt: bool,
         has_sandbox_prompt: bool,
         has_survey_or_thanks: bool,
-        has_infobar: bool,
+        _has_infobar: bool,
         has_autocomplete: bool,
         has_background_tasks: bool,
         has_help_panel: bool,
@@ -52,7 +52,8 @@ impl App {
         let approval_prompt_area_idx = next_idx_if(has_approval_prompt, &mut idx);
         let sandbox_prompt_area_idx = next_idx_if(has_sandbox_prompt, &mut idx);
         let survey_area_idx = next_idx_if(has_survey_or_thanks, &mut idx);
-        let infobar_area_idx = next_idx_if(has_infobar, &mut idx);
+        let infobar_area_idx = Some(idx);
+        idx += 1;
         let input_area_idx = idx;
         idx += 1;
         let autocomplete_area_idx = next_idx_if(has_autocomplete, &mut idx);
@@ -98,13 +99,13 @@ mod tests {
         );
 
         assert_eq!(indices.messages_area_idx, 2);
-        assert_eq!(indices.input_area_idx, 3);
-        assert_eq!(indices.min_areas, 5);
+        assert_eq!(indices.infobar_area_idx, Some(3));
+        assert_eq!(indices.input_area_idx, 4);
+        assert_eq!(indices.min_areas, 6);
         assert_eq!(indices.queue_choice_area_idx, None);
         assert_eq!(indices.approval_prompt_area_idx, None);
         assert_eq!(indices.sandbox_prompt_area_idx, None);
         assert_eq!(indices.survey_area_idx, None);
-        assert_eq!(indices.infobar_area_idx, None);
         assert_eq!(indices.autocomplete_area_idx, None);
         assert_eq!(indices.background_tasks_area_idx, None);
         assert_eq!(indices.help_area_idx, None);
@@ -146,8 +147,8 @@ mod tests {
             approval_prompt_area_idx: Some(4),
             sandbox_prompt_area_idx: None,
             survey_area_idx: None,
-            infobar_area_idx: None,
-            input_area_idx: 5,
+            infobar_area_idx: Some(5),
+            input_area_idx: 6,
             autocomplete_area_idx: None,
             background_tasks_area_idx: None,
             help_area_idx: None,
@@ -156,7 +157,7 @@ mod tests {
             rewind_area_idx: None,
             todos_area_idx: None,
             model_selection_area_idx: None,
-            min_areas: 7,
+            min_areas: 8,
         };
 
         let debug = format!("{:?}", indices);

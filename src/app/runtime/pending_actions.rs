@@ -144,8 +144,6 @@ impl App {
                         self.last_known_context_tokens =
                             stats.prompt_tokens.saturating_add(stats.completion_tokens);
                     }
-                    // Regular message - clear generation stats from previous message when new message is added to UI
-                    self.clear_generation_stats();
                     // Reset streaming tokens for new turn
                     self.streaming_completion_tokens = 0;
 

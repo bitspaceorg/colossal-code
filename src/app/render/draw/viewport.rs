@@ -30,23 +30,7 @@ impl App {
             let overlay_types = vec![MessageType::Agent; overlay_messages.len()];
             (overlay_messages, overlay_types)
         } else {
-            let mut messages_with_stats = messages.to_vec();
-            let mut message_types_with_stats = message_types_vec.clone();
-            if let Some(stats) = self.get_generation_stats() {
-                if stats.stop_reason != "tool_calls" {
-                    let stats_text = format!(
-                        "{:.2} tok/sec • {} completion • {} prompt • {:.2}s to first token • Stop reason: {}",
-                        stats.avg_completion_tok_per_sec,
-                        self.format_compact_number(stats.completion_tokens),
-                        self.format_compact_number(stats.prompt_tokens),
-                        stats.time_to_first_token_sec,
-                        stats.stop_reason.as_str()
-                    );
-                    messages_with_stats.push(stats_text);
-                    message_types_with_stats.push(MessageType::Agent);
-                }
-            }
-            (messages_with_stats, message_types_with_stats)
+            (messages.to_vec(), message_types_vec.clone())
         };
 
         let thinking_context = ThinkingContext {

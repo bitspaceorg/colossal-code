@@ -106,6 +106,8 @@ fn build_transcript_blocks(
         ));
     }
 
+    let mut deferred_thinking_block: Option<TranscriptBlock> = None;
+
     for (i, message) in messages.iter().enumerate() {
         let is_agent = matches!(message_types.get(i), Some(MessageType::Agent));
 
@@ -136,7 +138,7 @@ fn build_transcript_blocks(
                         text = format!("{} [Esc to interrupt | {}{}]", text, time_str, token_info);
                     }
 
-                    blocks.push(TranscriptBlock::single(
+                    deferred_thinking_block = Some(TranscriptBlock::single(
                         Line::from(vec![Span::raw(format!(" {}", text))]),
                         format!(" {}", text),
                     ));
@@ -146,6 +148,7 @@ fn build_transcript_blocks(
                     tool_name,
                     args,
                     result,
+                    raw_arguments: _,
                 } => {
                     blocks.push(TranscriptBlock {
                         rich: vec![
@@ -319,6 +322,10 @@ fn build_transcript_blocks(
             Line::from(vec![Span::raw(format!(" {}", message))]),
             format!(" {}", message),
         ));
+    }
+
+    if let Some(thinking_block) = deferred_thinking_block {
+        blocks.push(thinking_block);
     }
 
     blocks

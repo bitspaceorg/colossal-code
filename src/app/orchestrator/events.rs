@@ -222,8 +222,9 @@ impl App {
                 is_error: _,
             } => {
                 if let Some(result) = result {
-                    let formatted_result = Self::format_tool_result(&tool_name, &result);
-                    context.complete_tool_call(&tool_name, formatted_result);
+                    let formatted_result =
+                        Self::format_tool_result(&tool_name, &result, Some(&arguments));
+                    context.complete_tool_call(&tool_name, formatted_result, Some(arguments));
                 } else {
                     let formatted_args = Self::format_tool_arguments(&tool_name, &arguments);
                     context.add_tool_call_started(&tool_name, formatted_args);

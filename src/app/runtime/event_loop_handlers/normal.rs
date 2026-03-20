@@ -3,7 +3,7 @@ use std::time::Instant;
 use agent_core::AgentMessage;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{App, AppSnapshot, MessageState, MessageType, Mode, Phase, UiMessageEvent};
+use crate::app::{App, AppSnapshot, MessageState, MessageType, Mode, Phase};
 
 pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
     if app.dispatch_panel_key_from_runtime(key) {
@@ -23,23 +23,15 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
     if key.code == KeyCode::Esc
         && (app.agent_state.agent_processing || app.thinking_indicator_active)
     {
+        let removed_thinking =
+            App::remove_thinking_animation_placeholder(&mut app.messages, &mut app.message_types);
+        if removed_thinking && !app.message_states.is_empty() {
+            app.message_states.pop();
+        }
+
         if let Some((current_summary, token_count, chunk_count)) =
             app.thinking_current_summary.take()
         {
-            if let Some(last_msg) = app.messages.last()
-                && matches!(
-                    UiMessageEvent::parse(last_msg),
-                    Some(UiMessageEvent::ThinkingAnimation)
-                )
-            {
-                app.messages.pop();
-                app.message_types.pop();
-                if !app.message_states.is_empty() {
-                    app.message_states.pop();
-                }
-                app.thinking_indicator_active = false;
-            }
-
             app.messages.push(App::format_thinking_tree_line(
                 current_summary,
                 token_count,
@@ -48,18 +40,6 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
             ));
             app.message_types.push(MessageType::Agent);
             app.message_states.push(MessageState::Sent);
-        } else if let Some(last_msg) = app.messages.last()
-            && matches!(
-                UiMessageEvent::parse(last_msg),
-                Some(UiMessageEvent::ThinkingAnimation)
-            )
-        {
-            app.messages.pop();
-            app.message_types.pop();
-            if !app.message_states.is_empty() {
-                app.message_states.pop();
-            }
-            app.thinking_indicator_active = false;
         }
 
         app.agent_state.agent_interrupted = true;
@@ -82,7 +62,10 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
         app.message_types.push(MessageType::Agent);
         app.message_states.push(MessageState::Sent);
 
-        app.ensure_generation_stats_marker();
+        app.safety_state.show_approval_prompt = false;
+        app.safety_state.approval_prompt_content.clear();
+        app.safety_state.show_sandbox_prompt = false;
+        app.safety_state.sandbox_blocked_path.clear();
 
         app.is_thinking = false;
         app.thinking_indicator_active = false;
@@ -154,7 +137,18 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    if app.vim_mode_enabled && app.phase == Phase::Input && !app.show_background_tasks {
+    let prompt_active = app.show_queue_choice
+        || app.safety_state.show_approval_prompt
+        || app.safety_state.show_sandbox_prompt;
+
+    let vim_insert_mode = app.vim_mode_enabled
+        && matches!(app.vim_input_editor.get_mode(), edtui::EditorMode::Insert);
+
+    if app.vim_mode_enabled
+        && app.phase == Phase::Input
+        && !app.show_background_tasks
+        && (!prompt_active || !vim_insert_mode)
+    {
         let handled = match key.code {
             KeyCode::Char(c) => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
@@ -304,6 +298,66 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char(to_insert) if app.phase == Phase::Input && !app.show_background_tasks => {
+            if app.safety_state.show_approval_prompt {
+                if app.vim_mode_enabled
+                    && !matches!(app.vim_input_editor.get_mode(), edtui::EditorMode::Insert)
+                {
+                    app.vim_input_editor.handle_event(Event::Key(key));
+                    app.sync_vim_input();
+                    return;
+                }
+
+                if matches!(to_insert, '0' | '1' | '2') {
+                    app.input = to_insert.to_string();
+                    app.character_index = app.input.chars().count();
+                    app.input_modified = true;
+                    if app.vim_mode_enabled {
+                        app.sync_input_to_vim();
+                    }
+                }
+                return;
+            }
+
+            if app.safety_state.show_sandbox_prompt {
+                if app.vim_mode_enabled
+                    && !matches!(app.vim_input_editor.get_mode(), edtui::EditorMode::Insert)
+                {
+                    app.vim_input_editor.handle_event(Event::Key(key));
+                    app.sync_vim_input();
+                    return;
+                }
+
+                if matches!(to_insert, '0' | '1' | '2') {
+                    app.input = to_insert.to_string();
+                    app.character_index = app.input.chars().count();
+                    app.input_modified = true;
+                    if app.vim_mode_enabled {
+                        app.sync_input_to_vim();
+                    }
+                }
+                return;
+            }
+
+            if app.show_queue_choice {
+                if app.vim_mode_enabled
+                    && !matches!(app.vim_input_editor.get_mode(), edtui::EditorMode::Insert)
+                {
+                    app.vim_input_editor.handle_event(Event::Key(key));
+                    app.sync_vim_input();
+                    return;
+                }
+
+                if matches!(to_insert, '1' | '2' | '3') {
+                    app.input = to_insert.to_string();
+                    app.character_index = app.input.chars().count();
+                    app.input_modified = true;
+                    if app.vim_mode_enabled {
+                        app.sync_input_to_vim();
+                    }
+                }
+                return;
+            }
+
             app.handle_input_char_key(key, to_insert);
         }
         KeyCode::Backspace if app.phase == Phase::Input && !app.show_background_tasks => {

@@ -42,8 +42,20 @@ impl App {
         rendered_flag: &mut bool,
         stats: AgentGenerationStats,
     ) {
+        let same_as_existing = slot.as_ref().is_some_and(|existing| {
+            (existing.avg_completion_tok_per_sec - stats.avg_completion_tok_per_sec).abs()
+                < f32::EPSILON
+                && existing.completion_tokens == stats.completion_tokens
+                && existing.prompt_tokens == stats.prompt_tokens
+                && (existing.time_to_first_token_sec - stats.time_to_first_token_sec).abs()
+                    < f32::EPSILON
+                && existing.stop_reason == stats.stop_reason
+        });
+
         *slot = Some(stats);
-        *rendered_flag = false;
+        if !same_as_existing {
+            *rendered_flag = false;
+        }
     }
 
     pub(crate) fn clear_generation_stats_fields(

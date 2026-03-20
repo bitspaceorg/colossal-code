@@ -153,18 +153,44 @@ impl App {
                         if let Some(tx) = &self.agent_tx {
                             let _ = tx.send(AgentMessage::ApprovalResponse(true));
                         }
+
+                        let had_thinking_placeholder = App::remove_thinking_animation_placeholder(
+                            &mut self.messages,
+                            &mut self.message_types,
+                        );
                         self.messages.push(" ⎿ Approved".to_string());
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
+
+                        if had_thinking_placeholder {
+                            App::ensure_thinking_animation_placeholder(
+                                &mut self.messages,
+                                &mut self.message_types,
+                                self.thinking_indicator_active,
+                            );
+                        }
                     }
                     "1" => {
                         // Deny
                         if let Some(tx) = &self.agent_tx {
                             let _ = tx.send(AgentMessage::ApprovalResponse(false));
                         }
+
+                        let had_thinking_placeholder = App::remove_thinking_animation_placeholder(
+                            &mut self.messages,
+                            &mut self.message_types,
+                        );
                         self.messages.push(" ⎿ Denied".to_string());
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
+
+                        if had_thinking_placeholder {
+                            App::ensure_thinking_animation_placeholder(
+                                &mut self.messages,
+                                &mut self.message_types,
+                                self.thinking_indicator_active,
+                            );
+                        }
                     }
                     "2" => {
                         // Interrupt - deny and interrupt
@@ -172,11 +198,16 @@ impl App {
                             let _ = tx.send(AgentMessage::ApprovalResponse(false));
                             let _ = tx.send(AgentMessage::Cancel);
                         }
+                        App::remove_thinking_animation_placeholder(
+                            &mut self.messages,
+                            &mut self.message_types,
+                        );
+                        self.thinking_indicator_active = false;
+                        self.is_thinking = false;
                         self.messages
                             .push(" ⎿ Interrupted. What should Nite do instead?".to_string());
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
-                        self.ensure_generation_stats_marker();
                     }
                     _ => {
                         // Invalid choice, keep the popup
@@ -211,6 +242,11 @@ impl App {
                             }
                         });
 
+                        let had_thinking_placeholder = App::remove_thinking_animation_placeholder(
+                            &mut self.messages,
+                            &mut self.message_types,
+                        );
+
                         self.messages
                             .push(format!(" ⎿ Added '{}' to writable roots", path_display));
                         self.message_types.push(MessageType::Agent);
@@ -220,24 +256,49 @@ impl App {
                         );
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
+
+                        if had_thinking_placeholder {
+                            App::ensure_thinking_animation_placeholder(
+                                &mut self.messages,
+                                &mut self.message_types,
+                                self.thinking_indicator_active,
+                            );
+                        }
                     }
                     "1" => {
                         // Deny - just close the prompt
+                        let had_thinking_placeholder = App::remove_thinking_animation_placeholder(
+                            &mut self.messages,
+                            &mut self.message_types,
+                        );
                         self.messages.push(" ⎿ Sandbox access denied".to_string());
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
+
+                        if had_thinking_placeholder {
+                            App::ensure_thinking_animation_placeholder(
+                                &mut self.messages,
+                                &mut self.message_types,
+                                self.thinking_indicator_active,
+                            );
+                        }
                     }
                     "2" => {
                         // Interrupt - let user tell Nite what to do instead
                         if let Some(tx) = &self.agent_tx {
                             let _ = tx.send(AgentMessage::Cancel);
                         }
+                        App::remove_thinking_animation_placeholder(
+                            &mut self.messages,
+                            &mut self.message_types,
+                        );
+                        self.thinking_indicator_active = false;
+                        self.is_thinking = false;
                         // Agent will be interrupted, user can type their message
                         self.messages
                             .push(" ⎿ Interrupted. What should Nite do instead?".to_string());
                         self.message_types.push(MessageType::Agent);
                         self.message_states.push(MessageState::Sent);
-                        self.ensure_generation_stats_marker();
                     }
                     _ => {
                         // Invalid choice, keep the popup
@@ -305,8 +366,6 @@ impl App {
                     self.last_known_context_tokens =
                         stats.prompt_tokens.saturating_add(stats.completion_tokens);
                 }
-                // Clear generation stats from previous message when new message is added to UI
-                self.clear_generation_stats();
                 // Reset streaming tokens for new turn
                 self.streaming_completion_tokens = 0;
 

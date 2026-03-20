@@ -294,8 +294,6 @@ impl App {
                 let rewind_height = if self.show_rewind { 25 } else { 0 };
                 let todos_height = if self.show_todos { 15 } else { 0 };
                 let model_selection_height = if self.show_model_selection { 20 } else { 0 };
-                let has_infobar = self.ctrl_c_pressed.is_some() || !self.queued_messages.is_empty();
-
                 let mut constraints_vec = vec![
                     Constraint::Length(self.title_lines.len() as u16),
                     Constraint::Length(1),
@@ -315,9 +313,7 @@ impl App {
                 if survey_height > 0 {
                     constraints_vec.push(Constraint::Length(survey_height));
                 }
-                if has_infobar {
-                    constraints_vec.push(Constraint::Length(1));
-                }
+                constraints_vec.push(Constraint::Length(1));
 
                 constraints_vec.push(Constraint::Length(input_height));
 

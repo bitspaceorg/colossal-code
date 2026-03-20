@@ -5,7 +5,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, MessageType};
+use crate::app::{App, MessageType, UiMessageEvent};
 
 fn into_owned_line(line: Line<'_>) -> Line<'static> {
     let spans = line
@@ -36,32 +36,43 @@ impl App {
             }
         }
         let messages = self.get_messages();
-        for (idx, message) in messages.iter().enumerate() {
+        let mut idx = 0;
+        while idx < messages.len() {
+            let message = &messages[idx];
             let is_agent = matches!(message_types_vec.get(idx), Some(MessageType::Agent));
             let connector = self.agent_connector_for_index(message_types_vec, idx);
+
+            if is_agent
+                && let Some(UiMessageEvent::ToolCallCompleted {
+                    tool_name,
+                    args,
+                    result,
+                    raw_arguments,
+                }) = UiMessageEvent::parse(message)
+                && let Some(next_message) = messages.get(idx + 1)
+                && let Some(note) = App::approval_note_label(next_message)
+            {
+                message_lines.extend(
+                    self.render_tool_call_completed_with_note(
+                        &tool_name,
+                        &args,
+                        &result,
+                        raw_arguments.as_deref(),
+                        wrap_width,
+                        connector,
+                        Some(note),
+                    )
+                    .lines,
+                );
+                idx += 2;
+                continue;
+            }
+
             message_lines.extend(
                 self.render_message_with_max_width(message, wrap_width, None, is_agent, connector)
                     .lines,
             );
-        }
-
-        if let Some(stats) = self.get_generation_stats()
-            && stats.stop_reason != "tool_calls"
-        {
-            let stats_text = format!(
-                " {:.2} tok/sec • {} completion • {} prompt • {:.2}s to first token • Stop reason: {}",
-                stats.avg_completion_tok_per_sec,
-                self.format_compact_number(stats.completion_tokens),
-                self.format_compact_number(stats.prompt_tokens),
-                stats.time_to_first_token_sec,
-                stats.stop_reason.as_str()
-            );
-            message_lines.push(Line::from(Span::styled(
-                stats_text,
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(ratatui::style::Modifier::ITALIC),
-            )));
+            idx += 1;
         }
 
         if self.show_summary_history {

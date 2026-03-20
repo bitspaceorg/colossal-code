@@ -104,13 +104,13 @@ fn assistant_mode_to_display_matches_expected_labels() {
 fn format_tool_result_parses_success_and_failure_yaml_fields() {
     let read_result = "status: Success\ncontent: |-\n  first\n  second\n";
     assert_eq!(
-        App::format_tool_result("read_file", read_result),
+        App::format_tool_result("read_file", read_result, None),
         "Read 2 lines (12 chars)"
     );
 
     let failure_result = "status: Failure\nmessage: permission denied\n";
     assert_eq!(
-        App::format_tool_result("write_file", failure_result),
+        App::format_tool_result("write_file", failure_result, None),
         "Error: permission denied"
     );
 }
