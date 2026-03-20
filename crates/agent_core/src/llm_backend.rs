@@ -1017,7 +1017,7 @@ fn send_final_done(
     final_finish_reason: &str,
     fallback_model: &str,
     metrics: Option<StreamMetrics>,
-) {
+) -> bool {
     let finish_reason = if final_finish_reason.is_empty() {
         "stop".to_string()
     } else {
@@ -1068,7 +1068,7 @@ fn send_final_done(
         usage,
     };
 
-    let _ = tx.send(Response::Done(done));
+    tx.send(Response::Done(done)).is_ok()
 }
 
 async fn process_sse_stream(
@@ -1092,10 +1092,20 @@ async fn process_sse_stream(
     let mut estimated_tokens: usize = 0;
 
     while let Some(item) = body_stream.next().await {
+        if tx.is_closed() {
+            http_debug_log("SSE downstream closed; aborting stream read");
+            return Ok(());
+        }
+
         let chunk = item?;
         buffer.extend_from_slice(&chunk);
 
         while let Some(event_bytes) = extract_sse_event(&mut buffer) {
+            if tx.is_closed() {
+                http_debug_log("SSE downstream closed during event processing; aborting");
+                return Ok(());
+            }
+
             if event_bytes.is_empty() {
                 continue;
             }
@@ -1274,7 +1284,10 @@ async fn process_sse_stream(
                     usage: None,
                 };
 
-                let _ = tx.send(Response::Chunk(chunk_response));
+                if tx.send(Response::Chunk(chunk_response)).is_err() {
+                    http_debug_log("SSE downstream closed while sending chunk; aborting");
+                    return Ok(());
+                }
             }
         }
     }
@@ -1285,7 +1298,7 @@ async fn process_sse_stream(
         estimated_tokens,
     ));
 
-    send_final_done(
+    let _ = send_final_done(
         &tx,
         response_id,
         response_model,
