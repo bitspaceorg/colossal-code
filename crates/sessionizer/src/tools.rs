@@ -17,6 +17,10 @@ pub async fn exec_command(
     _approved_commands: &HashSet<Vec<String>>,
 ) -> Result<serde_json::Value, ColossalErr> {
     let cwd = std::env::current_dir().map_err(|e| ColossalErr::Io(e))?;
+    let default_timeout_ms = std::env::var("NITE_EXEC_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(120_000);
 
     // Use the PTY-based command execution from the manager
     let params = ExecCommandParams {
@@ -24,7 +28,11 @@ pub async fn exec_command(
         shell: shell.clone(),
         cwd,
         env: Default::default(),
-        timeout_ms: if is_background { None } else { Some(600_000) },
+        timeout_ms: if is_background {
+            None
+        } else {
+            Some(default_timeout_ms)
+        },
         max_output_tokens: 1000,
         sandbox_policy: sandbox_policy.clone(),
         is_background,
@@ -75,7 +83,11 @@ pub async fn execute_tools_with_sandbox(
 
             let mut cmd = Command::new(tools_path);
             cmd.args(args)
-                .current_dir(cwd_clone)
+                .current_dir(&cwd_clone)
+                .env(
+                    "NITE_WORKSPACE_ROOT",
+                    cwd_clone.to_string_lossy().to_string(),
+                )
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .stdin(Stdio::piped());
@@ -105,6 +117,7 @@ pub async fn execute_tools_with_sandbox(
         let output = Command::new(crate::seatbelt::MACOS_PATH_TO_SEATBELT_EXECUTABLE)
             .args(seatbelt_args)
             .current_dir(cwd)
+            .env("NITE_WORKSPACE_ROOT", cwd.to_string_lossy().to_string())
             .output()
             .await
             .map_err(|e| ColossalErr::Io(e))?;
@@ -116,7 +129,9 @@ pub async fn execute_tools_with_sandbox(
     {
         // For other platforms, execute directly without additional sandboxing
         let mut cmd = Command::new(tools_path);
-        cmd.args(args).current_dir(cwd);
+        cmd.args(args)
+            .current_dir(cwd.clone())
+            .env("NITE_WORKSPACE_ROOT", cwd.to_string_lossy().to_string());
 
         let output = cmd.output().await.map_err(|e| ColossalErr::Io(e))?;
 
@@ -184,6 +199,10 @@ fn create_seatbelt_args_for_policy(sandbox_policy: &SandboxPolicy, cwd: &Path) -
 }
 
 /// Get the path to the tools binary
+pub fn resolve_tools_binary_path() -> Result<PathBuf, ColossalErr> {
+    get_tools_path()
+}
+
 fn get_tools_path() -> Result<PathBuf, ColossalErr> {
     // Look for the tools binary in the same directory as the current executable
     let exe_path = std::env::current_exe().map_err(|e| ColossalErr::Io(e))?;

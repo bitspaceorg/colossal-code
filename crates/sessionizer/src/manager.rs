@@ -41,9 +41,8 @@ fn clean_shell_output(output: &str, command: &str) -> String {
     // Use battle-tested library to strip ALL ANSI escape sequences
     let without_ansi = strip_ansi_escapes::strip_str(&normalized);
 
-    // Remove any lines containing the command marker pattern
-    // This handles the echoed command line that includes __CMD_DONE___
-    let marker_regex = regex::Regex::new(r".*__CMD_DONE_.*").unwrap();
+    // Remove any lines containing internal command-control markers.
+    let marker_regex = regex::Regex::new(r".*(__CMD_DONE_|__NITE_CTL__).*").unwrap();
     let without_markers = marker_regex.replace_all(&without_ansi, "");
 
     let lines: Vec<&str> = without_markers.lines().collect();
@@ -84,6 +83,11 @@ fn clean_shell_output(output: &str, command: &str) -> String {
             continue;
         }
 
+        // Skip internal command wrapper echoes.
+        if trimmed.contains("__nite_cmd") {
+            continue;
+        }
+
         // Skip lines that match the exact command (first line is often the echo)
         if i == 0 && trimmed == command.trim() {
             continue;
@@ -93,6 +97,85 @@ fn clean_shell_output(output: &str, command: &str) -> String {
     }
 
     cleaned_lines.join("\n")
+}
+
+const CONTROL_PREFIX: &str = "__NITE_CTL__";
+
+#[derive(Debug, Clone, Copy)]
+enum ControlEvent {
+    Start,
+    Heartbeat,
+    Done(i32),
+}
+
+fn build_control_wrapped_command(command: &str, control_id: &str) -> String {
+    format!(
+        "{{ __nite_cmd() {{ {command} ; }}; __nite_cmd & __nite_pid=$!; printf '{prefix}{control_id}__START__%s\\n' \"$__nite_pid\"; ( while kill -0 \"$__nite_pid\" 2>/dev/null; do sleep 2; kill -0 \"$__nite_pid\" 2>/dev/null || break; printf '{prefix}{control_id}__HEARTBEAT__\\n'; done ) & __nite_hb=$!; wait \"$__nite_pid\"; __nite_code=$?; kill \"$__nite_hb\" 2>/dev/null; wait \"$__nite_hb\" 2>/dev/null; printf '{prefix}{control_id}__DONE__%s\\n' \"$__nite_code\"; }}",
+        prefix = CONTROL_PREFIX,
+    )
+}
+
+fn parse_control_line(line: &str, control_id: &str) -> Option<ControlEvent> {
+    let start_prefix = format!("{CONTROL_PREFIX}{control_id}__START__");
+    if let Some(pid_part) = line.strip_prefix(&start_prefix) {
+        let _ = pid_part.trim().parse::<i32>().ok()?;
+        return Some(ControlEvent::Start);
+    }
+
+    let heartbeat_line = format!("{CONTROL_PREFIX}{control_id}__HEARTBEAT__");
+    if line.trim() == heartbeat_line {
+        return Some(ControlEvent::Heartbeat);
+    }
+
+    let done_prefix = format!("{CONTROL_PREFIX}{control_id}__DONE__");
+    if let Some(code_part) = line.strip_prefix(&done_prefix)
+        && let Ok(code) = code_part.trim().parse::<i32>()
+    {
+        return Some(ControlEvent::Done(code));
+    }
+
+    None
+}
+
+fn extract_visible_output(
+    chunk: &str,
+    pending: &mut String,
+    control_id: &str,
+    command_completed: &mut bool,
+    done_exit_code: &mut Option<i32>,
+    flush_partial: bool,
+) -> String {
+    pending.push_str(chunk);
+    let mut visible = String::new();
+
+    while let Some(pos) = pending.find('\n') {
+        let mut line = pending[..pos].to_string();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+        pending.drain(..=pos);
+
+        if let Some(event) = parse_control_line(line.trim(), control_id) {
+            if let ControlEvent::Done(code) = event {
+                *command_completed = true;
+                *done_exit_code = Some(code);
+            }
+            continue;
+        }
+
+        visible.push_str(&line);
+        visible.push('\n');
+    }
+
+    if flush_partial && !pending.is_empty() {
+        let line = pending.trim_end_matches('\r').to_string();
+        pending.clear();
+        if parse_control_line(line.trim(), control_id).is_none() {
+            visible.push_str(&line);
+        }
+    }
+
+    visible
 }
 
 // Data structure for persisting session state
@@ -941,8 +1024,8 @@ impl SessionManager {
             .await;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Generate a unique marker to detect command completion
-        let marker = format!(
+        // Generate a unique control id for internal command lifecycle markers.
+        let control_id = format!(
             "__CMD_DONE_{}__",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -950,8 +1033,8 @@ impl SessionManager {
                 .as_nanos()
         );
 
-        // Send the command followed by an echo of the marker
-        let command_with_marker = format!("{}; echo '{}'", command, marker);
+        // Wrap the command with internal START/HEARTBEAT/DONE control markers.
+        let command_with_marker = build_control_wrapped_command(&command, &control_id);
         let stream_rx = self
             .send_command_to_shell_session(session_id, command_with_marker)
             .await?;
@@ -962,6 +1045,9 @@ impl SessionManager {
             .unwrap_or(Duration::from_secs(30));
         let deadline = start_time + timeout_duration;
         let mut command_completed = false;
+        let mut done_exit_code: Option<i32> = None;
+        let mut pending_stdout = String::new();
+        let mut pending_stderr = String::new();
 
         // Collect all streaming output until we see the marker
         while let Ok(event) = tokio::time::timeout(
@@ -972,20 +1058,36 @@ impl SessionManager {
         {
             match event {
                 Ok(StreamEvent::Stdout(output)) => {
-                    // Check if the output contains the completion marker
-                    if output.contains(&marker) {
-                        command_completed = true;
-                        // Remove the marker from the output
-                        let cleaned = output.replace(&marker, "");
-                        if !cleaned.trim().is_empty() {
-                            stdout_parts.push(cleaned);
-                        }
+                    let visible = extract_visible_output(
+                        &output,
+                        &mut pending_stdout,
+                        &control_id,
+                        &mut command_completed,
+                        &mut done_exit_code,
+                        false,
+                    );
+                    if !visible.is_empty() {
+                        stdout_parts.push(visible);
+                    }
+                    if command_completed {
                         break;
                     }
-                    stdout_parts.push(output);
                 }
                 Ok(StreamEvent::Stderr(output)) => {
-                    stdout_parts.push(output);
+                    let visible = extract_visible_output(
+                        &output,
+                        &mut pending_stderr,
+                        &control_id,
+                        &mut command_completed,
+                        &mut done_exit_code,
+                        false,
+                    );
+                    if !visible.is_empty() {
+                        stdout_parts.push(visible);
+                    }
+                    if command_completed {
+                        break;
+                    }
                 }
                 Ok(StreamEvent::Exit(_)) => break,
                 Ok(StreamEvent::Error(_)) => break,
@@ -993,13 +1095,41 @@ impl SessionManager {
             }
         }
 
+        let flushed_stdout = extract_visible_output(
+            "",
+            &mut pending_stdout,
+            &control_id,
+            &mut command_completed,
+            &mut done_exit_code,
+            true,
+        );
+        if !flushed_stdout.is_empty() {
+            stdout_parts.push(flushed_stdout);
+        }
+
+        let flushed_stderr = extract_visible_output(
+            "",
+            &mut pending_stderr,
+            &control_id,
+            &mut command_completed,
+            &mut done_exit_code,
+            true,
+        );
+        if !flushed_stderr.is_empty() {
+            stdout_parts.push(flushed_stderr);
+        }
+
         let aggregated_output = stdout_parts.join("");
         let cleaned_output = clean_shell_output(&aggregated_output, &command);
 
         Ok(ExecCommandOutput {
             duration: Instant::now().duration_since(start_time),
-            exit_status: if command_completed || Instant::now() < deadline {
+            exit_status: if let Some(code) = done_exit_code {
+                ExitStatus::Completed { code }
+            } else if command_completed {
                 ExitStatus::Completed { code: 0 }
+            } else if Instant::now() < deadline {
+                ExitStatus::Killed
             } else {
                 ExitStatus::Timeout
             },

@@ -32,6 +32,10 @@ pub async fn execute_tools_with_sandbox(
     crate::tools::execute_tools_with_sandbox(args, sandbox_policy, cwd).await
 }
 
+pub fn resolve_tools_binary_path() -> Result<PathBuf, ColossalErr> {
+    crate::tools::resolve_tools_binary_path()
+}
+
 pub async fn spawn_sandboxed_command(
     command: Vec<String>,
     sandbox_policy: &SandboxPolicy,

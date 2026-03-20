@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokenizers::Tokenizer;
 use tokio::sync::{Mutex, mpsc};
 
-static WORKSPACE_ROOT_OVERRIDE: OnceCell<Option<PathBuf>> = OnceCell::new();
+static WORKSPACE_ROOT_OVERRIDE: OnceCell<std::sync::Mutex<Option<PathBuf>>> = OnceCell::new();
 
 pub mod config;
 mod llm_backend;
@@ -83,30 +83,41 @@ fn preview_thinking(text: &str) -> String {
     preview
 }
 
-fn sandbox_policy_from_config(safety_config: &safety_config::SafetyConfig) -> SandboxPolicy {
-    let workspace_path = resolve_workspace_root();
-    let mut writable_roots = vec![colossal_linux_sandbox::protocol::WritableRoot {
-        root: workspace_path.clone(),
+fn push_writable_root_unique(
+    writable_roots: &mut Vec<colossal_linux_sandbox::protocol::WritableRoot>,
+    root: PathBuf,
+) {
+    if writable_roots.iter().any(|existing| existing.root == root) {
+        return;
+    }
+    writable_roots.push(colossal_linux_sandbox::protocol::WritableRoot {
+        root,
         recursive: true,
         read_only_subpaths: vec![],
-    }];
+    });
+}
+
+fn sandbox_policy_from_config_with_workspace(
+    safety_config: &safety_config::SafetyConfig,
+    workspace_path: PathBuf,
+) -> SandboxPolicy {
+    let mut writable_roots = Vec::new();
+    push_writable_root_unique(&mut writable_roots, workspace_path.clone());
 
     if let Some(parent) = workspace_path.parent() {
-        writable_roots.push(colossal_linux_sandbox::protocol::WritableRoot {
-            root: parent.to_path_buf(),
-            recursive: true,
-            read_only_subpaths: vec![],
-        });
+        push_writable_root_unique(&mut writable_roots, parent.to_path_buf());
     }
 
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_parent) = exe_path.parent().and_then(|p| p.parent()) {
-            writable_roots.push(colossal_linux_sandbox::protocol::WritableRoot {
-                root: exe_parent.to_path_buf(),
-                recursive: true,
-                read_only_subpaths: vec![],
-            });
+            push_writable_root_unique(&mut writable_roots, exe_parent.to_path_buf());
         }
+    }
+
+    if let Ok(tools_path) = resolve_tools_binary_path_for_runtime()
+        && let Some(tools_parent) = tools_path.parent()
+    {
+        push_writable_root_unique(&mut writable_roots, tools_parent.to_path_buf());
     }
 
     if let Ok(extra_roots) = std::env::var("SANDBOX_EXTRA_ROOTS") {
@@ -139,10 +150,14 @@ fn sandbox_policy_from_config(safety_config: &safety_config::SafetyConfig) -> Sa
     }
 }
 
+fn sandbox_policy_from_config(safety_config: &safety_config::SafetyConfig) -> SandboxPolicy {
+    sandbox_policy_from_config_with_workspace(safety_config, resolve_workspace_root())
+}
+
 pub(crate) fn workspace_root_override() -> Option<PathBuf> {
     WORKSPACE_ROOT_OVERRIDE
         .get_or_init(|| {
-            std::env::var("NITE_WORKSPACE_ROOT").ok().and_then(|raw| {
+            std::sync::Mutex::new(std::env::var("NITE_WORKSPACE_ROOT").ok().and_then(|raw| {
                 let trimmed = raw.trim();
                 if trimmed.is_empty() {
                     return None;
@@ -153,9 +168,11 @@ pub(crate) fn workspace_root_override() -> Option<PathBuf> {
                 } else {
                     std::env::current_dir().ok().map(|cwd| cwd.join(candidate))
                 }
-            })
+            }))
         })
-        .clone()
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or(None)
 }
 
 pub fn set_workspace_root_override(path: impl AsRef<Path>) {
@@ -166,12 +183,19 @@ pub fn set_workspace_root_override(path: impl AsRef<Path>) {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path.as_ref())
     };
-    let _ = WORKSPACE_ROOT_OVERRIDE.set(Some(absolute));
+    let slot = WORKSPACE_ROOT_OVERRIDE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = slot.lock() {
+        *guard = Some(absolute);
+    }
 }
 
 pub(crate) fn resolve_workspace_root() -> PathBuf {
     workspace_root_override()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+pub fn resolve_tools_binary_path_for_runtime() -> Result<PathBuf> {
+    colossal_linux_sandbox::resolve_tools_binary_path().map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 #[derive(Serialize)]
@@ -203,9 +227,11 @@ struct HtmlToTextResult {
     error: Option<String>,
 }
 
-async fn execute_tool_binary(args: Vec<String>, sandbox_policy: &SandboxPolicy) -> Result<String> {
-    let cwd = resolve_workspace_root();
-
+async fn execute_tool_binary(
+    args: Vec<String>,
+    sandbox_policy: &SandboxPolicy,
+    cwd: PathBuf,
+) -> Result<String> {
     // 10 minute timeout for tool execution to allow cargo/npm/etc operations
     let timeout_duration = std::time::Duration::from_secs(600);
     let output = match tokio::time::timeout(
@@ -351,6 +377,15 @@ async fn execute_tool_call(
     tx: mpsc::UnboundedSender<AgentMessage>,
 ) -> Result<String> {
     ensure_global_state_initialized().await;
+
+    if let Some(state) = GLOBAL_STATE.get() {
+        let safety_cfg = agent.safety_config.lock().await.clone();
+        let workspace_path = agent.effective_cwd();
+        let refreshed_policy =
+            sandbox_policy_from_config_with_workspace(&safety_cfg, workspace_path);
+        let mut policy_guard = state.sandbox_policy.lock().await;
+        *policy_guard = refreshed_policy;
+    }
 
     let name = &tool_call.function.name;
     let arguments: Value = serde_json::from_str(&tool_call.function.arguments)?;
@@ -810,7 +845,7 @@ async fn execute_tool_call(
             }
 
             let sandbox_policy = state.sandbox_policy.lock().await.clone();
-            let output = execute_tool_binary(args, &sandbox_policy).await?;
+            let output = execute_tool_binary(args, &sandbox_policy, agent.effective_cwd()).await?;
 
             // Tools binary outputs YAML, just return it directly
             Ok(output)
@@ -1772,7 +1807,8 @@ impl Agent {
 
         if let Some(state) = GLOBAL_STATE.get() {
             let mut policy_guard = state.sandbox_policy.lock().await;
-            *policy_guard = sandbox_policy_from_config(&new_safety_config);
+            *policy_guard =
+                sandbox_policy_from_config_with_workspace(&new_safety_config, self.effective_cwd());
         }
 
         // Update tools in the agent
@@ -3180,19 +3216,21 @@ impl Agent {
                             result
                         }
                         Err(e) => {
-                            #[derive(Serialize)]
-                            struct ToolError {
-                                error: String,
-                                tool: String,
-                                status: String,
-                            }
-                            let error_obj = ToolError {
-                                error: e.to_string(),
-                                tool: tool_call.function.name.clone(),
-                                status: "failed".to_string(),
-                            };
-                            serde_yaml::to_string(&error_obj)
-                                .unwrap_or_else(|_| "error: Failed to serialize error".to_string())
+                            let error_yaml = serde_yaml::to_string(&json!({
+                                "status": "Failure",
+                                "message": e.to_string(),
+                                "tool": tool_call.function.name.clone(),
+                            }))
+                            .unwrap_or_else(|_| {
+                                "status: Failure\nmessage: Tool execution failed".to_string()
+                            });
+
+                            let _ = tx.send(AgentMessage::ToolCallCompleted(
+                                tool_call.function.name.clone(),
+                                error_yaml.clone(),
+                            ));
+
+                            error_yaml
                         }
                     };
 
