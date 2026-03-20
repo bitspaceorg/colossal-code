@@ -2,7 +2,10 @@ use agent_core::set_workspace_root_override;
 use color_eyre::Result;
 use ratatui::{
     DefaultTerminal, Frame,
-    crossterm::{event::DisableBracketedPaste, event::EnableBracketedPaste, execute},
+    crossterm::{
+        event::DisableBracketedPaste, event::DisableMouseCapture, event::EnableBracketedPaste,
+        event::EnableMouseCapture, execute,
+    },
     layout::Constraint,
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
@@ -74,7 +77,7 @@ pub(crate) async fn run() -> Result<()> {
     }
 
     let terminal = ratatui::init();
-    execute!(std::io::stdout(), EnableBracketedPaste)?;
+    execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
 
     let app_result = {
         let loading_handle = tokio::spawn(async {
@@ -104,7 +107,11 @@ pub(crate) async fn run() -> Result<()> {
         app.run(terminal).await
     };
 
-    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+    let _ = execute!(
+        std::io::stdout(),
+        DisableBracketedPaste,
+        DisableMouseCapture
+    );
     ratatui::restore();
     app_result
 }

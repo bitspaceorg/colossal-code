@@ -3,6 +3,7 @@ use agent_core::{
     orchestrator::{OrchestratorControl, OrchestratorEvent},
 };
 use ratatui::{
+    layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
 };
@@ -133,6 +134,13 @@ pub(crate) struct App {
     pub(crate) exit: bool,
     // Navigation scroll offset
     pub(crate) nav_scroll_offset: usize,
+    pub(crate) message_scroll_offset: usize,
+    pub(crate) follow_messages_tail: bool,
+    pub(crate) scroll_messages_enabled: bool,
+    pub(crate) last_messages_area: Rect,
+    pub(crate) last_message_total_lines: usize,
+    pub(crate) last_message_scroll_at: Option<Instant>,
+    pub(crate) terminal_cursor_hidden: bool,
     // Flag to track if we need to position cursor on first nav render
     pub(crate) nav_needs_init: bool,
     // Flash highlight for yank operations

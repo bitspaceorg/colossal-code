@@ -112,6 +112,7 @@ impl App {
         if self.phase == Phase::Input && areas.len() >= min_areas {
             let messages_area = areas[messages_area_idx];
             let input_area = areas[area_indices.input_area_idx];
+            self.last_messages_area = messages_area;
             if spec_tree_view_active
                 || self.mode == Mode::Normal
                 || self.mode == Mode::SessionWindow
@@ -121,11 +122,15 @@ impl App {
                 let message_lines = self.compose_main_message_lines(max_width, append_plan, true);
 
                 let total_lines = message_lines.len();
+                self.last_message_total_lines = total_lines;
                 let visible_lines = messages_area.height as usize;
                 let scroll_offset = if spec_tree_view_active {
                     0
-                } else {
+                } else if self.follow_messages_tail {
                     total_lines.saturating_sub(visible_lines)
+                } else {
+                    self.message_scroll_offset
+                        .min(total_lines.saturating_sub(visible_lines))
                 };
                 let messages_widget =
                     Paragraph::new(Text::from(message_lines)).scroll((scroll_offset as u16, 0));

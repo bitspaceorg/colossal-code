@@ -40,7 +40,7 @@ pub fn load_config_map() -> HashMap<String, String> {
     parse_config_map_from_content(&content)
 }
 
-fn load_config_value_from_content(content: &str, key: &str) -> Option<String> {
+pub(crate) fn load_config_value_from_content(content: &str, key: &str) -> Option<String> {
     let key = key.trim();
     if key.is_empty() {
         return None;

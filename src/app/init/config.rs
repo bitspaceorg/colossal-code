@@ -49,6 +49,12 @@ impl App {
             .unwrap_or(false)
     }
 
+    pub(crate) fn load_scroll_setting() -> bool {
+        Self::load_config_value("scroll")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+    }
+
     pub(crate) fn load_model_setting() -> Option<String> {
         Self::load_config_value("model")
     }
@@ -164,13 +170,16 @@ impl App {
     }
 
     pub(crate) fn initialize_config_file() -> Result<()> {
-        crate::app::persistence::config::initialize_default_file("vim-keybind = false\n")
+        crate::app::persistence::config::initialize_default_file(
+            "vim-keybind = false\nscroll = false\n",
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::resolve_auto_summarize_threshold;
+    use crate::app::persistence::config::load_config_value_from_content;
     use crate::app::{
         AUTO_SUMMARIZE_THRESHOLD_VERSION, DEFAULT_AUTO_SUMMARIZE_THRESHOLD,
         LEGACY_AUTO_SUMMARIZE_THRESHOLD,
@@ -197,5 +206,14 @@ mod tests {
         let resolved_with_current_version =
             resolve_auto_summarize_threshold(Some(72.5), Some(AUTO_SUMMARIZE_THRESHOLD_VERSION));
         assert_eq!(resolved_with_current_version, 72.5);
+    }
+
+    #[test]
+    fn scroll_setting_reads_true_flag() {
+        let content = "scroll = true\n";
+
+        let value = load_config_value_from_content(content, "scroll");
+
+        assert_eq!(value.as_deref(), Some("true"));
     }
 }

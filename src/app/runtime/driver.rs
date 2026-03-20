@@ -42,14 +42,31 @@ impl App {
 
         self.process_pending_actions(outcome).await;
 
-        self.clear_startup_screen_if_ready(terminal)?;
-        terminal.draw(|frame| self.draw(frame))?;
-
         let poll_duration = self.startup_poll_duration();
         if event::poll(poll_duration)? {
-            let runtime_event = event::read()?;
-            self.handle_runtime_event(runtime_event)?;
+            loop {
+                let runtime_event = event::read()?;
+                self.handle_runtime_event(runtime_event)?;
+
+                if !event::poll(std::time::Duration::from_millis(0))? {
+                    break;
+                }
+            }
         }
+
+        let should_show_cursor = self.should_show_terminal_cursor();
+        if should_show_cursor {
+            if self.terminal_cursor_hidden {
+                terminal.show_cursor()?;
+                self.terminal_cursor_hidden = false;
+            }
+        } else if !self.terminal_cursor_hidden {
+            terminal.hide_cursor()?;
+            self.terminal_cursor_hidden = true;
+        }
+
+        self.clear_startup_screen_if_ready(terminal)?;
+        terminal.draw(|frame| self.draw(frame))?;
 
         Ok(())
     }

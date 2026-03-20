@@ -1,5 +1,6 @@
 use agent_core::{Agent, AgentMessage};
 use color_eyre::Result;
+use ratatui::layout::Rect;
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 
@@ -26,6 +27,7 @@ impl App {
         let current_model = Self::load_model_setting();
         let current_context_tokens = Self::detect_context_tokens(current_model.as_deref());
         let auto_summarize_threshold = Self::load_auto_summarize_threshold_setting();
+        let scroll_messages_enabled = Self::load_scroll_setting();
 
         let backend_env = BackendConfig::read().into_environment();
         let limit_thinking_to_first_token = backend_env.limit_thinking_to_first_token;
@@ -65,6 +67,13 @@ impl App {
             command_input: String::new(),
             exit: false,
             nav_scroll_offset: 0,
+            message_scroll_offset: 0,
+            follow_messages_tail: true,
+            scroll_messages_enabled,
+            last_messages_area: Rect::default(),
+            last_message_total_lines: 0,
+            last_message_scroll_at: None,
+            terminal_cursor_hidden: false,
             nav_needs_init: false,
             flash_highlight: None,
             ctrl_c_pressed: None,
