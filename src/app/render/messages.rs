@@ -3,7 +3,7 @@ use ratatui::{
     text::{Line, Span, Text},
 };
 
-use crate::app::render::edit_file_diff::render_edit_file_diff_lines;
+use crate::app::render::edit_file_diff::{RenderedEditFileDiff, build_edit_file_diff};
 use crate::app::render::todo_artifact::render_todo_artifact_lines;
 use crate::app::render::tool_format::tool_result_color;
 use crate::app::state::message::AgentConnector;
@@ -52,6 +52,29 @@ impl App {
         max_width: usize,
         connector: AgentConnector,
         note: Option<&str>,
+    ) -> Text<'static> {
+        self.render_tool_call_completed_with_note_for_message(
+            tool_name,
+            args,
+            result,
+            raw_arguments,
+            max_width,
+            connector,
+            note,
+            None,
+        )
+    }
+
+    pub(crate) fn render_tool_call_completed_with_note_for_message(
+        &self,
+        tool_name: &str,
+        args: &str,
+        result: &str,
+        raw_arguments: Option<&str>,
+        max_width: usize,
+        connector: AgentConnector,
+        note: Option<&str>,
+        message_idx: Option<usize>,
     ) -> Text<'static> {
         let bullet_color = tool_result_color(result);
         let result_color = bullet_color;
@@ -106,13 +129,17 @@ impl App {
             && let Some((path, old_string, new_string)) =
                 Self::extract_edit_file_diff_inputs(raw_args)
         {
-            lines.extend(render_edit_file_diff_lines(
+            let expanded =
+                message_idx.is_some_and(|idx| self.expanded_edit_file_diffs.contains(&idx));
+            let rendered_diff = build_edit_file_diff(
                 &old_string,
                 &new_string,
                 &path,
                 max_width,
                 Self::connector_prefix(connector, false),
-            ));
+                expanded,
+            );
+            lines.extend(rendered_diff.lines);
         }
 
         if tool_name == "todo_write"
@@ -128,6 +155,30 @@ impl App {
         }
 
         Text::from(lines)
+    }
+
+    pub(crate) fn rendered_edit_file_diff_for_message(
+        &self,
+        raw_arguments: &str,
+        result: &str,
+        max_width: usize,
+        connector: AgentConnector,
+        message_idx: usize,
+    ) -> Option<RenderedEditFileDiff> {
+        if !(result.starts_with("Created ") || result.starts_with("Updated ")) {
+            return None;
+        }
+
+        let (path, old_string, new_string) = Self::extract_edit_file_diff_inputs(raw_arguments)?;
+        let expanded = self.expanded_edit_file_diffs.contains(&message_idx);
+        Some(build_edit_file_diff(
+            &old_string,
+            &new_string,
+            &path,
+            max_width,
+            Self::connector_prefix(connector, false),
+            expanded,
+        ))
     }
 
     fn extract_edit_file_diff_inputs(raw_args: &str) -> Option<(String, String, String)> {

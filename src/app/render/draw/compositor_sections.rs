@@ -19,12 +19,13 @@ fn into_owned_line(line: Line<'_>) -> Line<'static> {
 
 impl App {
     pub(crate) fn compose_main_message_lines(
-        &self,
+        &mut self,
         max_width: usize,
         append_plan: bool,
         append_subagent_thinking: bool,
     ) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
+        self.visible_edit_file_artifacts.clear();
         let tips: Vec<Line<'static>> = self
             .render_tips()
             .into_iter()
@@ -35,13 +36,13 @@ impl App {
             lines.push(Line::from(" "));
         }
 
-        let messages = self.get_messages();
-        let message_types = self.get_message_types();
+        let messages = self.get_messages().to_vec();
+        let message_types = self.get_message_types().clone();
         let mut idx = 0;
         while idx < messages.len() {
             let message = &messages[idx];
             let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
-            let connector = self.agent_connector_for_index(message_types, idx);
+            let connector = self.agent_connector_for_index(&message_types, idx);
 
             if is_agent
                 && let Some(UiMessageEvent::ToolCallCompleted {
@@ -53,8 +54,9 @@ impl App {
                 && let Some(next_message) = messages.get(idx + 1)
                 && let Some(note) = App::approval_note_label(next_message)
             {
+                let start_row = lines.len();
                 lines.extend(
-                    self.render_tool_call_completed_with_note(
+                    self.render_tool_call_completed_with_note_for_message(
                         &tool_name,
                         &args,
                         &result,
@@ -62,10 +64,75 @@ impl App {
                         max_width,
                         connector,
                         Some(note),
+                        Some(idx),
                     )
                     .lines,
                 );
+                if tool_name == "edit_file"
+                    && let Some(raw_arguments) = raw_arguments.as_deref()
+                    && let Some(rendered_diff) = self.rendered_edit_file_diff_for_message(
+                        raw_arguments,
+                        &result,
+                        max_width,
+                        connector,
+                        idx,
+                    )
+                {
+                    let artifact_start = start_row + 2;
+                    let artifact_end = artifact_start + rendered_diff.lines.len();
+                    self.visible_edit_file_artifacts
+                        .push(crate::app::VisibleEditDiffArtifact {
+                            message_idx: idx,
+                            start_row: artifact_start,
+                            end_row: artifact_end,
+                            collapsed: rendered_diff.collapsed,
+                        });
+                }
                 idx += 2;
+                continue;
+            }
+
+            if is_agent
+                && let Some(UiMessageEvent::ToolCallCompleted {
+                    tool_name,
+                    args,
+                    result,
+                    raw_arguments,
+                }) = UiMessageEvent::parse(message)
+            {
+                let start_row = lines.len();
+                let rendered = self.render_tool_call_completed_with_note_for_message(
+                    &tool_name,
+                    &args,
+                    &result,
+                    raw_arguments.as_deref(),
+                    max_width,
+                    connector,
+                    None,
+                    Some(idx),
+                );
+                if tool_name == "edit_file"
+                    && let Some(raw_arguments) = raw_arguments.as_deref()
+                    && let Some(rendered_diff) = self.rendered_edit_file_diff_for_message(
+                        raw_arguments,
+                        &result,
+                        max_width,
+                        connector,
+                        idx,
+                    )
+                {
+                    let artifact_start = start_row + 2;
+                    let artifact_end = artifact_start + rendered_diff.lines.len();
+                    self.visible_edit_file_artifacts
+                        .push(crate::app::VisibleEditDiffArtifact {
+                            message_idx: idx,
+                            start_row: artifact_start,
+                            end_row: artifact_end,
+                            collapsed: rendered_diff.collapsed,
+                        });
+                }
+                lines.extend(rendered.lines);
+                idx += 1;
                 continue;
             }
 

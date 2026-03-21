@@ -27,6 +27,12 @@ const DIFF_BORDER_SET: symbols::border::Set = symbols::border::Set {
 };
 
 const COLLAPSE_THRESHOLD_LINES: usize = 30;
+
+pub(crate) struct RenderedEditFileDiff {
+    pub(crate) lines: Vec<RatatuiLine<'static>>,
+    pub(crate) collapsed: bool,
+}
+
 #[derive(Clone)]
 struct DiffLine {
     old_line: Option<usize>,
@@ -600,7 +606,11 @@ fn diff_pane_content_width(line_number_width: usize) -> usize {
 fn render_diff_buffer(rendered_pairs: &[RenderedPair], has_collapsed_groups: bool) -> Buffer {
     let border_color = Color::DarkGray;
     let max_visible_lines = 30usize;
-    let viewport_height = rendered_pairs.len().min(max_visible_lines).max(1);
+    let viewport_height = if has_collapsed_groups {
+        rendered_pairs.len().min(max_visible_lines).max(1)
+    } else {
+        rendered_pairs.len().max(1)
+    };
     let box_height = viewport_height as u16 + 2;
     let total_height = box_height + if has_collapsed_groups { 1 } else { 0 };
     let area = Rect::new(0, 0, 120, total_height);
@@ -700,13 +710,14 @@ fn buffer_row_to_line(
     RatatuiLine::from(spans)
 }
 
-pub(crate) fn render_edit_file_diff_lines(
+pub(crate) fn build_edit_file_diff(
     old_string: &str,
     new_string: &str,
     file_path: &str,
     max_width: usize,
     connector_prefix: Span<'static>,
-) -> Vec<RatatuiLine<'static>> {
+    expanded: bool,
+) -> RenderedEditFileDiff {
     let app = DiffRenderApp::new_from_content(old_string, new_string, file_path, None);
     let mut all_rows = Vec::new();
     for group in &app.diff_groups {
@@ -718,11 +729,40 @@ pub(crate) fn render_edit_file_diff_lines(
     let cell_content_width = diff_pane_content_width(app.line_number_width);
 
     let rendered_pairs = build_rendered_pairs(&app, &all_rows, cell_content_width);
-    let buffer = render_diff_buffer(&rendered_pairs, app.has_collapsed_groups);
+    let has_collapsed_groups = app.has_collapsed_groups && !expanded;
+    let buffer = if expanded {
+        render_diff_buffer(&rendered_pairs, false)
+    } else {
+        render_diff_buffer(&rendered_pairs, has_collapsed_groups)
+    };
 
-    (buffer.area.top()..buffer.area.bottom())
+    let lines = (buffer.area.top()..buffer.area.bottom())
         .map(|row| buffer_row_to_line(&buffer, row, &connector_prefix))
-        .collect()
+        .collect();
+
+    RenderedEditFileDiff {
+        lines,
+        collapsed: has_collapsed_groups,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn render_edit_file_diff_lines(
+    old_string: &str,
+    new_string: &str,
+    file_path: &str,
+    max_width: usize,
+    connector_prefix: Span<'static>,
+) -> Vec<RatatuiLine<'static>> {
+    build_edit_file_diff(
+        old_string,
+        new_string,
+        file_path,
+        max_width,
+        connector_prefix,
+        false,
+    )
+    .lines
 }
 
 #[cfg(test)]
@@ -770,6 +810,43 @@ mod tests {
         assert_eq!(
             lines[32].to_string().trim_end(),
             "... 10 more lines hidden. Press Ctrl+r to expand"
+        );
+    }
+
+    #[test]
+    fn expanded_diff_renders_all_rows_without_hidden_footer() {
+        let old_string = (0..40)
+            .map(|idx| format!("old line {idx}\n"))
+            .collect::<String>();
+        let new_string = (0..40)
+            .map(|idx| format!("new line {idx}\n"))
+            .collect::<String>();
+
+        let collapsed = build_edit_file_diff(
+            &old_string,
+            &new_string,
+            "src/main.rs",
+            100,
+            Span::raw(""),
+            false,
+        );
+        let expanded = build_edit_file_diff(
+            &old_string,
+            &new_string,
+            "src/main.rs",
+            100,
+            Span::raw(""),
+            true,
+        );
+
+        assert!(collapsed.collapsed);
+        assert!(!expanded.collapsed);
+        assert!(expanded.lines.len() > collapsed.lines.len());
+        assert!(
+            !expanded
+                .lines
+                .iter()
+                .any(|line| line.to_string().contains("Press Ctrl+r to expand"))
         );
     }
 

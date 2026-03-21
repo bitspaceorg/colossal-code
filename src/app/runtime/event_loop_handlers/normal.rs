@@ -137,6 +137,13 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.code == KeyCode::Char('r')
+        && app.expand_visible_edit_file_diff()
+    {
+        return;
+    }
+
     let prompt_active = app.show_queue_choice
         || app.safety_state.show_approval_prompt
         || app.safety_state.show_sandbox_prompt;

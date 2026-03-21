@@ -73,6 +73,8 @@ impl App {
             last_messages_area: Rect::default(),
             last_message_total_lines: 0,
             last_message_scroll_at: None,
+            expanded_edit_file_diffs: std::collections::HashSet::new(),
+            visible_edit_file_artifacts: Vec::new(),
             terminal_cursor_hidden: false,
             nav_needs_init: false,
             flash_highlight: None,
