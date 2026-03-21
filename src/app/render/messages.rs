@@ -4,6 +4,7 @@ use ratatui::{
 };
 
 use crate::app::render::edit_file_diff::render_edit_file_diff_lines;
+use crate::app::render::todo_artifact::render_todo_artifact_lines;
 use crate::app::render::tool_format::tool_result_color;
 use crate::app::state::message::AgentConnector;
 use crate::app::{App, MESSAGE_BORDER_SET, SUMMARY_BANNER_PREFIX, UiMessageEvent};
@@ -109,6 +110,18 @@ impl App {
                 &old_string,
                 &new_string,
                 &path,
+                max_width,
+                Self::connector_prefix(connector, false),
+            ));
+        }
+
+        if tool_name == "todo_write"
+            && let Some(todos) = raw_arguments
+                .and_then(Self::extract_todos_from_json_payload)
+                .or_else(|| Self::extract_todos_from_json_payload(result))
+        {
+            lines.extend(render_todo_artifact_lines(
+                &todos,
                 max_width,
                 Self::connector_prefix(connector, false),
             ));

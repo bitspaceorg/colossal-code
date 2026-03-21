@@ -292,7 +292,11 @@ impl App {
                 let help_height = if self.ui_state.show_help { 25 } else { 0 };
                 let resume_height = if self.ui_state.show_resume { 25 } else { 0 };
                 let rewind_height = if self.show_rewind { 25 } else { 0 };
-                let todos_height = if self.show_todos { 15 } else { 0 };
+                let todos_height = if self.show_todos {
+                    self.todos_panel_height()
+                } else {
+                    0
+                };
                 let model_selection_height = if self.show_model_selection { 20 } else { 0 };
                 let mut constraints_vec = vec![
                     Constraint::Length(self.title_lines.len() as u16),

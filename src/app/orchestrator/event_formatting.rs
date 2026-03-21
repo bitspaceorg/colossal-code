@@ -57,6 +57,15 @@ impl App {
     }
 
     pub(crate) fn format_tool_arguments(tool_name: &str, arguments_json: &str) -> String {
+        if tool_name == "todo_write"
+            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(arguments_json)
+        {
+            return format!(
+                "\"{}\"",
+                Self::describe_todo_write_call_from_payload(Some(&parsed))
+            );
+        }
+
         if tool_name == "edit_file"
             && let Some(path) = Self::extract_edit_file_inputs(arguments_json).map(|args| args.path)
         {
@@ -121,6 +130,13 @@ impl App {
         result_yaml: &str,
         arguments_json: Option<&str>,
     ) -> String {
+        if tool_name == "todo_write"
+            && let Some(todos) = Self::extract_todos_from_json_payload(result_yaml)
+                .or_else(|| arguments_json.and_then(Self::extract_todos_from_json_payload))
+        {
+            return Self::format_todo_counts(&todos);
+        }
+
         if let Ok(result) = serde_yaml::from_str::<serde_yaml::Value>(result_yaml)
             && let Some(obj) = result.as_mapping()
             && let Some(status) = obj
@@ -490,60 +506,99 @@ impl App {
                 .and_then(|value| value.get("url"))
                 .and_then(|url| url.as_str())
                 .map(|url| format!("Fetched {}", url)),
-            "TodoWrite" => Some(Self::describe_todo_write_call(parsed)),
+            "todo_write" | "TodoWrite" => Some(Self::describe_todo_write_call_from_payload(parsed)),
             _ => None,
         }
     }
 
-    fn describe_todo_write_call(parsed: Option<&serde_json::Value>) -> String {
-        if let Some(todos) = parsed
-            .and_then(|v| v.get("todos"))
-            .and_then(|t| t.as_array())
+    fn describe_todo_write_call_from_payload(parsed: Option<&serde_json::Value>) -> String {
+        if let Some(parsed) = parsed
+            && let Some(todos) = Self::extract_todos_from_value(parsed)
         {
-            if let Some(in_progress) = todos
-                .iter()
-                .find(|t| t.get("status").and_then(|s| s.as_str()) == Some("in_progress"))
-            {
-                let content = in_progress
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("task");
-                let truncated = if content.len() > 40 {
-                    format!("{}...", &content[..40])
-                } else {
-                    content.to_string()
-                };
-                return format!("Marked todo {} as in-progress", truncated);
-            }
-            if let Some(completed) = todos
-                .iter()
-                .find(|t| t.get("status").and_then(|s| s.as_str()) == Some("completed"))
-            {
-                let content = completed
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("task");
-                let truncated = if content.len() > 40 {
-                    format!("{}...", &content[..40])
-                } else {
-                    content.to_string()
-                };
-                return format!("Marked todo {} as completed", truncated);
-            }
-            if let Some(first) = todos.first() {
-                let content = first
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("task");
-                let truncated = if content.len() > 40 {
-                    format!("{}...", &content[..40])
-                } else {
-                    content.to_string()
-                };
-                return format!("Created todo {}", truncated);
-            }
+            return Self::describe_todo_write_action(&todos, parsed.get("initial_goal"));
+        }
+
+        "Updated todos".to_string()
+    }
+
+    fn describe_todo_write_action(
+        todos: &[crate::app::TodoItem],
+        initial_goal: Option<&serde_json::Value>,
+    ) -> String {
+        if let Some(todo) = Self::first_todo_with_status(todos, "in_progress") {
+            return format!(
+                "Marked `{}` as in progress",
+                Self::truncate_todo_content(todo)
+            );
+        }
+        if let Some(todo) = Self::first_todo_with_status(todos, "completed") {
+            return format!(
+                "Marked `{}` as completed",
+                Self::truncate_todo_content(todo)
+            );
+        }
+        if let Some(goal) = initial_goal
+            .and_then(|value| value.as_str())
+            .filter(|goal| !goal.is_empty())
+        {
+            return goal.to_string();
+        }
+        if let Some(todo) = todos.first() {
+            return format!("Created `{}`", Self::truncate_todo_content(todo));
         }
         "Updated todos".to_string()
+    }
+
+    fn truncate_todo_content(todo: &crate::app::TodoItem) -> String {
+        let content = todo.content.as_str();
+        if content.chars().count() > 40 {
+            let truncated: String = content.chars().take(40).collect();
+            format!("{}...", truncated)
+        } else {
+            content.to_string()
+        }
+    }
+
+    fn first_todo_with_status<'a>(
+        todos: &'a [crate::app::TodoItem],
+        status: &str,
+    ) -> Option<&'a crate::app::TodoItem> {
+        for todo in todos {
+            if todo.status == status {
+                return Some(todo);
+            }
+            if let Some(found) = Self::first_todo_with_status(&todo.children, status) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn format_todo_counts(todos: &[crate::app::TodoItem]) -> String {
+        let (total, pending, active, completed) = Self::todo_counts(todos);
+        format!(
+            "{} tasks • {} pending • {} active • {} completed",
+            total, pending, active, completed
+        )
+    }
+
+    fn todo_counts(todos: &[crate::app::TodoItem]) -> (usize, usize, usize, usize) {
+        fn walk(todos: &[crate::app::TodoItem], counts: &mut (usize, usize, usize, usize)) {
+            for todo in todos {
+                counts.0 += 1;
+                match todo.status.as_str() {
+                    "pending" => counts.1 += 1,
+                    "in_progress" => counts.2 += 1,
+                    "completed" => counts.3 += 1,
+                    _ => {}
+                }
+                walk(&todo.children, counts);
+            }
+        }
+
+        let mut counts = (0, 0, 0, 0);
+        walk(todos, &mut counts);
+        counts
     }
 }
 
@@ -602,6 +657,33 @@ mod tests {
         assert_eq!(
             App::format_tool_result("edit_file", result, None),
             "Failed: file already has content; provide old_string"
+        );
+    }
+
+    #[test]
+    fn todo_write_arguments_render_as_friendly_summary() {
+        let args = r#"{"todos":[{"content":"Initializing cargo project","status":"in_progress","activeForm":"Initializing cargo project"}]}"#;
+        assert_eq!(
+            App::format_tool_arguments("todo_write", args),
+            "\"Marked `Initializing cargo project` as in progress\""
+        );
+    }
+
+    #[test]
+    fn todo_write_result_formats_counts_from_json_result() {
+        let result = r#"{"status":"Success","todos":[{"content":"Initializing cargo project","status":"in_progress","activeForm":"Initializing cargo project"},{"content":"Set up workspace","status":"pending","activeForm":"Setting up workspace"},{"content":"Render todo artifact","status":"completed","activeForm":"Rendering todo artifact"}]}"#;
+        assert_eq!(
+            App::format_tool_result("todo_write", result, None),
+            "3 tasks • 1 pending • 1 active • 1 completed"
+        );
+    }
+
+    #[test]
+    fn todo_write_arguments_support_stringified_structured_todos() {
+        let args = r#"{"todo_list":"","goals":"","length":"3","initial_goal":"Create a bunch of todos for user","structured_todos":"[{\"content\":\"Initialize project scaffold\",\"status\":\"pending\",\"activeForm\":\"Initializing project scaffold\"}]"}"#;
+        assert_eq!(
+            App::format_tool_arguments("todo_write", args),
+            "\"Create a bunch of todos for user\""
         );
     }
 }

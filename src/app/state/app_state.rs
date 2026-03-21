@@ -286,7 +286,12 @@ impl App {
     pub(crate) fn parse_todo_item(json: &serde_json::Value) -> Option<TodoItem> {
         let content = json.get("content")?.as_str()?.to_string();
         let status = json.get("status")?.as_str()?.to_string();
-        let active_form = json.get("activeForm")?.as_str()?.to_string();
+        let active_form = json
+            .get("activeForm")
+            .or_else(|| json.get("active_form"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         // Recursively parse children
         let children = if let Some(children_array) = json.get("children").and_then(|v| v.as_array())
