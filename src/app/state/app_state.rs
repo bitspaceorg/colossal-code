@@ -10,7 +10,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     time::{Instant, SystemTime},
 };
 use tokio::{sync::mpsc, task};
@@ -32,6 +32,14 @@ pub(crate) struct TodoItem {
     pub(crate) active_form: String,
     #[serde(default)]
     pub(crate) children: Vec<TodoItem>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VisibleEditDiffArtifact {
+    pub(crate) message_idx: usize,
+    pub(crate) start_row: usize,
+    pub(crate) end_row: usize,
+    pub(crate) collapsed: bool,
 }
 
 /// Application modes
@@ -140,6 +148,8 @@ pub(crate) struct App {
     pub(crate) last_messages_area: Rect,
     pub(crate) last_message_total_lines: usize,
     pub(crate) last_message_scroll_at: Option<Instant>,
+    pub(crate) expanded_edit_file_diffs: HashSet<usize>,
+    pub(crate) visible_edit_file_artifacts: Vec<VisibleEditDiffArtifact>,
     pub(crate) terminal_cursor_hidden: bool,
     // Flag to track if we need to position cursor on first nav render
     pub(crate) nav_needs_init: bool,
@@ -331,6 +341,22 @@ impl App {
             self.expanded_sub_agent = None;
         }
         self.mode = self.mode_before_sub_agent.take().unwrap_or(Mode::Normal);
+    }
+
+    pub(crate) fn expand_visible_edit_file_diff(&mut self) -> bool {
+        let visible_start = self.message_scroll_offset;
+        let visible_end = visible_start + self.last_messages_area.height as usize;
+
+        if let Some(artifact) = self.visible_edit_file_artifacts.iter().find(|artifact| {
+            artifact.collapsed
+                && artifact.start_row < visible_end
+                && artifact.end_row > visible_start
+        }) {
+            self.expanded_edit_file_diffs.insert(artifact.message_idx);
+            return true;
+        }
+
+        false
     }
 
     pub(crate) fn get_mode_content(&mut self) -> Line<'static> {
