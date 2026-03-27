@@ -135,7 +135,15 @@ impl SafetyConfig {
         // In read-only mode, only allow read/search tools
         matches!(
             tool_name,
-            "read_file" | "list_files" | "grep" | "glob" | "web_search" | "web_fetch"
+            "read_file"
+                | "get_files"
+                | "get_files_recursive"
+                | "search_files_with_regex"
+                | "semantic_search"
+                | "web_search"
+                | "html_to_text"
+                | "todo_write"
+                | "request_split"
         )
     }
 
@@ -146,8 +154,9 @@ impl SafetyConfig {
                 "\n\n**READ-ONLY MODE ACTIVE**\n\
                 You are currently in read-only mode. You can:\n\
                 - Read files (read_file)\n\
-                - Search and list files (grep, glob, list_files)\n\
-                - Search the web (web_search, web_fetch)\n\n\
+                - Search and list files (get_files, get_files_recursive, search_files_with_regex, semantic_search)\n\
+                - Search the web (web_search, html_to_text)\n\
+                - Track tasks or request spec splitting (todo_write, request_split)\n\n\
                 You CANNOT:\n\
                 - Write or edit files\n\
                 - Execute bash commands\n\

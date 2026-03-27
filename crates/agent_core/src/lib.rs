@@ -1852,20 +1852,15 @@ impl Agent {
             system_prompt_guard.clone()
         };
 
-        let system_msg = "You are Nite 3, a coding agent deployed in the best TUI colossal code. You live inside the terminal, running lean, fast, and sharp. Your role is to serve as the developer's right hand.";
-
-        // Format the summary as if it were the first user message, including full system prompt
-        let full_context_msg = format!(
-            "{}\n\n\
-             This session is being continued from a previous conversation that ran out of context. \
-             The previous conversation has been summarized below:\n\n{}",
-            system_prompt_content, summary
-        );
-
-        // Create a new conversation with the same structure as a normal conversation start
         let request_builder = RequestBuilder::new()
-            .add_message(TextMessageRole::System, system_msg)
-            .add_message(TextMessageRole::User, &full_context_msg)
+            .add_message(TextMessageRole::System, &system_prompt_content)
+            .add_message(
+                TextMessageRole::User,
+                &format!(
+                    "This session is being continued from a previous conversation that ran out of context. The previous conversation has been summarized below:\n\n{}",
+                    summary
+                ),
+            )
             .set_tools(tools)
             .set_tool_choice(ToolChoice::Auto)
             .enable_thinking(true);
@@ -2539,16 +2534,13 @@ impl Agent {
                 let system_prompt_guard = self.system_prompt.lock().await;
                 system_prompt_guard.clone()
             };
-            let system_msg = "You are Nite 3, a coding agent deployed in the best TUI colossal code. You live inside the terminal, running lean, fast, and sharp. Your role is to serve as the developer's right hand.";
-            let full_user_msg = format!("{}\n\n{}", system_prompt_content, user_message);
-
             let tools = {
                 let tools_guard = self.tools.lock().await;
                 tools_guard.clone()
             };
             let builder = RequestBuilder::new()
-                .add_message(TextMessageRole::System, system_msg)
-                .add_message(TextMessageRole::User, &full_user_msg)
+                .add_message(TextMessageRole::System, &system_prompt_content)
+                .add_message(TextMessageRole::User, &user_message)
                 .set_tools(tools)
                 .set_tool_choice(ToolChoice::Auto)
                 .enable_thinking(true);
@@ -3083,6 +3075,22 @@ impl Agent {
                         }
                     }
                     Response::Done(response) => {
+                        if accumulated_tool_calls.is_empty()
+                            && let Some(tool_calls) = response
+                                .choices
+                                .first()
+                                .and_then(|choice| choice.message.tool_calls.clone())
+                        {
+                            for tool_call in tool_calls {
+                                let args_now = tool_call.function.arguments.clone();
+                                accumulated_tool_calls.insert(tool_call.index, tool_call.clone());
+                                let _ = tx.send(AgentMessage::ToolCallStarted(
+                                    tool_call.function.name.clone(),
+                                    args_now,
+                                ));
+                            }
+                        }
+
                         // Extract generation statistics only if there are no tool calls
                         if accumulated_tool_calls.is_empty() {
                             let stop_reason = response
