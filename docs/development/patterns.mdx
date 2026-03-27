@@ -1,0 +1,114 @@
+---
+title: "Engineering Patterns"
+description: "Guardrails for deterministic, maintainable implementation patterns"
+slug: "development-patterns"
+author: "kpprasanna"
+date: "27 MAR 2026"
+tags: ["development", "architecture", "standards"]
+---
+
+# Engineering Patterns
+
+This codebase favors deterministic, maintainable structure over fast first drafts.
+
+## Core Rules
+
+- Extend strong existing patterns before inventing new ones.
+- Reduce variance before adding behavior.
+- Keep domain ownership explicit.
+- Treat early architectural decisions as high leverage.
+- Optimize for maintainability under future AI-assisted changes.
+
+## Required Workflow Before Coding
+
+For any non-trivial change:
+
+1. Identify the owning domain.
+2. Compare at least two plausible patterns.
+3. Choose one pattern explicitly and state why it wins.
+4. Name the blast radius.
+5. State what is intentionally out of scope.
+6. Then implement.
+
+## Preferred Module Shape
+
+When a feature grows beyond a small edit, separate it into clear concerns:
+
+- `types`: shared data structures and enums
+- `service`: orchestration and application logic
+- `ui` or `render`: presentation only
+- `persistence`: storage and serialization
+- `integration`: external API/runtime/system boundaries
+
+Not every feature needs every module, but no feature should collapse all concerns into one file if it is expected to grow.
+
+## Forbidden Patterns
+
+- UI rendering mixed with transport or auth protocol logic
+- Persistence writes embedded inside render code
+- Environment/runtime activation scattered through input handlers
+- Growing global app state directly when a feature state should exist
+- Adding new branches to monolithic hotspots without considering extraction first
+
+## Refactor Triggers
+
+Stop extending a file and decompose it when:
+
+- it owns more than one domain concern
+- it becomes a high-churn entrypoint for unrelated changes
+- understanding a change requires describing multiple responsibilities in the same module
+- the next feature would increase variance more than clarity
+
+## Current Refactor Priorities
+
+### 1. Connect Flow
+
+`src/app/connect/mod.rs` currently mixes:
+
+- modal flow state
+- provider/auth decisions
+- persistence coordination
+- OpenAI subscription auth
+- runtime activation
+
+Recommended split:
+
+- `src/app/connect/types.rs`
+- `src/app/connect/service.rs`
+- `src/app/connect/openai_subscription.rs`
+- `src/app/connect/activation.rs`
+
+### 2. App State
+
+`src/app/state/app_state.rs` should gradually move toward bounded feature substates such as:
+
+- `ConnectState`
+- `PanelState`
+- `ModelState`
+- `BackgroundTaskState`
+
+### 3. Panel Dispatch
+
+`src/app/runtime/panel_dispatch.rs` should be split by modal/panel domain instead of remaining a shared control monolith.
+
+### 4. Backend Integration
+
+Before deeper Codex/Responses support lands, `crates/agent_core/src/llm_backend.rs` should be decomposed along transport/protocol boundaries so new providers do not stack onto one chokepoint.
+
+## Review Standard
+
+Every meaningful change should be understandable and defensible to another engineer immediately.
+
+Prefer:
+
+- clear ownership
+- low variance
+- strong boundaries
+- extensible patterns
+
+Avoid:
+
+- clever shortcuts
+- convenience coupling
+- hidden side effects
+- "temporary" structures in hotspot modules
