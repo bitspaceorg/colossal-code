@@ -32,6 +32,7 @@ pub(crate) enum ParsedSlashCommand {
     Summarize { custom_instructions: Option<String> },
     AutoSummarize { command: String },
     Help,
+    Connect,
     Resume,
     Rewind,
     Fork,
@@ -78,6 +79,8 @@ pub(crate) fn parse_slash_command(command: &str) -> ParsedSlashCommand {
         }
     } else if cmd_lower == "/help" {
         ParsedSlashCommand::Help
+    } else if cmd_lower == "/connect" {
+        ParsedSlashCommand::Connect
     } else if cmd_lower == "/resume" {
         ParsedSlashCommand::Resume
     } else if cmd_lower == "/rewind" {

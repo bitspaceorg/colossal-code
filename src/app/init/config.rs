@@ -1,11 +1,38 @@
 use color_eyre::Result;
+use std::collections::HashSet;
 
+use crate::app::persistence::auth_store::load_auth_store;
 use crate::app::{
     AUTO_SUMMARIZE_THRESHOLD_CONFIG_KEY, AUTO_SUMMARIZE_THRESHOLD_VERSION,
     AUTO_SUMMARIZE_THRESHOLD_VERSION_KEY, App, DEFAULT_AUTO_SUMMARIZE_THRESHOLD,
     LEGACY_AUTO_SUMMARIZE_THRESHOLD, MAX_AUTO_SUMMARIZE_THRESHOLD, MIN_AUTO_SUMMARIZE_THRESHOLD,
     ModelInfo, model_context,
 };
+
+const OPENAI_CONNECTED_MODELS: &[&str] = &[
+    "gpt-5.1-codex",
+    "gpt-5.1-codex-mini",
+    "gpt-5.2",
+    "gpt-5.2-codex",
+    "gpt-5.3-codex-spark",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+    "gpt-5.1-codex-max",
+    "gpt-5-codex",
+    "codex-mini",
+    "gpt-5.1",
+    "gpt-5",
+    "gpt-5-mini",
+    "gpt-4.1",
+];
+
+fn connected_provider_models(provider_id: &str) -> &'static [&'static str] {
+    match provider_id {
+        "openai" => OPENAI_CONNECTED_MODELS,
+        _ => &[],
+    }
+}
 
 fn parse_auto_summarize_threshold(raw: &str) -> Option<f32> {
     let sanitized = raw.trim().trim_end_matches('%').trim();
@@ -113,50 +140,79 @@ impl App {
     }
 
     pub(crate) fn load_models(&mut self) -> Result<()> {
-        let Some(models_dir) = Self::models_directory_path() else {
-            self.available_models.clear();
-            return Ok(());
-        };
+        let mut models = Vec::new();
+        if let Some(models_dir) = Self::models_directory_path()
+            && models_dir.exists()
+        {
+            for entry in std::fs::read_dir(&models_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("gguf") {
+                    if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
+                        let metadata = std::fs::metadata(&path)?;
+                        let size_bytes = metadata.len();
+                        let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
 
-        if !models_dir.exists() {
-            self.available_models.clear();
-            return Ok(());
+                        let quantization = model_context::extract_quantization(file_name);
+                        let architecture = model_context::extract_architecture(file_name);
+                        let parameter_count = model_context::extract_parameter_count(file_name);
+                        let author = model_context::extract_author(file_name);
+                        let version = model_context::extract_version(file_name);
+                        let context_length = model_context::context_length_from_gguf(&path);
+                        let file_hash = model_context::compute_file_hash(&path);
+
+                        let display_name = file_name
+                            .strip_suffix(".gguf")
+                            .unwrap_or(file_name)
+                            .to_string();
+
+                        models.push(ModelInfo {
+                            filename: file_name.to_string(),
+                            display_name,
+                            connection_id: None,
+                            provider_name: None,
+                            size_mb,
+                            quantization,
+                            architecture,
+                            parameter_count,
+                            file_hash,
+                            author,
+                            version,
+                            context_length,
+                        });
+                    }
+                }
+            }
         }
 
-        let mut models = Vec::new();
-        for entry in std::fs::read_dir(&models_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("gguf") {
-                if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
-                    let metadata = std::fs::metadata(&path)?;
-                    let size_bytes = metadata.len();
-                    let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
+        let mut seen = HashSet::new();
+        seen.extend(models.iter().map(|model| model.filename.clone()));
 
-                    let quantization = model_context::extract_quantization(file_name);
-                    let architecture = model_context::extract_architecture(file_name);
-                    let parameter_count = model_context::extract_parameter_count(file_name);
-                    let author = model_context::extract_author(file_name);
-                    let version = model_context::extract_version(file_name);
-                    let context_length = model_context::context_length_from_gguf(&path);
-                    let file_hash = model_context::compute_file_hash(&path);
+        if let Ok(store) = load_auth_store() {
+            for connection in store.connections {
+                let provider_models = connected_provider_models(&connection.provider_id);
+                if provider_models.is_empty() {
+                    continue;
+                }
 
-                    let display_name = file_name
-                        .strip_suffix(".gguf")
-                        .unwrap_or(file_name)
-                        .to_string();
+                for model in provider_models {
+                    if !seen.insert((*model).to_string()) {
+                        continue;
+                    }
 
                     models.push(ModelInfo {
-                        filename: file_name.to_string(),
-                        display_name,
-                        size_mb,
-                        quantization,
-                        architecture,
-                        parameter_count,
-                        file_hash,
-                        author,
-                        version,
-                        context_length,
+                        filename: (*model).to_string(),
+                        display_name: (*model).to_string(),
+                        connection_id: Some(connection.id.clone()),
+                        provider_name: Some(connection.provider_name.clone()),
+                        size_mb: 0.0,
+                        quantization: None,
+                        architecture: None,
+                        parameter_count: None,
+                        file_hash: None,
+                        author: None,
+                        version: None,
+                        context_length: None,
                     });
                 }
             }

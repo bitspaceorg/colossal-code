@@ -1,6 +1,11 @@
 use crate::app::App;
 
 pub(crate) fn handle_runtime_paste(app: &mut App, data: String) {
+    if app.connect.show_connect_modal {
+        app.handle_connect_paste(data);
+        return;
+    }
+
     if app.vim_mode_enabled {
         let current_text = app.vim_input_editor.get_text_content();
         let cursor = app.vim_input_editor.state.cursor;

@@ -1,3 +1,4 @@
+pub mod auth_store;
 pub mod compaction;
 pub mod config;
 pub mod conversations;

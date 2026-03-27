@@ -34,6 +34,10 @@ pub fn primary_metadata_line<F>(model: &ModelInfo, format_compact_number: F) -> 
 where
     F: Fn(usize) -> String,
 {
+    if let Some(provider_name) = model.provider_name.as_deref() {
+        return provider_name.to_string();
+    }
+
     let mut metadata_parts = Vec::new();
 
     if let Some(ref arch) = model.architecture {
@@ -60,6 +64,10 @@ where
 }
 
 pub fn secondary_metadata_line(model: &ModelInfo) -> Option<String> {
+    if model.connection_id.is_some() {
+        return Some(model.filename.clone());
+    }
+
     let mut metadata_parts = Vec::new();
 
     if let Some(ref author) = model.author {
@@ -141,6 +149,8 @@ mod tests {
         ModelInfo {
             filename: "test.gguf".to_string(),
             display_name: "test".to_string(),
+            connection_id: None,
+            provider_name: None,
             size_mb: 8192.0,
             quantization: Some("Q4_K_M".to_string()),
             architecture: Some("Llama".to_string()),

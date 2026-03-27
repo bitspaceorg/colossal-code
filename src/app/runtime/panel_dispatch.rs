@@ -8,7 +8,8 @@ use crate::app::{App, SLASH_COMMANDS};
 
 impl App {
     pub(crate) fn handle_panel_dispatch_key(&mut self, key: &KeyEvent) -> bool {
-        self.handle_summary_history_panel_key(key)
+        self.handle_connect_modal_key(key)
+            || self.handle_summary_history_panel_key(key)
             || self.handle_help_panel_key(key)
             || self.handle_resume_panel_key(key)
             || self.handle_history_panel_key(key)

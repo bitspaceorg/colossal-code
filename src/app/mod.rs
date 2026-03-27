@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod connect;
 pub(crate) mod constants;
 mod ext;
 pub mod init;
@@ -26,9 +27,7 @@ pub(crate) use render::panels::survey::Survey;
 pub(crate) use render::thinking::{
     create_thinking_highlight_spans, encode_generation_stats_message,
 };
-pub(crate) use state::app_state::{
-    App, AssistantMode, HelpTab, Mode, TodoItem, VisibleEditDiffArtifact,
-};
+pub(crate) use state::app_state::{App, AssistantMode, HelpTab, Mode, TodoItem};
 pub(crate) use state::ui_message_event::UiMessageEvent;
 pub(crate) use state::*;
 

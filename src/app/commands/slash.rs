@@ -96,6 +96,9 @@ impl App {
                 self.ui_state.help_tab = HelpTab::General; // Start on general tab
                 self.help_commands_selected = 0; // Reset selection
             }
+            SlashCommandDispatch::Connect => {
+                self.open_connect_modal();
+            }
             SlashCommandDispatch::Resume => {
                 // Open resume panel and load conversations
                 if let Err(e) = self.load_conversations_list() {

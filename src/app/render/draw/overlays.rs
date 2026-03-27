@@ -95,5 +95,7 @@ impl App {
         if let Some(idx) = area_indices.model_selection_area_idx {
             self.render_model_selection_panel(frame, areas[idx]);
         }
+
+        self.render_connect_modal(frame);
     }
 }

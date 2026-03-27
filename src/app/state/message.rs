@@ -382,6 +382,8 @@ pub(crate) enum UIMessageMetadata {
 pub(crate) struct ModelInfo {
     pub(crate) filename: String,
     pub(crate) display_name: String,
+    pub(crate) connection_id: Option<String>,
+    pub(crate) provider_name: Option<String>,
     pub(crate) size_mb: f64,
     pub(crate) quantization: Option<String>,
     pub(crate) architecture: Option<String>,

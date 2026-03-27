@@ -1,4 +1,5 @@
 pub mod background;
+pub mod connect;
 pub mod help;
 pub mod model;
 pub mod prompts;

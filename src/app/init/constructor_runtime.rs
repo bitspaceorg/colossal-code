@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::app::App;
 
 impl App {
-    pub(super) fn spawn_agent_runtime(
+    pub(crate) fn spawn_agent_runtime(
         agent_arc: Arc<Agent>,
         mut input_rx: mpsc::UnboundedReceiver<AgentMessage>,
         output_tx: mpsc::UnboundedSender<AgentMessage>,
