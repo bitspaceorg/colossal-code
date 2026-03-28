@@ -1,3 +1,4 @@
+use std::time::{Duration, Instant};
 use std::{sync::Arc, time::SystemTime};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -7,6 +8,16 @@ use crate::app::App;
 use crate::app::state::message::{MessageState, MessageType};
 
 impl App {
+    fn set_mode_status_message(&mut self) {
+        let label = self
+            .safety_state
+            .assistant_mode
+            .to_display()
+            .map(|(label, _)| label)
+            .unwrap_or_else(|| "normal mode".to_string());
+        self.status_message = Some(format!("Mode set to {label}"));
+    }
+
     fn cycle_openai_variant(&mut self) {
         const VARIANTS: &[Option<&str>] = &[
             None,
@@ -44,9 +55,46 @@ impl App {
             || (matches!(key.code, KeyCode::Tab) && key.modifiers.contains(KeyModifiers::SHIFT))
     }
 
+    fn is_ctrl_t(key: &KeyEvent) -> bool {
+        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+
+        matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T'))
+            || matches!(key.code, KeyCode::Char(c) if c == '')
+    }
+
+    fn allow_mode_toggle(&mut self) -> bool {
+        let now = Instant::now();
+        if self
+            .last_mode_toggle_at
+            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(180))
+        {
+            return false;
+        }
+        self.last_mode_toggle_at = Some(now);
+        true
+    }
+
+    fn allow_variant_toggle(&mut self) -> bool {
+        let now = Instant::now();
+        if self
+            .last_variant_toggle_at
+            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(180))
+        {
+            return false;
+        }
+        self.last_variant_toggle_at = Some(now);
+        true
+    }
+
     pub(crate) fn handle_normal_mode_global_toggles(&mut self, key: &KeyEvent) -> bool {
         if Self::is_shift_tab(key) {
+            if !self.allow_mode_toggle() {
+                return true;
+            }
             self.safety_state.assistant_mode = self.safety_state.assistant_mode.next();
+            self.set_mode_status_message();
 
             if let Some(safety_mode) = self.safety_state.assistant_mode.to_safety_mode() {
                 let mut config =
@@ -66,7 +114,10 @@ impl App {
             return true;
         }
 
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
+        if Self::is_ctrl_t(key) {
+            if !self.allow_variant_toggle() {
+                return true;
+            }
             self.cycle_openai_variant();
             return true;
         }
@@ -141,5 +192,12 @@ mod tests {
         let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
 
         assert!(!App::is_shift_tab(&ctrl_t));
+    }
+
+    #[test]
+    fn ctrl_t_detection_accepts_control_character() {
+        let ctrl_t = KeyEvent::new(KeyCode::Char('\u{14}'), KeyModifiers::CONTROL);
+
+        assert!(App::is_ctrl_t(&ctrl_t));
     }
 }

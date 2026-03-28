@@ -123,15 +123,13 @@ impl App {
 
     fn input_footer_line(&self, max_width: usize) -> Line<'static> {
         let mut spans = vec![
-            Span::styled(
-                self.input_provider_label(),
-                Style::default().fg(Color::White),
-            ),
             Span::raw(" "),
             Span::styled(
-                self.input_model_label(),
+                self.input_provider_label(),
                 Style::default().fg(Color::DarkGray),
             ),
+            Span::raw(" "),
+            Span::styled(self.input_model_label(), Style::default().fg(Color::Gray)),
             Span::styled(" • ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 self.input_variant_label(),

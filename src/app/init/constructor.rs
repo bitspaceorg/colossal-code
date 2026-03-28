@@ -93,6 +93,8 @@ impl App {
             nav_needs_init: false,
             flash_highlight: None,
             ctrl_c_pressed: None,
+            last_mode_toggle_at: None,
+            last_variant_toggle_at: None,
             survey: Survey::new(10, 0.33),
             safety_state: SafetyState::default(),
             agent: Some(agent_arc),
