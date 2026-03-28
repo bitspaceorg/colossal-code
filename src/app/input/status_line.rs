@@ -184,6 +184,18 @@ impl App {
         context_status_color_for_percent(percent_left)
     }
 
+    fn shortcuts_status_line(&self) -> Line<'static> {
+        Line::from(vec![
+            Span::styled("ctrl+t", Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+            Span::styled("variants", Style::default().fg(Color::White)),
+            Span::styled(" • ", Style::default().fg(Color::DarkGray)),
+            Span::styled("shift + tab", Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+            Span::styled("modes", Style::default().fg(Color::White)),
+        ])
+    }
+
     pub(crate) fn render_status_bar(
         &self,
         frame: &mut Frame,
@@ -239,18 +251,15 @@ impl App {
         };
         let center_line = Line::from(center_text);
         let center_width = center_line.width() as u16;
-        let version_text = vec![
-            Span::styled("Nite-2.5 ", Style::default().fg(Color::Magenta)),
-            self.context_status_span(),
-        ];
-        let version_width = Line::from(version_text.clone()).width() as u16;
+        let right_line = self.shortcuts_status_line();
+        let right_width = right_line.width() as u16;
         let horizontal = Layout::horizontal([
             Constraint::Length(1),
             Constraint::Length(directory_width),
             Constraint::Min(1),
             Constraint::Length(center_width),
             Constraint::Min(1),
-            Constraint::Length(version_width),
+            Constraint::Length(right_width),
             Constraint::Length(1),
         ])
         .flex(ratatui::layout::Flex::SpaceBetween);
@@ -265,8 +274,8 @@ impl App {
         let centered_area = Self::center_horizontal(center_area, center_width);
         let sandbox = Paragraph::new(center_line);
         frame.render_widget(sandbox, centered_area);
-        let version = Paragraph::new(Line::from(version_text)).right_aligned();
-        frame.render_widget(version, right_area);
+        let shortcuts = Paragraph::new(right_line).right_aligned();
+        frame.render_widget(shortcuts, right_area);
     }
 }
 

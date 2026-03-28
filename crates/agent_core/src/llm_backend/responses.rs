@@ -12,10 +12,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
-use super::{
-    HttpBackend, OpenAiUsage, estimate_tokens, message_adapter::assistant_tool_calls_from_message,
-    usage_from_openai,
-};
+use super::openai_options::OpenAiResponsesOptions;
+use super::{HttpBackend, OpenAiUsage, estimate_tokens, usage_from_openai};
 
 const DEFAULT_INSTRUCTIONS: &str = "You are Nite 3, a coding agent deployed in the best TUI colossal code. You live inside the terminal, running lean, fast, and sharp. Your role is to serve as the developer's right hand.";
 
@@ -23,6 +21,8 @@ pub(super) async fn stream_responses_request(
     backend: &HttpBackend,
     mut request_builder: RequestBuilder,
 ) -> Result<Box<dyn FuturesStream<Item = Response> + Unpin + Send>> {
+    backend.ensure_fresh_openai_auth().await?;
+
     let model_name = {
         let guard = backend.model.lock().await;
         guard.clone()
@@ -40,10 +40,10 @@ pub(super) async fn stream_responses_request(
         ))
         .json(&payload);
 
-    if let Some(header) = backend.auth_header() {
+    if let Some(header) = backend.openai_auth_header().await {
         request = request.header("Authorization", header);
     }
-    if let Some(account_id) = backend.chatgpt_account_id.as_deref() {
+    if let Some(account_id) = backend.openai_account_id().await {
         request = request.header("ChatGPT-Account-Id", account_id);
     }
 
@@ -72,7 +72,7 @@ pub(super) async fn stream_responses_request(
 }
 
 fn build_responses_payload(
-    backend: &HttpBackend,
+    _backend: &HttpBackend,
     request_builder: &mut RequestBuilder,
     model_name: &str,
 ) -> Value {
@@ -139,21 +139,19 @@ fn build_responses_payload(
         "stream": true,
     });
 
-    if let Some(store) = backend.profile.maybe_store_flag() {
-        payload["store"] = store;
+    payload["store"] = json!(false);
+
+    if let Some(max_len) = sampling_params.max_len {
+        payload["max_output_tokens"] = json!(max_len);
     }
 
-    backend
-        .profile
-        .apply_max_tokens(&mut payload, sampling_params.max_len);
+    payload["instructions"] = Value::String(if instructions.is_empty() {
+        DEFAULT_INSTRUCTIONS.to_string()
+    } else {
+        instructions.join("\n\n")
+    });
 
-    if backend.profile.requires_instructions() {
-        payload["instructions"] = Value::String(if instructions.is_empty() {
-            DEFAULT_INSTRUCTIONS.to_string()
-        } else {
-            instructions.join("\n\n")
-        });
-    }
+    OpenAiResponsesOptions::from_env().apply_to_responses_payload(&mut payload);
 
     if let Some((tools, tool_choice)) = request_builder.take_tools() {
         let serialized_tools: Vec<Value> = tools
@@ -203,6 +201,53 @@ fn content_as_text(value: &MessageContent) -> Option<String> {
                 .join(""),
         ),
     }
+}
+
+fn assistant_tool_calls_from_message(
+    msg: &indexmap::IndexMap<String, MessageContent>,
+) -> Vec<ToolCallResponse> {
+    let Some(value) = msg.get("tool_calls").or_else(|| msg.get("function")) else {
+        return Vec::new();
+    };
+    let Either::Right(parts) = value else {
+        return Vec::new();
+    };
+
+    parts
+        .iter()
+        .enumerate()
+        .map(|(idx, tool)| {
+            let index = tool
+                .get("index")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize)
+                .unwrap_or(idx);
+            let id = tool
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let name = tool
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let arguments = tool
+                .get("function")
+                .and_then(|f| f.get("arguments"))
+                .and_then(Value::as_str)
+                .unwrap_or("{}")
+                .to_string();
+
+            ToolCallResponse {
+                index,
+                id,
+                tp: ToolCallType::Function,
+                function: CalledFunction { name, arguments },
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Default)]

@@ -23,22 +23,8 @@ impl App {
             return;
         }
 
-        if let Some((mode_text, mode_color)) = self.safety_state.assistant_mode.to_display() {
-            let cycle_hint = "(shift + tab to cycle)";
-            let full_text = format!("{} {}", mode_text, cycle_hint);
-            let total_width = full_text.len() as u16;
-            let start_x = input_area.x + input_area.width.saturating_sub(total_width + 1);
-
-            self.render_indicator_text_at(frame, start_x, indicator_y, &mode_text, mode_color);
-            let cycle_start_x = start_x + mode_text.len() as u16;
-            self.render_indicator_text_at(
-                frame,
-                cycle_start_x,
-                indicator_y,
-                &format!(" {}", cycle_hint),
-                Color::DarkGray,
-            );
-        }
+        let _ = input_area;
+        let _ = indicator_y;
     }
 
     fn render_indicator_text(

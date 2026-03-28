@@ -6,6 +6,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::app::connect::model_discovery::format_model_display_name;
 use crate::app::{App, MessageType, UiMessageEvent, create_thinking_highlight_spans};
 
 fn into_owned_line(line: Line<'_>) -> Line<'static> {
@@ -18,14 +19,149 @@ fn into_owned_line(line: Line<'_>) -> Line<'static> {
 }
 
 impl App {
+    fn input_provider_label(&self) -> String {
+        self.current_model
+            .as_deref()
+            .map(|model| model.trim().to_ascii_lowercase())
+            .filter(|model| !model.is_empty())
+            .map(|model| {
+                if model.starts_with("gpt-") || model.starts_with('o') || model.contains("codex") {
+                    "OpenAI".to_string()
+                } else {
+                    "Local".to_string()
+                }
+            })
+            .unwrap_or_else(|| "Local".to_string())
+    }
+
+    fn input_model_label(&self) -> String {
+        let Some(model_id) = self
+            .current_model
+            .as_ref()
+            .map(|value| value.trim().to_string())
+        else {
+            return "Nite-2.5".to_string();
+        };
+        if model_id.is_empty() {
+            return "Nite-2.5".to_string();
+        }
+
+        let provider_id = if model_id.to_ascii_lowercase().starts_with("gpt-")
+            || model_id.to_ascii_lowercase().starts_with('o')
+            || model_id.to_ascii_lowercase().contains("codex")
+        {
+            "openai"
+        } else {
+            "local"
+        };
+
+        format_model_display_name(provider_id, &model_id)
+    }
+
+    fn input_variant_label(&self) -> String {
+        std::env::var("NITE_OPENAI_REASONING_EFFORT")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "none".to_string())
+    }
+
+    fn input_mode_label(&self) -> Option<(String, Color)> {
+        self.safety_state.assistant_mode.to_display()
+    }
+
+    fn input_context_footer_spans(&self) -> Vec<Span<'static>> {
+        let percent_used = if let Some(limit) = self.current_context_tokens {
+            if limit > 0 {
+                if let Some(stats) = self.get_generation_stats() {
+                    let used = stats.prompt_tokens.saturating_add(stats.completion_tokens);
+                    (used as f32 / limit as f32 * 100.0).clamp(0.0, 100.0)
+                } else if self.agent_state.agent_processing {
+                    let streaming_tokens =
+                        self.streaming_completion_tokens + self.thinking_token_count;
+                    let prompt_tokens = self
+                        .nav_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.generation_stats.as_ref())
+                        .map(|stats| stats.prompt_tokens)
+                        .unwrap_or(0);
+                    let used = prompt_tokens.saturating_add(streaming_tokens);
+                    (used as f32 / limit as f32 * 100.0).clamp(0.0, 100.0)
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        let filled = ((percent_used / 10.0).round() as usize).min(10);
+        let mut bar = String::with_capacity(10);
+        for idx in 0..10 {
+            bar.push(if idx < filled { '█' } else { '▒' });
+        }
+        let color = if percent_used >= 85.0 {
+            Color::Red
+        } else if percent_used >= 65.0 {
+            Color::Yellow
+        } else {
+            Color::DarkGray
+        };
+
+        vec![
+            Span::styled("[", Style::default().fg(Color::DarkGray)),
+            Span::styled(bar, Style::default().fg(color)),
+            Span::styled("] ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:.0}% used", percent_used),
+                Style::default().fg(color),
+            ),
+        ]
+    }
+
+    fn input_footer_line(&self, max_width: usize) -> Line<'static> {
+        let mut spans = vec![
+            Span::styled(
+                self.input_provider_label(),
+                Style::default().fg(Color::White),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                self.input_model_label(),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(" • ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                self.input_variant_label(),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(" • ", Style::default().fg(Color::DarkGray)),
+        ];
+        spans.extend(self.input_context_footer_spans());
+
+        if let Some((label, color)) = self.input_mode_label() {
+            let left_width: usize = spans.iter().map(|span| span.width()).sum();
+            let mode_width = label.len();
+            if max_width > left_width + mode_width {
+                spans.push(Span::raw(" ".repeat(max_width - left_width - mode_width)));
+            } else {
+                spans.push(Span::raw(" "));
+            }
+            spans.push(Span::styled(label, Style::default().fg(color)));
+        }
+
+        Line::from(spans)
+    }
+
     pub(crate) fn compose_main_message_lines(
-        &mut self,
+        &self,
         max_width: usize,
         append_plan: bool,
         append_subagent_thinking: bool,
     ) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
-        self.visible_edit_file_artifacts.clear();
         let tips: Vec<Line<'static>> = self
             .render_tips()
             .into_iter()
@@ -36,13 +172,13 @@ impl App {
             lines.push(Line::from(" "));
         }
 
-        let messages = self.get_messages().to_vec();
-        let message_types = self.get_message_types().clone();
+        let messages = self.get_messages();
+        let message_types = self.get_message_types();
         let mut idx = 0;
         while idx < messages.len() {
             let message = &messages[idx];
             let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
-            let connector = self.agent_connector_for_index(&message_types, idx);
+            let connector = self.agent_connector_for_index(message_types, idx);
 
             if is_agent
                 && let Some(UiMessageEvent::ToolCallCompleted {
@@ -54,9 +190,8 @@ impl App {
                 && let Some(next_message) = messages.get(idx + 1)
                 && let Some(note) = App::approval_note_label(next_message)
             {
-                let start_row = lines.len();
                 lines.extend(
-                    self.render_tool_call_completed_with_note_for_message(
+                    self.render_tool_call_completed_with_note(
                         &tool_name,
                         &args,
                         &result,
@@ -64,75 +199,10 @@ impl App {
                         max_width,
                         connector,
                         Some(note),
-                        Some(idx),
                     )
                     .lines,
                 );
-                if tool_name == "edit_file"
-                    && let Some(raw_arguments) = raw_arguments.as_deref()
-                    && let Some(rendered_diff) = self.rendered_edit_file_diff_for_message(
-                        raw_arguments,
-                        &result,
-                        max_width,
-                        connector,
-                        idx,
-                    )
-                {
-                    let artifact_start = start_row + 2;
-                    let artifact_end = artifact_start + rendered_diff.lines.len();
-                    self.visible_edit_file_artifacts
-                        .push(crate::app::VisibleEditDiffArtifact {
-                            message_idx: idx,
-                            start_row: artifact_start,
-                            end_row: artifact_end,
-                            collapsed: rendered_diff.collapsed,
-                        });
-                }
                 idx += 2;
-                continue;
-            }
-
-            if is_agent
-                && let Some(UiMessageEvent::ToolCallCompleted {
-                    tool_name,
-                    args,
-                    result,
-                    raw_arguments,
-                }) = UiMessageEvent::parse(message)
-            {
-                let start_row = lines.len();
-                let rendered = self.render_tool_call_completed_with_note_for_message(
-                    &tool_name,
-                    &args,
-                    &result,
-                    raw_arguments.as_deref(),
-                    max_width,
-                    connector,
-                    None,
-                    Some(idx),
-                );
-                if tool_name == "edit_file"
-                    && let Some(raw_arguments) = raw_arguments.as_deref()
-                    && let Some(rendered_diff) = self.rendered_edit_file_diff_for_message(
-                        raw_arguments,
-                        &result,
-                        max_width,
-                        connector,
-                        idx,
-                    )
-                {
-                    let artifact_start = start_row + 2;
-                    let artifact_end = artifact_start + rendered_diff.lines.len();
-                    self.visible_edit_file_artifacts
-                        .push(crate::app::VisibleEditDiffArtifact {
-                            message_idx: idx,
-                            start_row: artifact_start,
-                            end_row: artifact_end,
-                            collapsed: rendered_diff.collapsed,
-                        });
-                }
-                lines.extend(rendered.lines);
-                idx += 1;
                 continue;
             }
 
@@ -304,13 +374,15 @@ impl App {
             lines.push(Line::from(current_line));
         }
 
-        let total_lines = lines.len() as u16;
-        let max_content_height = 4u16;
+        let footer_line = self.input_footer_line(max_width as usize);
+        let total_lines = (lines.len() as u16).saturating_add(1);
+        let max_content_height = input_area.height.saturating_sub(2).max(1);
         let scroll_y = if total_lines > max_content_height {
-            cursor_row.saturating_sub(max_content_height - 1)
+            cursor_row.saturating_sub(max_content_height.saturating_sub(2))
         } else {
             0
         };
+        lines.push(footer_line);
         let input = Paragraph::new(Text::from(lines))
             .scroll((scroll_y, 0))
             .block(

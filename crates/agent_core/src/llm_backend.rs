@@ -20,12 +20,11 @@ use std::{net::IpAddr, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-mod backend_profile;
-mod message_adapter;
+mod openai_auth;
+mod openai_options;
 mod responses;
 
-use backend_profile::{HttpBackendProfile, HttpTransportKind, ToolChoiceFormat};
-use message_adapter::normalized_message_key;
+use openai_auth::OpenAiAuthState;
 
 #[async_trait]
 pub trait LLMBackend: Send + Sync {
@@ -136,8 +135,8 @@ pub struct HttpBackend {
     completions_path: String,
     requires_model_load: bool,
     supports_thinking_param: bool,
-    profile: HttpBackendProfile,
     chatgpt_account_id: Option<String>,
+    openai_auth: Option<OpenAiAuthState>,
 }
 
 fn http_debug_enabled() -> bool {
@@ -183,7 +182,18 @@ impl HttpBackend {
         } else {
             format!("/{}", completions_path)
         };
-        let profile = HttpBackendProfile::detect(&base_url, &completions_path);
+        let chatgpt_account_id = std::env::var("NITE_HTTP_ACCOUNT_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let openai_auth = if completions_path
+            .to_ascii_lowercase()
+            .contains("backend-api/codex/responses")
+        {
+            OpenAiAuthState::from_env(api_key.clone())
+        } else {
+            None
+        };
         Self {
             client: Client::new(),
             base_url,
@@ -192,15 +202,8 @@ impl HttpBackend {
             completions_path,
             requires_model_load,
             supports_thinking_param,
-            chatgpt_account_id: if profile.supports_chatgpt_account_id() {
-                std::env::var("NITE_HTTP_ACCOUNT_ID")
-                    .ok()
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
-            } else {
-                None
-            },
-            profile,
+            chatgpt_account_id,
+            openai_auth,
         }
     }
 
@@ -322,11 +325,16 @@ impl HttpBackend {
     }
 
     fn is_google_api(&self) -> bool {
-        self.profile.is_google_api()
+        self.base_url.contains("generativelanguage.googleapis.com")
+            && !self
+                .completions_path
+                .to_lowercase()
+                .contains("chat/completions")
     }
 
     fn is_responses_api(&self) -> bool {
-        self.profile.transport() == HttpTransportKind::Responses
+        let path = self.completions_path.to_ascii_lowercase();
+        path.contains("/responses") || path.contains("backend-api/codex/responses")
     }
 
     async fn stream_json_response(
@@ -481,20 +489,12 @@ impl LLMBackend for HttpBackend {
 
         let openai_messages = serialize_messages(request_builder.messages_ref());
         let tools_payload = request_builder.take_tools();
-        let sampling_params = request_builder.take_sampling_params();
 
         let mut payload = json!({
             "model": model_name.clone(),
             "messages": openai_messages,
             "stream": true,
         });
-
-        if let Some(store) = self.profile.maybe_store_flag() {
-            payload["store"] = store;
-        }
-
-        self.profile
-            .apply_max_tokens(&mut payload, sampling_params.max_len);
 
         if self.supports_thinking_param {
             if let Some(enable_thinking) = enable_thinking {
@@ -555,12 +555,9 @@ impl LLMBackend for HttpBackend {
             }
 
             if !is_google_api {
-                match self.profile.tool_choice_format() {
-                    ToolChoiceFormat::OpenAi => {
-                        payload["tool_choice"] = tool_choice_to_value(tool_choice);
-                    }
-                    ToolChoiceFormat::Responses | ToolChoiceFormat::Unsupported => {}
-                }
+                // Only send tool_choice for OpenAI-compatible APIs
+                let tool_choice_value = tool_choice_to_value(tool_choice);
+                payload["tool_choice"] = tool_choice_value;
             }
         }
 
@@ -800,7 +797,11 @@ fn serialize_messages(messages: &[IndexMap<String, MessageContent>]) -> Vec<Valu
         .map(|message| {
             let mut obj = serde_json::Map::new();
             for (key, value) in message.iter() {
-                let normalized_key = normalized_message_key(key).to_string();
+                let normalized_key = if key == "function" {
+                    "tool_calls".to_string()
+                } else {
+                    key.clone()
+                };
                 match value {
                     Either::Left(text) => {
                         obj.insert(normalized_key, Value::String(text.clone()));

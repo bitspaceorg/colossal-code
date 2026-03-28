@@ -1852,15 +1852,20 @@ impl Agent {
             system_prompt_guard.clone()
         };
 
+        let system_msg = "You are Nite 3, a coding agent deployed in the best TUI colossal code. You live inside the terminal, running lean, fast, and sharp. Your role is to serve as the developer's right hand.";
+
+        // Format the summary as if it were the first user message, including full system prompt
+        let full_context_msg = format!(
+            "{}\n\n\
+             This session is being continued from a previous conversation that ran out of context. \
+             The previous conversation has been summarized below:\n\n{}",
+            system_prompt_content, summary
+        );
+
+        // Create a new conversation with the same structure as a normal conversation start
         let request_builder = RequestBuilder::new()
-            .add_message(TextMessageRole::System, &system_prompt_content)
-            .add_message(
-                TextMessageRole::User,
-                &format!(
-                    "This session is being continued from a previous conversation that ran out of context. The previous conversation has been summarized below:\n\n{}",
-                    summary
-                ),
-            )
+            .add_message(TextMessageRole::System, system_msg)
+            .add_message(TextMessageRole::User, &full_context_msg)
             .set_tools(tools)
             .set_tool_choice(ToolChoice::Auto)
             .enable_thinking(true);
@@ -2534,6 +2539,7 @@ impl Agent {
                 let system_prompt_guard = self.system_prompt.lock().await;
                 system_prompt_guard.clone()
             };
+
             let tools = {
                 let tools_guard = self.tools.lock().await;
                 tools_guard.clone()

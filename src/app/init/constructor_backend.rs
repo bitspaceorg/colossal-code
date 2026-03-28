@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::app::persistence::auth_store::{StoredAuthKind, StoredConnection};
+use crate::app::persistence::auth_store::{StoredConnection, auth_file_path};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BackendConfig {
@@ -19,6 +19,8 @@ pub(crate) struct BackendEnvironment {
     pub(super) account_id: Option<String>,
     pub(super) refresh_token: Option<String>,
     pub(super) access_expires_at: Option<u64>,
+    pub(super) auth_file: Option<String>,
+    pub(super) active_connection_id: Option<String>,
     pub(super) google_user_project: Option<String>,
     pub(super) limit_thinking_to_first_token: bool,
 }
@@ -54,6 +56,8 @@ impl BackendConfig {
                 account_id: None,
                 refresh_token: None,
                 access_expires_at: None,
+                auth_file: None,
+                active_connection_id: None,
                 google_user_project: self.google_user_project,
                 limit_thinking_to_first_token: false,
             },
@@ -75,6 +79,8 @@ impl BackendConfig {
                 account_id: None,
                 refresh_token: None,
                 access_expires_at: None,
+                auth_file: None,
+                active_connection_id: None,
                 google_user_project: self.google_user_project,
                 limit_thinking_to_first_token: true,
             },
@@ -96,6 +102,8 @@ impl BackendConfig {
                 account_id: None,
                 refresh_token: None,
                 access_expires_at: None,
+                auth_file: None,
+                active_connection_id: None,
                 google_user_project: self.google_user_project,
                 limit_thinking_to_first_token: false,
             },
@@ -103,30 +111,24 @@ impl BackendConfig {
     }
 
     pub(crate) fn from_connection(connection: &StoredConnection) -> Option<BackendEnvironment> {
-        match connection.auth_kind {
-            StoredAuthKind::ApiKey => Some(BackendEnvironment {
-                backend_mode: "external",
-                base_url: connection.base_url.clone(),
-                api_key: connection.api_key.clone(),
-                completions_path: connection.completions_path.clone(),
-                account_id: None,
-                refresh_token: None,
-                access_expires_at: None,
-                google_user_project: None,
-                limit_thinking_to_first_token: true,
-            }),
-            StoredAuthKind::OpenAiSubscription => Some(BackendEnvironment {
-                backend_mode: "external",
-                base_url: connection.base_url.clone(),
-                api_key: connection.access_token.clone(),
-                completions_path: connection.completions_path.clone(),
-                account_id: connection.account_id.clone(),
-                refresh_token: connection.refresh_token.clone(),
-                access_expires_at: connection.access_expires_at,
-                google_user_project: None,
-                limit_thinking_to_first_token: true,
-            }),
-        }
+        Some(BackendEnvironment {
+            backend_mode: "external",
+            base_url: connection.base_url.clone(),
+            api_key: connection
+                .access_token
+                .clone()
+                .or_else(|| connection.api_key.clone()),
+            completions_path: connection.completions_path.clone(),
+            account_id: connection.account_id.clone(),
+            refresh_token: connection.refresh_token.clone(),
+            access_expires_at: connection.access_expires_at,
+            auth_file: auth_file_path()
+                .ok()
+                .map(|path| path.to_string_lossy().to_string()),
+            active_connection_id: Some(connection.id.clone()),
+            google_user_project: None,
+            limit_thinking_to_first_token: true,
+        })
     }
 }
 
@@ -193,6 +195,26 @@ impl App {
         } else {
             unsafe {
                 std::env::remove_var("NITE_HTTP_ACCESS_EXPIRES_AT");
+            }
+        }
+
+        if let Some(value) = env.auth_file.as_deref() {
+            unsafe {
+                std::env::set_var("NITE_AUTH_FILE", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("NITE_AUTH_FILE");
+            }
+        }
+
+        if let Some(value) = env.active_connection_id.as_deref() {
+            unsafe {
+                std::env::set_var("NITE_ACTIVE_CONNECTION_ID", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("NITE_ACTIVE_CONNECTION_ID");
             }
         }
 

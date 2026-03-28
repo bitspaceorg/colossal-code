@@ -1,4 +1,5 @@
 mod activation;
+pub(crate) mod model_discovery;
 mod openai_subscription;
 mod service;
 mod types;

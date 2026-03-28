@@ -7,6 +7,38 @@ use crate::app::App;
 use crate::app::state::message::{MessageState, MessageType};
 
 impl App {
+    fn cycle_openai_variant(&mut self) {
+        const VARIANTS: &[Option<&str>] = &[
+            None,
+            Some("low"),
+            Some("medium"),
+            Some("high"),
+            Some("xhigh"),
+        ];
+
+        let current = std::env::var("NITE_OPENAI_REASONING_EFFORT")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+        let current_index = VARIANTS
+            .iter()
+            .position(|variant| variant.map(|v| v.to_string()) == current)
+            .unwrap_or(0);
+        let next = VARIANTS[(current_index + 1) % VARIANTS.len()];
+
+        match next {
+            Some(value) => unsafe {
+                std::env::set_var("NITE_OPENAI_REASONING_EFFORT", value);
+            },
+            None => unsafe {
+                std::env::remove_var("NITE_OPENAI_REASONING_EFFORT");
+            },
+        }
+
+        let label = next.unwrap_or("none");
+        self.status_message = Some(format!("Variant set to {label}"));
+    }
+
     pub(crate) fn is_shift_tab(key: &KeyEvent) -> bool {
         matches!(key.code, KeyCode::BackTab)
             || (matches!(key.code, KeyCode::Tab) && key.modifiers.contains(KeyModifiers::SHIFT))
@@ -31,6 +63,11 @@ impl App {
                 }
             }
 
+            return true;
+        }
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
+            self.cycle_openai_variant();
             return true;
         }
 
@@ -97,5 +134,12 @@ mod tests {
         assert!(App::is_shift_tab(&backtab_without_shift));
         assert!(App::is_shift_tab(&tab_with_shift));
         assert!(!App::is_shift_tab(&plain_tab));
+    }
+
+    #[test]
+    fn ctrl_t_is_not_treated_as_shift_tab() {
+        let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+
+        assert!(!App::is_shift_tab(&ctrl_t));
     }
 }

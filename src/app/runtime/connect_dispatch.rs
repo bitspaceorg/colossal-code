@@ -115,9 +115,15 @@ impl App {
                 }
                 KeyCode::Enter => {
                     let sanitized = self.sanitized_connect_api_key();
-                    if !sanitized.is_empty() && !self.connect.available_models.is_empty() {
+                    if !sanitized.is_empty() {
                         self.connect.input = sanitized;
                         self.connect.input_cursor = self.connect.input.chars().count();
+                        if let Err(error) = self.refresh_selected_provider_models() {
+                            self.push_connect_status(format!(
+                                " ⎿ model discovery fell back to defaults: {}",
+                                error
+                            ));
+                        }
                         self.connect.mode = ConnectModalMode::Models;
                         self.connect.model_selected_index = 0;
                     }
@@ -132,6 +138,12 @@ impl App {
                     if self.connect.subscription_state.access_token.is_some()
                         && self.connect.subscription_state.refresh_token.is_some()
                     {
+                        if let Err(error) = self.refresh_selected_provider_models() {
+                            self.push_connect_status(format!(
+                                " ⎿ model discovery fell back to defaults: {}",
+                                error
+                            ));
+                        }
                         self.connect.mode = ConnectModalMode::Models;
                         self.connect.model_selected_index = 0;
                     } else if !self.connect.subscription_state.started {
@@ -144,6 +156,12 @@ impl App {
                     } else {
                         match self.poll_openai_subscription_auth() {
                             Ok(true) => {
+                                if let Err(error) = self.refresh_selected_provider_models() {
+                                    self.push_connect_status(format!(
+                                        " ⎿ model discovery fell back to defaults: {}",
+                                        error
+                                    ));
+                                }
                                 self.connect.mode = ConnectModalMode::Models;
                                 self.connect.model_selected_index = 0;
                             }

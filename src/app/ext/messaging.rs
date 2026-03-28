@@ -1,6 +1,6 @@
 use crate::app::{
     AgentConnector, App, MessageState, MessageType, SUMMARY_BANNER_PREFIX, UIMessageMetadata,
-    UiMessageEvent, encode_generation_stats_message,
+    encode_generation_stats_message,
 };
 use agent_core::GenerationStats as AgentGenerationStats;
 use ratatui::text::Line;
@@ -117,18 +117,14 @@ impl App {
             return;
         }
 
-        let has_marker = messages.iter().rev().take(6).any(|msg| {
-            matches!(
-                UiMessageEvent::parse(msg),
-                Some(UiMessageEvent::GenerationStats { .. })
-            )
-        });
-        if has_marker {
-            *rendered_flag = true;
-            return;
-        }
-
         if let Some(stats) = stats.clone() {
+            let encoded = encode_generation_stats_message(&stats);
+            let has_same_marker = messages.iter().rev().take(6).any(|msg| msg == &encoded);
+            if has_same_marker {
+                *rendered_flag = true;
+                return;
+            }
+
             Self::push_generation_stats_message(messages, message_types, message_states, &stats);
             message_metadata.push(None);
             message_timestamps.push(SystemTime::now());

@@ -26,22 +26,16 @@ impl App {
         let _ = Self::initialize_conversations_dir();
 
         let mut current_model = Self::load_model_setting();
-        let current_context_tokens = Self::detect_context_tokens(current_model.as_deref());
         let auto_summarize_threshold = Self::load_auto_summarize_threshold_setting();
         let scroll_messages_enabled = Self::load_scroll_setting();
         let auth_store = load_auth_store().unwrap_or_default();
-        let active_connection = auth_store
-            .active_connection_id
-            .as_ref()
-            .and_then(|active_id| {
-                auth_store
-                    .connections
-                    .iter()
-                    .find(|connection| &connection.id == active_id)
-            });
 
         let mut backend_env = BackendConfig::read().into_environment();
-        if let Some(connection) = active_connection
+        if let Some(active_id) = auth_store.active_connection_id.as_deref()
+            && let Some(connection) = auth_store
+                .connections
+                .iter()
+                .find(|connection| connection.id == active_id)
             && let Some(env) = BackendConfig::from_connection(connection)
         {
             backend_env = env;
@@ -49,6 +43,7 @@ impl App {
                 current_model = connection.model.clone();
             }
         }
+        let current_context_tokens = Self::detect_context_tokens(current_model.as_deref());
         let limit_thinking_to_first_token = backend_env.limit_thinking_to_first_token;
         Self::apply_backend_environment(&backend_env);
 
@@ -92,8 +87,6 @@ impl App {
             last_messages_area: Rect::default(),
             last_message_total_lines: 0,
             last_message_scroll_at: None,
-            expanded_edit_file_diffs: std::collections::HashSet::new(),
-            visible_edit_file_artifacts: Vec::new(),
             terminal_cursor_hidden: false,
             nav_needs_init: false,
             flash_highlight: None,
@@ -297,16 +290,16 @@ impl App {
             viewing_task: None,
             ui_state: UiState::default(),
             help_commands_selected: 0,
-            resume_conversations: Vec::new(),
-            resume_selected: 0,
-            resume_load_pending: false,
-            is_fork_mode: false,
-            show_todos: false,
             connect: crate::app::connect::ConnectState {
                 saved_connections: auth_store.connections.clone(),
                 active_connection_id: auth_store.active_connection_id.clone(),
                 ..Default::default()
             },
+            resume_conversations: Vec::new(),
+            resume_selected: 0,
+            resume_load_pending: false,
+            is_fork_mode: false,
+            show_todos: false,
             show_model_selection: false,
             available_models: Vec::new(),
             model_selected_index: 0,

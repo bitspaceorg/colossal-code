@@ -1,6 +1,7 @@
 use color_eyre::Result;
 
 use crate::app::App;
+use crate::app::connect::model_discovery::{format_model_display_name, resolve_provider_models};
 use crate::app::connect::{
     ConnectAuthMethod, ConnectModalMode, ConnectProviderOption, ConnectSubscriptionState,
     built_in_providers,
@@ -73,6 +74,19 @@ impl App {
         })
     }
 
+    pub(crate) fn active_model_display_name(&self) -> Option<String> {
+        let model_id = self.current_model.as_deref()?.trim();
+        if model_id.is_empty() {
+            return None;
+        }
+
+        let provider_id = self
+            .active_connection()
+            .map(|connection| connection.provider_id.as_str())
+            .unwrap_or("local");
+        Some(format_model_display_name(provider_id, model_id))
+    }
+
     pub(crate) fn auth_methods_for_selected_provider(&self) -> Vec<ConnectAuthMethod> {
         self.connect
             .selected_provider
@@ -109,7 +123,17 @@ impl App {
             );
         }
 
-        self.connect.available_models = provider.models.clone();
+        self.connect.available_models = resolve_provider_models(
+            &provider,
+            saved
+                .as_ref()
+                .map(|connection| connection.auth_kind.clone()),
+            saved
+                .as_ref()
+                .and_then(|connection| connection.api_key.as_deref()),
+            saved.as_ref(),
+        )
+        .unwrap_or_else(|_| provider.models.clone());
         self.connect.model_selected_index = saved
             .as_ref()
             .and_then(|connection| connection.model.as_ref())
@@ -222,6 +246,55 @@ impl App {
         self.connect.saved_connections = store.connections;
         self.connect.active_connection_id = store.active_connection_id;
         Ok(connection)
+    }
+
+    pub(crate) fn refresh_selected_provider_models(&mut self) -> Result<()> {
+        let provider = self
+            .connect
+            .selected_provider
+            .clone()
+            .ok_or_else(|| color_eyre::eyre::eyre!("No provider selected"))?;
+        let auth_method = self
+            .connect
+            .selected_auth_method
+            .unwrap_or(ConnectAuthMethod::ApiKey);
+        let auth_kind = match auth_method {
+            ConnectAuthMethod::ApiKey => StoredAuthKind::ApiKey,
+            ConnectAuthMethod::OpenAiSubscription => StoredAuthKind::OpenAiSubscription,
+        };
+        let api_key = self.sanitized_connect_api_key();
+
+        let temp_saved = match auth_method {
+            ConnectAuthMethod::ApiKey => None,
+            ConnectAuthMethod::OpenAiSubscription => Some(StoredConnection {
+                id: provider.id.clone(),
+                provider_id: provider.id.clone(),
+                provider_name: provider.name.clone(),
+                auth_kind: StoredAuthKind::OpenAiSubscription,
+                api_key: None,
+                model: None,
+                base_url: Some("https://chatgpt.com".to_string()),
+                completions_path: Some("/backend-api/codex/responses".to_string()),
+                account_id: self.connect.subscription_state.account_id.clone(),
+                access_token: self.connect.subscription_state.access_token.clone(),
+                refresh_token: self.connect.subscription_state.refresh_token.clone(),
+                access_expires_at: self.connect.subscription_state.expires_at,
+                created_at: 0,
+                updated_at: 0,
+            }),
+        };
+
+        let resolved = resolve_provider_models(
+            &provider,
+            Some(auth_kind),
+            Some(api_key.as_str()),
+            temp_saved.as_ref(),
+        )?;
+        if !resolved.is_empty() {
+            self.connect.available_models = resolved;
+            self.connect.model_selected_index = 0;
+        }
+        Ok(())
     }
 
     pub(crate) fn handle_connect_paste(&mut self, data: String) {

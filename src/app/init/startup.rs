@@ -261,9 +261,9 @@ impl App {
                                 current_width += cw;
                             }
                         }
-                        lines_needed.clamp(1, 4) + 2
+                        lines_needed.clamp(1, 4) + 3
                     }
-                    _ => 3u16,
+                    _ => 4u16,
                 };
                 let queue_choice_height = if self.show_queue_choice { 2 } else { 0 };
                 let approval_prompt_height = if self.safety_state.show_approval_prompt {
