@@ -157,8 +157,6 @@ pub(crate) struct App {
     pub(crate) flash_highlight: Option<(edtui::state::selection::Selection, std::time::Instant)>,
     // Ctrl+C confirmation state
     pub(crate) ctrl_c_pressed: Option<std::time::Instant>,
-    pub(crate) last_mode_toggle_at: Option<Instant>,
-    pub(crate) last_variant_toggle_at: Option<Instant>,
     // Survey manager
     pub(crate) survey: Survey,
     // Assistant mode (cycled with Shift+Tab)

@@ -15,6 +15,7 @@ impl App {
             || self.handle_history_panel_key(key)
             || self.handle_rewind_panel_key(key)
             || self.handle_model_selection_panel_key(key)
+            || self.handle_normal_mode_global_toggles(key)
     }
 
     fn handle_summary_history_panel_key(&mut self, key: &KeyEvent) -> bool {

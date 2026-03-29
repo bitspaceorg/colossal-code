@@ -6,7 +6,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::connect::model_discovery::format_model_display_name;
+use crate::app::connect::model_discovery::fallback_formatted_model_display_name;
 use crate::app::{App, MessageType, UiMessageEvent, create_thinking_highlight_spans};
 
 fn into_owned_line(line: Line<'_>) -> Line<'static> {
@@ -55,7 +55,7 @@ impl App {
             "local"
         };
 
-        format_model_display_name(provider_id, &model_id)
+        fallback_formatted_model_display_name(provider_id, &model_id)
     }
 
     fn input_variant_label(&self) -> String {

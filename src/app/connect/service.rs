@@ -1,7 +1,9 @@
 use color_eyre::Result;
 
 use crate::app::App;
-use crate::app::connect::model_discovery::{format_model_display_name, resolve_provider_models};
+use crate::app::connect::model_discovery::{
+    fallback_formatted_model_display_name, resolve_provider_models,
+};
 use crate::app::connect::{
     ConnectAuthMethod, ConnectModalMode, ConnectProviderOption, ConnectSubscriptionState,
     built_in_providers,
@@ -84,7 +86,7 @@ impl App {
             .active_connection()
             .map(|connection| connection.provider_id.as_str())
             .unwrap_or("local");
-        Some(format_model_display_name(provider_id, model_id))
+        Some(fallback_formatted_model_display_name(provider_id, model_id))
     }
 
     pub(crate) fn auth_methods_for_selected_provider(&self) -> Vec<ConnectAuthMethod> {

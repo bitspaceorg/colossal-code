@@ -4,8 +4,7 @@ use ratatui::{
     DefaultTerminal, Frame,
     crossterm::{
         event::DisableBracketedPaste, event::DisableMouseCapture, event::EnableBracketedPaste,
-        event::EnableMouseCapture, event::KeyboardEnhancementFlags,
-        event::PopKeyboardEnhancementFlags, event::PushKeyboardEnhancementFlags, execute,
+        event::EnableMouseCapture, execute,
     },
     layout::Constraint,
     style::{Color, Modifier, Style},
@@ -78,23 +77,6 @@ pub(crate) async fn run() -> Result<()> {
     }
 
     let terminal = ratatui::init();
-    let keyboard_enhancements_enabled = matches!(
-        ratatui::crossterm::terminal::supports_keyboard_enhancement(),
-        Ok(true)
-    );
-
-    if keyboard_enhancements_enabled {
-        execute!(
-            std::io::stdout(),
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-            )
-        )?;
-    }
-
     execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
 
     let app_result = {
@@ -125,9 +107,6 @@ pub(crate) async fn run() -> Result<()> {
         app.run(terminal).await
     };
 
-    if keyboard_enhancements_enabled {
-        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
-    }
     let _ = execute!(
         std::io::stdout(),
         DisableBracketedPaste,

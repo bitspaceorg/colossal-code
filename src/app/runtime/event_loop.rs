@@ -35,10 +35,6 @@ impl App {
             );
         }
 
-        if matches!(self.mode, Mode::Normal) && self.handle_normal_mode_global_toggles(&key) {
-            return;
-        }
-
         match self.mode {
             Mode::Normal => event_loop_handlers::handle_runtime_key_normal(self, key),
             Mode::Navigation | Mode::Visual | Mode::Search => {

@@ -79,6 +79,10 @@ pub(crate) fn format_model_display_name(provider_id: &str, model_id: &str) -> St
         .unwrap_or_else(|| fallback_model_display_name(provider_id, model_id))
 }
 
+pub(crate) fn fallback_formatted_model_display_name(provider_id: &str, model_id: &str) -> String {
+    fallback_model_display_name(provider_id, model_id)
+}
+
 fn fetch_openai_api_models(api_key: &str) -> Result<Vec<String>> {
     let client = Client::new();
     let response = client

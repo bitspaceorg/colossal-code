@@ -21,6 +21,28 @@ fn context_status_color_for_percent(percent_left: f32) -> Color {
 }
 
 impl App {
+    fn truncate_middle(value: &str, max_chars: usize) -> String {
+        let chars: Vec<char> = value.chars().collect();
+        if chars.len() <= max_chars {
+            return value.to_string();
+        }
+        if max_chars <= 1 {
+            return "…".to_string();
+        }
+        if max_chars <= 4 {
+            return chars[..max_chars.saturating_sub(1)]
+                .iter()
+                .collect::<String>()
+                + "…";
+        }
+
+        let keep_left = (max_chars - 1) / 2;
+        let keep_right = max_chars - 1 - keep_left;
+        let left = chars[..keep_left].iter().collect::<String>();
+        let right = chars[chars.len() - keep_right..].iter().collect::<String>();
+        format!("{left}…{right}")
+    }
+
     fn workspace_root_for_status() -> Result<PathBuf> {
         if let Ok(raw) = env::var("NITE_WORKSPACE_ROOT") {
             let trimmed = raw.trim();
@@ -46,17 +68,18 @@ impl App {
     }
 
     pub(crate) fn compute_status_left_initial() -> Result<Line<'static>> {
-        Self::compute_status_left_impl(false, edtui::EditorMode::Normal)
+        Self::compute_status_left_impl(false, edtui::EditorMode::Normal, None)
     }
 
     pub(crate) fn compute_status_left(&self) -> Result<Line<'static>> {
         let mode = self.vim_input_editor.get_mode();
-        Self::compute_status_left_impl(self.vim_mode_enabled, mode)
+        Self::compute_status_left_impl(self.vim_mode_enabled, mode, None)
     }
 
     fn compute_status_left_impl(
         vim_mode_enabled: bool,
         vim_input_mode: edtui::EditorMode,
+        max_width: Option<usize>,
     ) -> Result<Line<'static>> {
         let current_dir = Self::workspace_root_for_status()?;
         let dir_string = current_dir.to_string_lossy().to_string();
@@ -98,19 +121,30 @@ impl App {
                 break;
             }
         }
-        let mut spans = Vec::new();
-
-        if vim_mode_enabled {
-            let mode_str = match vim_input_mode {
+        let mode_str = if vim_mode_enabled {
+            match vim_input_mode {
                 edtui::EditorMode::Normal => Some("[NORMAL]"),
                 edtui::EditorMode::Insert => Some("[INSERT]"),
                 edtui::EditorMode::Visual { .. } => Some("[VISUAL]"),
                 edtui::EditorMode::Search => None,
-            };
-            if let Some(mode) = mode_str {
-                spans.push(Span::styled(mode, Style::default().fg(Color::DarkGray)));
-                spans.push(Span::raw(" "));
             }
+        } else {
+            None
+        };
+
+        let reserved_width =
+            mode_str.map_or(0, |mode| mode.chars().count() + 1) + git_info.chars().count();
+        let display_path = max_width
+            .map(|width| width.saturating_sub(reserved_width))
+            .filter(|available| *available > 0)
+            .map(|available| Self::truncate_middle(&display_path, available))
+            .unwrap_or(display_path);
+
+        let mut spans = Vec::new();
+
+        if let Some(mode) = mode_str {
+            spans.push(Span::styled(mode, Style::default().fg(Color::DarkGray)));
+            spans.push(Span::raw(" "));
         }
 
         spans.push(Span::styled(display_path, Style::default().fg(Color::Blue)));
@@ -189,7 +223,7 @@ impl App {
             Span::styled("ctrl+t", Style::default().fg(Color::DarkGray)),
             Span::raw(" "),
             Span::styled("variants", Style::default().fg(Color::White)),
-            Span::styled(" • ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" • ", Style::default().fg(Color::Gray)),
             Span::styled("shift + tab", Style::default().fg(Color::DarkGray)),
             Span::raw(" "),
             Span::styled("modes", Style::default().fg(Color::White)),
@@ -205,7 +239,6 @@ impl App {
         cursor_col: usize,
         scroll_offset: usize,
     ) {
-        let directory_width = self.status_left.width() as u16;
         let center_text = match mode {
             Mode::Navigation | Mode::Visual | Mode::Search | Mode::SessionWindow => {
                 let (mode_name, mode_color) = match mode {
@@ -253,6 +286,19 @@ impl App {
         let center_width = center_line.width() as u16;
         let right_line = self.shortcuts_status_line();
         let right_width = right_line.width() as u16;
+        let max_left_width = status_area
+            .width
+            .saturating_sub(center_width)
+            .saturating_sub(right_width)
+            .saturating_sub(6)
+            .max(12);
+        let status_left = Self::compute_status_left_impl(
+            self.vim_mode_enabled,
+            self.vim_input_editor.get_mode(),
+            Some(max_left_width as usize),
+        )
+        .unwrap_or_else(|_| self.status_left.clone());
+        let directory_width = status_left.width().min(max_left_width as usize) as u16;
         let horizontal = Layout::horizontal([
             Constraint::Length(1),
             Constraint::Length(directory_width),
@@ -264,10 +310,6 @@ impl App {
         ])
         .flex(ratatui::layout::Flex::SpaceBetween);
         let [_, left_area, _, center_area, _, right_area, _] = horizontal.areas(status_area);
-
-        let status_left = self
-            .compute_status_left()
-            .unwrap_or_else(|_| self.status_left.clone());
 
         let directory = Paragraph::new(status_left).left_aligned();
         frame.render_widget(directory, left_area);

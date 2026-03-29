@@ -1,4 +1,3 @@
-use std::time::{Duration, Instant};
 use std::{sync::Arc, time::SystemTime};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -8,93 +7,14 @@ use crate::app::App;
 use crate::app::state::message::{MessageState, MessageType};
 
 impl App {
-    fn set_mode_status_message(&mut self) {
-        let label = self
-            .safety_state
-            .assistant_mode
-            .to_display()
-            .map(|(label, _)| label)
-            .unwrap_or_else(|| "normal mode".to_string());
-        self.status_message = Some(format!("Mode set to {label}"));
-    }
-
-    fn cycle_openai_variant(&mut self) {
-        const VARIANTS: &[Option<&str>] = &[
-            None,
-            Some("low"),
-            Some("medium"),
-            Some("high"),
-            Some("xhigh"),
-        ];
-
-        let current = std::env::var("NITE_OPENAI_REASONING_EFFORT")
-            .ok()
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| !value.is_empty());
-        let current_index = VARIANTS
-            .iter()
-            .position(|variant| variant.map(|v| v.to_string()) == current)
-            .unwrap_or(0);
-        let next = VARIANTS[(current_index + 1) % VARIANTS.len()];
-
-        match next {
-            Some(value) => unsafe {
-                std::env::set_var("NITE_OPENAI_REASONING_EFFORT", value);
-            },
-            None => unsafe {
-                std::env::remove_var("NITE_OPENAI_REASONING_EFFORT");
-            },
-        }
-
-        let label = next.unwrap_or("none");
-        self.status_message = Some(format!("Variant set to {label}"));
-    }
-
     pub(crate) fn is_shift_tab(key: &KeyEvent) -> bool {
         matches!(key.code, KeyCode::BackTab)
             || (matches!(key.code, KeyCode::Tab) && key.modifiers.contains(KeyModifiers::SHIFT))
     }
 
-    fn is_ctrl_t(key: &KeyEvent) -> bool {
-        if !key.modifiers.contains(KeyModifiers::CONTROL) {
-            return false;
-        }
-
-        matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T'))
-            || matches!(key.code, KeyCode::Char(c) if c == '')
-    }
-
-    fn allow_mode_toggle(&mut self) -> bool {
-        let now = Instant::now();
-        if self
-            .last_mode_toggle_at
-            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(180))
-        {
-            return false;
-        }
-        self.last_mode_toggle_at = Some(now);
-        true
-    }
-
-    fn allow_variant_toggle(&mut self) -> bool {
-        let now = Instant::now();
-        if self
-            .last_variant_toggle_at
-            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(180))
-        {
-            return false;
-        }
-        self.last_variant_toggle_at = Some(now);
-        true
-    }
-
     pub(crate) fn handle_normal_mode_global_toggles(&mut self, key: &KeyEvent) -> bool {
         if Self::is_shift_tab(key) {
-            if !self.allow_mode_toggle() {
-                return true;
-            }
             self.safety_state.assistant_mode = self.safety_state.assistant_mode.next();
-            self.set_mode_status_message();
 
             if let Some(safety_mode) = self.safety_state.assistant_mode.to_safety_mode() {
                 let mut config =
@@ -114,11 +34,36 @@ impl App {
             return true;
         }
 
-        if Self::is_ctrl_t(key) {
-            if !self.allow_variant_toggle() {
-                return true;
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
+            const VARIANTS: &[Option<&str>] = &[
+                None,
+                Some("low"),
+                Some("medium"),
+                Some("high"),
+                Some("xhigh"),
+            ];
+
+            let current = std::env::var("NITE_OPENAI_REASONING_EFFORT")
+                .ok()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty());
+            let current_index = VARIANTS
+                .iter()
+                .position(|variant| variant.map(|v| v.to_string()) == current)
+                .unwrap_or(0);
+            let next = VARIANTS[(current_index + 1) % VARIANTS.len()];
+
+            match next {
+                Some(value) => unsafe {
+                    std::env::set_var("NITE_OPENAI_REASONING_EFFORT", value);
+                },
+                None => unsafe {
+                    std::env::remove_var("NITE_OPENAI_REASONING_EFFORT");
+                },
             }
-            self.cycle_openai_variant();
+
+            let label = next.unwrap_or("none");
+            self.status_message = Some(format!("Variant set to {label}"));
             return true;
         }
 
@@ -192,12 +137,5 @@ mod tests {
         let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
 
         assert!(!App::is_shift_tab(&ctrl_t));
-    }
-
-    #[test]
-    fn ctrl_t_detection_accepts_control_character() {
-        let ctrl_t = KeyEvent::new(KeyCode::Char('\u{14}'), KeyModifiers::CONTROL);
-
-        assert!(App::is_ctrl_t(&ctrl_t));
     }
 }
