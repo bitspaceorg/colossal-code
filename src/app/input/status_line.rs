@@ -11,13 +11,8 @@ use std::{env, path::PathBuf, process::Command};
 use crate::app::{App, Mode};
 
 fn context_status_color_for_percent(percent_left: f32) -> Color {
-    if percent_left <= 10.0 {
-        Color::Red
-    } else if percent_left <= 35.0 {
-        Color::Yellow
-    } else {
-        Color::DarkGray
-    }
+    let _ = percent_left;
+    Color::DarkGray
 }
 
 impl App {
@@ -328,8 +323,8 @@ mod tests {
 
     #[test]
     fn context_status_color_uses_expected_thresholds() {
-        assert_eq!(context_status_color_for_percent(8.0), Color::Red);
-        assert_eq!(context_status_color_for_percent(20.0), Color::Yellow);
+        assert_eq!(context_status_color_for_percent(8.0), Color::DarkGray);
+        assert_eq!(context_status_color_for_percent(20.0), Color::DarkGray);
         assert_eq!(context_status_color_for_percent(55.0), Color::DarkGray);
     }
 }

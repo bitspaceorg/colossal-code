@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::Paragraph,
 };
@@ -100,20 +100,24 @@ impl App {
         let filled = ((percent_used / 10.0).round() as usize).min(10);
         let mut bar = String::with_capacity(10);
         for idx in 0..10 {
-            bar.push(if idx < filled { '█' } else { '▒' });
+            bar.push(if idx < filled { '▰' } else { '▱' });
         }
-        let color = if percent_used >= 85.0 {
-            Color::Red
-        } else if percent_used >= 65.0 {
-            Color::Yellow
-        } else {
-            Color::DarkGray
-        };
+        let color = Color::DarkGray;
 
         vec![
-            Span::styled("[", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "[",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ),
             Span::styled(bar, Style::default().fg(color)),
-            Span::styled("] ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                " ] ",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ),
             Span::styled(
                 format!("{:.0}% used", percent_used),
                 Style::default().fg(color),
