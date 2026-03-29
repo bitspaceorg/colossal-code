@@ -1,7 +1,8 @@
 use color_eyre::Result;
 use std::collections::HashSet;
 
-use crate::app::persistence::auth_store::load_auth_store;
+use crate::app::connect::model_discovery::{provider_model_metadata, provider_models_metadata};
+use crate::app::persistence::auth_store::{StoredConnection, load_auth_store};
 use crate::app::{
     AUTO_SUMMARIZE_THRESHOLD_CONFIG_KEY, AUTO_SUMMARIZE_THRESHOLD_VERSION,
     AUTO_SUMMARIZE_THRESHOLD_VERSION_KEY, App, DEFAULT_AUTO_SUMMARIZE_THRESHOLD,
@@ -62,6 +63,102 @@ fn resolve_auto_summarize_threshold(stored_value: Option<f32>, stored_version: O
 }
 
 impl App {
+    pub(crate) fn build_available_models(
+        connections: &[StoredConnection],
+    ) -> Result<Vec<ModelInfo>> {
+        let mut models = Vec::new();
+        if let Some(models_dir) = Self::models_directory_path()
+            && models_dir.exists()
+        {
+            for entry in std::fs::read_dir(&models_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("gguf") {
+                    if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
+                        let metadata = std::fs::metadata(&path)?;
+                        let size_bytes = metadata.len();
+                        let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
+
+                        let quantization = model_context::extract_quantization(file_name);
+                        let architecture = model_context::extract_architecture(file_name);
+                        let parameter_count = model_context::extract_parameter_count(file_name);
+                        let author = model_context::extract_author(file_name);
+                        let version = model_context::extract_version(file_name);
+                        let context_length = model_context::context_length_from_gguf(&path);
+                        let file_hash = model_context::compute_file_hash(&path);
+
+                        let display_name = file_name
+                            .strip_suffix(".gguf")
+                            .unwrap_or(file_name)
+                            .to_string();
+
+                        models.push(ModelInfo {
+                            filename: file_name.to_string(),
+                            display_name,
+                            connection_id: None,
+                            provider_name: None,
+                            size_mb,
+                            quantization,
+                            architecture,
+                            parameter_count,
+                            file_hash,
+                            author,
+                            version,
+                            context_length,
+                            supported_variants: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut seen = HashSet::new();
+        seen.extend(models.iter().map(|model| model.filename.clone()));
+
+        for connection in connections {
+            let provider_models = connected_provider_models(&connection.provider_id);
+            if provider_models.is_empty() {
+                continue;
+            }
+
+            let provider_metadata =
+                provider_models_metadata(&connection.provider_id).unwrap_or_default();
+
+            for model in provider_models {
+                if !seen.insert((*model).to_string()) {
+                    continue;
+                }
+
+                models.push(ModelInfo {
+                    filename: (*model).to_string(),
+                    display_name: provider_metadata
+                        .get(*model)
+                        .map(|metadata| metadata.display_name.clone())
+                        .unwrap_or_else(|| (*model).to_string()),
+                    connection_id: Some(connection.id.clone()),
+                    provider_name: Some(connection.provider_name.clone()),
+                    size_mb: 0.0,
+                    quantization: None,
+                    architecture: None,
+                    parameter_count: None,
+                    file_hash: None,
+                    author: None,
+                    version: None,
+                    context_length: provider_metadata
+                        .get(*model)
+                        .and_then(|metadata| metadata.context_length),
+                    supported_variants: provider_metadata
+                        .get(*model)
+                        .map(|metadata| metadata.supported_variants.clone())
+                        .unwrap_or_default(),
+                });
+            }
+        }
+
+        models.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+        Ok(models)
+    }
+
     pub(crate) fn models_directory_path() -> Option<std::path::PathBuf> {
         dirs::home_dir().map(|home| home.join(".config").join(".nite").join("models"))
     }
@@ -102,17 +199,36 @@ impl App {
         resolve_auto_summarize_threshold(stored_value, stored_version)
     }
 
-    pub(crate) fn detect_context_tokens(model: Option<&str>) -> Option<usize> {
-        if model.is_none() {
+    pub(crate) fn detect_context_tokens(
+        model: Option<&str>,
+        provider_id: Option<&str>,
+    ) -> Option<usize> {
+        let Some(model) = model else {
             return None;
+        };
+
+        if let Some(provider_id) = provider_id
+            && let Some(metadata) = provider_model_metadata(provider_id, model)
+            && metadata.context_length.is_some()
+        {
+            return metadata.context_length;
         }
+
         let models_dir = Self::models_directory_path();
         let dir_ref = models_dir.as_deref();
-        model.and_then(|name| model_context::detect_context_length(dir_ref, name))
+        model_context::detect_context_length(dir_ref, model)
     }
 
     pub(crate) fn refresh_context_window(&mut self) {
-        self.current_context_tokens = Self::detect_context_tokens(self.current_model.as_deref());
+        self.current_context_tokens = self
+            .current_model_metadata()
+            .and_then(|model| model.context_length)
+            .or_else(|| {
+                Self::detect_context_tokens(
+                    self.current_model.as_deref(),
+                    self.current_model_provider_id(),
+                )
+            });
     }
 
     pub(crate) fn save_config(&self) -> Result<()> {
@@ -140,85 +256,10 @@ impl App {
     }
 
     pub(crate) fn load_models(&mut self) -> Result<()> {
-        let mut models = Vec::new();
-        if let Some(models_dir) = Self::models_directory_path()
-            && models_dir.exists()
-        {
-            for entry in std::fs::read_dir(&models_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("gguf") {
-                    if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
-                        let metadata = std::fs::metadata(&path)?;
-                        let size_bytes = metadata.len();
-                        let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
-
-                        let quantization = model_context::extract_quantization(file_name);
-                        let architecture = model_context::extract_architecture(file_name);
-                        let parameter_count = model_context::extract_parameter_count(file_name);
-                        let author = model_context::extract_author(file_name);
-                        let version = model_context::extract_version(file_name);
-                        let context_length = model_context::context_length_from_gguf(&path);
-                        let file_hash = model_context::compute_file_hash(&path);
-
-                        let display_name = file_name
-                            .strip_suffix(".gguf")
-                            .unwrap_or(file_name)
-                            .to_string();
-
-                        models.push(ModelInfo {
-                            filename: file_name.to_string(),
-                            display_name,
-                            connection_id: None,
-                            provider_name: None,
-                            size_mb,
-                            quantization,
-                            architecture,
-                            parameter_count,
-                            file_hash,
-                            author,
-                            version,
-                            context_length,
-                        });
-                    }
-                }
-            }
-        }
-
-        let mut seen = HashSet::new();
-        seen.extend(models.iter().map(|model| model.filename.clone()));
-
-        if let Ok(store) = load_auth_store() {
-            for connection in store.connections {
-                let provider_models = connected_provider_models(&connection.provider_id);
-                if provider_models.is_empty() {
-                    continue;
-                }
-
-                for model in provider_models {
-                    if !seen.insert((*model).to_string()) {
-                        continue;
-                    }
-
-                    models.push(ModelInfo {
-                        filename: (*model).to_string(),
-                        display_name: (*model).to_string(),
-                        connection_id: Some(connection.id.clone()),
-                        provider_name: Some(connection.provider_name.clone()),
-                        size_mb: 0.0,
-                        quantization: None,
-                        architecture: None,
-                        parameter_count: None,
-                        file_hash: None,
-                        author: None,
-                        version: None,
-                        context_length: None,
-                    });
-                }
-            }
-        }
-
-        models.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+        let models = match load_auth_store() {
+            Ok(store) => Self::build_available_models(&store.connections)?,
+            Err(_) => Vec::new(),
+        };
         self.available_models = models;
         self.model_selected_index = 0;
 

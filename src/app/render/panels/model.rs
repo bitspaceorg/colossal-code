@@ -159,6 +159,7 @@ mod tests {
             author: Some("meta".to_string()),
             version: Some("3.1".to_string()),
             context_length: Some(32768),
+            supported_variants: Vec::new(),
         }
     }
 

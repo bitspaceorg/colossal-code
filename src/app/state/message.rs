@@ -392,6 +392,7 @@ pub(crate) struct ModelInfo {
     pub(crate) author: Option<String>,
     pub(crate) version: Option<String>,
     pub(crate) context_length: Option<usize>,
+    pub(crate) supported_variants: Vec<String>,
 }
 
 /// File change statistics for rewind points

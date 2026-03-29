@@ -12,6 +12,15 @@ impl App {
             || (matches!(key.code, KeyCode::Tab) && key.modifiers.contains(KeyModifiers::SHIFT))
     }
 
+    fn is_ctrl_t(key: &KeyEvent) -> bool {
+        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+
+        matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T'))
+            || matches!(key.code, KeyCode::Char(c) if c == '\u{14}')
+    }
+
     pub(crate) fn handle_normal_mode_global_toggles(&mut self, key: &KeyEvent) -> bool {
         if Self::is_shift_tab(key) {
             self.safety_state.assistant_mode = self.safety_state.assistant_mode.next();
@@ -34,35 +43,47 @@ impl App {
             return true;
         }
 
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
-            const VARIANTS: &[Option<&str>] = &[
-                None,
-                Some("low"),
-                Some("medium"),
-                Some("high"),
-                Some("xhigh"),
-            ];
+        if Self::is_ctrl_t(key) {
+            let mut variants = self.current_model_supported_variants();
+
+            if variants.is_empty() {
+                self.status_message = Some("No variants available for current model".to_string());
+                return true;
+            }
+
+            let supports_none = variants.iter().any(|variant| variant == "none");
+            let cycle = variants
+                .drain(..)
+                .map(|variant| {
+                    if variant == "none" {
+                        None
+                    } else {
+                        Some(variant)
+                    }
+                })
+                .collect::<Vec<_>>();
 
             let current = std::env::var("NITE_OPENAI_REASONING_EFFORT")
                 .ok()
                 .map(|value| value.trim().to_ascii_lowercase())
                 .filter(|value| !value.is_empty());
-            let current_index = VARIANTS
+            let current_index = cycle
                 .iter()
-                .position(|variant| variant.map(|v| v.to_string()) == current)
-                .unwrap_or(0);
-            let next = VARIANTS[(current_index + 1) % VARIANTS.len()];
+                .position(|variant| variant.as_ref() == current.as_ref())
+                .or_else(|| (!supports_none && current.is_none()).then_some(cycle.len() - 1))
+                .unwrap_or(cycle.len() - 1);
+            let next = cycle[(current_index + 1) % cycle.len()].clone();
+            let label = next.as_deref().unwrap_or("none").to_string();
 
             match next {
-                Some(value) => unsafe {
-                    std::env::set_var("NITE_OPENAI_REASONING_EFFORT", value);
+                Some(ref value) => unsafe {
+                    std::env::set_var("NITE_OPENAI_REASONING_EFFORT", &value);
                 },
                 None => unsafe {
                     std::env::remove_var("NITE_OPENAI_REASONING_EFFORT");
                 },
             }
 
-            let label = next.unwrap_or("none");
             self.status_message = Some(format!("Variant set to {label}"));
             return true;
         }
@@ -137,5 +158,12 @@ mod tests {
         let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
 
         assert!(!App::is_shift_tab(&ctrl_t));
+    }
+
+    #[test]
+    fn ctrl_t_detection_accepts_control_character() {
+        let ctrl_t = KeyEvent::new(KeyCode::Char('\u{14}'), KeyModifiers::CONTROL);
+
+        assert!(App::is_ctrl_t(&ctrl_t));
     }
 }

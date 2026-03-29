@@ -13,10 +13,7 @@ pub(super) struct OpenAiResponsesOptions {
 impl OpenAiResponsesOptions {
     pub(super) fn from_env() -> Self {
         Self {
-            reasoning_effort: env_choice(
-                "NITE_OPENAI_REASONING_EFFORT",
-                &["low", "medium", "high", "xhigh"],
-            ),
+            reasoning_effort: env_non_empty("NITE_OPENAI_REASONING_EFFORT"),
             reasoning_summary: env_non_empty("NITE_OPENAI_REASONING_SUMMARY"),
             text_verbosity: env_choice("NITE_OPENAI_TEXT_VERBOSITY", &["low", "medium", "high"]),
             service_tier: env_non_empty("NITE_OPENAI_SERVICE_TIER"),

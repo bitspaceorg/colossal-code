@@ -95,7 +95,7 @@ impl AssistantMode {
     pub(crate) fn to_display(self) -> Option<(String, Color)> {
         match self {
             AssistantMode::None => None,
-            AssistantMode::Yolo => Some(("YOLO mode".to_string(), Color::Red)),
+            AssistantMode::Yolo => Some(("YOLO mode".to_string(), Color::Magenta)),
             AssistantMode::Plan => Some(("plan mode".to_string(), Color::Blue)),
             AssistantMode::AutoAccept => Some(("auto-accept edits".to_string(), Color::Green)),
             AssistantMode::ReadOnly => Some(("read-only".to_string(), Color::Yellow)),
@@ -421,6 +421,14 @@ impl App {
             Mode::Search => Color::Cyan,
             Mode::SessionWindow => Color::Blue,
         }
+    }
+
+    pub(crate) fn get_input_bar_color(&self) -> Color {
+        self.safety_state
+            .assistant_mode
+            .to_display()
+            .map(|(_, color)| color)
+            .unwrap_or_else(|| self.get_mode_border_color())
     }
 
     pub(crate) fn update_animation(&mut self) {

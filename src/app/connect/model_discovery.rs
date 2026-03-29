@@ -6,6 +6,13 @@ use std::collections::{BTreeSet, HashMap};
 use crate::app::connect::ConnectProviderOption;
 use crate::app::persistence::auth_store::{StoredAuthKind, StoredConnection};
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ProviderModelMetadata {
+    pub(crate) display_name: String,
+    pub(crate) context_length: Option<usize>,
+    pub(crate) supported_variants: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct OpenAiModelsResponse {
     data: Vec<OpenAiModelEntry>,
@@ -18,12 +25,25 @@ struct OpenAiModelEntry {
 
 #[derive(Debug, Deserialize)]
 struct ModelsDevProvider {
+    #[serde(default)]
+    npm: Option<String>,
     models: HashMap<String, ModelsDevModel>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ModelsDevModel {
     name: String,
+    #[serde(default)]
+    reasoning: bool,
+    #[serde(default)]
+    release_date: Option<String>,
+    #[serde(default)]
+    limit: Option<ModelsDevLimit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelsDevLimit {
+    context: usize,
 }
 
 pub(crate) fn resolve_provider_models(
@@ -58,14 +78,14 @@ pub(crate) fn resolve_model_display_names(
     provider_id: &str,
     model_ids: &[String],
 ) -> HashMap<String, String> {
-    let remote = fetch_models_dev_provider_names(provider_id).ok();
+    let remote = fetch_provider_model_metadata(provider_id).ok();
     model_ids
         .iter()
         .map(|model_id| {
             let display_name = remote
                 .as_ref()
                 .and_then(|map| map.get(model_id))
-                .cloned()
+                .map(|metadata| metadata.display_name.clone())
                 .unwrap_or_else(|| fallback_model_display_name(provider_id, model_id));
             (model_id.clone(), display_name)
         })
@@ -73,9 +93,12 @@ pub(crate) fn resolve_model_display_names(
 }
 
 pub(crate) fn format_model_display_name(provider_id: &str, model_id: &str) -> String {
-    fetch_models_dev_provider_names(provider_id)
+    fetch_provider_model_metadata(provider_id)
         .ok()
-        .and_then(|map| map.get(model_id).cloned())
+        .and_then(|map| {
+            map.get(model_id)
+                .map(|metadata| metadata.display_name.clone())
+        })
         .unwrap_or_else(|| fallback_model_display_name(provider_id, model_id))
 }
 
@@ -84,62 +107,68 @@ pub(crate) fn fallback_formatted_model_display_name(provider_id: &str, model_id:
 }
 
 fn fetch_openai_api_models(api_key: &str) -> Result<Vec<String>> {
-    let client = Client::new();
-    let response = client
-        .get("https://api.openai.com/v1/models")
-        .bearer_auth(api_key.trim())
-        .send()?;
-    if !response.status().is_success() {
-        return Err(color_eyre::eyre::eyre!(
-            "OpenAI model discovery failed with status {}",
-            response.status()
-        ));
-    }
+    let api_key = api_key.trim().to_string();
+    run_blocking_request(move || {
+        let client = Client::new();
+        let response = client
+            .get("https://api.openai.com/v1/models")
+            .bearer_auth(api_key)
+            .send()?;
+        if !response.status().is_success() {
+            return Err(color_eyre::eyre::eyre!(
+                "OpenAI model discovery failed with status {}",
+                response.status()
+            ));
+        }
 
-    let payload: OpenAiModelsResponse = response.json()?;
-    Ok(filter_openai_model_ids(
-        payload.data.into_iter().map(|entry| entry.id),
-    ))
+        let payload: OpenAiModelsResponse = response.json()?;
+        Ok(filter_openai_model_ids(
+            payload.data.into_iter().map(|entry| entry.id),
+        ))
+    })
 }
 
 fn fetch_openai_subscription_models(connection: &StoredConnection) -> Result<Vec<String>> {
-    let Some(access_token) = connection.access_token.as_deref() else {
+    let Some(access_token) = connection.access_token.clone() else {
         return Ok(Vec::new());
     };
 
-    let client = Client::new();
-    let mut request = client
-        .get("https://api.openai.com/v1/models")
-        .bearer_auth(access_token.trim());
-    if let Some(account_id) = connection.account_id.as_deref() {
-        request = request.header("ChatGPT-Account-Id", account_id);
-    }
-
-    let response = request.send()?;
-    if !response.status().is_success() {
-        return Ok(Vec::new());
-    }
-
-    let payload: OpenAiModelsResponse = response.json()?;
-    let mut models = filter_openai_model_ids(payload.data.into_iter().map(|entry| entry.id));
-    let allowed = [
-        "gpt-5.1-codex",
-        "gpt-5.1-codex-max",
-        "gpt-5.1-codex-mini",
-        "gpt-5.2",
-        "gpt-5.2-codex",
-        "gpt-5.3-codex",
-        "gpt-5.3-codex-spark",
-        "gpt-5.4",
-        "gpt-5.4-mini",
-    ];
-    for model in allowed {
-        if !models.iter().any(|existing| existing == model) {
-            models.push(model.to_string());
+    let account_id = connection.account_id.clone();
+    run_blocking_request(move || {
+        let client = Client::new();
+        let mut request = client
+            .get("https://api.openai.com/v1/models")
+            .bearer_auth(access_token.trim());
+        if let Some(account_id) = account_id.as_deref() {
+            request = request.header("ChatGPT-Account-Id", account_id);
         }
-    }
-    models.sort();
-    Ok(models)
+
+        let response = request.send()?;
+        if !response.status().is_success() {
+            return Ok(Vec::new());
+        }
+
+        let payload: OpenAiModelsResponse = response.json()?;
+        let mut models = filter_openai_model_ids(payload.data.into_iter().map(|entry| entry.id));
+        let allowed = [
+            "gpt-5.1-codex",
+            "gpt-5.1-codex-max",
+            "gpt-5.1-codex-mini",
+            "gpt-5.2",
+            "gpt-5.2-codex",
+            "gpt-5.3-codex",
+            "gpt-5.3-codex-spark",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+        ];
+        for model in allowed {
+            if !models.iter().any(|existing| existing == model) {
+                models.push(model.to_string());
+            }
+        }
+        models.sort();
+        Ok(models)
+    })
 }
 
 fn filter_openai_model_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -175,30 +204,128 @@ fn filter_openai_model_ids(ids: impl IntoIterator<Item = String>) -> Vec<String>
     models.into_iter().collect()
 }
 
-fn fetch_models_dev_provider_names(provider_id: &str) -> Result<HashMap<String, String>> {
-    let client = Client::new();
-    let response = client
-        .get("https://models.dev/api.json")
-        .header(reqwest::header::USER_AGENT, "nite")
-        .send()?;
-    if !response.status().is_success() {
-        return Err(color_eyre::eyre::eyre!(
-            "models.dev lookup failed with status {}",
-            response.status()
-        ));
+pub(crate) fn provider_model_metadata(
+    provider_id: &str,
+    model_id: &str,
+) -> Option<ProviderModelMetadata> {
+    provider_models_metadata(provider_id)
+        .ok()
+        .and_then(|map| map.get(model_id).cloned())
+}
+
+pub(crate) fn provider_models_metadata(
+    provider_id: &str,
+) -> Result<HashMap<String, ProviderModelMetadata>> {
+    fetch_provider_model_metadata(provider_id)
+}
+
+fn fetch_provider_model_metadata(
+    provider_id: &str,
+) -> Result<HashMap<String, ProviderModelMetadata>> {
+    let provider_id = provider_id.to_string();
+    run_blocking_request(move || {
+        let client = Client::new();
+        let response = client
+            .get("https://models.dev/api.json")
+            .header(reqwest::header::USER_AGENT, "nite")
+            .send()?;
+        if !response.status().is_success() {
+            return Err(color_eyre::eyre::eyre!(
+                "models.dev lookup failed with status {}",
+                response.status()
+            ));
+        }
+
+        let payload: HashMap<String, ModelsDevProvider> = response.json()?;
+        Ok(payload
+            .get(&provider_id)
+            .map(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .map(|(id, model)| {
+                        (
+                            id.clone(),
+                            ProviderModelMetadata {
+                                display_name: model.name.clone(),
+                                context_length: model.limit.as_ref().map(|limit| limit.context),
+                                supported_variants: derive_supported_variants(
+                                    &provider_id,
+                                    provider.npm.as_deref(),
+                                    id,
+                                    model,
+                                ),
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    })
+}
+
+fn run_blocking_request<T, F>(operation: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    std::thread::spawn(operation)
+        .join()
+        .map_err(|_| color_eyre::eyre::eyre!("blocking request thread panicked"))?
+}
+
+fn derive_supported_variants(
+    provider_id: &str,
+    provider_npm: Option<&str>,
+    model_id: &str,
+    model: &ModelsDevModel,
+) -> Vec<String> {
+    if !model.reasoning {
+        return Vec::new();
     }
 
-    let payload: HashMap<String, ModelsDevProvider> = response.json()?;
-    Ok(payload
-        .get(provider_id)
-        .map(|provider| {
-            provider
-                .models
+    const WIDELY_SUPPORTED_EFFORTS: &[&str] = &["low", "medium", "high"];
+    let id = model_id.to_ascii_lowercase();
+    let release_date = model.release_date.as_deref().unwrap_or("");
+
+    match provider_npm.or(Some(provider_id)) {
+        Some("@ai-sdk/openai") | Some("openai") => {
+            if id == "gpt-5-pro" {
+                return Vec::new();
+            }
+
+            if id.contains("codex") {
+                let mut efforts = WIDELY_SUPPORTED_EFFORTS
+                    .iter()
+                    .map(|effort| (*effort).to_string())
+                    .collect::<Vec<_>>();
+                if release_date >= "2025-12-04" {
+                    efforts.push("xhigh".to_string());
+                }
+                return efforts;
+            }
+
+            let mut efforts = WIDELY_SUPPORTED_EFFORTS
                 .iter()
-                .map(|(id, model)| (id.clone(), model.name.clone()))
-                .collect()
-        })
-        .unwrap_or_default())
+                .map(|effort| (*effort).to_string())
+                .collect::<Vec<_>>();
+            if id == "gpt-5" || id.starts_with("gpt-5.") || id.contains("gpt-5-") {
+                efforts.insert(0, "minimal".to_string());
+            }
+            if release_date >= "2025-11-13" {
+                efforts.insert(0, "none".to_string());
+            }
+            if release_date >= "2025-12-04" {
+                efforts.push("xhigh".to_string());
+            }
+            efforts
+        }
+        Some("@ai-sdk/openai-compatible") | Some("openai-compatible") => WIDELY_SUPPORTED_EFFORTS
+            .iter()
+            .map(|effort| (*effort).to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn fallback_model_display_name(provider_id: &str, model_id: &str) -> String {
@@ -235,7 +362,9 @@ fn format_openai_token(token: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::fallback_model_display_name;
+    use super::{
+        ModelsDevLimit, ModelsDevModel, derive_supported_variants, fallback_model_display_name,
+    };
 
     #[test]
     fn formats_openai_model_ids_when_catalog_is_missing() {
@@ -252,6 +381,41 @@ mod tests {
         assert_eq!(
             fallback_model_display_name("anthropic", "claude-sonnet-4-5"),
             "claude-sonnet-4-5"
+        );
+    }
+
+    #[test]
+    fn derives_openai_variants_from_models_dev_metadata() {
+        let model = ModelsDevModel {
+            name: "GPT-5.4".to_string(),
+            reasoning: true,
+            release_date: Some("2026-03-05".to_string()),
+            limit: Some(ModelsDevLimit { context: 1_050_000 }),
+        };
+
+        assert_eq!(
+            derive_supported_variants("openai", Some("@ai-sdk/openai"), "gpt-5.4", &model),
+            vec!["none", "minimal", "low", "medium", "high", "xhigh"]
+        );
+    }
+
+    #[test]
+    fn derives_openai_compatible_variants_from_models_dev_metadata() {
+        let model = ModelsDevModel {
+            name: "deepseek-chat".to_string(),
+            reasoning: true,
+            release_date: Some("2026-01-01".to_string()),
+            limit: Some(ModelsDevLimit { context: 128_000 }),
+        };
+
+        assert_eq!(
+            derive_supported_variants(
+                "openai-compatible",
+                Some("@ai-sdk/openai-compatible"),
+                "deepseek-chat",
+                &model,
+            ),
+            vec!["low", "medium", "high"]
         );
     }
 }

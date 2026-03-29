@@ -58,12 +58,14 @@ impl App {
         fallback_formatted_model_display_name(provider_id, &model_id)
     }
 
-    fn input_variant_label(&self) -> String {
-        std::env::var("NITE_OPENAI_REASONING_EFFORT")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "none".to_string())
+    fn input_variant_label(&self) -> Option<String> {
+        self.current_model_supports_variants().then(|| {
+            std::env::var("NITE_OPENAI_REASONING_EFFORT")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "none".to_string())
+        })
     }
 
     fn input_mode_label(&self) -> Option<(String, Color)> {
@@ -134,13 +136,14 @@ impl App {
             ),
             Span::raw(" "),
             Span::styled(self.input_model_label(), Style::default().fg(Color::Gray)),
-            Span::styled(" • ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                self.input_variant_label(),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::styled(" • ", Style::default().fg(Color::DarkGray)),
         ];
+
+        if let Some(variant) = self.input_variant_label() {
+            spans.push(Span::styled(" • ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(variant, Style::default().fg(Color::Yellow)));
+        }
+
+        spans.push(Span::styled(" • ", Style::default().fg(Color::DarkGray)));
         spans.extend(self.input_context_footer_spans());
 
         if let Some((label, color)) = self.input_mode_label() {
@@ -390,7 +393,7 @@ impl App {
             .block(
                 ratatui::widgets::Block::bordered()
                     .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(Style::default().fg(self.get_mode_border_color())),
+                    .border_style(Style::default().fg(self.get_input_bar_color())),
             );
         frame.render_widget(input, input_area);
 

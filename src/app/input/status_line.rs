@@ -214,15 +214,23 @@ impl App {
     }
 
     fn shortcuts_status_line(&self) -> Line<'static> {
-        Line::from(vec![
-            Span::styled("ctrl+t", Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
-            Span::styled("variants", Style::default().fg(Color::White)),
-            Span::styled(" • ", Style::default().fg(Color::Gray)),
-            Span::styled("shift + tab", Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
-            Span::styled("modes", Style::default().fg(Color::White)),
-        ])
+        let mut spans = Vec::new();
+
+        if self.current_model_supports_variants() {
+            spans.push(Span::styled("ctrl+t", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled("variants", Style::default().fg(Color::White)));
+            spans.push(Span::styled(" • ", Style::default().fg(Color::Gray)));
+        }
+
+        spans.push(Span::styled(
+            "shift + tab",
+            Style::default().fg(Color::DarkGray),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled("modes", Style::default().fg(Color::White)));
+
+        Line::from(spans)
     }
 
     pub(crate) fn render_status_bar(

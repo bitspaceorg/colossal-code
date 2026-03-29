@@ -2,7 +2,7 @@ use color_eyre::Result;
 
 use crate::app::App;
 use crate::app::connect::model_discovery::{
-    fallback_formatted_model_display_name, resolve_provider_models,
+    fallback_formatted_model_display_name, provider_model_metadata, resolve_provider_models,
 };
 use crate::app::connect::{
     ConnectAuthMethod, ConnectModalMode, ConnectProviderOption, ConnectSubscriptionState,
@@ -13,6 +13,51 @@ use crate::app::persistence::auth_store::{
 };
 
 impl App {
+    pub(crate) fn current_model_provider_id(&self) -> Option<&str> {
+        self.active_connection()
+            .map(|connection| connection.provider_id.as_str())
+    }
+
+    pub(crate) fn current_model_metadata(&self) -> Option<&crate::app::ModelInfo> {
+        let model_id = self.current_model.as_deref()?.trim();
+        if model_id.is_empty() {
+            return None;
+        }
+
+        let active_connection_id = self.connect.active_connection_id.as_deref();
+        self.available_models.iter().find(|model| {
+            model.filename == model_id
+                && match (model.connection_id.as_deref(), active_connection_id) {
+                    (Some(model_connection), Some(active_connection)) => {
+                        model_connection == active_connection
+                    }
+                    (None, None) => true,
+                    (None, Some(_)) => false,
+                    (Some(_), None) => false,
+                }
+        })
+    }
+
+    pub(crate) fn current_model_supported_variants(&self) -> Vec<String> {
+        if let Some(model) = self.current_model_metadata() {
+            return model.supported_variants.clone();
+        }
+
+        let model_id = match self.current_model.as_deref().map(str::trim) {
+            Some("") | None => return Vec::new(),
+            Some(model_id) => model_id,
+        };
+
+        self.current_model_provider_id()
+            .and_then(|provider_id| provider_model_metadata(provider_id, model_id))
+            .map(|metadata| metadata.supported_variants)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn current_model_supports_variants(&self) -> bool {
+        !self.current_model_supported_variants().is_empty()
+    }
+
     pub(crate) fn sanitized_connect_api_key(&self) -> String {
         self.connect.input.trim().to_string()
     }

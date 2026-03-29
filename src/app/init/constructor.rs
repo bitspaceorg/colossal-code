@@ -43,7 +43,21 @@ impl App {
                 current_model = connection.model.clone();
             }
         }
-        let current_context_tokens = Self::detect_context_tokens(current_model.as_deref());
+        let current_context_tokens = Self::detect_context_tokens(
+            current_model.as_deref(),
+            auth_store
+                .active_connection_id
+                .as_deref()
+                .and_then(|active_id| {
+                    auth_store
+                        .connections
+                        .iter()
+                        .find(|connection| connection.id == active_id)
+                        .map(|connection| connection.provider_id.as_str())
+                }),
+        );
+        let available_models =
+            Self::build_available_models(&auth_store.connections).unwrap_or_default();
         let limit_thinking_to_first_token = backend_env.limit_thinking_to_first_token;
         Self::apply_backend_environment(&backend_env);
 
@@ -303,7 +317,7 @@ impl App {
             is_fork_mode: false,
             show_todos: false,
             show_model_selection: false,
-            available_models: Vec::new(),
+            available_models,
             model_selected_index: 0,
             show_rewind: false,
             rewind_points: Vec::new(),
