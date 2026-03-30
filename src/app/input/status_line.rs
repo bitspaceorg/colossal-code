@@ -216,10 +216,10 @@ impl App {
     fn shortcuts_status_line(&self) -> Line<'static> {
         let mut spans = Vec::new();
 
-        if self.current_model_supports_variants() {
-            spans.push(Span::styled("ctrl+t", Style::default().fg(Color::DarkGray)));
+        if self.current_model_supports_reasoning() {
+            spans.push(Span::styled("ctrl+e", Style::default().fg(Color::DarkGray)));
             spans.push(Span::raw(" "));
-            spans.push(Span::styled("variants", Style::default().fg(Color::White)));
+            spans.push(Span::styled("effort", Style::default().fg(Color::White)));
             spans.push(Span::styled(" • ", Style::default().fg(Color::Gray)));
         }
 

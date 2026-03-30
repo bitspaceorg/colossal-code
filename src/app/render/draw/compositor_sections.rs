@@ -58,9 +58,9 @@ impl App {
         fallback_formatted_model_display_name(provider_id, &model_id)
     }
 
-    fn input_variant_label(&self) -> Option<String> {
-        self.current_model_supports_variants().then(|| {
-            std::env::var("NITE_OPENAI_REASONING_EFFORT")
+    fn input_reasoning_effort_label(&self) -> Option<String> {
+        self.current_model_supports_reasoning().then(|| {
+            std::env::var("NITE_REASONING_EFFORT")
                 .ok()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
@@ -138,9 +138,9 @@ impl App {
             Span::styled(self.input_model_label(), Style::default().fg(Color::Gray)),
         ];
 
-        if let Some(variant) = self.input_variant_label() {
+        if let Some(effort) = self.input_reasoning_effort_label() {
             spans.push(Span::styled(" • ", Style::default().fg(Color::DarkGray)));
-            spans.push(Span::styled(variant, Style::default().fg(Color::Yellow)));
+            spans.push(Span::styled(effort, Style::default().fg(Color::Yellow)));
         }
 
         spans.push(Span::styled(" • ", Style::default().fg(Color::DarkGray)));

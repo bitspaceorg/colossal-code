@@ -10,7 +10,7 @@ use crate::app::persistence::auth_store::{StoredAuthKind, StoredConnection};
 pub(crate) struct ProviderModelMetadata {
     pub(crate) display_name: String,
     pub(crate) context_length: Option<usize>,
-    pub(crate) supported_variants: Vec<String>,
+    pub(crate) supported_effort_levels: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -249,7 +249,7 @@ fn fetch_provider_model_metadata(
                             ProviderModelMetadata {
                                 display_name: model.name.clone(),
                                 context_length: model.limit.as_ref().map(|limit| limit.context),
-                                supported_variants: derive_supported_variants(
+                                supported_effort_levels: derive_supported_reasoning_efforts(
                                     &provider_id,
                                     provider.npm.as_deref(),
                                     id,
@@ -274,7 +274,7 @@ where
         .map_err(|_| color_eyre::eyre::eyre!("blocking request thread panicked"))?
 }
 
-fn derive_supported_variants(
+fn derive_supported_reasoning_efforts(
     provider_id: &str,
     provider_npm: Option<&str>,
     model_id: &str,
@@ -363,7 +363,8 @@ fn format_openai_token(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelsDevLimit, ModelsDevModel, derive_supported_variants, fallback_model_display_name,
+        ModelsDevLimit, ModelsDevModel, derive_supported_reasoning_efforts,
+        fallback_model_display_name,
     };
 
     #[test]
@@ -394,13 +395,13 @@ mod tests {
         };
 
         assert_eq!(
-            derive_supported_variants("openai", Some("@ai-sdk/openai"), "gpt-5.4", &model),
+            derive_supported_reasoning_efforts("openai", Some("@ai-sdk/openai"), "gpt-5.4", &model),
             vec!["none", "minimal", "low", "medium", "high", "xhigh"]
         );
     }
 
     #[test]
-    fn derives_openai_compatible_variants_from_models_dev_metadata() {
+    fn derives_openai_compatible_reasoning_efforts_from_models_dev_metadata() {
         let model = ModelsDevModel {
             name: "deepseek-chat".to_string(),
             reasoning: true,
@@ -409,7 +410,7 @@ mod tests {
         };
 
         assert_eq!(
-            derive_supported_variants(
+            derive_supported_reasoning_efforts(
                 "openai-compatible",
                 Some("@ai-sdk/openai-compatible"),
                 "deepseek-chat",

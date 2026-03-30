@@ -12,13 +12,13 @@ impl App {
             || (matches!(key.code, KeyCode::Tab) && key.modifiers.contains(KeyModifiers::SHIFT))
     }
 
-    fn is_ctrl_t(key: &KeyEvent) -> bool {
+    fn is_ctrl_e(key: &KeyEvent) -> bool {
         if !key.modifiers.contains(KeyModifiers::CONTROL) {
             return false;
         }
 
-        matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T'))
-            || matches!(key.code, KeyCode::Char(c) if c == '\u{14}')
+        matches!(key.code, KeyCode::Char('e') | KeyCode::Char('E'))
+            || matches!(key.code, KeyCode::Char(c) if c == '\u{05}')
     }
 
     pub(crate) fn handle_normal_mode_global_toggles(&mut self, key: &KeyEvent) -> bool {
@@ -43,33 +43,27 @@ impl App {
             return true;
         }
 
-        if Self::is_ctrl_t(key) {
-            let mut variants = self.current_model_supported_variants();
+        if Self::is_ctrl_e(key) {
+            let mut efforts = self.current_model_supported_effort_levels();
 
-            if variants.is_empty() {
-                self.status_message = Some("No variants available for current model".to_string());
+            if efforts.is_empty() {
+                self.status_message = Some("Reasoning not supported for current model".to_string());
                 return true;
             }
 
-            let supports_none = variants.iter().any(|variant| variant == "none");
-            let cycle = variants
+            let supports_none = efforts.iter().any(|effort| effort == "none");
+            let cycle = efforts
                 .drain(..)
-                .map(|variant| {
-                    if variant == "none" {
-                        None
-                    } else {
-                        Some(variant)
-                    }
-                })
+                .map(|effort| if effort == "none" { None } else { Some(effort) })
                 .collect::<Vec<_>>();
 
-            let current = std::env::var("NITE_OPENAI_REASONING_EFFORT")
+            let current = std::env::var("NITE_REASONING_EFFORT")
                 .ok()
                 .map(|value| value.trim().to_ascii_lowercase())
                 .filter(|value| !value.is_empty());
             let current_index = cycle
                 .iter()
-                .position(|variant| variant.as_ref() == current.as_ref())
+                .position(|effort| effort.as_ref() == current.as_ref())
                 .or_else(|| (!supports_none && current.is_none()).then_some(cycle.len() - 1))
                 .unwrap_or(cycle.len() - 1);
             let next = cycle[(current_index + 1) % cycle.len()].clone();
@@ -77,14 +71,14 @@ impl App {
 
             match next {
                 Some(ref value) => unsafe {
-                    std::env::set_var("NITE_OPENAI_REASONING_EFFORT", &value);
+                    std::env::set_var("NITE_REASONING_EFFORT", &value);
                 },
                 None => unsafe {
-                    std::env::remove_var("NITE_OPENAI_REASONING_EFFORT");
+                    std::env::remove_var("NITE_REASONING_EFFORT");
                 },
             }
 
-            self.status_message = Some(format!("Variant set to {label}"));
+            self.status_message = Some(format!("Effort set to {label}"));
             return true;
         }
 
@@ -154,16 +148,16 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_t_is_not_treated_as_shift_tab() {
-        let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+    fn ctrl_e_is_not_treated_as_shift_tab() {
+        let ctrl_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
 
-        assert!(!App::is_shift_tab(&ctrl_t));
+        assert!(!App::is_shift_tab(&ctrl_e));
     }
 
     #[test]
-    fn ctrl_t_detection_accepts_control_character() {
-        let ctrl_t = KeyEvent::new(KeyCode::Char('\u{14}'), KeyModifiers::CONTROL);
+    fn ctrl_e_detection_accepts_control_character() {
+        let ctrl_e = KeyEvent::new(KeyCode::Char('\u{05}'), KeyModifiers::CONTROL);
 
-        assert!(App::is_ctrl_t(&ctrl_t));
+        assert!(App::is_ctrl_e(&ctrl_e));
     }
 }

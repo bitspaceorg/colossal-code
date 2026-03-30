@@ -84,7 +84,7 @@ fn assistant_mode_to_display_matches_expected_labels() {
     assert_eq!(AssistantMode::None.to_display(), None);
     assert_eq!(
         AssistantMode::Yolo.to_display(),
-        Some(("YOLO mode".to_string(), Color::Red))
+        Some(("YOLO mode".to_string(), Color::Magenta))
     );
     assert_eq!(
         AssistantMode::Plan.to_display(),

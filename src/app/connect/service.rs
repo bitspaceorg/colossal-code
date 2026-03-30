@@ -38,9 +38,9 @@ impl App {
         })
     }
 
-    pub(crate) fn current_model_supported_variants(&self) -> Vec<String> {
+    pub(crate) fn current_model_supported_effort_levels(&self) -> Vec<String> {
         if let Some(model) = self.current_model_metadata() {
-            return model.supported_variants.clone();
+            return model.supported_effort_levels.clone();
         }
 
         let model_id = match self.current_model.as_deref().map(str::trim) {
@@ -50,12 +50,12 @@ impl App {
 
         self.current_model_provider_id()
             .and_then(|provider_id| provider_model_metadata(provider_id, model_id))
-            .map(|metadata| metadata.supported_variants)
+            .map(|metadata| metadata.supported_effort_levels)
             .unwrap_or_default()
     }
 
-    pub(crate) fn current_model_supports_variants(&self) -> bool {
-        !self.current_model_supported_variants().is_empty()
+    pub(crate) fn current_model_supports_reasoning(&self) -> bool {
+        !self.current_model_supported_effort_levels().is_empty()
     }
 
     pub(crate) fn sanitized_connect_api_key(&self) -> String {

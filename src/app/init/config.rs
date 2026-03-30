@@ -105,7 +105,7 @@ impl App {
                             author,
                             version,
                             context_length,
-                            supported_variants: Vec::new(),
+                            supported_effort_levels: Vec::new(),
                         });
                     }
                 }
@@ -147,9 +147,9 @@ impl App {
                     context_length: provider_metadata
                         .get(*model)
                         .and_then(|metadata| metadata.context_length),
-                    supported_variants: provider_metadata
+                    supported_effort_levels: provider_metadata
                         .get(*model)
-                        .map(|metadata| metadata.supported_variants.clone())
+                        .map(|metadata| metadata.supported_effort_levels.clone())
                         .unwrap_or_default(),
                 });
             }

@@ -27,7 +27,7 @@ const THINKING_BUDGET_MEDIUM: u64 = 8_000;
 const THINKING_BUDGET_HIGH: u64 = 16_000;
 
 fn anthropic_thinking_budget() -> Option<u64> {
-    let effort = std::env::var("NITE_OPENAI_REASONING_EFFORT")
+    let effort = std::env::var("NITE_REASONING_EFFORT")
         .ok()
         .map(|v| v.trim().to_ascii_lowercase())
         .filter(|v| !v.is_empty())?;
