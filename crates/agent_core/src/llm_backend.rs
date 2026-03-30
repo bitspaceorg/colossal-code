@@ -20,10 +20,13 @@ use std::{net::IpAddr, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+mod anthropic;
+mod claude_auth;
 mod openai_auth;
 mod openai_options;
 mod responses;
 
+use claude_auth::ClaudeCodeAuthState;
 use openai_auth::OpenAiAuthState;
 
 #[async_trait]
@@ -135,8 +138,11 @@ pub struct HttpBackend {
     completions_path: String,
     requires_model_load: bool,
     supports_thinking_param: bool,
+    provider_id: Option<String>,
+    auth_kind: Option<String>,
     chatgpt_account_id: Option<String>,
     openai_auth: Option<OpenAiAuthState>,
+    claude_auth: Option<ClaudeCodeAuthState>,
 }
 
 fn http_debug_enabled() -> bool {
@@ -186,11 +192,26 @@ impl HttpBackend {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
+        let provider_id = std::env::var("NITE_HTTP_PROVIDER_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let auth_kind = std::env::var("NITE_HTTP_AUTH_KIND")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         let openai_auth = if completions_path
             .to_ascii_lowercase()
             .contains("backend-api/codex/responses")
         {
             OpenAiAuthState::from_env(api_key.clone())
+        } else {
+            None
+        };
+        let claude_auth = if provider_id.as_deref() == Some("anthropic")
+            && auth_kind.as_deref() == Some("claude_code")
+        {
+            ClaudeCodeAuthState::from_env(api_key.clone())
         } else {
             None
         };
@@ -202,8 +223,11 @@ impl HttpBackend {
             completions_path,
             requires_model_load,
             supports_thinking_param,
+            provider_id,
+            auth_kind,
             chatgpt_account_id,
             openai_auth,
+            claude_auth,
         }
     }
 
@@ -312,6 +336,65 @@ impl HttpBackend {
         } else {
             Some(format!("Bearer {}", self.api_key))
         }
+    }
+
+    fn provider_uses_bearer_auth(&self) -> bool {
+        self.provider_id.as_deref() != Some("anthropic")
+            || self.auth_kind.as_deref() == Some("claude_code")
+    }
+
+    fn has_claude_auth(&self) -> bool {
+        self.claude_auth.is_some()
+    }
+
+    fn is_anthropic_api(&self) -> bool {
+        self.provider_id.as_deref() == Some("anthropic")
+            || self
+                .completions_path
+                .to_ascii_lowercase()
+                .contains("/v1/messages")
+    }
+
+    async fn ensure_fresh_claude_auth(&self) -> Result<()> {
+        if let Some(state) = &self.claude_auth {
+            state.ensure_fresh(&self.client, false).await?;
+        }
+        Ok(())
+    }
+
+    async fn force_refresh_claude_auth(&self) -> Result<()> {
+        if let Some(state) = &self.claude_auth {
+            state.ensure_fresh(&self.client, true).await?;
+        }
+        Ok(())
+    }
+
+    async fn claude_auth_header(&self) -> Option<String> {
+        if let Some(state) = &self.claude_auth {
+            return state.auth_header().await;
+        }
+        None
+    }
+
+    async fn claude_organization_id(&self) -> Option<String> {
+        if let Some(state) = &self.claude_auth {
+            return state.organization_id().await;
+        }
+        std::env::var("NITE_HTTP_ORGANIZATION_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    fn apply_claude_request_headers(
+        &self,
+        request: reqwest::RequestBuilder,
+        model_id: &str,
+    ) -> reqwest::RequestBuilder {
+        if let Some(state) = &self.claude_auth {
+            return state.apply_request_headers(request, model_id);
+        }
+        request
     }
 
     fn user_project_header(&self) -> Option<String> {
@@ -478,6 +561,9 @@ impl LLMBackend for HttpBackend {
     ) -> Result<Box<dyn FuturesStream<Item = Response> + Unpin + Send>> {
         if self.is_responses_api() {
             return responses::stream_responses_request(self, request).await;
+        }
+        if self.is_anthropic_api() {
+            return anthropic::stream_anthropic_request(self, request).await;
         }
 
         let mut request_builder = request;

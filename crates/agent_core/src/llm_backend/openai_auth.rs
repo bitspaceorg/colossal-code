@@ -158,6 +158,10 @@ impl HttpBackend {
         Ok(())
     }
 
+    pub(super) fn has_openai_auth(&self) -> bool {
+        self.openai_auth.is_some()
+    }
+
     pub(super) async fn openai_auth_header(&self) -> Option<String> {
         if let Some(state) = &self.openai_auth {
             return state.auth_header().await;

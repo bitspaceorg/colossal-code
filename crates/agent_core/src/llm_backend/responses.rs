@@ -51,6 +51,46 @@ pub(super) async fn stream_responses_request(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
+
+        if status.as_u16() == 401 && backend.has_openai_auth() {
+            backend.ensure_fresh_openai_auth().await?;
+            let mut retry_request = backend
+                .client
+                .post(format!(
+                    "{}/{}",
+                    backend.base_url,
+                    backend.completions_path.trim_start_matches('/')
+                ))
+                .json(&payload);
+            if let Some(header) = backend.openai_auth_header().await {
+                retry_request = retry_request.header("Authorization", header);
+            }
+            if let Some(account_id) = backend.openai_account_id().await {
+                retry_request = retry_request.header("ChatGPT-Account-Id", account_id);
+            }
+            let retried = retry_request.send().await?;
+            let retried_status = retried.status();
+            if retried_status.is_success() {
+                let (tx, rx) = mpsc::unbounded_channel();
+                tokio::spawn(async move {
+                    let sender = tx;
+                    if let Err(err) =
+                        process_responses_sse(retried, model_name, sender.clone(), request_start)
+                            .await
+                    {
+                        let _ = sender.send(Response::InternalError(err.into()));
+                    }
+                });
+                return Ok(Box::new(UnboundedReceiverStream::new(rx)));
+            }
+            let retried_body = retried.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "Responses API Error {}: {}",
+                retried_status.as_u16(),
+                retried_body
+            ));
+        }
+
         return Err(anyhow::anyhow!(
             "Responses API Error {}: {}",
             status.as_u16(),
