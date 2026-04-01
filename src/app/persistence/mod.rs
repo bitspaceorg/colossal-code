@@ -3,6 +3,7 @@ pub mod compaction;
 pub mod config;
 pub mod conversations;
 pub mod history;
+pub mod model_cache;
 pub mod rewind;
 pub mod session_io;
 pub mod todos;

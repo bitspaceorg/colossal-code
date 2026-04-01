@@ -52,19 +52,27 @@ pub(crate) fn resolve_provider_models(
     api_key: Option<&str>,
     saved_connection: Option<&StoredConnection>,
 ) -> Result<Vec<String>> {
-    if provider.id != "openai" {
+    if provider.id != "openai" && provider.id != "anthropic" {
         return Ok(provider.models.clone());
     }
 
     let fetched = match auth_kind.unwrap_or(StoredAuthKind::ApiKey) {
-        StoredAuthKind::ApiKey => api_key
-            .filter(|value| !value.trim().is_empty())
-            .map(fetch_openai_api_models)
-            .transpose()?,
+        StoredAuthKind::ApiKey => match provider.id.as_str() {
+            "openai" => api_key
+                .filter(|value| !value.trim().is_empty())
+                .map(fetch_openai_api_models)
+                .transpose()?,
+            "anthropic" => api_key
+                .filter(|value| !value.trim().is_empty())
+                .map(fetch_anthropic_api_models)
+                .transpose()?,
+            _ => None,
+        },
         StoredAuthKind::OpenAiSubscription => match saved_connection {
             Some(connection) => Some(fetch_openai_subscription_models(connection)?),
             None => None,
         },
+        StoredAuthKind::ClaudeCode => Some(default_claude_code_models()),
     };
 
     if let Some(models) = fetched.filter(|models| !models.is_empty()) {
@@ -204,6 +212,32 @@ fn filter_openai_model_ids(ids: impl IntoIterator<Item = String>) -> Vec<String>
     models.into_iter().collect()
 }
 
+fn fetch_anthropic_api_models(api_key: &str) -> Result<Vec<String>> {
+    let api_key = api_key.trim().to_string();
+    run_blocking_request(move || {
+        let client = Client::new();
+        let response = client
+            .get("https://api.anthropic.com/v1/models")
+            .header("x-api-key", &api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send()?;
+        if !response.status().is_success() {
+            return Ok(Vec::new());
+        }
+
+        let payload: OpenAiModelsResponse = response.json()?;
+        Ok(payload.data.into_iter().map(|entry| entry.id).collect())
+    })
+}
+
+fn default_claude_code_models() -> Vec<String> {
+    vec![
+        "claude-sonnet-4-6".to_string(),
+        "claude-opus-4-6".to_string(),
+        "claude-haiku-4-5".to_string(),
+    ]
+}
+
 pub(crate) fn provider_model_metadata(
     provider_id: &str,
     model_id: &str,
@@ -324,7 +358,10 @@ fn derive_supported_reasoning_efforts(
             .iter()
             .map(|effort| (*effort).to_string())
             .collect(),
-        _ => Vec::new(),
+        _ => WIDELY_SUPPORTED_EFFORTS
+            .iter()
+            .map(|effort| (*effort).to_string())
+            .collect(),
     }
 }
 
@@ -335,6 +372,9 @@ fn fallback_model_display_name(provider_id: &str, model_id: &str) -> String {
             .map(format_openai_token)
             .collect::<Vec<_>>()
             .join("-");
+    }
+    if provider_id == "anthropic" {
+        return format_claude_model_name(model_id);
     }
     model_id.to_string()
 }
@@ -360,6 +400,76 @@ fn format_openai_token(token: &str) -> String {
     formatted
 }
 
+fn format_claude_model_name(model_id: &str) -> String {
+    let parts: Vec<&str> = model_id.split('-').collect();
+    if parts.is_empty() {
+        return model_id.to_string();
+    }
+
+    let mut version_parts = Vec::new();
+    let mut model_name = None;
+    let mut other_parts = Vec::new();
+
+    // First, skip "claude" and extract components
+    let mut i = 0;
+    if parts[i] == "claude" {
+        i += 1;
+    }
+
+    // Separate model name (haiku/sonnet/opus) from version numbers
+    while i < parts.len() {
+        let part = parts[i];
+
+        if part == "sonnet" || part == "haiku" || part == "opus" {
+            model_name = Some(part);
+        } else if part.chars().all(|c| c.is_ascii_digit()) && part.len() != 8 {
+            // Version numbers (exclude 8-digit dates)
+            version_parts.push(part);
+        } else if part.len() <= 3 && part.chars().all(|c| c.is_ascii_alphanumeric()) {
+            other_parts.push(part);
+        }
+
+        i += 1;
+    }
+
+    let mut result = String::new();
+
+    // Put model name first (Haiku, Sonnet, Opus)
+    if let Some(name) = model_name {
+        let mut chars = name.chars();
+        if let Some(first) = chars.next() {
+            result.push(first.to_ascii_uppercase());
+            result.push_str(chars.as_str());
+        }
+    }
+
+    // Then version numbers
+    if !version_parts.is_empty() {
+        if !result.is_empty() {
+            result.push(' ');
+        }
+        result.push_str(version_parts[0]);
+        for part in &version_parts[1..] {
+            result.push('.');
+            result.push_str(part);
+        }
+    }
+
+    // Then other parts (e.g., "pro")
+    for part in other_parts {
+        if !result.is_empty() {
+            result.push(' ');
+        }
+        result.push_str(&part.to_uppercase());
+    }
+
+    if result.is_empty() {
+        model_id.to_string()
+    } else {
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -378,10 +488,22 @@ mod tests {
     }
 
     #[test]
-    fn leaves_unknown_provider_ids_unchanged() {
+    fn formats_claude_model_ids() {
         assert_eq!(
             fallback_model_display_name("anthropic", "claude-sonnet-4-5"),
-            "claude-sonnet-4-5"
+            "Sonnet 4.5"
+        );
+        assert_eq!(
+            fallback_model_display_name("anthropic", "claude-3-haiku-20240307"),
+            "Haiku 3"
+        );
+        assert_eq!(
+            fallback_model_display_name("anthropic", "claude-3-opus-20240229"),
+            "Opus 3"
+        );
+        assert_eq!(
+            fallback_model_display_name("anthropic", "claude-haiku-4-5"),
+            "Haiku 4.5"
         );
     }
 

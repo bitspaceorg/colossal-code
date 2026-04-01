@@ -1,6 +1,5 @@
 use std::time::SystemTime;
 
-use agent_core::AgentMessage;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
 use crate::app::state::message::{MessageState, MessageType};
@@ -278,28 +277,34 @@ impl App {
                     let selected_model = &self.available_models[self.model_selected_index];
                     let selected_filename = selected_model.filename.clone();
                     let selected_display = selected_model.display_name.clone();
-                    self.current_model = Some(selected_filename.clone());
-                    self.refresh_context_window();
+                    let connection_id = selected_model.connection_id.clone();
                     self.show_model_selection = false;
 
-                    if let Err(e) = self.save_config() {
-                        self.messages
-                            .push(format!(" ⚠ Failed to save model to config: {}", e));
-                        self.message_types.push(MessageType::Agent);
-                        self.message_states.push(MessageState::Sent);
-                    }
-
-                    if let Some(ref tx) = self.agent_tx {
-                        let _ = tx.send(AgentMessage::ReloadModel(selected_filename.clone()));
-                        self.messages
-                            .push(format!(" ⟳ Loading model: {}", selected_display));
-                        self.message_types.push(MessageType::Agent);
-                        self.message_states.push(MessageState::Sent);
+                    let result = if let Some(connection_id) = connection_id.as_deref() {
+                        self.select_connected_model(connection_id, selected_filename.clone())
+                            .map(|provider_name| {
+                                format!(
+                                    " ✔ Model set to: {} via {}",
+                                    selected_display, provider_name
+                                )
+                            })
                     } else {
-                        self.messages
-                            .push(format!(" ✔ Model set to: {}", selected_display));
-                        self.message_types.push(MessageType::Agent);
-                        self.message_states.push(MessageState::Sent);
+                        self.activate_local_model(selected_filename.clone())
+                            .map(|_| format!(" ✔ Model set to: {}", selected_display))
+                    };
+
+                    match result {
+                        Ok(message) => {
+                            self.messages.push(message);
+                            self.message_types.push(MessageType::Agent);
+                            self.message_states.push(MessageState::Sent);
+                        }
+                        Err(e) => {
+                            self.messages
+                                .push(format!(" ⚠ Failed to switch model: {}", e));
+                            self.message_types.push(MessageType::Agent);
+                            self.message_states.push(MessageState::Sent);
+                        }
                     }
                 }
             }

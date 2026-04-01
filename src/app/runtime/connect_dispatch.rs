@@ -83,7 +83,8 @@ impl App {
                         self.connect.selected_index = 0;
                         self.connect.mode = match method {
                             ConnectAuthMethod::ApiKey => ConnectModalMode::ApiKey,
-                            ConnectAuthMethod::OpenAiSubscription => ConnectModalMode::Subscription,
+                            ConnectAuthMethod::OpenAiSubscription
+                            | ConnectAuthMethod::ClaudeCode => ConnectModalMode::Subscription,
                         };
                     }
                 }
@@ -135,42 +136,81 @@ impl App {
                     self.connect.mode = ConnectModalMode::AuthMethod;
                 }
                 KeyCode::Enter => {
-                    if self.connect.subscription_state.access_token.is_some()
-                        && self.connect.subscription_state.refresh_token.is_some()
-                    {
-                        if let Err(error) = self.refresh_selected_provider_models() {
-                            self.push_connect_status(format!(
-                                " ⎿ model discovery fell back to defaults: {}",
-                                error
-                            ));
-                        }
-                        self.connect.mode = ConnectModalMode::Models;
-                        self.connect.model_selected_index = 0;
-                    } else if !self.connect.subscription_state.started {
-                        if let Err(error) = self.start_openai_subscription_auth() {
-                            self.push_connect_status(format!(
-                                " ⎿ failed to start OpenAI subscription auth: {}",
-                                error
-                            ));
+                    if self.connect.selected_auth_method == Some(ConnectAuthMethod::ClaudeCode) {
+                        // Claude Code auth: poll for imported credentials
+                        if self.connect.oauth_state.access_token.is_some() {
+                            if let Err(error) = self.refresh_selected_provider_models() {
+                                self.push_connect_status(format!(
+                                    " ⎿ model discovery fell back to defaults: {}",
+                                    error
+                                ));
+                            }
+                            self.connect.mode = ConnectModalMode::Models;
+                            self.connect.model_selected_index = 0;
+                        } else if !self.connect.oauth_state.started {
+                            if let Err(error) = self.start_selected_oauth_auth() {
+                                self.push_connect_status(format!(
+                                    " ⎿ failed to start auth: {}",
+                                    error
+                                ));
+                            }
+                        } else {
+                            match self.poll_selected_oauth_auth() {
+                                Ok(true) => {
+                                    if let Err(error) = self.refresh_selected_provider_models() {
+                                        self.push_connect_status(format!(
+                                            " ⎿ model discovery fell back to defaults: {}",
+                                            error
+                                        ));
+                                    }
+                                    self.connect.mode = ConnectModalMode::Models;
+                                    self.connect.model_selected_index = 0;
+                                }
+                                Ok(false) => {}
+                                Err(error) => {
+                                    self.push_connect_status(format!(" ⎿ auth failed: {}", error));
+                                }
+                            }
                         }
                     } else {
-                        match self.poll_openai_subscription_auth() {
-                            Ok(true) => {
-                                if let Err(error) = self.refresh_selected_provider_models() {
+                        // OpenAI subscription auth
+                        if self.connect.subscription_state.access_token.is_some()
+                            && self.connect.subscription_state.refresh_token.is_some()
+                        {
+                            if let Err(error) = self.refresh_selected_provider_models() {
+                                self.push_connect_status(format!(
+                                    " ⎿ model discovery fell back to defaults: {}",
+                                    error
+                                ));
+                            }
+                            self.connect.mode = ConnectModalMode::Models;
+                            self.connect.model_selected_index = 0;
+                        } else if !self.connect.subscription_state.started {
+                            if let Err(error) = self.start_openai_subscription_auth() {
+                                self.push_connect_status(format!(
+                                    " ⎿ failed to start OpenAI subscription auth: {}",
+                                    error
+                                ));
+                            }
+                        } else {
+                            match self.poll_openai_subscription_auth() {
+                                Ok(true) => {
+                                    if let Err(error) = self.refresh_selected_provider_models() {
+                                        self.push_connect_status(format!(
+                                            " ⎿ model discovery fell back to defaults: {}",
+                                            error
+                                        ));
+                                    }
+                                    self.connect.mode = ConnectModalMode::Models;
+                                    self.connect.model_selected_index = 0;
+                                }
+                                Ok(false) => {}
+                                Err(error) => {
                                     self.push_connect_status(format!(
-                                        " ⎿ model discovery fell back to defaults: {}",
+                                        " ⎿ OpenAI subscription auth failed: {}",
                                         error
                                     ));
                                 }
-                                self.connect.mode = ConnectModalMode::Models;
-                                self.connect.model_selected_index = 0;
-                            }
-                            Ok(false) => {}
-                            Err(error) => {
-                                self.push_connect_status(format!(
-                                    " ⎿ OpenAI subscription auth failed: {}",
-                                    error
-                                ));
                             }
                         }
                     }

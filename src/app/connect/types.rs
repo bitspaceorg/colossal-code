@@ -13,6 +13,7 @@ pub(crate) enum ConnectModalMode {
 pub(crate) enum ConnectAuthMethod {
     ApiKey,
     OpenAiSubscription,
+    ClaudeCode,
 }
 
 impl ConnectAuthMethod {
@@ -20,6 +21,7 @@ impl ConnectAuthMethod {
         match self {
             Self::ApiKey => "API key",
             Self::OpenAiSubscription => "ChatGPT Plus/Pro",
+            Self::ClaudeCode => "Claude Pro/Max",
         }
     }
 
@@ -29,6 +31,7 @@ impl ConnectAuthMethod {
             Self::OpenAiSubscription => {
                 "Uses your ChatGPT subscription through the Codex auth flow"
             }
+            Self::ClaudeCode => "Uses your Claude subscription through the Claude Code auth flow",
         }
     }
 }
@@ -38,6 +41,7 @@ impl From<StoredAuthKind> for ConnectAuthMethod {
         match value {
             StoredAuthKind::ApiKey => Self::ApiKey,
             StoredAuthKind::OpenAiSubscription => Self::OpenAiSubscription,
+            StoredAuthKind::ClaudeCode => Self::ClaudeCode,
         }
     }
 }
@@ -65,6 +69,21 @@ pub(crate) struct ConnectProviderOption {
     pub(crate) auth_methods: Vec<ConnectAuthMethod>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct OAuthState {
+    pub(crate) started: bool,
+    pub(crate) launch_command: Option<String>,
+    pub(crate) account_id: Option<String>,
+    pub(crate) access_token: Option<String>,
+    pub(crate) refresh_token: Option<String>,
+    pub(crate) expires_at: Option<u64>,
+    pub(crate) scopes: Vec<String>,
+    pub(crate) subscription_type: Option<String>,
+    pub(crate) rate_limit_tier: Option<String>,
+    pub(crate) organization_id: Option<String>,
+    pub(crate) status: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConnectState {
     pub(crate) show_connect_modal: bool,
@@ -77,6 +96,7 @@ pub(crate) struct ConnectState {
     pub(crate) selected_provider: Option<ConnectProviderOption>,
     pub(crate) selected_auth_method: Option<ConnectAuthMethod>,
     pub(crate) subscription_state: ConnectSubscriptionState,
+    pub(crate) oauth_state: OAuthState,
     pub(crate) available_models: Vec<String>,
     pub(crate) model_selected_index: usize,
     pub(crate) saved_connections: Vec<StoredConnection>,
@@ -96,6 +116,7 @@ impl Default for ConnectState {
             selected_provider: None,
             selected_auth_method: None,
             subscription_state: ConnectSubscriptionState::default(),
+            oauth_state: OAuthState::default(),
             available_models: Vec::new(),
             model_selected_index: 0,
             saved_connections: Vec::new(),
@@ -139,11 +160,12 @@ pub(crate) fn built_in_providers() -> Vec<ConnectProviderOption> {
             description: "Claude models with your Anthropic account".to_string(),
             api_key_hint: "Paste your Anthropic API key to continue.".to_string(),
             models: vec![
-                "claude-3-7-sonnet-latest".to_string(),
-                "claude-3-5-sonnet-latest".to_string(),
-                "claude-3-5-haiku-latest".to_string(),
+                "claude-sonnet-4-6".to_string(),
+                "claude-opus-4-6".to_string(),
+                "claude-haiku-4-5".to_string(),
+                "claude-sonnet-4-5".to_string(),
             ],
-            auth_methods: vec![ConnectAuthMethod::ApiKey],
+            auth_methods: vec![ConnectAuthMethod::ClaudeCode, ConnectAuthMethod::ApiKey],
         },
         ConnectProviderOption {
             id: "openai-compatible".to_string(),

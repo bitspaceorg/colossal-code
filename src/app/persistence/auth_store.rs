@@ -12,6 +12,8 @@ pub(crate) enum StoredAuthKind {
     ApiKey,
     #[serde(rename = "openai_subscription")]
     OpenAiSubscription,
+    #[serde(rename = "claude_code")]
+    ClaudeCode,
 }
 
 impl Default for StoredAuthKind {
@@ -42,6 +44,14 @@ pub(crate) struct StoredConnection {
     pub(crate) refresh_token: Option<String>,
     #[serde(default)]
     pub(crate) access_expires_at: Option<u64>,
+    #[serde(default)]
+    pub(crate) oauth_scopes: Vec<String>,
+    #[serde(default)]
+    pub(crate) oauth_subscription_type: Option<String>,
+    #[serde(default)]
+    pub(crate) oauth_rate_limit_tier: Option<String>,
+    #[serde(default)]
+    pub(crate) organization_id: Option<String>,
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
 }
@@ -145,6 +155,10 @@ mod tests {
             access_token: None,
             refresh_token: None,
             access_expires_at: None,
+            oauth_scopes: Vec::new(),
+            oauth_subscription_type: None,
+            oauth_rate_limit_tier: None,
+            organization_id: None,
             created_at: now,
             updated_at: now,
         });
@@ -161,6 +175,10 @@ mod tests {
             access_token: None,
             refresh_token: None,
             access_expires_at: None,
+            oauth_scopes: Vec::new(),
+            oauth_subscription_type: None,
+            oauth_rate_limit_tier: None,
+            organization_id: None,
             created_at: now,
             updated_at: now + 1,
         });

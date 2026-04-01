@@ -1,6 +1,8 @@
 mod activation;
+mod claude_code;
 pub(crate) mod model_discovery;
 mod openai_subscription;
+mod provider_oauth;
 mod service;
 mod types;
 

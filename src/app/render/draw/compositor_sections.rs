@@ -27,6 +27,8 @@ impl App {
             .map(|model| {
                 if model.starts_with("gpt-") || model.starts_with('o') || model.contains("codex") {
                     "OpenAI".to_string()
+                } else if model.contains("claude") {
+                    "Claude".to_string()
                 } else {
                     "Local".to_string()
                 }
@@ -51,6 +53,8 @@ impl App {
             || model_id.to_ascii_lowercase().contains("codex")
         {
             "openai"
+        } else if model_id.to_ascii_lowercase().contains("claude") {
+            "anthropic"
         } else {
             "local"
         };

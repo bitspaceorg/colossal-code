@@ -155,6 +155,7 @@ impl App {
             .as_ref()
             .map(|connection| ConnectAuthMethod::from(connection.auth_kind.clone()));
         self.connect.subscription_state = ConnectSubscriptionState::default();
+        self.connect.oauth_state = Default::default();
         if let Some(connection) = saved.as_ref()
             && connection.auth_kind == StoredAuthKind::OpenAiSubscription
         {
@@ -168,6 +169,11 @@ impl App {
                 "A saved subscription connection exists. You can re-authorize or continue."
                     .to_string(),
             );
+        }
+        if let Some(connection) = saved.as_ref()
+            && connection.auth_kind == StoredAuthKind::ClaudeCode
+        {
+            self.oauth_state_from_connection(connection);
         }
 
         self.connect.available_models = resolve_provider_models(
@@ -251,6 +257,10 @@ impl App {
                     access_token: None,
                     refresh_token: None,
                     access_expires_at: None,
+                    oauth_scopes: Vec::new(),
+                    oauth_subscription_type: None,
+                    oauth_rate_limit_tier: None,
+                    organization_id: None,
                     created_at,
                     updated_at: now,
                 }
@@ -276,6 +286,37 @@ impl App {
                     access_token: self.connect.subscription_state.access_token.clone(),
                     refresh_token: self.connect.subscription_state.refresh_token.clone(),
                     access_expires_at: self.connect.subscription_state.expires_at,
+                    oauth_scopes: Vec::new(),
+                    oauth_subscription_type: None,
+                    oauth_rate_limit_tier: None,
+                    organization_id: None,
+                    created_at,
+                    updated_at: now,
+                }
+            }
+            ConnectAuthMethod::ClaudeCode => {
+                if self.connect.oauth_state.access_token.is_none() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "Claude Code authorization has not completed yet"
+                    ));
+                }
+                StoredConnection {
+                    id: id.clone(),
+                    provider_id: provider.id,
+                    provider_name: provider.name,
+                    auth_kind: StoredAuthKind::ClaudeCode,
+                    api_key: None,
+                    model,
+                    base_url: Some("https://api.anthropic.com".to_string()),
+                    completions_path: Some("/v1/messages".to_string()),
+                    account_id: None,
+                    access_token: self.connect.oauth_state.access_token.clone(),
+                    refresh_token: self.connect.oauth_state.refresh_token.clone(),
+                    access_expires_at: self.connect.oauth_state.expires_at,
+                    oauth_scopes: self.connect.oauth_state.scopes.clone(),
+                    oauth_subscription_type: self.connect.oauth_state.subscription_type.clone(),
+                    oauth_rate_limit_tier: self.connect.oauth_state.rate_limit_tier.clone(),
+                    organization_id: self.connect.oauth_state.organization_id.clone(),
                     created_at,
                     updated_at: now,
                 }
@@ -305,10 +346,7 @@ impl App {
             .connect
             .selected_auth_method
             .unwrap_or(ConnectAuthMethod::ApiKey);
-        let auth_kind = match auth_method {
-            ConnectAuthMethod::ApiKey => StoredAuthKind::ApiKey,
-            ConnectAuthMethod::OpenAiSubscription => StoredAuthKind::OpenAiSubscription,
-        };
+        let auth_kind = Self::stored_auth_kind_for_method(auth_method);
         let api_key = self.sanitized_connect_api_key();
 
         let temp_saved = match auth_method {
@@ -326,6 +364,30 @@ impl App {
                 access_token: self.connect.subscription_state.access_token.clone(),
                 refresh_token: self.connect.subscription_state.refresh_token.clone(),
                 access_expires_at: self.connect.subscription_state.expires_at,
+                oauth_scopes: Vec::new(),
+                oauth_subscription_type: None,
+                oauth_rate_limit_tier: None,
+                organization_id: None,
+                created_at: 0,
+                updated_at: 0,
+            }),
+            ConnectAuthMethod::ClaudeCode => Some(StoredConnection {
+                id: provider.id.clone(),
+                provider_id: provider.id.clone(),
+                provider_name: provider.name.clone(),
+                auth_kind: StoredAuthKind::ClaudeCode,
+                api_key: None,
+                model: None,
+                base_url: Some("https://api.anthropic.com".to_string()),
+                completions_path: Some("/v1/messages".to_string()),
+                account_id: None,
+                access_token: self.connect.oauth_state.access_token.clone(),
+                refresh_token: self.connect.oauth_state.refresh_token.clone(),
+                access_expires_at: self.connect.oauth_state.expires_at,
+                oauth_scopes: self.connect.oauth_state.scopes.clone(),
+                oauth_subscription_type: self.connect.oauth_state.subscription_type.clone(),
+                oauth_rate_limit_tier: self.connect.oauth_state.rate_limit_tier.clone(),
+                organization_id: self.connect.oauth_state.organization_id.clone(),
                 created_at: 0,
                 updated_at: 0,
             }),

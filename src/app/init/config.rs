@@ -28,9 +28,29 @@ const OPENAI_CONNECTED_MODELS: &[&str] = &[
     "gpt-4.1",
 ];
 
+const ANTHROPIC_CONNECTED_MODELS: &[&str] = &[
+    // Latest models
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
+    // Aliases and previous versions
+    "claude-opus-4-5",
+    "claude-sonnet-4-5",
+    "claude-haiku-4-5-20251001",
+    "claude-opus-4-1",
+    "claude-opus-4-0",
+    "claude-sonnet-4-0",
+    // Older models
+    "claude-opus-4",
+    "claude-sonnet-4",
+    "claude-3-opus-20240229",
+    "claude-3-haiku-20240307",
+];
+
 fn connected_provider_models(provider_id: &str) -> &'static [&'static str] {
     match provider_id {
         "openai" => OPENAI_CONNECTED_MODELS,
+        "anthropic" => ANTHROPIC_CONNECTED_MODELS,
         _ => &[],
     }
 }
@@ -116,42 +136,69 @@ impl App {
         seen.extend(models.iter().map(|model| model.filename.clone()));
 
         for connection in connections {
-            let provider_models = connected_provider_models(&connection.provider_id);
-            if provider_models.is_empty() {
-                continue;
-            }
+            // Try to get provider metadata dynamically
+            let provider_metadata = match provider_models_metadata(&connection.provider_id) {
+                Ok(metadata) => metadata,
+                Err(e) => {
+                    eprintln!(
+                        "[WARN] Failed to fetch model metadata for provider '{}': {}",
+                        connection.provider_id, e
+                    );
+                    Default::default()
+                }
+            };
 
-            let provider_metadata =
-                provider_models_metadata(&connection.provider_id).unwrap_or_default();
+            // If metadata is available, use those models dynamically instead of hardcoded lists
+            if !provider_metadata.is_empty() {
+                for (model_id, metadata) in provider_metadata.iter() {
+                    if !seen.insert(model_id.clone()) {
+                        continue;
+                    }
 
-            for model in provider_models {
-                if !seen.insert((*model).to_string()) {
+                    models.push(ModelInfo {
+                        filename: model_id.clone(),
+                        display_name: metadata.display_name.clone(),
+                        connection_id: Some(connection.id.clone()),
+                        provider_name: Some(connection.provider_name.clone()),
+                        size_mb: 0.0,
+                        quantization: None,
+                        architecture: None,
+                        parameter_count: None,
+                        file_hash: None,
+                        author: None,
+                        version: None,
+                        context_length: metadata.context_length,
+                        supported_effort_levels: metadata.supported_effort_levels.clone(),
+                    });
+                }
+            } else {
+                // Fallback to hardcoded lists for backward compatibility
+                let provider_models = connected_provider_models(&connection.provider_id);
+                if provider_models.is_empty() {
                     continue;
                 }
 
-                models.push(ModelInfo {
-                    filename: (*model).to_string(),
-                    display_name: provider_metadata
-                        .get(*model)
-                        .map(|metadata| metadata.display_name.clone())
-                        .unwrap_or_else(|| (*model).to_string()),
-                    connection_id: Some(connection.id.clone()),
-                    provider_name: Some(connection.provider_name.clone()),
-                    size_mb: 0.0,
-                    quantization: None,
-                    architecture: None,
-                    parameter_count: None,
-                    file_hash: None,
-                    author: None,
-                    version: None,
-                    context_length: provider_metadata
-                        .get(*model)
-                        .and_then(|metadata| metadata.context_length),
-                    supported_effort_levels: provider_metadata
-                        .get(*model)
-                        .map(|metadata| metadata.supported_effort_levels.clone())
-                        .unwrap_or_default(),
-                });
+                for model in provider_models {
+                    if !seen.insert((*model).to_string()) {
+                        continue;
+                    }
+
+                    models.push(ModelInfo {
+                        filename: (*model).to_string(),
+                        display_name: (*model).to_string(),
+                        connection_id: Some(connection.id.clone()),
+                        provider_name: Some(connection.provider_name.clone()),
+                        size_mb: 0.0,
+                        quantization: None,
+                        architecture: None,
+                        parameter_count: None,
+                        file_hash: None,
+                        author: None,
+                        version: None,
+                        context_length: None,
+                        supported_effort_levels: Vec::new(),
+                    });
+                }
             }
         }
 
@@ -264,6 +311,10 @@ impl App {
         self.model_selected_index = 0;
 
         Ok(())
+    }
+
+    pub(crate) fn refresh_available_models_cache(&mut self, _discover: bool) -> Result<()> {
+        self.load_models()
     }
 
     pub(crate) fn initialize_config_file() -> Result<()> {

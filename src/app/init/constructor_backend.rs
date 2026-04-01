@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::app::persistence::auth_store::{StoredConnection, auth_file_path};
+use crate::app::persistence::auth_store::{StoredAuthKind, StoredConnection, auth_file_path};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BackendConfig {
@@ -19,6 +19,9 @@ pub(crate) struct BackendEnvironment {
     pub(super) account_id: Option<String>,
     pub(super) refresh_token: Option<String>,
     pub(super) access_expires_at: Option<u64>,
+    pub(super) provider_id: Option<String>,
+    pub(super) auth_kind: Option<String>,
+    pub(super) organization_id: Option<String>,
     pub(super) auth_file: Option<String>,
     pub(super) active_connection_id: Option<String>,
     pub(super) google_user_project: Option<String>,
@@ -56,6 +59,9 @@ impl BackendConfig {
                 account_id: None,
                 refresh_token: None,
                 access_expires_at: None,
+                provider_id: None,
+                auth_kind: None,
+                organization_id: None,
                 auth_file: None,
                 active_connection_id: None,
                 google_user_project: self.google_user_project,
@@ -79,6 +85,9 @@ impl BackendConfig {
                 account_id: None,
                 refresh_token: None,
                 access_expires_at: None,
+                provider_id: None,
+                auth_kind: None,
+                organization_id: None,
                 auth_file: None,
                 active_connection_id: None,
                 google_user_project: self.google_user_project,
@@ -102,6 +111,9 @@ impl BackendConfig {
                 account_id: None,
                 refresh_token: None,
                 access_expires_at: None,
+                provider_id: None,
+                auth_kind: None,
+                organization_id: None,
                 auth_file: None,
                 active_connection_id: None,
                 google_user_project: self.google_user_project,
@@ -122,6 +134,16 @@ impl BackendConfig {
             account_id: connection.account_id.clone(),
             refresh_token: connection.refresh_token.clone(),
             access_expires_at: connection.access_expires_at,
+            provider_id: Some(connection.provider_id.clone()),
+            auth_kind: Some(
+                match connection.auth_kind {
+                    StoredAuthKind::ApiKey => "api_key",
+                    StoredAuthKind::OpenAiSubscription => "openai_subscription",
+                    StoredAuthKind::ClaudeCode => "claude_code",
+                }
+                .to_string(),
+            ),
+            organization_id: connection.organization_id.clone(),
             auth_file: auth_file_path()
                 .ok()
                 .map(|path| path.to_string_lossy().to_string()),
@@ -225,6 +247,36 @@ impl App {
         } else {
             unsafe {
                 std::env::remove_var("NITE_GOOGLE_USER_PROJECT");
+            }
+        }
+
+        if let Some(value) = env.provider_id.as_deref() {
+            unsafe {
+                std::env::set_var("NITE_HTTP_PROVIDER_ID", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("NITE_HTTP_PROVIDER_ID");
+            }
+        }
+
+        if let Some(value) = env.auth_kind.as_deref() {
+            unsafe {
+                std::env::set_var("NITE_HTTP_AUTH_KIND", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("NITE_HTTP_AUTH_KIND");
+            }
+        }
+
+        if let Some(value) = env.organization_id.as_deref() {
+            unsafe {
+                std::env::set_var("NITE_HTTP_ORGANIZATION_ID", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("NITE_HTTP_ORGANIZATION_ID");
             }
         }
     }

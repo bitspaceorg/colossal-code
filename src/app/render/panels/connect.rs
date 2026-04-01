@@ -225,14 +225,6 @@ impl App {
                         .saved_connections
                         .iter()
                         .find(|connection| connection.provider_id == provider.id);
-                    let is_active = connected
-                        .and_then(|connection| {
-                            self.connect
-                                .active_connection_id
-                                .as_ref()
-                                .map(|id| id == &connection.id)
-                        })
-                        .unwrap_or(false);
                     let title_style = if selected {
                         Style::default()
                             .fg(Color::Cyan)
@@ -252,10 +244,6 @@ impl App {
                             Span::styled(
                                 if connected.is_some() { "  saved" } else { "" },
                                 Style::default().fg(Color::Green),
-                            ),
-                            Span::styled(
-                                if is_active { "  active" } else { "" },
-                                Style::default().fg(Color::Yellow),
                             ),
                         ]),
                         Line::from(vec![
@@ -402,50 +390,92 @@ impl App {
     }
 
     fn render_connect_subscription_panel(&self, frame: &mut Frame, area: Rect) {
+        let is_claude = self.connect.selected_auth_method
+            == Some(crate::app::connect::ConnectAuthMethod::ClaudeCode);
+
+        let (title, description) = if is_claude {
+            (
+                " Claude Code Authorization ",
+                "Connect your Claude subscription and continue in this session.",
+            )
+        } else {
+            (
+                " OpenAI Subscription ",
+                "Connect your ChatGPT subscription and continue in this session.",
+            )
+        };
+
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Cyan))
             .style(Style::default().bg(CONNECT_BG))
-            .title(" OpenAI Subscription ")
+            .title(title)
             .title_bottom(Line::from(" Enter continue · Esc back ").centered());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
         let mut lines = vec![Line::from(Span::styled(
-            "Connect your ChatGPT subscription and continue in this session.",
+            description,
             Style::default().fg(Color::White),
         ))];
 
-        if let Some(url) = self.connect.subscription_state.verification_url.as_deref() {
-            lines.push(Line::from(vec![
-                Span::styled("Open", Style::default().fg(Color::Yellow)),
-                Span::raw(": "),
-                Span::styled(url, Style::default().fg(Color::White)),
-            ]));
-        }
-        if let Some(code) = self.connect.subscription_state.user_code.as_deref() {
-            lines.push(Line::from(vec![
-                Span::styled("Code", Style::default().fg(Color::Yellow)),
-                Span::raw(": "),
-                Span::styled(code, Style::default().fg(Color::Cyan)),
-            ]));
-        }
-        if let Some(status) = self.connect.subscription_state.status.as_deref() {
+        if is_claude {
+            // Claude Code auth flow
+            if let Some(status) = self.connect.oauth_state.status.as_deref() {
+                lines.push(Line::from(Span::styled(
+                    status,
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "Press Enter to start Claude Code login.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            if let Some(url) = self.connect.oauth_state.launch_command.as_deref() {
+                lines.push(Line::from(vec![
+                    Span::styled("Run", Style::default().fg(Color::Yellow)),
+                    Span::raw(": "),
+                    Span::styled(url, Style::default().fg(Color::White)),
+                ]));
+            }
             lines.push(Line::from(Span::styled(
-                status,
+                "Press Enter after you finish authorization.",
                 Style::default().fg(Color::DarkGray),
             )));
         } else {
+            // OpenAI subscription flow
+            if let Some(url) = self.connect.subscription_state.verification_url.as_deref() {
+                lines.push(Line::from(vec![
+                    Span::styled("Open", Style::default().fg(Color::Yellow)),
+                    Span::raw(": "),
+                    Span::styled(url, Style::default().fg(Color::White)),
+                ]));
+            }
+            if let Some(code) = self.connect.subscription_state.user_code.as_deref() {
+                lines.push(Line::from(vec![
+                    Span::styled("Code", Style::default().fg(Color::Yellow)),
+                    Span::raw(": "),
+                    Span::styled(code, Style::default().fg(Color::Cyan)),
+                ]));
+            }
+            if let Some(status) = self.connect.subscription_state.status.as_deref() {
+                lines.push(Line::from(Span::styled(
+                    status,
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "Press Enter to start browser/device authorization.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
             lines.push(Line::from(Span::styled(
-                "Press Enter to start browser/device authorization.",
+                "Press Enter after you finish authorization in the browser.",
                 Style::default().fg(Color::DarkGray),
             )));
         }
-        lines.push(Line::from(Span::styled(
-            "Press Enter after you finish authorization in the browser.",
-            Style::default().fg(Color::DarkGray),
-        )));
 
         frame.render_widget(
             Paragraph::new(lines)

@@ -181,7 +181,9 @@ impl App {
             }
             SlashCommandDispatch::Model => {
                 // Open model selection panel
-                if let Err(e) = self.load_models() {
+                if self.available_models.is_empty()
+                    && let Err(e) = self.refresh_available_models_cache(true)
+                {
                     self.messages
                         .push(format!(" ⎿ Error loading models: {}", e));
                     self.message_types.push(MessageType::Agent);

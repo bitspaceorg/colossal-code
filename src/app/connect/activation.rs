@@ -62,6 +62,7 @@ impl App {
         self.connect.active_connection_id = store.active_connection_id;
 
         self.activate_connection(&connection)?;
+        let _ = self.load_models();
         Ok(connection.provider_name)
     }
 
@@ -70,11 +71,10 @@ impl App {
         env: crate::app::init::constructor_backend::BackendEnvironment,
         model: Option<String>,
     ) -> Result<()> {
-        let conversation = if let Some(agent) = &self.agent {
-            futures::executor::block_on(agent.export_conversation())
-        } else {
-            None
-        };
+        let conversation = self
+            .agent
+            .as_ref()
+            .and_then(|agent| futures::executor::block_on(agent.export_conversation()));
 
         Self::apply_backend_environment(&env);
         if let Some(model) = model {
