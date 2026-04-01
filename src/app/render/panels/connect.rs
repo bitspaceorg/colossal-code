@@ -518,25 +518,38 @@ impl App {
             sections[0],
         );
 
+        let list_height = sections[1].height as usize;
+        let selected_index = self
+            .connect
+            .model_selected_index
+            .min(self.connect.available_models.len().saturating_sub(1));
+
+        // Calculate scroll offset to keep selected item visible
+        let visible_items = list_height.max(1);
+        let scroll_offset = if selected_index >= visible_items {
+            selected_index - visible_items + 1
+        } else {
+            0
+        };
+        let visible_end = (scroll_offset + visible_items).min(self.connect.available_models.len());
+
         let items: Vec<ListItem> = self
             .connect
             .available_models
             .iter()
             .enumerate()
+            .skip(scroll_offset)
+            .take(visible_end - scroll_offset)
             .map(|(idx, model)| {
-                let selected = idx
-                    == self
-                        .connect
-                        .model_selected_index
-                        .min(self.connect.available_models.len().saturating_sub(1));
+                let is_selected = idx == selected_index;
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        if selected { ">  " } else { "   " },
+                        if is_selected { ">  " } else { "   " },
                         Style::default().fg(Color::Green),
                     ),
                     Span::styled(
                         model.clone(),
-                        if selected {
+                        if is_selected {
                             Style::default()
                                 .fg(Color::Green)
                                 .add_modifier(Modifier::BOLD)

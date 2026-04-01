@@ -38,14 +38,11 @@ impl App {
                     let result = if let Some(connection_id) = connection_id.as_deref() {
                         self.select_connected_model(connection_id, selected_filename.clone())
                             .map(|provider_name| {
-                                format!(
-                                    " ✔ Model set to: {} via {}",
-                                    selected_display, provider_name
-                                )
+                                format!(" ⎿ switched to {} via {}", selected_display, provider_name)
                             })
                     } else {
                         self.activate_local_model(selected_filename.clone())
-                            .map(|_| format!(" ✔ Model set to: {}", selected_display))
+                            .map(|_| format!(" ⎿ switched to {}", selected_display))
                     };
 
                     match result {

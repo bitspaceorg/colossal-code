@@ -176,17 +176,9 @@ impl App {
             self.oauth_state_from_connection(connection);
         }
 
-        self.connect.available_models = resolve_provider_models(
-            &provider,
-            saved
-                .as_ref()
-                .map(|connection| connection.auth_kind.clone()),
-            saved
-                .as_ref()
-                .and_then(|connection| connection.api_key.as_deref()),
-            saved.as_ref(),
-        )
-        .unwrap_or_else(|_| provider.models.clone());
+        // Don't block on fetching models here - use provider.models as fallback
+        // Models will be fetched when user runs /model if needed
+        self.connect.available_models = provider.models.clone();
         self.connect.model_selected_index = saved
             .as_ref()
             .and_then(|connection| connection.model.as_ref())
