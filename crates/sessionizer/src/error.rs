@@ -22,6 +22,7 @@ impl std::error::Error for SandboxErr {}
 pub enum ColossalErr {
     Io(io::Error),
     Sandbox(SandboxErr),
+    MissingSandboxHelper,
 }
 
 impl fmt::Display for ColossalErr {
@@ -29,6 +30,9 @@ impl fmt::Display for ColossalErr {
         match self {
             ColossalErr::Io(e) => write!(f, "IO error: {}", e),
             ColossalErr::Sandbox(e) => write!(f, "Sandbox error: {}", e),
+            ColossalErr::MissingSandboxHelper => {
+                write!(f, "Sandbox helper binary was required but not found")
+            }
         }
     }
 }
@@ -38,6 +42,7 @@ impl std::error::Error for ColossalErr {
         match self {
             ColossalErr::Io(e) => Some(e),
             ColossalErr::Sandbox(e) => Some(e),
+            ColossalErr::MissingSandboxHelper => None,
         }
     }
 }

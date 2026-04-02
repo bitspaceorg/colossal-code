@@ -2838,6 +2838,7 @@ dependencies = [
  "rayon",
  "regex",
  "reqwest",
+ "seccompiler",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -2850,6 +2851,7 @@ dependencies = [
  "uuid",
  "walkdir",
  "whoami",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

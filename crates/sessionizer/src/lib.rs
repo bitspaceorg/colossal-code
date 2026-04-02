@@ -8,10 +8,13 @@ pub mod error;
 pub mod hash_id;
 #[cfg(target_os = "linux")]
 pub mod landlock;
+#[cfg(target_os = "linux")]
+pub mod linux_sandbox;
 pub mod manager;
 pub mod protocol;
 pub mod pty;
 pub mod safety;
+pub mod sandboxing;
 pub mod search_results;
 pub mod seatbelt;
 pub mod semantic_search;
@@ -22,6 +25,8 @@ pub mod spawn;
 pub mod tools;
 pub mod types;
 pub mod utils;
+#[cfg(target_os = "windows")]
+pub mod windows_sandbox;
 
 /// Execute tools binary with the given sandbox policy applied
 pub async fn execute_tools_with_sandbox(
@@ -44,19 +49,35 @@ pub async fn spawn_sandboxed_command(
 ) -> Result<Child, ColossalErr> {
     #[cfg(target_os = "macos")]
     {
-        seatbelt::spawn_command_under_seatbelt(
-            command,
+        let program = PathBuf::from(command.first().ok_or_else(|| {
+            ColossalErr::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Empty command",
+            ))
+        })?);
+        let request = sandboxing::SandboxManager::new().prepare_spawn(
+            sandboxing::SandboxCommand {
+                program,
+                args: command[1..].to_vec(),
+                cwd: cwd.clone(),
+                env,
+            },
             sandbox_policy,
-            cwd,
+        )?;
+        spawn::spawn_child_async(
+            request.program,
+            request.args,
+            None,
+            request.cwd,
+            sandbox_policy,
             spawn::StdioPolicy::RedirectForShellTool,
-            env,
+            request.env,
         )
         .await
+        .map_err(ColossalErr::Io)
     }
     #[cfg(target_os = "linux")]
     {
-        use crate::landlock::apply_sandbox_policy_to_current_thread;
-        use std::process::Stdio;
         use tokio::process::Command;
 
         let shell = shell::default_user_shell().await;
@@ -76,33 +97,50 @@ pub async fn spawn_sandboxed_command(
             ))
         })?;
 
-        apply_sandbox_policy_to_current_thread(sandbox_policy, &cwd)?;
+        let request = sandboxing::SandboxManager::new().prepare_spawn(
+            sandboxing::SandboxCommand {
+                program: PathBuf::from(program),
+                args: args.to_vec(),
+                cwd: cwd.clone(),
+                env,
+            },
+            sandbox_policy,
+        )?;
 
-        let mut cmd = Command::new(program);
-        cmd.args(args)
-            .current_dir(&cwd)
-            .envs(&env)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::piped());
+        let mut cmd = Command::new(&request.program);
+        cmd.args(&request.args)
+            .current_dir(&request.cwd)
+            .envs(&request.env)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::piped());
 
         cmd.spawn().map_err(|e| ColossalErr::Io(e))
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
+        let request = sandboxing::SandboxManager::new().prepare_spawn(
+            sandboxing::SandboxCommand {
+                program: PathBuf::from(command.get(0).ok_or_else(|| {
+                    ColossalErr::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Empty command",
+                    ))
+                })?),
+                args: command[1..].to_vec(),
+                cwd: cwd.clone(),
+                env,
+            },
+            sandbox_policy,
+        )?;
         spawn::spawn_child_async(
-            PathBuf::from(command.get(0).ok_or_else(|| {
-                ColossalErr::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Empty command",
-                ))
-            })?),
-            command[1..].to_vec(),
+            request.program,
+            request.args,
             None,
-            cwd,
+            request.cwd,
             sandbox_policy,
             spawn::StdioPolicy::RedirectForShellTool,
-            env,
+            request.env,
         )
         .await
         .map_err(|e| ColossalErr::Io(e))

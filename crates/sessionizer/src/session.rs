@@ -27,11 +27,11 @@
 
 use crate::error::ColossalErr;
 use crate::protocol::SandboxPolicy;
+use crate::sandboxing::{SandboxCommand, SandboxManager};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use qdrant_client::Payload;
 use qdrant_client::Qdrant;
-use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -42,70 +42,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
-
-// Compatible struct for linux-sandbox protocol
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LinuxSandboxPolicy {
-    mode: String,
-    writable_roots: Vec<LinuxWritableRoot>,
-    network_access: bool,
-    exclude_tmpdir_env_var: bool,
-    exclude_slash_tmp: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LinuxWritableRoot {
-    root: PathBuf,
-    recursive: bool,
-}
-
-impl From<&SandboxPolicy> for LinuxSandboxPolicy {
-    fn from(policy: &SandboxPolicy) -> Self {
-        match policy {
-            SandboxPolicy::WorkspaceWrite {
-                writable_roots,
-                network_access,
-                exclude_tmpdir_env_var,
-                exclude_slash_tmp,
-            } => {
-                let linux_writable_roots = writable_roots
-                    .iter()
-                    .map(|wr| LinuxWritableRoot {
-                        root: wr.root.clone(),
-                        recursive: wr.recursive,
-                    })
-                    .collect();
-
-                LinuxSandboxPolicy {
-                    mode: "workspace-write".to_string(),
-                    writable_roots: linux_writable_roots,
-                    network_access: matches!(
-                        network_access,
-                        crate::protocol::NetworkAccess::Enabled
-                    ),
-                    exclude_tmpdir_env_var: *exclude_tmpdir_env_var,
-                    exclude_slash_tmp: *exclude_slash_tmp,
-                }
-            }
-            SandboxPolicy::DangerFullAccess => LinuxSandboxPolicy {
-                mode: "danger-full-access".to_string(),
-                writable_roots: vec![],
-                network_access: true,
-                exclude_tmpdir_env_var: false,
-                exclude_slash_tmp: false,
-            },
-            SandboxPolicy::ReadOnly => LinuxSandboxPolicy {
-                mode: "read-only".to_string(),
-                writable_roots: vec![], // No writable roots in read-only mode
-                network_access: false,  // Restrict network in read-only mode
-                exclude_tmpdir_env_var: true,
-                exclude_slash_tmp: true,
-            },
-        }
-    }
-}
 
 /// Shared session state that can be accessed by both PTY and semantic search sessions
 #[derive(Debug)]
@@ -957,8 +893,8 @@ impl SemanticSearchSession {
 ///
 /// SANDBOX APPLICATION ORDER:
 /// 1. Open PTY (requires /dev/ptmx access)
-/// 2. Apply sandbox policy to current thread
-/// 3. Spawn child process (inherits sandbox)
+/// 2. Wrap the command with the platform sandbox launcher when needed
+/// 3. Spawn the wrapped child process under the PTY
 ///
 /// The child process will run under the sandbox restrictions.
 pub async fn create_sandboxed_exec_session(
@@ -968,8 +904,6 @@ pub async fn create_sandboxed_exec_session(
     sandbox_policy: SandboxPolicy,
     cwd: PathBuf,
 ) -> Result<(ExecCommandSession, tokio::sync::oneshot::Receiver<i32>), ColossalErr> {
-    // IMPORTANT: Open PTY BEFORE applying Landlock
-    // Landlock restricts file system access, including /dev/ptmx which is needed for PTY creation
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -980,39 +914,46 @@ pub async fn create_sandboxed_exec_session(
         })
         .map_err(|e| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
-    // Now apply the sandbox policy AFTER opening PTY but BEFORE spawning the command
-    crate::landlock::apply_sandbox_policy_to_current_thread(&sandbox_policy, &cwd)?;
-
-    // Convert sandbox policy to linux-sandbox format
-    let linux_sandbox_policy: LinuxSandboxPolicy = (&sandbox_policy).into();
-    let _sandbox_policy_json = serde_json::to_string(&linux_sandbox_policy)
-        .map_err(|e| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-    // eprintln!("Sandbox policy JSON: {}", sandbox_policy_json);
-
-    // Execute the command directly instead of using a sandbox wrapper
     let args = shlex::split(&command).ok_or_else(|| {
         ColossalErr::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "Failed to parse command string",
         ))
     })?;
+    let program = args.first().ok_or_else(|| {
+        ColossalErr::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Failed to parse command string",
+        ))
+    })?;
+    let mut env = HashMap::new();
+    env.insert("HISTFILE".to_string(), "/dev/null".to_string());
+    env.insert("HISTSIZE".to_string(), "0".to_string());
+    env.insert("SAVEHIST".to_string(), "0".to_string());
+    env.insert("HISTCONTROL".to_string(), "ignoreboth".to_string());
+    let request = SandboxManager::new().prepare_spawn(
+        SandboxCommand {
+            program: PathBuf::from(program),
+            args: args[1..].to_vec(),
+            cwd: cwd.clone(),
+            env,
+        },
+        &sandbox_policy,
+    )?;
 
     let mut child;
     let mut attempts = 0;
     loop {
-        let mut command_builder = CommandBuilder::new(&args[0]);
-        for arg in &args[1..] {
+        let mut command_builder = CommandBuilder::new(&request.program);
+        for arg in &request.args {
             command_builder.arg(arg);
         }
 
         // Set working directory
-        command_builder.cwd(&cwd);
-
-        // Disable shell history to prevent AI commands from polluting user's history
-        command_builder.env("HISTFILE", "/dev/null");
-        command_builder.env("HISTSIZE", "0");
-        command_builder.env("SAVEHIST", "0"); // zsh
-        command_builder.env("HISTCONTROL", "ignoreboth"); // bash
+        command_builder.cwd(&request.cwd);
+        for (key, value) in &request.env {
+            command_builder.env(key, value);
+        }
 
         match pair.slave.spawn_command(command_builder) {
             Ok(c) => {
@@ -1144,8 +1085,8 @@ pub async fn create_sandboxed_exec_session(
 ///
 /// SANDBOX APPLICATION ORDER:
 /// 1. Open PTY (requires /dev/ptmx access)
-/// 2. Apply sandbox policy to current thread
-/// 3. Spawn shell process (inherits sandbox)
+/// 2. Wrap the shell with the platform sandbox launcher when needed
+/// 3. Spawn the wrapped shell process under the PTY
 ///
 /// The shell and all commands executed within it will run under the sandbox restrictions.
 pub async fn create_persistent_shell_session(
@@ -1154,9 +1095,6 @@ pub async fn create_persistent_shell_session(
     sandbox_policy: SandboxPolicy,
     cwd: PathBuf,
 ) -> Result<(PersistentShellSession, tokio::sync::oneshot::Receiver<i32>), ColossalErr> {
-    // IMPORTANT: Open PTY BEFORE applying Landlock
-    // Landlock restricts file system access, including /dev/ptmx which is needed for PTY creation
-    // Once Landlock is applied, we can't access /dev/ptmx anymore
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -1167,33 +1105,38 @@ pub async fn create_persistent_shell_session(
         })
         .map_err(|e| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
-    // Now apply the sandbox policy AFTER opening PTY but BEFORE spawning the shell
-    // This ensures the child process inherits the restrictions
-    crate::landlock::apply_sandbox_policy_to_current_thread(&sandbox_policy, &cwd)?;
+    let mut env = HashMap::new();
+    env.insert("HISTFILE".to_string(), "/dev/null".to_string());
+    env.insert("HISTSIZE".to_string(), "0".to_string());
+    env.insert("SAVEHIST".to_string(), "0".to_string());
+    env.insert("HISTCONTROL".to_string(), "ignoreboth".to_string());
+    let mut shell_args = Vec::new();
+    if login {
+        shell_args.push("-l".to_string());
+    }
+    let request = SandboxManager::new().prepare_spawn(
+        SandboxCommand {
+            program: PathBuf::from(&shell),
+            args: shell_args,
+            cwd: cwd.clone(),
+            env,
+        },
+        &sandbox_policy,
+    )?;
 
-    // Convert sandbox policy to linux-sandbox format
-    let linux_sandbox_policy: LinuxSandboxPolicy = (&sandbox_policy).into();
-    let _sandbox_policy_json = serde_json::to_string(&linux_sandbox_policy)
-        .map_err(|e| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-    // eprintln!("Sandbox policy JSON: {}", sandbox_policy_json);
-
-    // Execute the shell directly instead of using a sandbox wrapper
     let mut child;
     let mut attempts = 0;
     loop {
-        let mut command_builder = CommandBuilder::new(&shell);
-        if login {
-            command_builder.arg("-l");
+        let mut command_builder = CommandBuilder::new(&request.program);
+        for arg in &request.args {
+            command_builder.arg(arg);
         }
 
         // Set working directory
-        command_builder.cwd(&cwd);
-
-        // Disable shell history to prevent AI commands from polluting user's history
-        command_builder.env("HISTFILE", "/dev/null");
-        command_builder.env("HISTSIZE", "0");
-        command_builder.env("SAVEHIST", "0"); // zsh
-        command_builder.env("HISTCONTROL", "ignoreboth"); // bash
+        command_builder.cwd(&request.cwd);
+        for (key, value) in &request.env {
+            command_builder.env(key, value);
+        }
 
         match pair.slave.spawn_command(command_builder) {
             Ok(c) => {
