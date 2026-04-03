@@ -12,6 +12,9 @@ mod cap;
 #[path = "windows_sandbox/env.rs"]
 mod env;
 #[cfg(target_os = "windows")]
+#[path = "windows_sandbox/firewall.rs"]
+mod firewall;
+#[cfg(target_os = "windows")]
 #[path = "windows_sandbox/path_normalization.rs"]
 mod path_normalization;
 #[cfg(target_os = "windows")]
@@ -182,6 +185,7 @@ mod imp {
     use super::env::{
         apply_no_network_to_env, ensure_non_interactive_pager, normalize_null_device_env,
     };
+    use super::firewall::FirewallRuleGuard;
     use super::path_normalization::canonicalize_path;
     use super::process::create_process_as_user;
     use super::token::{
@@ -323,40 +327,72 @@ mod imp {
             primary_sid.as_ref(),
             workspace_sid.as_ref(),
         )?;
+        let firewall_guard = if !profile.allow_network {
+            let identity_sid = profile
+                .primary_capability_sid
+                .as_deref()
+                .or(profile.workspace_capability_sid.as_deref())
+                .ok_or_else(|| {
+                    "missing Windows sandbox identity SID for firewall rule".to_string()
+                })?;
+            Some(
+                FirewallRuleGuard::install_outbound_block(identity_sid)
+                    .map_err(|err| err.to_string())?,
+            )
+        } else {
+            None
+        };
         let job = if profile.use_job_object {
             Some(create_kill_on_close_job()?)
         } else {
             None
         };
 
-        let created = create_process_as_user(token.raw(), command, cwd, &env_map)
-            .map_err(|err| err.to_string())?;
-        if let Some(job) = &job {
-            if unsafe { AssignProcessToJobObject(job.raw(), created.process_info.hProcess) } == 0 {
-                return Err(format!("AssignProcessToJobObject failed: {}", unsafe {
-                    GetLastError()
-                }));
+        let result = (|| -> Result<u32, String> {
+            let created = create_process_as_user(token.raw(), command, cwd, &env_map)
+                .map_err(|err| err.to_string())?;
+            if let Some(job) = &job {
+                if unsafe { AssignProcessToJobObject(job.raw(), created.process_info.hProcess) }
+                    == 0
+                {
+                    unsafe {
+                        if created.process_info.hThread != 0 {
+                            CloseHandle(created.process_info.hThread);
+                        }
+                        if created.process_info.hProcess != 0 {
+                            CloseHandle(created.process_info.hProcess);
+                        }
+                    }
+                    return Err(format!("AssignProcessToJobObject failed: {}", unsafe {
+                        GetLastError()
+                    }));
+                }
             }
-        }
 
-        let exit_code = wait_for_process(created.process_info.hProcess)?;
+            let exit_code = wait_for_process(created.process_info.hProcess)?;
 
-        unsafe {
-            if created.process_info.hThread != 0 {
-                CloseHandle(created.process_info.hThread);
+            unsafe {
+                if created.process_info.hThread != 0 {
+                    CloseHandle(created.process_info.hThread);
+                }
+                if created.process_info.hProcess != 0 {
+                    CloseHandle(created.process_info.hProcess);
+                }
             }
-            if created.process_info.hProcess != 0 {
-                CloseHandle(created.process_info.hProcess);
-            }
-        }
+
+            Ok(exit_code)
+        })();
 
         for (path, sid) in guards.into_iter().rev() {
             unsafe {
                 revoke_ace(&path, sid);
             }
         }
+        if let Some(firewall_guard) = firewall_guard {
+            let _ = firewall_guard.remove();
+        }
 
-        Ok(exit_code)
+        result
     }
 
     fn create_profile_token(
