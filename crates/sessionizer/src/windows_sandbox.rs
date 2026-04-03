@@ -161,79 +161,77 @@ mod imp {
         profile: &WindowsSandboxProfile,
         command: &[String],
     ) -> Result<u32, String> {
-        unsafe {
-            let token = if profile.use_restricted_token {
-                create_restricted_current_token()?
-            } else {
-                create_restricted_current_token()?
-            };
-            let job = if profile.use_job_object {
-                Some(create_kill_on_close_job()?)
-            } else {
-                None
-            };
+        let token = if profile.use_restricted_token {
+            create_restricted_current_token()?
+        } else {
+            create_restricted_current_token()?
+        };
+        let job = if profile.use_job_object {
+            Some(create_kill_on_close_job()?)
+        } else {
+            None
+        };
 
-            let mut startup_info: STARTUPINFOW = unsafe { std::mem::zeroed() };
-            startup_info.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-            startup_info.dwFlags |= STARTF_USESTDHANDLES;
-            startup_info.hStdInput = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-            startup_info.hStdOutput = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
-            startup_info.hStdError = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+        let mut startup_info: STARTUPINFOW = unsafe { std::mem::zeroed() };
+        startup_info.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        startup_info.dwFlags |= STARTF_USESTDHANDLES;
+        startup_info.hStdInput = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        startup_info.hStdOutput = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+        startup_info.hStdError = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
 
-            let desktop = to_wide("Winsta0\\Default");
-            startup_info.lpDesktop = desktop.as_ptr() as *mut u16;
+        let desktop = to_wide("Winsta0\\Default");
+        startup_info.lpDesktop = desktop.as_ptr() as *mut u16;
 
-            let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-            let env = current_environment_block();
-            let mut cmdline_buf = build_command_line(command);
-            let cwd_w = to_wide(cwd.as_os_str());
+        let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        let env = current_environment_block();
+        let mut cmdline_buf = build_command_line(command);
+        let cwd_w = to_wide(cwd.as_os_str());
 
-            let ok = unsafe {
-                CreateProcessAsUserW(
-                    token.raw(),
-                    std::ptr::null(),
-                    cmdline_buf.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    1,
-                    CREATE_UNICODE_ENVIRONMENT,
-                    env.as_ptr() as *mut _,
-                    cwd_w.as_ptr(),
-                    &startup_info,
-                    &mut process_info,
-                )
-            };
-            if ok == 0 {
-                return Err(format!("CreateProcessAsUserW failed: {}", unsafe {
-                    GetLastError()
-                }));
-            }
-
-            let process = OwnedHandle::new(process_info.hProcess)
-                .ok_or_else(|| "missing child process handle".to_string())?;
-            let thread = OwnedHandle::new(process_info.hThread)
-                .ok_or_else(|| "missing child thread handle".to_string())?;
-            let _ = thread;
-
-            if let Some(job) = &job {
-                if unsafe { AssignProcessToJobObject(job.raw(), process.raw()) } == 0 {
-                    return Err(format!("AssignProcessToJobObject failed: {}", unsafe {
-                        GetLastError()
-                    }));
-                }
-            }
-
-            unsafe {
-                WaitForSingleObject(process.raw(), INFINITE);
-            }
-            let mut exit_code: u32 = STILL_ACTIVE as u32;
-            if unsafe { GetExitCodeProcess(process.raw(), &mut exit_code) } == 0 {
-                return Err(format!("GetExitCodeProcess failed: {}", unsafe {
-                    GetLastError()
-                }));
-            }
-            Ok(exit_code)
+        let ok = unsafe {
+            CreateProcessAsUserW(
+                token.raw(),
+                std::ptr::null(),
+                cmdline_buf.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                1,
+                CREATE_UNICODE_ENVIRONMENT,
+                env.as_ptr() as *mut _,
+                cwd_w.as_ptr(),
+                &startup_info,
+                &mut process_info,
+            )
+        };
+        if ok == 0 {
+            return Err(format!("CreateProcessAsUserW failed: {}", unsafe {
+                GetLastError()
+            }));
         }
+
+        let process = OwnedHandle::new(process_info.hProcess)
+            .ok_or_else(|| "missing child process handle".to_string())?;
+        let thread = OwnedHandle::new(process_info.hThread)
+            .ok_or_else(|| "missing child thread handle".to_string())?;
+        let _ = thread;
+
+        if let Some(job) = &job {
+            if unsafe { AssignProcessToJobObject(job.raw(), process.raw()) } == 0 {
+                return Err(format!("AssignProcessToJobObject failed: {}", unsafe {
+                    GetLastError()
+                }));
+            }
+        }
+
+        unsafe {
+            WaitForSingleObject(process.raw(), INFINITE);
+        }
+        let mut exit_code: u32 = STILL_ACTIVE as u32;
+        if unsafe { GetExitCodeProcess(process.raw(), &mut exit_code) } == 0 {
+            return Err(format!("GetExitCodeProcess failed: {}", unsafe {
+                GetLastError()
+            }));
+        }
+        Ok(exit_code)
     }
 
     fn create_restricted_current_token() -> Result<OwnedHandle, String> {
