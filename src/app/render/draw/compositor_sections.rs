@@ -7,7 +7,8 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::connect::model_discovery::fallback_formatted_model_display_name;
-use crate::app::{App, MessageType, UiMessageEvent, create_thinking_highlight_spans};
+use crate::app::render::transcript::TranscriptEntry;
+use crate::app::{App, create_thinking_highlight_spans};
 
 fn into_owned_line(line: Line<'_>) -> Line<'static> {
     let spans = line
@@ -183,60 +184,15 @@ impl App {
 
         let messages = self.get_messages();
         let message_types = self.get_message_types();
-        let mut idx = 0;
-        while idx < messages.len() {
-            let message = &messages[idx];
-            let is_agent = matches!(message_types.get(idx), Some(MessageType::Agent));
-            let connector = self.agent_connector_for_index(message_types, idx);
-
-            if is_agent
-                && let Some(UiMessageEvent::ToolCallCompleted {
-                    tool_name,
-                    args,
-                    result,
-                    raw_arguments,
-                }) = UiMessageEvent::parse(message)
-                && let Some(next_message) = messages.get(idx + 1)
-                && let Some(note) = App::approval_note_label(next_message)
-            {
-                lines.extend(
-                    self.render_tool_call_completed_with_note(
-                        &tool_name,
-                        &args,
-                        &result,
-                        raw_arguments.as_deref(),
-                        max_width,
-                        connector,
-                        Some(note),
-                    )
-                    .lines,
-                );
-                if Self::should_insert_primary_agent_block_gap(
-                    message,
-                    messages.get(idx + 2).map(String::as_str),
-                ) {
-                    // Keep spacing between complete primary assistant blocks, including artifacts.
-                    lines.push(Line::from(""));
-                }
-                idx += 2;
-                continue;
-            }
-
-            lines.extend(
-                self.render_message_with_max_width(message, max_width, None, is_agent, connector)
-                    .lines,
-            );
-            if is_agent
-                && Self::should_insert_primary_agent_block_gap(
-                    message,
-                    messages.get(idx + 1).map(String::as_str),
-                )
-            {
-                // Keep spacing between complete primary assistant blocks, including artifacts.
-                lines.push(Line::from(""));
-            }
-            idx += 1;
-        }
+        let entries: Vec<TranscriptEntry<'_>> = messages
+            .iter()
+            .zip(message_types.iter())
+            .map(|(content, message_type)| TranscriptEntry {
+                content,
+                message_type,
+            })
+            .collect();
+        lines.extend(self.render_transcript_lines(max_width, &entries));
 
         if append_plan {
             self.append_tool_plan_view_lines(&mut lines, max_width);
