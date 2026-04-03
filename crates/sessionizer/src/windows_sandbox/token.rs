@@ -1,7 +1,7 @@
 use super::winutil::to_wide;
 use anyhow::{Result, anyhow};
 use std::ffi::c_void;
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HLOCAL, LUID, LocalFree};
+use windows_sys::Win32::Foundation::{GetLastError, HLOCAL, LUID, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
     EXPLICIT_ACCESS_W, GRANT_ACCESS, SetEntriesInAclW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN,
     TRUSTEE_W,

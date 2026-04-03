@@ -470,6 +470,7 @@ impl SemanticSearchSession {
             let debounce_map_clone = Arc::new(Mutex::new(HashMap::new()));
             let file_content_cache_clone = Arc::new(Mutex::new(HashMap::new()));
             let cwd_clone = cwd.clone();
+            #[cfg(target_os = "linux")]
             let sandbox_policy_clone = sandbox_policy.clone();
 
             let handle = tokio::spawn(async move {

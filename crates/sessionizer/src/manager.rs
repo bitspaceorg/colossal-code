@@ -1448,6 +1448,7 @@ impl SessionManager {
         let status_clone = status.clone();
         let cwd_clone = cwd.clone();
         let collection_name_clone = collection_name.clone();
+        #[cfg(target_os = "linux")]
         let sandbox_policy_clone = sandbox_policy.clone();
 
         let indexing_handle = tokio::spawn(async move {
