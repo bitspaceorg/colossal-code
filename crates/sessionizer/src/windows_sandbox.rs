@@ -122,7 +122,7 @@ mod imp {
         }
         let exit_code = spawn_restricted_child(&cwd, &profile, &command)
             .unwrap_or_else(|err| panic!("failed to spawn Windows sandbox child: {err}"));
-        std::process::exit(exit_code as i32);
+        std::process::exit(exit_code.try_into().unwrap_or(1));
     }
 
     fn parse_helper_args() -> (PathBuf, WindowsSandboxProfile, Vec<String>) {
@@ -173,7 +173,7 @@ mod imp {
                 None
             };
 
-            let mut startup_info: STARTUPINFOW = std::mem::zeroed();
+            let mut startup_info: STARTUPINFOW = unsafe { std::mem::zeroed() };
             startup_info.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
             startup_info.dwFlags |= STARTF_USESTDHANDLES;
             startup_info.hStdInput = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
@@ -183,7 +183,7 @@ mod imp {
             let desktop = to_wide("Winsta0\\Default");
             startup_info.lpDesktop = desktop.as_ptr() as *mut u16;
 
-            let mut process_info: PROCESS_INFORMATION = std::mem::zeroed();
+            let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
             let env = current_environment_block();
             let mut cmdline_buf = build_command_line(command);
             let cwd_w = to_wide(cwd.as_os_str());
@@ -236,7 +236,7 @@ mod imp {
         }
     }
 
-    unsafe fn create_restricted_current_token() -> Result<OwnedHandle, String> {
+    fn create_restricted_current_token() -> Result<OwnedHandle, String> {
         let desired = TOKEN_DUPLICATE
             | TOKEN_QUERY
             | TOKEN_ASSIGN_PRIMARY
@@ -274,10 +274,10 @@ mod imp {
         OwnedHandle::new(restricted).ok_or_else(|| "missing restricted token".to_string())
     }
 
-    unsafe fn create_kill_on_close_job() -> Result<OwnedHandle, String> {
+    fn create_kill_on_close_job() -> Result<OwnedHandle, String> {
         let job = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };
         let job = OwnedHandle::new(job).ok_or_else(|| "CreateJobObjectW failed".to_string())?;
-        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         if unsafe {
             SetInformationJobObject(
