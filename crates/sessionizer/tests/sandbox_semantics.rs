@@ -5,6 +5,29 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::sync::{Mutex, OnceLock};
+
+fn semantic_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("semantic lock")
+}
+
+#[cfg(target_os = "windows")]
+fn cleanup_windows_firewall_rules() {
+    let _ = std::process::Command::new("powershell")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-Command",
+            "Get-NetFirewallRule -PolicyStore ActiveStore | Where-Object { $_.Name -like 'colossal_sandbox_outbound_block_*' } | Remove-NetFirewallRule",
+        ])
+        .output();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cleanup_windows_firewall_rules() {}
 
 fn probe_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_sandbox-probe"))
@@ -46,6 +69,8 @@ fn workspace_write_policy(cwd: &Path) -> SandboxPolicy {
 
 #[test]
 fn readonly_blocks_write() {
+    let _guard = semantic_test_lock();
+    cleanup_windows_firewall_rules();
     let temp = tempfile::tempdir().expect("tempdir");
     let target = temp.path().join("blocked.txt");
 
@@ -68,6 +93,8 @@ fn readonly_blocks_write() {
 
 #[test]
 fn workspace_write_allows_workspace() {
+    let _guard = semantic_test_lock();
+    cleanup_windows_firewall_rules();
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(temp.path().join(".git")).expect("create git dir");
     let target = temp.path().join("allowed.txt");
@@ -94,6 +121,8 @@ fn workspace_write_allows_workspace() {
 
 #[test]
 fn workspace_write_blocks_protected_subpath() {
+    let _guard = semantic_test_lock();
+    cleanup_windows_firewall_rules();
     let temp = tempfile::tempdir().expect("tempdir");
     let git_dir = temp.path().join(".git");
     std::fs::create_dir_all(&git_dir).expect("create git dir");
@@ -121,6 +150,8 @@ fn workspace_write_blocks_protected_subpath() {
 
 #[test]
 fn restricted_network_blocks_http() {
+    let _guard = semantic_test_lock();
+    cleanup_windows_firewall_rules();
     let temp = tempfile::tempdir().expect("tempdir");
     let (url, server) = spawn_test_http_server();
 
@@ -139,6 +170,8 @@ fn restricted_network_blocks_http() {
 
 #[test]
 fn danger_full_access_allows_http_and_write() {
+    let _guard = semantic_test_lock();
+    cleanup_windows_firewall_rules();
     let temp = tempfile::tempdir().expect("tempdir");
     let target = temp.path().join("allowed.txt");
     let write_output = run_probe_under_policy(
