@@ -24,6 +24,10 @@ path = "src/bin/file_watcher_test.rs"
 name = "colossal-sandbox-helper"
 path = "src/bin/colossal_sandbox_helper.rs"
 
+[[bin]]
+name = "sandbox-probe"
+path = "src/bin/sandbox_probe.rs"
+
 [lib]
 name = "colossal_linux_sandbox"
 path = "src/lib.rs"

@@ -205,11 +205,29 @@ pub fn resolve_sandbox_helper_path() -> Result<PathBuf, ColossalErr> {
         return Err(ColossalErr::MissingSandboxHelper);
     };
 
-    let candidate = bin_dir.join("colossal-sandbox-helper");
-    if candidate.is_file() {
-        Ok(candidate)
-    } else {
-        Err(ColossalErr::MissingSandboxHelper)
+    let search_dirs = [Some(bin_dir), bin_dir.parent()].into_iter().flatten();
+    for dir in search_dirs {
+        for candidate in sandbox_helper_candidates(dir) {
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    Err(ColossalErr::MissingSandboxHelper)
+}
+
+fn sandbox_helper_candidates(bin_dir: &Path) -> Vec<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        vec![
+            bin_dir.join("colossal-sandbox-helper.exe"),
+            bin_dir.join("colossal-sandbox-helper"),
+        ]
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec![bin_dir.join("colossal-sandbox-helper")]
     }
 }
 
