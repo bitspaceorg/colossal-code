@@ -16,9 +16,9 @@ pub struct FirewallRuleGuard {
 
 impl FirewallRuleGuard {
     pub fn install_outbound_block(identity_sid: &str) -> Result<Self> {
-        unsafe {
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED)
-                .map_err(|err| anyhow!("CoInitializeEx failed: {err:?}"))?;
+        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        if hr.is_err() {
+            return Err(anyhow!("CoInitializeEx failed: {hr:?}"));
         }
 
         let rule_name = format!(
@@ -46,9 +46,9 @@ impl FirewallRuleGuard {
     }
 
     pub fn remove(self) -> Result<()> {
-        unsafe {
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED)
-                .map_err(|err| anyhow!("CoInitializeEx failed: {err:?}"))?;
+        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        if hr.is_err() {
+            return Err(anyhow!("CoInitializeEx failed: {hr:?}"));
         }
         let result = (|| -> Result<()> {
             let policy: INetFwPolicy2 =
