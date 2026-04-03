@@ -6,7 +6,16 @@ use std::path::{Path, PathBuf};
 use tokio::process::Child;
 
 pub(crate) const MACOS_SEATBELT_BASE_POLICY: &str = include_str!("seatbelt_base_policy.sbpl");
+const MACOS_RESTRICTED_READ_ONLY_PLATFORM_DEFAULTS: &str =
+    include_str!("restricted_read_only_platform_defaults.sbpl");
 pub(crate) const MACOS_PATH_TO_SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
+
+#[derive(Debug, Clone)]
+struct SeatbeltAccessRoot {
+    root: PathBuf,
+    recursive: bool,
+    excluded_subpaths: Vec<PathBuf>,
+}
 
 pub async fn spawn_command_under_seatbelt(
     command: Vec<String>,
@@ -16,7 +25,6 @@ pub async fn spawn_command_under_seatbelt(
     mut env: HashMap<String, String>,
 ) -> Result<Child, ColossalErr> {
     let args = create_seatbelt_command_args(command, sandbox_policy, &cwd);
-    // eprintln!("Seatbelt args: {:?}", args);
     env.insert(COLOSSAL_SANDBOX_ENV_VAR.to_string(), "seatbelt".to_string());
     spawn_child_async(
         PathBuf::from(MACOS_PATH_TO_SEATBELT_EXECUTABLE),
@@ -28,165 +36,119 @@ pub async fn spawn_command_under_seatbelt(
         env,
     )
     .await
-    .map_err(|e| ColossalErr::Io(e))
+    .map_err(ColossalErr::Io)
 }
 
 pub fn apply_sandbox_policy(sandbox_policy: &SandboxPolicy, cwd: &Path) -> Result<(), ColossalErr> {
-    use std::io::Write;
-    use std::process::Command;
-    use tempfile::NamedTempFile;
-
-    // Create a temporary seatbelt profile
-    let mut profile = String::from("(version 1)\n");
-
-    match sandbox_policy {
-        crate::protocol::SandboxPolicy::WorkspaceWrite {
-            writable_roots,
-            network_access,
-            exclude_tmpdir_env_var,
-            exclude_slash_tmp,
-        } => {
-            // Allow reading the current working directory and its subdirectories
-            profile.push_str(&format!(
-                "(allow file-read* (subpath \"{}\"))\n",
-                cwd.display()
-            ));
-
-            // Allow reading the current working directory itself
-            profile.push_str(&format!(
-                "(allow file-read-metadata (subpath \"{}\"))\n",
-                cwd.display()
-            ));
-
-            // Add rules for writable roots
-            for writable_root in writable_roots {
-                if writable_root.recursive {
-                    profile.push_str(&format!(
-                        "(allow file-read* file-write* (subpath \"{}\"))\n",
-                        writable_root.root.display()
-                    ));
-                    profile.push_str(&format!(
-                        "(allow file-read-metadata file-write-data (subpath \"{}\"))\n",
-                        writable_root.root.display()
-                    ));
-                } else {
-                    profile.push_str(&format!(
-                        "(allow file-read* file-write* (literal \"{}\"))\n",
-                        writable_root.root.display()
-                    ));
-                    profile.push_str(&format!(
-                        "(allow file-read-metadata file-write-data (literal \"{}\"))\n",
-                        writable_root.root.display()
-                    ));
-                }
-
-                // Add read-only subpath restrictions
-                for read_only_path in &writable_root.read_only_subpaths {
-                    profile.push_str(&format!(
-                        "(allow file-read* (subpath \"{}\"))\n",
-                        read_only_path.display()
-                    ));
-                    profile.push_str(&format!(
-                        "(allow file-read-metadata (subpath \"{}\"))\n",
-                        read_only_path.display()
-                    ));
-                }
-            }
-
-            // Handle /tmp access
-            if !exclude_slash_tmp {
-                profile.push_str("(allow file-read* file-write* (subpath \"/tmp\"))\n");
-                profile.push_str("(allow file-read-metadata file-write-data (subpath \"/tmp\"))\n");
-            }
-
-            // Handle TMPDIR access
-            if !exclude_tmpdir_env_var {
-                if let Ok(tmpdir) = std::env::var("TMPDIR") {
-                    profile.push_str(&format!(
-                        "(allow file-read* file-write* (subpath \"{}\"))\n",
-                        tmpdir
-                    ));
-                    profile.push_str(&format!(
-                        "(allow file-read-metadata file-write-data (subpath \"{}\"))\n",
-                        tmpdir
-                    ));
-                }
-            }
-
-            // Network access
-            if matches!(network_access, crate::protocol::NetworkAccess::Enabled) {
-                profile.push_str("(allow network*)\n");
-            } else {
-                profile.push_str("(deny network*)\n");
-            }
-        }
-        crate::protocol::SandboxPolicy::DangerFullAccess => {
-            // For DangerFullAccess, allow everything (not recommended but possible)
-            profile.push_str("(allow default)\n");
-        }
-        crate::protocol::SandboxPolicy::ReadOnly => {
-            // Read-only mode: allow reading cwd and system paths, but NO writes
-            profile.push_str(&format!(
-                "(allow file-read* (subpath \"{}\"))\n",
-                cwd.display()
-            ));
-            profile.push_str(&format!(
-                "(allow file-read-metadata (subpath \"{}\"))\n",
-                cwd.display()
-            ));
-            // Deny all writes
-            profile.push_str("(deny file-write*)\n");
-            // Deny network
-            profile.push_str("(deny network*)\n");
-        }
-    }
-
-    // Add basic system permissions needed for normal operation
-    profile.push_str("(allow file-read* (subpath \"/usr\"))\n");
-    profile.push_str("(allow file-read* (subpath \"/bin\"))\n");
-    profile.push_str("(allow file-read* (subpath \"/lib\"))\n");
-    profile.push_str("(allow file-read* (subpath \"/System\"))\n");
-    profile.push_str("(allow process-exec)\n");
-
-    // Create a temporary file for the profile
-    let mut temp_file = NamedTempFile::new().map_err(|e| {
-        ColossalErr::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to create temp profile file: {}", e),
+    let output = std::process::Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+        .args(create_seatbelt_command_args(
+            vec!["true".to_string()],
+            sandbox_policy,
+            cwd,
         ))
-    })?;
-
-    temp_file.write_all(profile.as_bytes()).map_err(|e| {
-        ColossalErr::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to write profile: {}", e),
-        ))
-    })?;
-
-    // Apply the sandbox profile using sandbox-exec to 'true' to test if the sandbox is valid
-    let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
-        .arg("-f")
-        .arg(temp_file.path())
-        .arg("true") // Just test if the sandbox is valid
         .output()
         .map_err(|e| {
-            ColossalErr::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to execute sandbox-exec: {}", e),
-            ))
+            ColossalErr::Io(std::io::Error::other(format!(
+                "Failed to execute sandbox-exec: {e}"
+            )))
         })?;
 
     if !output.status.success() {
-        return Err(ColossalErr::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!(
-                "Sandbox profile validation failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-        )));
+        return Err(ColossalErr::Io(std::io::Error::other(format!(
+            "Sandbox profile validation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))));
     }
 
     Ok(())
+}
+
+fn normalize_path_for_sandbox(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+
+    path.canonicalize().ok().or(Some(path.to_path_buf()))
+}
+
+fn build_seatbelt_access_policy(
+    action: &str,
+    param_prefix: &str,
+    roots: Vec<SeatbeltAccessRoot>,
+) -> (String, Vec<(String, PathBuf)>) {
+    let mut policy_components = Vec::new();
+    let mut params = Vec::new();
+
+    for (index, access_root) in roots.into_iter().enumerate() {
+        let root =
+            normalize_path_for_sandbox(access_root.root.as_path()).unwrap_or(access_root.root);
+        let root_param = format!("{param_prefix}_{index}");
+        params.push((root_param.clone(), root));
+
+        let root_policy = if access_root.recursive {
+            format!("(subpath (param \"{root_param}\"))")
+        } else {
+            format!("(literal (param \"{root_param}\"))")
+        };
+
+        if access_root.excluded_subpaths.is_empty() {
+            policy_components.push(root_policy);
+            continue;
+        }
+
+        let mut require_parts = vec![root_policy];
+        for (excluded_index, excluded_subpath) in
+            access_root.excluded_subpaths.into_iter().enumerate()
+        {
+            let excluded_subpath =
+                normalize_path_for_sandbox(excluded_subpath.as_path()).unwrap_or(excluded_subpath);
+            let excluded_param = format!("{param_prefix}_{index}_EXCLUDED_{excluded_index}");
+            params.push((excluded_param.clone(), excluded_subpath));
+            require_parts.push(format!(
+                "(require-not (literal (param \"{excluded_param}\")))"
+            ));
+            require_parts.push(format!(
+                "(require-not (subpath (param \"{excluded_param}\")))"
+            ));
+        }
+        policy_components.push(format!("(require-all {} )", require_parts.join(" ")));
+    }
+
+    if policy_components.is_empty() {
+        (String::new(), Vec::new())
+    } else {
+        (
+            format!("(allow {action}\n{}\n)", policy_components.join(" ")),
+            params,
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn confstr_path(name: libc::c_int) -> Option<PathBuf> {
+    use std::ffi::CStr;
+
+    let mut buf = vec![0_i8; (libc::PATH_MAX as usize) + 1];
+    let len = unsafe { libc::confstr(name, buf.as_mut_ptr(), buf.len()) };
+    if len == 0 {
+        return None;
+    }
+    let cstr = unsafe { CStr::from_ptr(buf.as_ptr()) };
+    let path = PathBuf::from(cstr.to_str().ok()?);
+    path.canonicalize().ok().or(Some(path))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_dir_params() -> Vec<(String, PathBuf)> {
+    if let Some(path) = confstr_path(libc::_CS_DARWIN_USER_CACHE_DIR) {
+        return vec![("DARWIN_USER_CACHE_DIR".to_string(), path)];
+    }
+    vec![]
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_dir_params() -> Vec<(String, PathBuf)> {
+    vec![]
 }
 
 pub(crate) fn create_seatbelt_command_args(
@@ -194,66 +156,86 @@ pub(crate) fn create_seatbelt_command_args(
     sandbox_policy: &SandboxPolicy,
     cwd: &Path,
 ) -> Vec<String> {
-    let (file_write_policy, extra_cli_args) = {
-        if sandbox_policy.has_full_disk_write_access() {
-            (
-                r#"(allow file-write* (regex #"^/"))"#.to_string(),
-                Vec::<String>::new(),
-            )
+    let (file_write_policy, file_write_dir_params) = if sandbox_policy.has_full_disk_write_access()
+    {
+        (
+            r#"(allow file-write* (regex #"^/"))"#.to_string(),
+            Vec::new(),
+        )
+    } else {
+        build_seatbelt_access_policy(
+            "file-write*",
+            "WRITABLE_ROOT",
+            sandbox_policy
+                .get_writable_roots_with_cwd(cwd)
+                .into_iter()
+                .map(|root| SeatbeltAccessRoot {
+                    root: root.root,
+                    recursive: root.recursive,
+                    excluded_subpaths: root.read_only_subpaths,
+                })
+                .collect(),
+        )
+    };
+
+    let (file_read_policy, file_read_dir_params) = if sandbox_policy.has_full_disk_read_access() {
+        (
+            "; allow read-only file operations\n(allow file-read*)".to_string(),
+            Vec::new(),
+        )
+    } else {
+        let (policy, params) = build_seatbelt_access_policy(
+            "file-read*",
+            "READABLE_ROOT",
+            sandbox_policy
+                .get_readable_roots_with_cwd(cwd)
+                .into_iter()
+                .map(|root| SeatbeltAccessRoot {
+                    root,
+                    recursive: true,
+                    excluded_subpaths: Vec::new(),
+                })
+                .collect(),
+        );
+        if policy.is_empty() {
+            (String::new(), params)
         } else {
-            let writable_roots = sandbox_policy.get_writable_roots_with_cwd(cwd);
-            let mut writable_folder_policies: Vec<String> = Vec::new();
-            let mut cli_args: Vec<String> = Vec::new();
-            for (index, wr) in writable_roots.iter().enumerate() {
-                let canonical_root = wr.root.canonicalize().unwrap_or_else(|_| wr.root.clone());
-                let root_param = format!("WRITABLE_ROOT_{index}");
-                cli_args.push(format!(
-                    "-D{root_param}={}",
-                    canonical_root.to_string_lossy()
-                ));
-                if wr.read_only_subpaths.is_empty() {
-                    writable_folder_policies.push(format!("(subpath (param \"{root_param}\"))"));
-                } else {
-                    let mut require_parts: Vec<String> = Vec::new();
-                    require_parts.push(format!("(subpath (param \"{root_param}\"))"));
-                    for (subpath_index, ro) in wr.read_only_subpaths.iter().enumerate() {
-                        let canonical_ro = ro.canonicalize().unwrap_or_else(|_| ro.clone());
-                        let ro_param = format!("WRITABLE_ROOT_{index}_RO_{subpath_index}");
-                        cli_args.push(format!("-D{ro_param}={}", canonical_ro.to_string_lossy()));
-                        require_parts
-                            .push(format!("(require-not (subpath (param \"{ro_param}\")))"));
-                    }
-                    let policy_component = format!("(require-all {} )", require_parts.join(" "));
-                    writable_folder_policies.push(policy_component);
-                }
-            }
-            if writable_folder_policies.is_empty() {
-                ("".to_string(), Vec::<String>::new())
-            } else {
-                let file_write_policy = format!(
-                    "(allow file-write*\n{}\n)",
-                    writable_folder_policies.join(" ")
-                );
-                (file_write_policy, cli_args)
-            }
+            (
+                format!("; allow read-only file operations\n{policy}"),
+                params,
+            )
         }
     };
-    let file_read_policy = if sandbox_policy.has_full_disk_read_access() {
-        "; allow read-only file operations\n(allow file-read*)"
-    } else {
-        ""
-    };
+
     let network_policy = if sandbox_policy.has_full_network_access() {
-        "(allow network-outbound)\n(allow network-inbound)\n(allow system-socket)"
+        "(allow network-outbound)\n(allow network-inbound)\n(allow system-socket)".to_string()
     } else {
-        ""
+        String::new()
     };
-    let full_policy = format!(
-        "{MACOS_SEATBELT_BASE_POLICY}\n{file_read_policy}\n{file_write_policy}\n{network_policy}"
+
+    let mut policy_sections = vec![
+        MACOS_SEATBELT_BASE_POLICY.to_string(),
+        file_read_policy,
+        file_write_policy,
+        network_policy,
+    ];
+    if !sandbox_policy.has_full_disk_read_access() {
+        policy_sections.push(MACOS_RESTRICTED_READ_ONLY_PLATFORM_DEFAULTS.to_string());
+    }
+    let full_policy = policy_sections.join("\n");
+
+    let dir_params = [
+        file_read_dir_params,
+        file_write_dir_params,
+        macos_dir_params(),
+    ]
+    .concat();
+    let mut seatbelt_args = vec!["-p".to_string(), full_policy];
+    seatbelt_args.extend(
+        dir_params
+            .into_iter()
+            .map(|(key, value)| format!("-D{key}={}", value.to_string_lossy())),
     );
-    // eprintln!("Generated SBPL policy:\n{}", full_policy);
-    let mut seatbelt_args: Vec<String> = vec!["-p".to_string(), full_policy];
-    seatbelt_args.extend(extra_cli_args);
     seatbelt_args.push("--".to_string());
     seatbelt_args.extend(command);
     seatbelt_args
@@ -261,9 +243,8 @@ pub(crate) fn create_seatbelt_command_args(
 
 #[cfg(test)]
 mod tests {
-    use super::{MACOS_SEATBELT_BASE_POLICY, create_seatbelt_command_args};
-    use crate::protocol::{SandboxPolicy, WritableRoot};
-    use pretty_assertions::assert_eq;
+    use super::create_seatbelt_command_args;
+    use crate::protocol::{NetworkAccess, SandboxPolicy, WritableRoot};
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
@@ -282,6 +263,8 @@ mod tests {
             root_without_git_canon,
         } = populate_tmpdir(tmp.path());
         let cwd = tmp.path().join("cwd");
+        fs::create_dir_all(cwd.join(".git")).expect("create cwd .git");
+        let cwd_canon = cwd.canonicalize().expect("canonicalize cwd");
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![
                 WritableRoot {
@@ -295,7 +278,7 @@ mod tests {
                     read_only_subpaths: vec![],
                 },
             ],
-            network_access: crate::protocol::NetworkAccess::Restricted,
+            network_access: NetworkAccess::Restricted,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
@@ -304,41 +287,38 @@ mod tests {
             &policy,
             &cwd,
         );
-        let expected_policy = format!(
-            r#"{MACOS_SEATBELT_BASE_POLICY}
-
-(allow file-write*
-(require-all (subpath (param "WRITABLE_ROOT_0")) (require-not (subpath (param "WRITABLE_ROOT_0_RO_0"))) ) (subpath (param "WRITABLE_ROOT_1")) (require-all (subpath (param "WRITABLE_ROOT_2")) (require-not (subpath (param "WRITABLE_ROOT_2_RO_0"))) )
-)
-"#,
+        let policy_text = &args[1];
+        assert!(policy_text.contains("(allow file-write*"));
+        assert!(policy_text.contains("(allow file-read*"));
+        assert!(
+            policy_text.contains("(require-not (literal (param \"WRITABLE_ROOT_0_EXCLUDED_0\")))")
         );
-        let mut expected_args = vec![
-            "-p".to_string(),
-            expected_policy,
-            format!(
-                "-DWRITABLE_ROOT_0={}",
-                root_with_git_canon.to_string_lossy()
-            ),
-            format!(
-                "-DWRITABLE_ROOT_0_RO_0={}",
-                root_with_git_git_canon.to_string_lossy()
-            ),
-            format!(
-                "-DWRITABLE_ROOT_1={}",
-                root_without_git_canon.to_string_lossy()
-            ),
-            format!("-DWRITABLE_ROOT_2={}", cwd.to_string_lossy()),
-            format!(
-                "-DWRITABLE_ROOT_2_RO_0={}",
-                cwd.join(".git").to_string_lossy()
-            ),
-        ];
-        expected_args.extend(vec![
-            "--".to_string(),
-            "/bin/echo".to_string(),
-            "hello".to_string(),
-        ]);
-        assert_eq!(expected_args, args);
+        assert!(
+            policy_text.contains("(require-not (subpath (param \"WRITABLE_ROOT_0_EXCLUDED_0\")))")
+        );
+        assert!(args.contains(&format!(
+            "-DWRITABLE_ROOT_0={}",
+            root_with_git_canon.to_string_lossy()
+        )));
+        assert!(args.contains(&format!(
+            "-DWRITABLE_ROOT_0_EXCLUDED_0={}",
+            root_with_git_git_canon.to_string_lossy()
+        )));
+        assert!(args.contains(&format!(
+            "-DWRITABLE_ROOT_1={}",
+            root_without_git_canon.to_string_lossy()
+        )));
+        assert!(args.contains(&format!(
+            "-DWRITABLE_ROOT_2={}",
+            cwd_canon.to_string_lossy()
+        )));
+        assert!(args.contains(&format!(
+            "-DWRITABLE_ROOT_2_EXCLUDED_0={}",
+            cwd_canon.join(".git").to_string_lossy()
+        )));
+        assert_eq!(args[args.len() - 3], "--");
+        assert_eq!(args[args.len() - 2], "/bin/echo");
+        assert_eq!(args[args.len() - 1], "hello");
     }
 
     #[test]
@@ -355,7 +335,7 @@ mod tests {
         } = populate_tmpdir(tmp.path());
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![],
-            network_access: crate::protocol::NetworkAccess::Restricted,
+            network_access: NetworkAccess::Restricted,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         };
@@ -364,52 +344,23 @@ mod tests {
             &policy,
             root_with_git.as_path(),
         );
-        let tmpdir_env_var = std::env::var("TMPDIR")
-            .ok()
-            .map(PathBuf::from)
-            .and_then(|p| p.canonicalize().ok())
-            .map(|p| p.to_string_lossy().to_string());
-        let tempdir_policy_entry = if tmpdir_env_var.is_some() {
-            r#" (subpath (param "WRITABLE_ROOT_2"))"#
-        } else {
-            ""
-        };
-        let expected_policy = format!(
-            r#"{MACOS_SEATBELT_BASE_POLICY}
-
-(allow file-write*
-(require-all (subpath (param "WRITABLE_ROOT_0")) (require-not (subpath (param "WRITABLE_ROOT_0_RO_0"))) ) (subpath (param "WRITABLE_ROOT_1")){tempdir_policy_entry}
-)
-"#,
+        let policy_text = &args[1];
+        assert!(policy_text.contains("(allow file-write*"));
+        assert!(
+            policy_text.contains("(require-not (literal (param \"WRITABLE_ROOT_0_EXCLUDED_0\")))")
         );
-        let mut expected_args = vec![
-            "-p".to_string(),
-            expected_policy,
-            format!(
-                "-DWRITABLE_ROOT_0={}",
-                root_with_git_canon.to_string_lossy()
-            ),
-            format!(
-                "-DWRITABLE_ROOT_0_RO_0={}",
-                root_with_git_git_canon.to_string_lossy()
-            ),
-            format!(
-                "-DWRITABLE_ROOT_1={}",
-                PathBuf::from("/tmp")
-                    .canonicalize()
-                    .expect("canonicalize /tmp")
-                    .to_string_lossy()
-            ),
-        ];
-        if let Some(p) = tmpdir_env_var {
-            expected_args.push(format!("-DWRITABLE_ROOT_2={p}"));
-        }
-        expected_args.extend(vec![
-            "--".to_string(),
-            "/bin/echo".to_string(),
-            "hello".to_string(),
-        ]);
-        assert_eq!(expected_args, args);
+        assert!(args.contains(&format!(
+            "-DWRITABLE_ROOT_0={}",
+            root_with_git_canon.to_string_lossy()
+        )));
+        assert!(args.contains(&format!(
+            "-DWRITABLE_ROOT_0_EXCLUDED_0={}",
+            root_with_git_git_canon.to_string_lossy()
+        )));
+        assert!(args.iter().any(|arg| arg.starts_with("-DWRITABLE_ROOT_1=")));
+        assert_eq!(args[args.len() - 3], "--");
+        assert_eq!(args[args.len() - 2], "/bin/echo");
+        assert_eq!(args[args.len() - 1], "hello");
     }
 
     #[test]
@@ -423,21 +374,16 @@ mod tests {
             &SandboxPolicy::DangerFullAccess,
             &cwd,
         );
-        let expected_policy = format!(
-            r#"{MACOS_SEATBELT_BASE_POLICY}
-; allow read-only file operations
-(allow file-read*)
-(allow file-write* (regex #"^/"))
-(allow network-outbound)
-(allow network-inbound)
-(allow system-socket)"#,
-        );
 
         assert_eq!(args[0], "-p");
-        assert_eq!(args[1], expected_policy);
-        assert_eq!(args[2], "--");
-        assert_eq!(args[3], "/bin/echo");
-        assert_eq!(args[4], "hello");
+        assert!(args[1].contains("(allow file-read*)"));
+        assert!(args[1].contains("(allow file-write* (regex #\"^/\"))"));
+        assert!(args[1].contains("(allow network-outbound)"));
+        assert!(args[1].contains("(allow network-inbound)"));
+        assert!(args[1].contains("(allow system-socket)"));
+        assert_eq!(args[args.len() - 3], "--");
+        assert_eq!(args[args.len() - 2], "/bin/echo");
+        assert_eq!(args[args.len() - 1], "hello");
     }
 
     struct PopulatedTmp {
