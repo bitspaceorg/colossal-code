@@ -40,6 +40,28 @@ pub struct SystemBwrap {
     pub supports_argv0: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BubblewrapLauncher {
+    System(SystemBwrap),
+    Packaged(PathBuf),
+}
+
+impl BubblewrapLauncher {
+    pub fn program(&self) -> &Path {
+        match self {
+            Self::System(system) => system.program.as_path(),
+            Self::Packaged(path) => path.as_path(),
+        }
+    }
+
+    pub fn supports_argv0(&self) -> bool {
+        match self {
+            Self::System(system) => system.supports_argv0,
+            Self::Packaged(_) => true,
+        }
+    }
+}
+
 pub fn preferred_system_bwrap() -> Option<SystemBwrap> {
     static BWRAP: OnceLock<Option<SystemBwrap>> = OnceLock::new();
     BWRAP
@@ -52,6 +74,14 @@ pub fn preferred_system_bwrap() -> Option<SystemBwrap> {
             )
         })
         .clone()
+}
+
+pub fn preferred_bwrap_launcher(current_exe: Option<&Path>) -> Option<BubblewrapLauncher> {
+    if let Some(system) = preferred_system_bwrap() {
+        return Some(BubblewrapLauncher::System(system));
+    }
+
+    resolve_packaged_bwrap(current_exe).map(BubblewrapLauncher::Packaged)
 }
 
 fn system_bwrap_responds(system_bwrap_path: &Path) -> bool {
@@ -69,6 +99,27 @@ fn system_bwrap_supports_argv0(system_bwrap_path: &Path) -> bool {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     stdout.contains("--argv0") || stderr.contains("--argv0")
+}
+
+fn resolve_packaged_bwrap(current_exe: Option<&Path>) -> Option<PathBuf> {
+    if let Some(path) = env::var_os("COLOSSAL_BWRAP_PATH") {
+        let candidate = PathBuf::from(path);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    let Some(current_exe) = current_exe else {
+        return None;
+    };
+    let bin_dir = current_exe.parent()?;
+    let candidates = [
+        bin_dir.join("colossal-bwrap"),
+        bin_dir.join("bwrap"),
+        bin_dir.join("libexec").join("colossal-bwrap"),
+        bin_dir.join("libexec").join("bwrap"),
+    ];
+    candidates.into_iter().find(|candidate| candidate.is_file())
 }
 
 pub fn create_bwrap_command_args(
@@ -268,6 +319,29 @@ mod tests {
             .expect("system bwrap");
         assert!(!selected.supports_argv0);
     }
+
+    #[test]
+    fn falls_back_to_packaged_bwrap_next_to_helper() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let helper = temp.path().join("colossal-sandbox-helper");
+        let packaged = temp.path().join("colossal-bwrap");
+        std::fs::write(&helper, "").expect("helper stub");
+        std::fs::write(&packaged, "").expect("packaged bwrap stub");
+
+        let launcher = preferred_bwrap_launcher_for_paths(None, Some(helper.as_path()));
+        assert_eq!(launcher, Some(BubblewrapLauncher::Packaged(packaged)));
+    }
+}
+
+#[cfg(test)]
+fn preferred_bwrap_launcher_for_paths(
+    system_bwrap: Option<SystemBwrap>,
+    current_exe: Option<&Path>,
+) -> Option<BubblewrapLauncher> {
+    if let Some(system) = system_bwrap {
+        return Some(BubblewrapLauncher::System(system));
+    }
+    resolve_packaged_bwrap(current_exe).map(BubblewrapLauncher::Packaged)
 }
 
 fn preferred_system_bwrap_for_path(

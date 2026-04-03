@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
 fn main() {
     use colossal_linux_sandbox::linux_sandbox::{
-        create_bwrap_command_args, preferred_system_bwrap,
+        create_bwrap_command_args, preferred_bwrap_launcher,
     };
     use colossal_linux_sandbox::protocol::SandboxPolicy;
     use std::path::PathBuf;
@@ -47,13 +47,14 @@ fn main() {
     }
 
     if !matches!(sandbox_policy, SandboxPolicy::DangerFullAccess) {
-        if let Some(bwrap) = preferred_system_bwrap() {
-            let current_exe = std::env::current_exe()
-                .unwrap_or_else(|err| panic!("failed to resolve helper path: {err}"));
+        let current_exe = std::env::current_exe()
+            .unwrap_or_else(|err| panic!("failed to resolve helper path: {err}"));
+        if let Some(bwrap) = preferred_bwrap_launcher(Some(current_exe.as_path())) {
             let inner_command =
                 build_inner_stage_command(&current_exe, &cwd, &sandbox_policy, &command);
-            let bwrap_args = create_bwrap_command_args(&sandbox_policy, &cwd, &inner_command);
-            exec_program(&bwrap.program, &bwrap_args);
+            let mut bwrap_args = create_bwrap_command_args(&sandbox_policy, &cwd, &inner_command);
+            apply_inner_command_argv0(&mut bwrap_args, bwrap.supports_argv0());
+            exec_program(bwrap.program(), &bwrap_args);
         }
     }
 
@@ -61,6 +62,25 @@ fn main() {
         .unwrap_or_else(|err| panic!("failed to apply sandbox policy: {err}"));
 
     exec_program(PathBuf::from(&command[0]).as_path(), &command);
+}
+
+#[cfg(target_os = "linux")]
+fn apply_inner_command_argv0(argv: &mut Vec<String>, supports_argv0: bool) {
+    if !supports_argv0 {
+        return;
+    }
+
+    let command_separator_index = argv
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or_else(|| panic!("bubblewrap argv is missing command separator '--'"));
+    let argv0 = std::env::args()
+        .next()
+        .unwrap_or_else(|| "colossal-sandbox-helper".to_string());
+    argv.splice(
+        command_separator_index..command_separator_index,
+        ["--argv0".to_string(), argv0],
+    );
 }
 
 #[cfg(target_os = "linux")]
