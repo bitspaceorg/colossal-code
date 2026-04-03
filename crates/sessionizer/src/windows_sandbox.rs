@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", allow(unsafe_op_in_unsafe_fn))]
+
 use crate::protocol::{NetworkAccess, SandboxPolicy, WritableRoot};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -410,20 +412,16 @@ mod imp {
             if let Some(workspace) = workspace_sid {
                 caps.push(workspace.raw());
             }
-            let handle = unsafe {
-                create_workspace_write_token_with_caps_from(base.raw(), &caps)
-                    .map_err(|err| err.to_string())?
-            };
+            let handle = create_workspace_write_token_with_caps_from(base.raw(), &caps)
+                .map_err(|err| err.to_string())?;
             OwnedHandle::new(handle).ok_or_else(|| "missing workspace token".to_string())?
         } else {
             let mut caps = Vec::new();
             if let Some(primary) = primary_sid {
                 caps.push(primary.raw());
             }
-            let handle = unsafe {
-                create_readonly_token_with_caps_from(base.raw(), &caps)
-                    .map_err(|err| err.to_string())?
-            };
+            let handle = create_readonly_token_with_caps_from(base.raw(), &caps)
+                .map_err(|err| err.to_string())?;
             OwnedHandle::new(handle).ok_or_else(|| "missing readonly token".to_string())?
         };
         Ok(token)

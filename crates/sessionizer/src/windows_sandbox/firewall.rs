@@ -8,7 +8,7 @@ use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
     CoUninitialize,
 };
-use windows::core::BSTR;
+use windows::core::{BSTR, Interface};
 
 pub struct FirewallRuleGuard {
     rule_name: String,
