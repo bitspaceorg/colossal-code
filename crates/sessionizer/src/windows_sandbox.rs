@@ -2,6 +2,31 @@ use crate::protocol::{NetworkAccess, SandboxPolicy, WritableRoot};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "windows")]
+#[path = "windows_sandbox/acl.rs"]
+mod acl;
+#[cfg(target_os = "windows")]
+#[path = "windows_sandbox/cap.rs"]
+mod cap;
+#[cfg(target_os = "windows")]
+#[path = "windows_sandbox/env.rs"]
+mod env;
+#[cfg(target_os = "windows")]
+#[path = "windows_sandbox/path_normalization.rs"]
+mod path_normalization;
+#[cfg(target_os = "windows")]
+#[path = "windows_sandbox/process.rs"]
+mod process;
+#[cfg(target_os = "windows")]
+#[path = "windows_sandbox/token.rs"]
+mod token;
+#[cfg(target_os = "windows")]
+#[path = "windows_sandbox/winutil.rs"]
+mod winutil;
+#[cfg(target_os = "windows")]
+#[path = "windows_sandbox/workspace_acl.rs"]
+mod workspace_acl;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowsSandboxProfile {
     pub profile_type: String,
@@ -11,7 +36,8 @@ pub struct WindowsSandboxProfile {
     pub allow_network: bool,
     pub use_restricted_token: bool,
     pub use_job_object: bool,
-    pub capability_sid: String,
+    pub primary_capability_sid: Option<String>,
+    pub workspace_capability_sid: Option<String>,
 }
 
 impl WindowsSandboxProfile {
@@ -25,7 +51,16 @@ pub fn build_windows_sandbox_profile(
     sandbox_policy: &SandboxPolicy,
     cwd: &Path,
 ) -> WindowsSandboxProfile {
+    #[cfg(target_os = "windows")]
+    let canonical_cwd = path_normalization::canonicalize_path(cwd);
+    #[cfg(not(target_os = "windows"))]
     let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+
+    let (primary_capability_sid, workspace_capability_sid) =
+        capability_sids_for_policy(sandbox_policy, &canonical_cwd);
+    let writable_roots = build_windows_writable_roots(sandbox_policy, &canonical_cwd);
+    let readable_roots =
+        build_windows_readable_roots(sandbox_policy, &canonical_cwd, &writable_roots);
 
     match sandbox_policy {
         SandboxPolicy::DangerFullAccess => WindowsSandboxProfile {
@@ -36,60 +71,137 @@ pub fn build_windows_sandbox_profile(
             allow_network: true,
             use_restricted_token: false,
             use_job_object: false,
-            capability_sid: String::new(),
+            primary_capability_sid: None,
+            workspace_capability_sid: None,
         },
         SandboxPolicy::ReadOnly => WindowsSandboxProfile {
             profile_type: "read-only".to_string(),
-            cwd: canonical_cwd.clone(),
-            writable_roots: vec![],
-            readable_roots: vec![canonical_cwd],
+            cwd: canonical_cwd,
+            writable_roots,
+            readable_roots,
             allow_network: false,
             use_restricted_token: true,
             use_job_object: true,
-            capability_sid: String::new(),
+            primary_capability_sid,
+            workspace_capability_sid,
         },
-        SandboxPolicy::WorkspaceWrite {
-            writable_roots,
-            network_access,
-            ..
-        } => WindowsSandboxProfile {
+        SandboxPolicy::WorkspaceWrite { network_access, .. } => WindowsSandboxProfile {
             profile_type: "workspace-write".to_string(),
-            cwd: canonical_cwd.clone(),
-            writable_roots: writable_roots.clone(),
-            readable_roots: vec![canonical_cwd],
+            cwd: canonical_cwd,
+            writable_roots,
+            readable_roots,
             allow_network: matches!(network_access, NetworkAccess::Enabled),
             use_restricted_token: true,
             use_job_object: true,
-            capability_sid: String::new(),
+            primary_capability_sid,
+            workspace_capability_sid,
         },
     }
+}
+
+fn build_windows_writable_roots(sandbox_policy: &SandboxPolicy, cwd: &Path) -> Vec<WritableRoot> {
+    match sandbox_policy {
+        SandboxPolicy::WorkspaceWrite {
+            writable_roots,
+            exclude_tmpdir_env_var,
+            ..
+        } => {
+            let mut roots = writable_roots.clone();
+            roots.push(WritableRoot {
+                root: cwd.to_path_buf(),
+                recursive: true,
+                read_only_subpaths: vec![cwd.join(".git")],
+            });
+            if !exclude_tmpdir_env_var {
+                if let Ok(tmpdir) = std::env::var("TMPDIR") {
+                    roots.push(WritableRoot {
+                        root: PathBuf::from(tmpdir),
+                        recursive: true,
+                        read_only_subpaths: vec![],
+                    });
+                }
+            }
+            roots
+        }
+        _ => vec![],
+    }
+}
+
+fn build_windows_readable_roots(
+    sandbox_policy: &SandboxPolicy,
+    cwd: &Path,
+    writable_roots: &[WritableRoot],
+) -> Vec<PathBuf> {
+    match sandbox_policy {
+        SandboxPolicy::DangerFullAccess => vec![],
+        SandboxPolicy::ReadOnly => vec![cwd.to_path_buf()],
+        SandboxPolicy::WorkspaceWrite { .. } => {
+            let mut readable = vec![cwd.to_path_buf()];
+            for root in writable_roots {
+                if !readable.contains(&root.root) {
+                    readable.push(root.root.clone());
+                }
+            }
+            readable
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn capability_sids_for_policy(
+    sandbox_policy: &SandboxPolicy,
+    cwd: &Path,
+) -> (Option<String>, Option<String>) {
+    let caps = cap::load_or_create_cap_sids().ok();
+    match sandbox_policy {
+        SandboxPolicy::DangerFullAccess => (None, None),
+        SandboxPolicy::ReadOnly => (caps.as_ref().map(|caps| caps.readonly.clone()), None),
+        SandboxPolicy::WorkspaceWrite { .. } => {
+            let primary = caps.as_ref().map(|caps| caps.workspace.clone());
+            let workspace = cap::workspace_cap_sid_for_cwd(cwd).ok();
+            (primary, workspace)
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn capability_sids_for_policy(
+    _sandbox_policy: &SandboxPolicy,
+    _cwd: &Path,
+) -> (Option<String>, Option<String>) {
+    (None, None)
 }
 
 #[cfg(target_os = "windows")]
 mod imp {
     use super::WindowsSandboxProfile;
-    use std::collections::HashMap;
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-    use std::path::{Path, PathBuf};
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, STILL_ACTIVE};
-    use windows_sys::Win32::Security::{
-        CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, LUA_TOKEN, TOKEN_ADJUST_DEFAULT,
-        TOKEN_ADJUST_PRIVILEGES, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
-        TOKEN_QUERY, WRITE_RESTRICTED,
+    use super::acl::{
+        READ_EXECUTE_ALLOW_MASK, add_allow_ace, add_deny_write_ace, allow_null_device,
+        ensure_allow_mask_aces, revoke_ace,
     };
-    use windows_sys::Win32::System::Console::{
-        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    use super::env::{
+        apply_no_network_to_env, ensure_non_interactive_pager, normalize_null_device_env,
+    };
+    use super::path_normalization::canonicalize_path;
+    use super::process::create_process_as_user;
+    use super::token::{
+        convert_string_sid_to_sid, create_readonly_token_with_caps_from,
+        create_workspace_write_token_with_caps_from, get_current_token_for_restriction,
+    };
+    use super::workspace_acl::is_command_cwd_root;
+    use std::collections::HashMap;
+    use std::ffi::c_void;
+    use std::path::{Path, PathBuf};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, HANDLE, HLOCAL, LocalFree, STILL_ACTIVE,
     };
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
         SetInformationJobObject,
     };
-    use windows_sys::Win32::System::Threading::OpenProcessToken;
     use windows_sys::Win32::System::Threading::{
-        CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, GetCurrentProcess, GetExitCodeProcess,
-        INFINITE, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOW, WaitForSingleObject,
+        GetExitCodeProcess, INFINITE, WaitForSingleObject,
     };
 
     struct OwnedHandle(HANDLE);
@@ -111,7 +223,31 @@ mod imp {
     impl Drop for OwnedHandle {
         fn drop(&mut self) {
             unsafe {
-                CloseHandle(self.0);
+                if self.0 != 0 {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    struct LocalSid(*mut c_void);
+
+    impl LocalSid {
+        fn from_string(value: &str) -> Option<Self> {
+            convert_string_sid_to_sid(value).map(Self)
+        }
+
+        fn raw(&self) -> *mut c_void {
+            self.0
+        }
+    }
+
+    impl Drop for LocalSid {
+        fn drop(&mut self) {
+            unsafe {
+                if !self.0.is_null() {
+                    LocalFree(self.0 as HLOCAL);
+                }
             }
         }
     }
@@ -121,8 +257,8 @@ mod imp {
         if command.is_empty() {
             panic!("missing sandboxed command");
         }
-        let exit_code = spawn_restricted_child(&cwd, &profile, &command)
-            .unwrap_or_else(|err| panic!("failed to spawn Windows sandbox child: {err}"));
+        let exit_code = run_profile(&cwd, &profile, &command)
+            .unwrap_or_else(|err| panic!("failed to run Windows sandbox helper: {err}"));
         std::process::exit(exit_code.try_into().unwrap_or(1));
     }
 
@@ -157,120 +293,174 @@ mod imp {
         )
     }
 
-    fn spawn_restricted_child(
+    fn run_profile(
         cwd: &Path,
         profile: &WindowsSandboxProfile,
         command: &[String],
     ) -> Result<u32, String> {
-        let token = if profile.use_restricted_token {
-            create_restricted_current_token()?
-        } else {
-            create_restricted_current_token()?
-        };
+        let canonical_cwd = canonicalize_path(cwd);
+        let mut env_map: HashMap<String, String> = std::env::vars().collect();
+        env_map.remove("COLOSSAL_WINDOWS_SANDBOX_PROFILE");
+        normalize_null_device_env(&mut env_map);
+        ensure_non_interactive_pager(&mut env_map);
+        if !profile.allow_network {
+            apply_no_network_to_env(&mut env_map).map_err(|err| err.to_string())?;
+        }
+
+        let primary_sid = profile
+            .primary_capability_sid
+            .as_deref()
+            .and_then(LocalSid::from_string);
+        let workspace_sid = profile
+            .workspace_capability_sid
+            .as_deref()
+            .and_then(LocalSid::from_string);
+
+        let token = create_profile_token(profile, primary_sid.as_ref(), workspace_sid.as_ref())?;
+        let guards = apply_profile_acl_policy(
+            profile,
+            &canonical_cwd,
+            primary_sid.as_ref(),
+            workspace_sid.as_ref(),
+        )?;
         let job = if profile.use_job_object {
             Some(create_kill_on_close_job()?)
         } else {
             None
         };
 
-        let mut startup_info: STARTUPINFOW = unsafe { std::mem::zeroed() };
-        startup_info.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-        startup_info.dwFlags |= STARTF_USESTDHANDLES;
-        startup_info.hStdInput = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-        startup_info.hStdOutput = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
-        startup_info.hStdError = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
-
-        let desktop = to_wide("Winsta0\\Default");
-        startup_info.lpDesktop = desktop.as_ptr() as *mut u16;
-
-        let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-        let env = current_environment_block();
-        let mut cmdline_buf = build_command_line(command);
-        let cwd_w = to_wide(cwd.as_os_str());
-
-        let ok = unsafe {
-            CreateProcessAsUserW(
-                token.raw(),
-                std::ptr::null(),
-                cmdline_buf.as_mut_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                1,
-                CREATE_UNICODE_ENVIRONMENT,
-                env.as_ptr() as *mut _,
-                cwd_w.as_ptr(),
-                &startup_info,
-                &mut process_info,
-            )
-        };
-        if ok == 0 {
-            return Err(format!("CreateProcessAsUserW failed: {}", unsafe {
-                GetLastError()
-            }));
-        }
-
-        let process = OwnedHandle::new(process_info.hProcess)
-            .ok_or_else(|| "missing child process handle".to_string())?;
-        let thread = OwnedHandle::new(process_info.hThread)
-            .ok_or_else(|| "missing child thread handle".to_string())?;
-        let _ = thread;
-
+        let created = create_process_as_user(token.raw(), command, cwd, &env_map)
+            .map_err(|err| err.to_string())?;
         if let Some(job) = &job {
-            if unsafe { AssignProcessToJobObject(job.raw(), process.raw()) } == 0 {
+            if unsafe { AssignProcessToJobObject(job.raw(), created.process_info.hProcess) } == 0 {
                 return Err(format!("AssignProcessToJobObject failed: {}", unsafe {
                     GetLastError()
                 }));
             }
         }
 
+        let exit_code = wait_for_process(created.process_info.hProcess)?;
+
         unsafe {
-            WaitForSingleObject(process.raw(), INFINITE);
+            if created.process_info.hThread != 0 {
+                CloseHandle(created.process_info.hThread);
+            }
+            if created.process_info.hProcess != 0 {
+                CloseHandle(created.process_info.hProcess);
+            }
         }
-        let mut exit_code: u32 = STILL_ACTIVE as u32;
-        if unsafe { GetExitCodeProcess(process.raw(), &mut exit_code) } == 0 {
-            return Err(format!("GetExitCodeProcess failed: {}", unsafe {
-                GetLastError()
-            }));
+
+        for (path, sid) in guards.into_iter().rev() {
+            unsafe {
+                revoke_ace(&path, sid);
+            }
         }
+
         Ok(exit_code)
     }
 
-    fn create_restricted_current_token() -> Result<OwnedHandle, String> {
-        let desired = TOKEN_DUPLICATE
-            | TOKEN_QUERY
-            | TOKEN_ASSIGN_PRIMARY
-            | TOKEN_ADJUST_DEFAULT
-            | TOKEN_ADJUST_SESSIONID
-            | TOKEN_ADJUST_PRIVILEGES;
-        let mut base: HANDLE = 0;
-        if unsafe { OpenProcessToken(GetCurrentProcess(), desired, &mut base) } == 0 {
-            return Err(format!("OpenProcessToken failed: {}", unsafe {
-                GetLastError()
-            }));
-        }
-        let base = OwnedHandle::new(base).ok_or_else(|| "missing process token".to_string())?;
+    fn create_profile_token(
+        profile: &WindowsSandboxProfile,
+        primary_sid: Option<&LocalSid>,
+        workspace_sid: Option<&LocalSid>,
+    ) -> Result<OwnedHandle, String> {
+        let base = get_current_token_for_restriction().map_err(|err| err.to_string())?;
+        let base = OwnedHandle::new(base).ok_or_else(|| "missing base token".to_string())?;
+        let token = if profile.profile_type == "workspace-write" {
+            let mut caps = Vec::new();
+            if let Some(primary) = primary_sid {
+                caps.push(primary.raw());
+            }
+            if let Some(workspace) = workspace_sid {
+                caps.push(workspace.raw());
+            }
+            let handle = unsafe {
+                create_workspace_write_token_with_caps_from(base.raw(), &caps)
+                    .map_err(|err| err.to_string())?
+            };
+            OwnedHandle::new(handle).ok_or_else(|| "missing workspace token".to_string())?
+        } else {
+            let mut caps = Vec::new();
+            if let Some(primary) = primary_sid {
+                caps.push(primary.raw());
+            }
+            let handle = unsafe {
+                create_readonly_token_with_caps_from(base.raw(), &caps)
+                    .map_err(|err| err.to_string())?
+            };
+            OwnedHandle::new(handle).ok_or_else(|| "missing readonly token".to_string())?
+        };
+        Ok(token)
+    }
 
-        let mut restricted: HANDLE = 0;
-        let flags = DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED;
-        if unsafe {
-            CreateRestrictedToken(
-                base.raw(),
-                flags,
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                &mut restricted,
-            )
-        } == 0
-        {
-            return Err(format!("CreateRestrictedToken failed: {}", unsafe {
-                GetLastError()
-            }));
+    fn apply_profile_acl_policy(
+        profile: &WindowsSandboxProfile,
+        canonical_cwd: &Path,
+        primary_sid: Option<&LocalSid>,
+        workspace_sid: Option<&LocalSid>,
+    ) -> Result<Vec<(PathBuf, *mut c_void)>, String> {
+        let mut guards = Vec::new();
+
+        if let Some(primary) = primary_sid {
+            unsafe {
+                allow_null_device(primary.raw());
+            }
         }
-        OwnedHandle::new(restricted).ok_or_else(|| "missing restricted token".to_string())
+        if let Some(workspace) = workspace_sid {
+            unsafe {
+                allow_null_device(workspace.raw());
+            }
+        }
+
+        for root in &profile.readable_roots {
+            let canonical_root = canonicalize_path(root);
+            let sid =
+                effective_sid_for_path(&canonical_root, canonical_cwd, primary_sid, workspace_sid)
+                    .ok_or_else(|| "missing capability SID for readable root".to_string())?;
+            let added = unsafe {
+                ensure_allow_mask_aces(&canonical_root, &[sid], READ_EXECUTE_ALLOW_MASK)
+                    .map_err(|err| err.to_string())?
+            };
+            if added {
+                guards.push((canonical_root, sid));
+            }
+        }
+
+        for root in &profile.writable_roots {
+            let canonical_root = canonicalize_path(&root.root);
+            let sid =
+                effective_sid_for_path(&canonical_root, canonical_cwd, primary_sid, workspace_sid)
+                    .ok_or_else(|| "missing capability SID for writable root".to_string())?;
+            let added =
+                unsafe { add_allow_ace(&canonical_root, sid).map_err(|err| err.to_string())? };
+            if added {
+                guards.push((canonical_root.clone(), sid));
+            }
+            for protected in &root.read_only_subpaths {
+                let canonical_protected = canonicalize_path(protected);
+                let denied = unsafe {
+                    add_deny_write_ace(&canonical_protected, sid).map_err(|err| err.to_string())?
+                };
+                if denied {
+                    guards.push((canonical_protected, sid));
+                }
+            }
+        }
+
+        Ok(guards)
+    }
+
+    fn effective_sid_for_path(
+        path: &Path,
+        canonical_cwd: &Path,
+        primary_sid: Option<&LocalSid>,
+        workspace_sid: Option<&LocalSid>,
+    ) -> Option<*mut c_void> {
+        if is_command_cwd_root(path, canonical_cwd) {
+            workspace_sid.or(primary_sid).map(LocalSid::raw)
+        } else {
+            primary_sid.or(workspace_sid).map(LocalSid::raw)
+        }
     }
 
     fn create_kill_on_close_job() -> Result<OwnedHandle, String> {
@@ -294,80 +484,17 @@ mod imp {
         Ok(job)
     }
 
-    fn build_command_line(command: &[String]) -> Vec<u16> {
-        let joined = command
-            .iter()
-            .map(|arg| quote_windows_arg(arg))
-            .collect::<Vec<_>>()
-            .join(" ");
-        to_wide(joined)
-    }
-
-    fn current_environment_block() -> Vec<u16> {
-        let mut env_map: HashMap<String, String> = std::env::vars().collect();
-        env_map.remove("COLOSSAL_WINDOWS_SANDBOX_PROFILE");
-        make_env_block(&env_map)
-    }
-
-    fn make_env_block(env: &HashMap<String, String>) -> Vec<u16> {
-        let mut items: Vec<(String, String)> =
-            env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        items.sort_by(|a, b| {
-            a.0.to_uppercase()
-                .cmp(&b.0.to_uppercase())
-                .then(a.0.cmp(&b.0))
-        });
-        let mut block = Vec::new();
-        for (key, value) in items {
-            let mut entry = to_wide(format!("{key}={value}"));
-            entry.pop();
-            block.extend_from_slice(&entry);
-            block.push(0);
+    fn wait_for_process(process: HANDLE) -> Result<u32, String> {
+        unsafe {
+            WaitForSingleObject(process, INFINITE);
         }
-        block.push(0);
-        block
-    }
-
-    fn to_wide<S: AsRef<OsStr>>(value: S) -> Vec<u16> {
-        let mut wide: Vec<u16> = value.as_ref().encode_wide().collect();
-        wide.push(0);
-        wide
-    }
-
-    fn quote_windows_arg(arg: &str) -> String {
-        let needs_quotes = arg.is_empty()
-            || arg
-                .chars()
-                .any(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '"'));
-        if !needs_quotes {
-            return arg.to_string();
+        let mut exit_code: u32 = STILL_ACTIVE as u32;
+        if unsafe { GetExitCodeProcess(process, &mut exit_code) } == 0 {
+            return Err(format!("GetExitCodeProcess failed: {}", unsafe {
+                GetLastError()
+            }));
         }
-
-        let mut quoted = String::with_capacity(arg.len() + 2);
-        quoted.push('"');
-        let mut backslashes = 0;
-        for ch in arg.chars() {
-            match ch {
-                '\\' => backslashes += 1,
-                '"' => {
-                    quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
-                    quoted.push('"');
-                    backslashes = 0;
-                }
-                _ => {
-                    if backslashes > 0 {
-                        quoted.push_str(&"\\".repeat(backslashes));
-                        backslashes = 0;
-                    }
-                    quoted.push(ch);
-                }
-            }
-        }
-        if backslashes > 0 {
-            quoted.push_str(&"\\".repeat(backslashes * 2));
-        }
-        quoted.push('"');
-        quoted
+        Ok(exit_code)
     }
 }
 
