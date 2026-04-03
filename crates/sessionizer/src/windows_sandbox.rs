@@ -181,8 +181,8 @@ fn capability_sids_for_policy(
 mod imp {
     use super::WindowsSandboxProfile;
     use super::acl::{
-        READ_EXECUTE_ALLOW_MASK, add_allow_ace, add_deny_write_ace, allow_null_device,
-        ensure_allow_mask_aces, revoke_ace,
+        READ_EXECUTE_ALLOW_MASK, add_deny_write_ace, allow_null_device, ensure_allow_mask_aces,
+        ensure_allow_write_aces, revoke_ace,
     };
     use super::env::{
         apply_no_network_to_env, ensure_non_interactive_pager, normalize_null_device_env,
@@ -471,10 +471,11 @@ mod imp {
             if sids.is_empty() {
                 return Err("missing capability SID for writable root".to_string());
             }
-            for sid in &sids {
-                let added =
-                    unsafe { add_allow_ace(&canonical_root, *sid).map_err(|err| err.to_string())? };
-                if added {
+            let added = unsafe {
+                ensure_allow_write_aces(&canonical_root, &sids).map_err(|err| err.to_string())?
+            };
+            if added {
+                for sid in &sids {
                     guards.push((canonical_root.clone(), *sid));
                 }
             }

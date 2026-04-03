@@ -25,8 +25,14 @@ const CONTAINER_INHERIT_ACE: u32 = 0x2;
 const OBJECT_INHERIT_ACE: u32 = 0x1;
 const GENERIC_WRITE_MASK: u32 = 0x4000_0000;
 const SE_KERNEL_OBJECT: u32 = 6;
+const WRITE_ALLOW_MASK: u32 =
+    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE | FILE_DELETE_CHILD;
 
 pub const READ_EXECUTE_ALLOW_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+
+pub unsafe fn ensure_allow_write_aces(path: &Path, sids: &[*mut c_void]) -> Result<bool> {
+    ensure_allow_mask_aces(path, sids, WRITE_ALLOW_MASK)
+}
 
 pub unsafe fn ensure_allow_mask_aces(
     path: &Path,
