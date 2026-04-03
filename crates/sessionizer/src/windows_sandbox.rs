@@ -448,35 +448,46 @@ mod imp {
 
         for root in &profile.readable_roots {
             let canonical_root = canonicalize_path(root);
-            let sid =
-                effective_sid_for_path(&canonical_root, canonical_cwd, primary_sid, workspace_sid)
-                    .ok_or_else(|| "missing capability SID for readable root".to_string())?;
+            let sids =
+                effective_sids_for_path(&canonical_root, canonical_cwd, primary_sid, workspace_sid);
+            if sids.is_empty() {
+                return Err("missing capability SID for readable root".to_string());
+            }
             let added = unsafe {
-                ensure_allow_mask_aces(&canonical_root, &[sid], READ_EXECUTE_ALLOW_MASK)
+                ensure_allow_mask_aces(&canonical_root, &sids, READ_EXECUTE_ALLOW_MASK)
                     .map_err(|err| err.to_string())?
             };
             if added {
-                guards.push((canonical_root, sid));
+                for sid in sids {
+                    guards.push((canonical_root.clone(), sid));
+                }
             }
         }
 
         for root in &profile.writable_roots {
             let canonical_root = canonicalize_path(&root.root);
-            let sid =
-                effective_sid_for_path(&canonical_root, canonical_cwd, primary_sid, workspace_sid)
-                    .ok_or_else(|| "missing capability SID for writable root".to_string())?;
-            let added =
-                unsafe { add_allow_ace(&canonical_root, sid).map_err(|err| err.to_string())? };
-            if added {
-                guards.push((canonical_root.clone(), sid));
+            let sids =
+                effective_sids_for_path(&canonical_root, canonical_cwd, primary_sid, workspace_sid);
+            if sids.is_empty() {
+                return Err("missing capability SID for writable root".to_string());
+            }
+            for sid in &sids {
+                let added =
+                    unsafe { add_allow_ace(&canonical_root, *sid).map_err(|err| err.to_string())? };
+                if added {
+                    guards.push((canonical_root.clone(), *sid));
+                }
             }
             for protected in &root.read_only_subpaths {
                 let canonical_protected = canonicalize_path(protected);
-                let denied = unsafe {
-                    add_deny_write_ace(&canonical_protected, sid).map_err(|err| err.to_string())?
-                };
-                if denied {
-                    guards.push((canonical_protected, sid));
+                for sid in &sids {
+                    let denied = unsafe {
+                        add_deny_write_ace(&canonical_protected, *sid)
+                            .map_err(|err| err.to_string())?
+                    };
+                    if denied {
+                        guards.push((canonical_protected.clone(), *sid));
+                    }
                 }
             }
         }
@@ -484,17 +495,29 @@ mod imp {
         Ok(guards)
     }
 
-    fn effective_sid_for_path(
+    fn effective_sids_for_path(
         path: &Path,
         canonical_cwd: &Path,
         primary_sid: Option<&LocalSid>,
         workspace_sid: Option<&LocalSid>,
-    ) -> Option<*mut c_void> {
+    ) -> Vec<*mut c_void> {
+        let mut sids = Vec::new();
         if is_command_cwd_root(path, canonical_cwd) {
-            workspace_sid.or(primary_sid).map(LocalSid::raw)
+            if let Some(workspace) = workspace_sid {
+                sids.push(workspace.raw());
+            }
+            if let Some(primary) = primary_sid {
+                sids.push(primary.raw());
+            }
         } else {
-            primary_sid.or(workspace_sid).map(LocalSid::raw)
+            if let Some(primary) = primary_sid {
+                sids.push(primary.raw());
+            }
+            if let Some(workspace) = workspace_sid {
+                sids.push(workspace.raw());
+            }
         }
+        sids
     }
 
     fn create_kill_on_close_job() -> Result<OwnedHandle, String> {
