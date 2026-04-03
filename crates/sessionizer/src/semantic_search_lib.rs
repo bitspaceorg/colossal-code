@@ -3,7 +3,6 @@ use qdrant_client::qdrant::{
     PointStruct, SearchParamsBuilder, SearchPointsBuilder, UpsertPointsBuilder,
 };
 use qdrant_client::{Payload, Qdrant};
-use reqwest;
 use serde::Serialize;
 use serde_json;
 use std::fs;

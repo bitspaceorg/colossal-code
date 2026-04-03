@@ -1451,6 +1451,7 @@ impl SessionManager {
         let sandbox_policy_clone = sandbox_policy.clone();
 
         let indexing_handle = tokio::spawn(async move {
+            #[cfg(target_os = "linux")]
             // IMPORTANT: Apply sandbox to this spawned task's thread
             // This sandbox policy will apply to:
             // 1. The indexing task itself

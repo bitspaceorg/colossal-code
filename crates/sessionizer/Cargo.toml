@@ -54,10 +54,10 @@ notify = "6.1.1"
 tempfile = "3.13"
 regex = "1.11"
 strip-ansi-escapes = "0.2"
+reqwest = { version = "0.12", features = ["json", "stream"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 clap = { version = "4", features = ["derive"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
 landlock = "0.4.1"
 libc = "0.2.175"
 seccompiler = "0.5.0"
