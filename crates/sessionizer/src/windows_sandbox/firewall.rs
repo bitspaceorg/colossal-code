@@ -31,8 +31,7 @@ impl FirewallRuleGuard {
             let policy: INetFwPolicy2 =
                 unsafe { CoCreateInstance(&NetFwPolicy2, None, CLSCTX_INPROC_SERVER) }
                     .map_err(|err| anyhow!("CoCreateInstance NetFwPolicy2 failed: {err:?}"))?;
-            let rules = policy
-                .Rules()
+            let rules = unsafe { policy.Rules() }
                 .map_err(|err| anyhow!("INetFwPolicy2::Rules failed: {err:?}"))?;
             ensure_block_rule(&rules, &rule_name, identity_sid)
         })();
@@ -54,8 +53,7 @@ impl FirewallRuleGuard {
             let policy: INetFwPolicy2 =
                 unsafe { CoCreateInstance(&NetFwPolicy2, None, CLSCTX_INPROC_SERVER) }
                     .map_err(|err| anyhow!("CoCreateInstance NetFwPolicy2 failed: {err:?}"))?;
-            let rules = policy
-                .Rules()
+            let rules = unsafe { policy.Rules() }
                 .map_err(|err| anyhow!("INetFwPolicy2::Rules failed: {err:?}"))?;
             remove_rule_if_present(&rules, &self.rule_name)
         })();
