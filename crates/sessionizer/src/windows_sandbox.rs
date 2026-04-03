@@ -226,7 +226,7 @@ mod imp {
             unsafe {
                 WaitForSingleObject(process.raw(), INFINITE);
             }
-            let mut exit_code = STILL_ACTIVE;
+            let mut exit_code: u32 = STILL_ACTIVE as u32;
             if unsafe { GetExitCodeProcess(process.raw(), &mut exit_code) } == 0 {
                 return Err(format!("GetExitCodeProcess failed: {}", unsafe {
                     GetLastError()
