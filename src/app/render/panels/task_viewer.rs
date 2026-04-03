@@ -136,6 +136,18 @@ impl App {
                     connector,
                 );
                 lines.extend(rendered.lines);
+                if is_agent
+                    && Self::should_insert_primary_agent_block_gap(
+                        &message.content,
+                        context
+                            .messages
+                            .get(idx + 1)
+                            .map(|next| next.content.as_str()),
+                    )
+                {
+                    // Keep spacing between complete primary assistant blocks, including artifacts.
+                    lines.push(Line::from(""));
+                }
             }
 
             if let Some(stats) = context.generation_stats.clone() {

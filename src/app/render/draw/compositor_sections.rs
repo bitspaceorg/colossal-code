@@ -211,6 +211,13 @@ impl App {
                     )
                     .lines,
                 );
+                if Self::should_insert_primary_agent_block_gap(
+                    message,
+                    messages.get(idx + 2).map(String::as_str),
+                ) {
+                    // Keep spacing between complete primary assistant blocks, including artifacts.
+                    lines.push(Line::from(""));
+                }
                 idx += 2;
                 continue;
             }
@@ -219,6 +226,15 @@ impl App {
                 self.render_message_with_max_width(message, max_width, None, is_agent, connector)
                     .lines,
             );
+            if is_agent
+                && Self::should_insert_primary_agent_block_gap(
+                    message,
+                    messages.get(idx + 1).map(String::as_str),
+                )
+            {
+                // Keep spacing between complete primary assistant blocks, including artifacts.
+                lines.push(Line::from(""));
+            }
             idx += 1;
         }
 
