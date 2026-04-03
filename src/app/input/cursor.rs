@@ -1,6 +1,10 @@
 use crate::app::{App, SLASH_COMMANDS};
 use ratatui::crossterm::event::{Event, KeyEvent};
 
+fn should_ignore_vim_input_char(mode: edtui::EditorMode, to_insert: char) -> bool {
+    to_insert == '/' && mode == edtui::EditorMode::Normal
+}
+
 fn cursor_position(input: &str, character_index: usize) -> (usize, usize) {
     let mut char_count = 0;
     for (row, line) in input.lines().enumerate() {
@@ -287,7 +291,7 @@ impl App {
 
     pub(crate) fn handle_input_char_key(&mut self, key: KeyEvent, to_insert: char) {
         if self.vim_mode_enabled {
-            if to_insert == '/' && self.vim_input_editor.get_mode() == edtui::EditorMode::Normal {
+            if should_ignore_vim_input_char(self.vim_input_editor.get_mode(), to_insert) {
                 return;
             }
             self.vim_input_editor.handle_event(Event::Key(key));
@@ -358,7 +362,10 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_autocomplete_suggestions, cursor_position, should_show_autocomplete};
+    use super::{
+        build_autocomplete_suggestions, cursor_position, should_ignore_vim_input_char,
+        should_show_autocomplete,
+    };
 
     #[test]
     fn cursor_position_tracks_row_and_column() {
@@ -381,5 +388,18 @@ mod tests {
         assert!(suggestions.iter().any(|(cmd, _)| cmd == "/spec"));
         assert!(suggestions.iter().any(|(cmd, _)| cmd == "/spec split"));
         assert!(suggestions.iter().all(|(cmd, _)| cmd.starts_with("/sp")));
+    }
+
+    #[test]
+    fn vim_normal_mode_ignores_slash_for_input_bar() {
+        assert!(should_ignore_vim_input_char(edtui::EditorMode::Normal, '/'));
+        assert!(!should_ignore_vim_input_char(
+            edtui::EditorMode::Insert,
+            '/'
+        ));
+        assert!(!should_ignore_vim_input_char(
+            edtui::EditorMode::Normal,
+            'a'
+        ));
     }
 }

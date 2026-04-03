@@ -161,8 +161,7 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
                     false
                 } else {
-                    app.vim_input_editor.handle_event(Event::Key(key));
-                    app.sync_vim_input();
+                    app.handle_input_char_key(key, c);
                     app.update_autocomplete();
                     true
                 }
