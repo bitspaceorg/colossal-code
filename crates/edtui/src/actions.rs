@@ -195,9 +195,9 @@ impl Execute for Composed {
 
 #[cfg(test)]
 mod tests {
+    use crate::clipboard::InternalClipboard;
     use crate::Index2;
     use crate::Lines;
-    use crate::clipboard::InternalClipboard;
 
     use super::*;
     fn test_state() -> EditorState {

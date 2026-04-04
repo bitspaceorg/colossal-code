@@ -1,8 +1,8 @@
 use ratatui::text::Line;
 use ratatui::text::Span;
 use std::ops::Range;
-use textwrap::Options;
 use textwrap::wrap_algorithms::Penalties;
+use textwrap::Options;
 
 use crate::line_utils::push_owned_lines;
 

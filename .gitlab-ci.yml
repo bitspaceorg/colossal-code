@@ -13,7 +13,8 @@ variables:
   image: nixos/nix:2.24.11
   before_script:
     - nix --version
-    - nix flake show --no-write-lock-file >/dev/null
+    - nix flake metadata
+    - nix develop --accept-flake-config -c treefmt --version
 
 .rules_first_party:
   rules: &rules_first_party

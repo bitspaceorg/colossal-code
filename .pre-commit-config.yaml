@@ -7,23 +7,14 @@ default_stages:
 repos:
   - repo: local
     hooks:
-      - id: treefmt
-        name: treefmt
-        entry: nix develop --accept-flake-config -c treefmt --fail-on-change
-        pass_filenames: true
-        files: ''
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: nix develop --accept-flake-config -c bash -c 'cargo fmt --all && git add -A'
+        pass_filenames: false
+        always_run: true
         language: system
-        types:
-          - file
-
-      - id: nil
-        name: nil
-        entry: nix develop --accept-flake-config -c nil
-        pass_filenames: true
-        files: '\.nix$'
-        language: system
-        types:
-          - file
+        stages:
+          - pre-commit
 
       - id: docs-build
         name: docs-build

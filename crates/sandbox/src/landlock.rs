@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use crate::error::{ColossalErr as SandboxError, Result, SandboxErr};
 use crate::protocol::SandboxPolicy;
 
-use landlock::ABI;
 use landlock::Access;
 use landlock::AccessFs;
 use landlock::CompatLevel;
@@ -13,6 +12,8 @@ use landlock::Compatible;
 use landlock::Ruleset;
 use landlock::RulesetAttr;
 use landlock::RulesetCreatedAttr;
+use landlock::ABI;
+use seccompiler::apply_filter;
 use seccompiler::BackendError;
 use seccompiler::BpfProgram;
 use seccompiler::Error as SeccompError;
@@ -23,7 +24,6 @@ use seccompiler::SeccompCondition;
 use seccompiler::SeccompFilter;
 use seccompiler::SeccompRule;
 use seccompiler::TargetArch;
-use seccompiler::apply_filter;
 
 /// Apply sandbox policies inside this thread so only the child inherits
 /// them, not the entire CLI process.
@@ -124,15 +124,13 @@ fn install_network_seccomp_filter_on_current_thread() -> std::result::Result<(),
     deny_syscall(libc::SYS_ptrace);
 
     // For `socket` we allow AF_UNIX (arg0 == AF_UNIX) and deny everything else.
-    let unix_only_rule = SeccompRule::new(vec![
-        SeccompCondition::new(
-            0, // first argument (domain)
-            SeccompCmpArgLen::Dword,
-            SeccompCmpOp::Ne,
-            libc::AF_UNIX as u64,
-        )
-        .map_err(|e: BackendError| SandboxError::SeccompBackend(e.into()))?,
-    ])
+    let unix_only_rule = SeccompRule::new(vec![SeccompCondition::new(
+        0, // first argument (domain)
+        SeccompCmpArgLen::Dword,
+        SeccompCmpOp::Ne,
+        libc::AF_UNIX as u64,
+    )
+    .map_err(|e: BackendError| SandboxError::SeccompBackend(e.into()))?])
     .map_err(|e: BackendError| SandboxError::SeccompBackend(e.into()))?;
 
     rules.insert(libc::SYS_socket, vec![unix_only_rule.clone()]);

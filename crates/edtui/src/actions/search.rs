@@ -1,7 +1,7 @@
 use jagged::index::RowIndex;
 
 use crate::actions::motion::CharacterClass;
-use crate::{EditorMode, EditorState, Index2, state::SearchDirection};
+use crate::{state::SearchDirection, EditorMode, EditorState, Index2};
 
 use super::Execute;
 

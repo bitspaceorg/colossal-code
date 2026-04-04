@@ -1,7 +1,7 @@
 use crate::citation::rewrite_file_citations_with_scheme;
 use crate::line_utils::line_to_static;
-use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_line;
+use crate::wrapping::RtOptions;
 use pulldown_cmark::CodeBlockKind;
 use pulldown_cmark::CowStr;
 use pulldown_cmark::Event;

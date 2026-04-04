@@ -8,8 +8,8 @@ use jagged::Index2;
 
 use super::Execute;
 use crate::{
-    EditorMode, EditorState,
     helper::{max_col, max_col_normal, skip_whitespace, skip_whitespace_rev},
+    EditorMode, EditorState,
 };
 
 #[derive(Clone, Debug, Copy)]
