@@ -13,6 +13,8 @@ variables:
   image: nixos/nix:2.24.11
   before_script:
     - nix --version
+    - git config --unset-all core.hooksPath || true
+    - nix run github:cachix/pre-commit-hooks.nix#pre-commit-hooks -- install
     - nix flake show --no-write-lock-file >/dev/null
 
 .rules_first_party:
