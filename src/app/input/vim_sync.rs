@@ -3,10 +3,6 @@ use edtui::{EditorEventHandler, EditorState};
 use ratatui::crossterm::event::Event;
 use ratatui::text::Line;
 
-pub use crate::app::input::transcript_lines::{
-    ThinkingContext, create_plain_content_for_editor, create_rich_content_from_messages,
-};
-
 /// A struct that combines edtui functionality with rich formatting
 pub struct RichEditor {
     /// The edtui editor state for navigation and editing

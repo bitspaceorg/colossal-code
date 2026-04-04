@@ -1,57 +1,23 @@
 use ratatui::{
     Frame,
     style::{Color, Style},
-    text::{Line, Span},
+    text::Line,
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::render::transcript::TranscriptEntry;
-use crate::app::{App, MessageType};
-
-fn into_owned_line(line: Line<'_>) -> Line<'static> {
-    let spans = line
-        .spans
-        .into_iter()
-        .map(|span| Span::styled(span.content.to_string(), span.style))
-        .collect::<Vec<_>>();
-    Line::from(spans)
-}
+use crate::app::App;
 
 impl App {
-    pub(crate) fn build_navigation_message_lines(
-        &self,
-        wrap_width: usize,
-        message_types_vec: &[MessageType],
-    ) -> Vec<Line<'static>> {
-        let mut message_lines = Vec::new();
-        {
-            let tips: Vec<Line<'static>> = self
-                .render_tips()
-                .into_iter()
-                .map(into_owned_line)
-                .collect();
-            message_lines.extend(tips.clone());
-            let messages = self.get_messages();
-            if !tips.is_empty() && !messages.is_empty() {
-                message_lines.push(Line::from(" "));
-            }
-        }
-        let messages = self.get_messages();
-        let entries: Vec<TranscriptEntry<'_>> = messages
-            .iter()
-            .zip(message_types_vec.iter())
-            .map(|(content, message_type)| TranscriptEntry {
-                content,
-                message_type,
-            })
-            .collect();
-        message_lines.extend(self.render_transcript_lines(wrap_width, &entries));
+    pub(crate) fn build_navigation_message_lines(&self, wrap_width: usize) -> Vec<Line<'static>> {
+        self.compose_main_message_lines(wrap_width, false, false)
+    }
 
-        if self.show_summary_history {
-            message_lines = self.render_summary_history_lines(wrap_width);
-        }
-
+    pub(crate) fn navigation_plain_content(message_lines: &[Line<'static>]) -> String {
         message_lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub(crate) fn paint_navigation_search_matches(
@@ -313,5 +279,30 @@ impl App {
                 cell.set_style(Style::default().bg(Color::Yellow).fg(Color::Black));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::text::Line;
+
+    use crate::app::App;
+
+    #[test]
+    fn navigation_plain_content_preserves_rendered_row_structure() {
+        let message_lines = vec![
+            Line::from("● todo_write(...)"),
+            Line::from("  ⎿  updated task list"),
+            Line::from("┌ artifact ┐"),
+            Line::from(""),
+            Line::from("● Done"),
+        ];
+
+        let plain = App::navigation_plain_content(&message_lines);
+
+        assert_eq!(
+            plain,
+            "● todo_write(...)\n  ⎿  updated task list\n┌ artifact ┐\n\n● Done"
+        );
     }
 }

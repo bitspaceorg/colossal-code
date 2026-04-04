@@ -5,10 +5,7 @@ use ratatui::{
     widgets::{Block, BorderType, Paragraph},
 };
 
-use crate::app;
-use crate::app::init::startup::tips;
-use crate::app::input::vim_sync::{ThinkingContext, create_rich_content_from_messages};
-use crate::app::{App, MESSAGE_BORDER_SET, MessageType};
+use crate::app::App;
 
 impl App {
     pub(crate) fn render_navigation_mode_view(
@@ -22,42 +19,8 @@ impl App {
             .set_viewport_rows((messages_area.height as usize).max(10));
 
         let wrap_width = messages_area.width.saturating_sub(4) as usize;
-        let messages = self.get_messages();
-        let message_types_vec = self.get_message_types().clone();
-
-        let (messages_with_stats, message_types_with_stats) = if self.show_summary_history {
-            let overlay_messages = self.summary_history_virtual_messages();
-            let overlay_types = vec![MessageType::Agent; overlay_messages.len()];
-            (overlay_messages, overlay_types)
-        } else {
-            (messages.to_vec(), message_types_vec.clone())
-        };
-
-        let thinking_context = ThinkingContext {
-            snowflake_frame: self.thinking_snowflake_frames[self.get_thinking_loader_frame()],
-            current_summary: self.get_thinking_current_summary().clone(),
-            current_word: self.get_thinking_current_word().to_string(),
-            elapsed_secs: self.get_thinking_elapsed_secs(),
-            token_count: self.get_thinking_token_count(),
-        };
-
-        let rich_content = create_rich_content_from_messages(
-            &messages_with_stats,
-            &message_types_with_stats,
-            tips(),
-            self.visible_tips,
-            MESSAGE_BORDER_SET,
-            wrap_width,
-            &thinking_context,
-        );
-        let plain_content = app::input::vim_sync::create_plain_content_for_editor(
-            &messages_with_stats,
-            &message_types_with_stats,
-            tips(),
-            self.visible_tips,
-            wrap_width,
-            &thinking_context,
-        );
+        let message_lines = self.build_navigation_message_lines(wrap_width);
+        let plain_content = Self::navigation_plain_content(&message_lines);
 
         let old_cursor_row = self.editor.state.cursor.row;
         let old_cursor_col = self.editor.state.cursor.col;
@@ -70,7 +33,8 @@ impl App {
         let old_undo = self.editor.state.undo.clone();
         let old_redo = self.editor.state.redo.clone();
 
-        self.editor.set_rich_content(rich_content, plain_content);
+        self.editor
+            .set_rich_content(message_lines.clone(), plain_content);
 
         if self.nav_needs_init {
             let max_row = self.editor.state.lines.len().saturating_sub(1);
@@ -99,8 +63,6 @@ impl App {
             self.editor.state.undo = old_undo;
             self.editor.state.redo = old_redo;
         }
-
-        let message_lines = self.build_navigation_message_lines(wrap_width, &message_types_vec);
 
         let cursor_row = self.editor.state.cursor.row;
         let visible_lines = messages_area.height as usize;
