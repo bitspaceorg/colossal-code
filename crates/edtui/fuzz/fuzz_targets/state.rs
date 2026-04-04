@@ -1,6 +1,6 @@
 #![no_main]
 
-use edtui::{events::KeyEvent, EditorEventHandler, EditorState};
+use edtui::{EditorEventHandler, EditorState, events::KeyEvent};
 use libfuzzer_sys::fuzz_target;
 
 // run: cargo fuzz run state -- -rss_limit_mb=8192

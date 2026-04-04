@@ -5,11 +5,13 @@ GLM-4.7 is a mixture of experts (MoE) model from the GLM family with standard GQ
 ## HTTP API
 
 Start the server:
+
 ```bash
 mistralrs serve --isq 4 -p 1234 -m zai-org/GLM-4.7
 ```
 
 Send requests using an OpenAI-compatible client:
+
 ```py
 import openai
 
@@ -38,6 +40,7 @@ while True:
 ```
 
 ## Python SDK
+
 ```py
 from mistralrs import Runner, Which, ChatCompletionRequest, Architecture
 

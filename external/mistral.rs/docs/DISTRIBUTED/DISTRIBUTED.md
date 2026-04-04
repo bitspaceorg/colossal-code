@@ -1,10 +1,12 @@
 # Distributed inference in mistral.rs
 
 Mistral.rs supports distributed inference with a few strategies
+
 - [NCCL](NCCL.md) (recommended for CUDA)
 - [Ring backend](RING.md) (supported on all devices)
 
 **What backend is best?**
+
 - **For CUDA-only system**: NCCL
 - **Anything else**: Ring backend
 

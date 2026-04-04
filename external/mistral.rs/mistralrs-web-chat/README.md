@@ -3,6 +3,7 @@
 > **Deprecated:** The standalone `mistralrs-web-chat` binary is deprecated. Use `mistralrs serve --ui` instead for the same functionality.
 >
 > **Migration:**
+>
 > ```bash
 > # Old
 > cargo run --release --features cuda --bin mistralrs-web-chat -- --text-model Qwen/Qwen3-4B
@@ -34,14 +35,14 @@ A minimal, fast, and modern web chat interface for [mistral.rs](https://github.c
 - **Settings Persistence:** User settings are saved to localStorage and persist across sessions.
 - **Web Search:** Optional web search integration (when enabled on server).
 - **Keyboard Shortcuts:**
-  - `Ctrl+Enter` (or `Cmd+Enter` on Mac) to send messages.
-  - Button click also sends.
+    - `Ctrl+Enter` (or `Cmd+Enter` on Mac) to send messages.
+    - Button click also sends.
 
 ---
 
 ## Quickstart
 
-1) Build the app.
+1. Build the app.
 
 > Note: choose the features based on [this guide](../README.md#supported-accelerators).
 
@@ -58,7 +59,7 @@ cargo run --release --features <specify feature(s) here> --bin mistralrs-web-cha
 
 ---
 
-2) Access the app!
+2. Access the app!
 
 - Open http://localhost:1234 (or your chosen port).
 
@@ -92,12 +93,14 @@ Options:
 ### Examples
 
 Basic usage with a text model:
+
 ```bash
 cargo run --release --features cuda --bin mistralrs-web-chat -- \
   --text-model meta-llama/Llama-3.2-3B-Instruct
 ```
 
 With custom generation defaults:
+
 ```bash
 cargo run --release --features cuda --bin mistralrs-web-chat -- \
   --text-model Qwen/Qwen3-4B \
@@ -107,6 +110,7 @@ cargo run --release --features cuda --bin mistralrs-web-chat -- \
 ```
 
 Multiple models with web search:
+
 ```bash
 cargo run --release --features cuda --bin mistralrs-web-chat -- \
   --text-model Qwen/Qwen3-4B \
@@ -119,21 +123,21 @@ cargo run --release --features cuda --bin mistralrs-web-chat -- \
 
 ## API Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/ws` | WebSocket connection for streaming chat |
-| GET | `/api/settings` | Get server default settings |
-| GET | `/api/list_models` | List available models |
-| POST | `/api/select_model` | Switch active model |
-| GET | `/api/list_chats` | List saved chats |
-| POST | `/api/new_chat` | Create new chat |
-| POST | `/api/load_chat` | Load chat history |
-| POST | `/api/delete_chat` | Delete chat |
-| POST | `/api/rename_chat` | Rename chat |
-| POST | `/api/upload_image` | Upload image (vision models) |
-| POST | `/api/upload_text` | Upload text/code file |
-| POST | `/api/upload_audio` | Upload audio file |
-| POST | `/api/generate_speech` | Generate speech (TTS models) |
+| Method | Endpoint               | Description                             |
+| ------ | ---------------------- | --------------------------------------- |
+| GET    | `/ws`                  | WebSocket connection for streaming chat |
+| GET    | `/api/settings`        | Get server default settings             |
+| GET    | `/api/list_models`     | List available models                   |
+| POST   | `/api/select_model`    | Switch active model                     |
+| GET    | `/api/list_chats`      | List saved chats                        |
+| POST   | `/api/new_chat`        | Create new chat                         |
+| POST   | `/api/load_chat`       | Load chat history                       |
+| POST   | `/api/delete_chat`     | Delete chat                             |
+| POST   | `/api/rename_chat`     | Rename chat                             |
+| POST   | `/api/upload_image`    | Upload image (vision models)            |
+| POST   | `/api/upload_text`     | Upload text/code file                   |
+| POST   | `/api/upload_audio`    | Upload audio file                       |
+| POST   | `/api/generate_speech` | Generate speech (TTS models)            |
 
 ---
 
@@ -143,24 +147,25 @@ Messages sent to the WebSocket can include generation parameters:
 
 ```json
 {
-  "content": "Your message here",
-  "generation_params": {
-    "temperature": 0.8,
-    "top_p": 0.95,
-    "top_k": 50,
-    "max_tokens": 2048,
-    "repetition_penalty": 1.1
-  },
-  "web_search_options": {
-    "search_context_size": "medium"
-  }
+    "content": "Your message here",
+    "generation_params": {
+        "temperature": 0.8,
+        "top_p": 0.95,
+        "top_k": 50,
+        "max_tokens": 2048,
+        "repetition_penalty": 1.1
+    },
+    "web_search_options": {
+        "search_context_size": "medium"
+    }
 }
 ```
 
 To update the system prompt:
+
 ```json
 {
-  "set_system_prompt": "You are a helpful assistant."
+    "set_system_prompt": "You are a helpful assistant."
 }
 ```
 
@@ -169,11 +174,13 @@ To update the system prompt:
 ## Development
 
 ### Frontend
+
 - Edit static/index.html and supporting JS/CSS.
 - Uses marked.js for markdown rendering.
 - Settings stored in localStorage under `mistralrs_settings`.
 
 ### Backend
+
 - See main.rs for server and model loading logic.
 - Models are managed via CLI arguments; hot reloading is not supported.
 - Generation parameters can be configured via CLI and overridden per-message.

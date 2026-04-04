@@ -5,39 +5,42 @@ Mistral.rs supports the Qwen2-VL vision model family, with examples in the Rust,
 UQFF quantizations are also available.
 
 The Python and HTTP APIs support sending images as:
+
 - URL
 - Path to a local image
 - [Base64](https://en.wikipedia.org/wiki/Base64) encoded string
 
 The Rust SDK takes an image from the [image](https://docs.rs/image/latest/image/index.html) crate.
 
-> Note: When using device mapping or model topology, only the text model and its layers will be managed. This is because it contains most of the model parameters. *The text model has 28 layers*.
+> Note: When using device mapping or model topology, only the text model and its layers will be managed. This is because it contains most of the model parameters. _The text model has 28 layers_.
 
 ## ToC
+
 - [Qwen 2 Vision Model: `Qwen2-VL Collection`](#qwen-2-vision-model-qwen2-vl-collection)
-  - [ToC](#toc)
-  - [Interactive mode](#interactive-mode)
-  - [HTTP server](#http-server)
-  - [Rust](#rust)
-  - [Python](#python)
+    - [ToC](#toc)
+    - [Interactive mode](#interactive-mode)
+    - [HTTP server](#http-server)
+    - [Rust](#rust)
+    - [Python](#python)
 
 ## Interactive mode
 
 Mistral.rs supports interactive mode for vision models! It is an easy way to interact with the model.
 
-1) Start up interactive mode with the Qwen2-VL model
+1. Start up interactive mode with the Qwen2-VL model
 
 ```
 mistralrs run vision -m Qwen/Qwen2-VL-2B-Instruct
 ```
 
-2) Say hello!
+2. Say hello!
+
 ```
 > Hello!
 Hello! How can I assist you today?
 ```
 
-3) Pass the model an image and ask a question.
+3. Pass the model an image and ask a question.
 
 ```
 > Hello!
@@ -55,6 +58,7 @@ camellias are also known for their resilience and ability to thrive in a variety
 ```
 
 ## HTTP server
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/qwen2vl.py).
 
 We support an OpenAI compatible HTTP API for vision models. This example demonstrates sending a chat completion request with an image.
@@ -67,11 +71,13 @@ We support an OpenAI compatible HTTP API for vision models. This example demonst
 <img src="https://www.garden-treasures.com/cdn/shop/products/IMG_6245.jpg" alt="Mount Washington">
 
 **Prompt:**
+
 ```
 What type of flower is this? Give some fun facts.
 ```
 
 **Output:**
+
 ```
 flowers are a beautiful addition to any garden or outdoor space. They come in many different colors and shapes, and can be used for both decorative purposes and as sources of pollination for bees and other insects.
 
@@ -83,13 +89,13 @@ In conclusion, camellias are beautiful flowers that add color and interest to ga
 
 ---
 
-1) Start the server
+1. Start the server
 
 ```
 mistralrs serve vision -p 1234 -m Qwen/Qwen2-VL-2B-Instruct
 ```
 
-2) Send a request
+2. Send a request
 
 ```py
 from openai import OpenAI
@@ -131,6 +137,7 @@ print(resp)
 ---
 
 ## Rust
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/vision_models/main.rs).
 
 ```rust
@@ -177,6 +184,7 @@ async fn main() -> Result<()> {
 ---
 
 ## Python
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/qwen2vl.py).
 
 This example demonstrates loading and sending a chat completion request with an image.

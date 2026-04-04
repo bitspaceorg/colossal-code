@@ -3,6 +3,7 @@
 The Phi 4 Multimodal Model has support in the Rust, Python, and HTTP APIs. The Phi 4 Multimodal Model supports ISQ for increased performance.
 
 The Python and HTTP APIs support sending images as:
+
 - URL
 - Path to a local image
 - [Base64](https://en.wikipedia.org/wiki/Base64) encoded string
@@ -17,6 +18,7 @@ The Rust SDK takes an image from the [image](https://docs.rs/image/latest/image/
 [**Phi 4 multimodal supports audio inputs!**](#audio-input).
 
 ## HTTP server
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/phi3v.py).
 
 We support an OpenAI compatible HTTP API for vision models. This example demonstrates sending a chat completion request with an image.
@@ -27,27 +29,30 @@ We support an OpenAI compatible HTTP API for vision models. This example demonst
 
 **Image:**
 <img src="https://www.nhmagazine.com/content/uploads/2019/05/mtwashingtonFranconia-2-19-18-108-Edit-Edit.jpg" alt="Mount Washington" width = "1000" height = "666">
+
 <h6><a href = "https://www.nhmagazine.com/mount-washington/">Credit</a></h6>
 
 **Prompt:**
+
 ```
 What is shown in this image? Write a detailed response analyzing the scene.
 ```
 
 **Output:**
+
 ```
 A mountain with snow on it.
 ```
 
 ---
 
-1) Start the server
+1. Start the server
 
 ```
 mistralrs serve vision -p 1234 -m microsoft/Phi-4-multimodal-instruct
 ```
 
-2) Send a request
+2. Send a request
 
 ```py
 from openai import OpenAI
@@ -89,6 +94,7 @@ print(resp)
 ---
 
 ## Rust
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/vision_models/main.rs).
 
 This is a minimal example of running the Phi 4 Multimodal model with a dummy image.
@@ -133,6 +139,7 @@ async fn main() -> Result<()> {
 ```
 
 ## Python
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/phi3v.py).
 
 This example demonstrates loading and sending a chat completion request with an image.
@@ -181,7 +188,7 @@ print(res.usage)
 
 ## Audio input
 
-Alongside vision, Phi 4 Multimodal in `mistral.rs` can accept **audio** as an additional modality.  This unlocks fully-local pipelines such as **text + speech + vision -> text** where the model can reason jointly over what it *hears* and what it *sees*.
+Alongside vision, Phi 4 Multimodal in `mistral.rs` can accept **audio** as an additional modality. This unlocks fully-local pipelines such as **text + speech + vision -> text** where the model can reason jointly over what it _hears_ and what it _sees_.
 
 `mistral.rs` automatically decodes the supplied audio (WAV/MP3/FLAC/OGG/… – anything [Symphonia](https://github.com/pdeljanov/Symphonia) can handle) into 16-bit PCM.
 
@@ -191,21 +198,25 @@ Audio is delivered with the `audio_url` content-type that mirrors OpenAIʼs offi
 
 ```json
 {
-  "role": "user",
-  "content": [
-    {
-      "type": "audio_url",
-      "audio_url": { "url": "https://upload.wikimedia.org/wikipedia/commons/4/42/Bird_singing.ogg" }
-    },
-    {
-      "type": "image_url",
-      "image_url": { "url": "https://www.allaboutbirds.org/guide/assets/og/528129121-1200px.jpg" }
-    },
-    {
-      "type": "text",
-      "text": "Describe what is happening in this clip in as much detail as possible."
-    }
-  ]
+    "role": "user",
+    "content": [
+        {
+            "type": "audio_url",
+            "audio_url": {
+                "url": "https://upload.wikimedia.org/wikipedia/commons/4/42/Bird_singing.ogg"
+            }
+        },
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": "https://www.allaboutbirds.org/guide/assets/og/528129121-1200px.jpg"
+            }
+        },
+        {
+            "type": "text",
+            "text": "Describe what is happening in this clip in as much detail as possible."
+        }
+    ]
 }
 ```
 
@@ -252,7 +263,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-With this, you now have a single-call pipeline that fuses *sound*, *vision*, and *text* – all running locally through `mistral.rs`! 🔥
+With this, you now have a single-call pipeline that fuses _sound_, _vision_, and _text_ – all running locally through `mistral.rs`! 🔥
 
 - You can find an example of encoding the [image via base64 here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/phi3v_base64.py).
 - You can find an example of loading an [image locally here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/phi3v_local_img.py).

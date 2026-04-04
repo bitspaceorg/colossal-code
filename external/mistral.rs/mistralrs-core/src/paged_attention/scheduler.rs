@@ -81,7 +81,9 @@ impl PagedAttentionScheduler {
     pub fn set_prefix_caching_enabled_sync(&mut self, enabled: bool) {
         self.prefix_caching_enabled = enabled;
         if enabled {
-            info!("Prefix caching enabled (block-level, PagedAttention). Expect higher multi-turn throughput for both text and multimodal.");
+            info!(
+                "Prefix caching enabled (block-level, PagedAttention). Expect higher multi-turn throughput for both text and multimodal."
+            );
         }
     }
 

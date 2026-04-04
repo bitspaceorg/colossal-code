@@ -764,8 +764,12 @@ impl Gemma3nAudioAttention {
                         // Truncate mask to match logits
                         mask = mask.narrow(i, 0, logit_dim)?;
                     } else {
-                        bail!("Mask dimension {} has size {} which is smaller than logits size {} and cannot be broadcast", 
-                              i, mask_dim, logit_dim);
+                        bail!(
+                            "Mask dimension {} has size {} which is smaller than logits size {} and cannot be broadcast",
+                            i,
+                            mask_dim,
+                            logit_dim
+                        );
                     }
                 }
             }

@@ -154,7 +154,9 @@ pub fn get_xlora_paths(
                 })
                 .collect::<Vec<_>>();
             if adapter_files.is_empty() && xlora_order.adapters.is_some() {
-                anyhow::bail!("Adapter files are empty. Perhaps the ordering file adapters does not match the actual adapters?")
+                anyhow::bail!(
+                    "Adapter files are empty. Perhaps the ordering file adapters does not match the actual adapters?"
+                )
             }
 
             // Get the local paths for each adapter
@@ -203,7 +205,9 @@ pub fn get_xlora_paths(
                 anyhow::bail!(
                     "Adapter ordering file, adapter model config, and base model ID do not match: {}, {}, and {} respectively.",
                     xlora_order.base_model_id,
-                    xlora_config.map(|cfg| cfg.base_model_id).unwrap_or(base_model_id.clone()),
+                    xlora_config
+                        .map(|cfg| cfg.base_model_id)
+                        .unwrap_or(base_model_id.clone()),
                     base_model_id
                 );
             }
@@ -441,7 +445,9 @@ pub(crate) fn get_chat_template(
     } else if chat_template_ovrd.is_some() {
         None
     } else {
-        info!("No chat template file found. Chat template may be set via `chat_template.json` or processor config.");
+        info!(
+            "No chat template file found. Chat template may be set via `chat_template.json` or processor config."
+        );
         None
     };
     let mut template: ChatTemplate = match chat_template_ovrd {
@@ -535,7 +541,9 @@ pub(crate) fn get_chat_template(
         Some(_) => template,
         None => {
             if let Some(template_content) = template_content {
-                info!("`tokenizer_config.json` does not contain a chat template, attempting to use specified JINJA chat template.");
+                info!(
+                    "`tokenizer_config.json` does not contain a chat template, attempting to use specified JINJA chat template."
+                );
                 let mut deser: HashMap<String, Value> =
                     serde_json::from_str(&template_content).unwrap();
 
@@ -559,7 +567,9 @@ pub(crate) fn get_chat_template(
                         }
                     }
                     None => {
-                        warn!("No specified chat template. No chat template will be used. Only prompts will be accepted, not messages.");
+                        warn!(
+                            "No specified chat template. No chat template will be used. Only prompts will be accepted, not messages."
+                        );
                         deser.insert("chat_template".to_string(), Value::Null);
                     }
                 }
@@ -568,7 +578,9 @@ pub(crate) fn get_chat_template(
                     .expect("Serialization of modified chat template failed.");
                 serde_json::from_str(&ser).unwrap()
             } else {
-                warn!("No chat template source found. No chat template will be used. Only prompts will be accepted, not messages.");
+                warn!(
+                    "No chat template source found. No chat template will be used. Only prompts will be accepted, not messages."
+                );
                 template
             }
         }

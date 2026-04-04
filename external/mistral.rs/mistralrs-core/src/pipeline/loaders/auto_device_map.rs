@@ -395,7 +395,11 @@ pub fn get_device_layers(
         let over = b_to_mb!(remaining);
         anyhow::bail!(
             "This model does not fit on the devices {:?}, and exceeds total capacity by {}MB. Auto device mapping params: {params}",
-            avail_copy.iter().rev().map(|(a, d)| format!("{} (avail: {}MB)", d.device_pretty_repr(), b_to_mb!(a))).collect::<Vec<_>>(),
+            avail_copy
+                .iter()
+                .rev()
+                .map(|(a, d)| format!("{} (avail: {}MB)", d.device_pretty_repr(), b_to_mb!(a)))
+                .collect::<Vec<_>>(),
             over
         );
     }

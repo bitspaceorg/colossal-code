@@ -3,17 +3,20 @@
 ## Overview
 
 Web search implementation with carefully balanced parameters:
+
 - **`web_search`** - Search with previews (2000 chars/page)
 - **`html_to_text`** - Full content extraction (configurable)
 
 ## Parameters
 
 ### web_search
+
 - `query` (required) - The search query
 - `limit` (optional, default: 10) - Number of results
 - `site` (optional, ADVANCED) - Array of domains to search within
 
 ### html_to_text
+
 - `url` (required) - URL to fetch
 - `max_content_length` (optional, default: 10000) - Max characters
 
@@ -22,6 +25,7 @@ Web search implementation with carefully balanced parameters:
 ### Why Include `site` Parameter?
 
 The `site` parameter is included but with strong warnings because:
+
 1. **Power users need it** - For authoritative source searches
 2. **Comprehensive coverage** - Supports multiple domains
 3. **Explicit control** - When you know exactly what you need
@@ -29,6 +33,7 @@ The `site` parameter is included but with strong warnings because:
 ### Why Strong Warnings?
 
 The parameter is marked ADVANCED and heavily warned because:
+
 1. **Easy to misuse** - Can miss important information
 2. **False confidence** - LLMs might think they know sites when they don't
 3. **Better alternatives** - Good queries usually work better
@@ -37,34 +42,38 @@ The parameter is marked ADVANCED and heavily warned because:
 ### The Balance
 
 **Most searches should use:**
+
 ```json
 {
-  "query": "rust async programming",
-  "limit": 5
+    "query": "rust async programming",
+    "limit": 5
 }
 ```
 
 **Only when certain, use:**
+
 ```json
 {
-  "query": "async trait",
-  "limit": 5,
-  "site": ["rust-lang.org", "docs.rs", "blog.rust-lang.org"]
+    "query": "async trait",
+    "limit": 5,
+    "site": ["rust-lang.org", "docs.rs", "blog.rust-lang.org"]
 }
 ```
 
 ## Safety Mechanisms
 
 ### 1. Tool Description Warning
+
 ```
-"ADVANCED: Array of specific domains to search within. Only use if you know 
-exactly which authoritative sites to search... DO NOT use unless you are 
+"ADVANCED: Array of specific domains to search within. Only use if you know
+exactly which authoritative sites to search... DO NOT use unless you are
 certain about the authoritative domains."
 ```
 
 ### 2. System Prompt Warnings
 
 Multiple sections in system_prompt.txt:
+
 - ⚠️ WARNING section listing when to use
 - DO NOT use section listing when NOT to use
 - Emphasis on "ONLY when you know what you're doing"
@@ -73,6 +82,7 @@ Multiple sections in system_prompt.txt:
 ### 3. Documentation Emphasis
 
 docs/WEB_SEARCH.md includes:
+
 - Dedicated warning section
 - Clear DO/DON'T lists
 - "Use with caution" messaging
@@ -88,6 +98,7 @@ Recommended pattern:
 ```
 
 This balances:
+
 - **Discovery** (web_search with previews)
 - **Deep reading** (html_to_text for specifics)
 - **Context usage** (preview first, full only when needed)
@@ -95,6 +106,7 @@ This balances:
 ## Usage Guidelines for LLM
 
 ### Standard Approach (90% of cases)
+
 ```json
 {
   "query": "topic to search",
@@ -103,7 +115,9 @@ This balances:
 ```
 
 ### Advanced Approach (10% of cases)
+
 Only when:
+
 - User explicitly requests specific sites
 - You know EXACTLY which authoritative domains
 - Multiple related domains provided
@@ -111,9 +125,9 @@ Only when:
 
 ```json
 {
-  "query": "specific query",
-  "limit": 5,
-  "site": ["domain1.com", "domain2.org", "domain3.io"]
+    "query": "specific query",
+    "limit": 5,
+    "site": ["domain1.com", "domain2.org", "domain3.io"]
 }
 ```
 
@@ -134,11 +148,13 @@ docs/
 ## Context Budget
 
 Example search session:
+
 - web_search (5 results): ~2,500 tokens
 - html_to_text (1 page): ~2,500 tokens
 - **Total: ~5,000 tokens**
 
 With site filtering:
+
 - Potentially fewer but more focused results
 - Same 2000 char/page limit applies
 - Same workflow to html_to_text

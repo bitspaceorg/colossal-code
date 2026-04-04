@@ -1,6 +1,6 @@
 # Qwen3 Embedding
 
-The Qwen3 Embedding model series is the latest proprietary model of the Qwen family, specifically designed for text embedding and ranking tasks. 
+The Qwen3 Embedding model series is the latest proprietary model of the Qwen family, specifically designed for text embedding and ranking tasks.
 
 For a catalog of all embedding backends, see [EMBEDDINGS.md](EMBEDDINGS.md).
 
@@ -28,12 +28,12 @@ To expose the model alongside chat models, register it in your selector configur
 
 ```json
 {
-  "embed-qwen3": {
-    "Embedding": {
-      "model_id": "Qwen/Qwen3-Embedding-0.6B",
-      "arch": "qwen3embedding"
+    "embed-qwen3": {
+        "Embedding": {
+            "model_id": "Qwen/Qwen3-Embedding-0.6B",
+            "arch": "qwen3embedding"
+        }
     }
-  }
 }
 ```
 

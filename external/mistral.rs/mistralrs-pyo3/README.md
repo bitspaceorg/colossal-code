@@ -5,6 +5,7 @@
 ## Documentation
 
 For full documentation, see:
+
 - [Python SDK Documentation](https://ericlbuehler.github.io/mistral.rs/PYTHON_SDK.html)
 - [Installation Guide](https://ericlbuehler.github.io/mistral.rs/PYTHON_INSTALLATION.html)
 

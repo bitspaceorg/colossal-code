@@ -227,8 +227,9 @@ impl VisionLoaderType {
             "Gemma3nForConditionalGeneration" => Ok(Self::Gemma3n),
             "Qwen3VLForConditionalGeneration" => Ok(Self::Qwen3VL),
             "Qwen3VLMoeForConditionalGeneration" => Ok(Self::Qwen3VLMoE),
-            "VoxtralForConditionalGeneration"
-            | "VoxtralRealtimeForConditionalGeneration" => Ok(Self::Voxtral),
+            "VoxtralForConditionalGeneration" | "VoxtralRealtimeForConditionalGeneration" => {
+                Ok(Self::Voxtral)
+            }
             other => anyhow::bail!(
                 "Unsupported Hugging Face Transformers -CausalLM model class `{other}`. Please raise an issue."
             ),
@@ -257,7 +258,9 @@ impl FromStr for VisionLoaderType {
             "qwen3vl" => Ok(Self::Qwen3VL),
             "qwen3vlmoe" => Ok(Self::Qwen3VLMoE),
             "voxtral" => Ok(Self::Voxtral),
-            a => Err(format!("Unknown architecture `{a}`. Possible architectures: `phi3v`, `idefics2`, `llava_next`, `llava`, `vllama`, `qwen2vl`, `idefics3`, `minicpmo`, `phi4mm`, `qwen2_5vl`, `gemma3`, `mistral3`, `llama4`, `gemma3n`, `qwen3vl`, `qwen3vlmoe`, `voxtral`.")),
+            a => Err(format!(
+                "Unknown architecture `{a}`. Possible architectures: `phi3v`, `idefics2`, `llava_next`, `llava`, `vllama`, `qwen2vl`, `idefics3`, `minicpmo`, `phi4mm`, `qwen2_5vl`, `gemma3`, `mistral3`, `llama4`, `gemma3n`, `qwen3vl`, `qwen3vlmoe`, `voxtral`."
+            )),
         }
     }
 }

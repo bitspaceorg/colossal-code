@@ -19,6 +19,7 @@ mistralrs run speech -m nari-labs/Dia-1.6B -a dia
 ```
 
 After this, you can send requests via the HTTP server:
+
 ```py
 from pathlib import Path
 from openai import OpenAI
@@ -38,6 +39,7 @@ print(f"WAV audio written to {output_path.resolve()}")
 ```
 
 ## Rust example
+
 ```rust
 use std::time::Instant;
 
@@ -73,6 +75,7 @@ async fn main() -> Result<()> {
 ```
 
 ## Python example
+
 ```py
 from mistralrs import (
     Runner,

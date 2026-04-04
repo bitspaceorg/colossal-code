@@ -9,9 +9,9 @@ Mistral.rs implements speculative decoding based on the paper: [Fast Inference f
 1. The draft model generates `gamma` candidate tokens autoregressively
 2. The target model evaluates all candidate tokens in a single forward pass
 3. Using rejection sampling, tokens are accepted or rejected:
-   - Accept if the target model's probability >= draft model's probability
-   - Otherwise, accept with probability `p_target(x) / p_draft(x)`
-   - If rejected, sample from the normalized difference distribution
+    - Accept if the target model's probability >= draft model's probability
+    - Otherwise, accept with probability `p_target(x) / p_draft(x)`
+    - If rejected, sample from the normalized difference distribution
 
 This approach guarantees the same output distribution as running the target model alone, while often achieving significant speedups.
 
@@ -123,10 +123,10 @@ print(res.usage)
 
 ### Python SDK Parameters
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `which_draft` | `Which` | Draft model specification (Plain, GGUF, etc.) |
-| `speculative_gamma` | `int` | Number of draft tokens per step (default: 32) |
+| Parameter           | Type    | Description                                   |
+| ------------------- | ------- | --------------------------------------------- |
+| `which_draft`       | `Which` | Draft model specification (Plain, GGUF, etc.) |
+| `speculative_gamma` | `int`   | Number of draft tokens per step (default: 32) |
 
 ## Using the Rust SDK
 
@@ -185,11 +185,11 @@ For best performance:
 
 ### Example Model Pairings
 
-| Target Model | Draft Model | Notes |
-|--------------|-------------|-------|
-| Llama 3.1-8B | Llama 3.2-1B | Same family, good acceptance |
-| Llama 3.1-70B | Llama 3.1-8B | Large speedup potential |
-| Mistral-7B | Mistral-7B (Q4_K_M GGUF) | Same model, quantized draft |
+| Target Model  | Draft Model              | Notes                        |
+| ------------- | ------------------------ | ---------------------------- |
+| Llama 3.1-8B  | Llama 3.2-1B             | Same family, good acceptance |
+| Llama 3.1-70B | Llama 3.1-8B             | Large speedup potential      |
+| Mistral-7B    | Mistral-7B (Q4_K_M GGUF) | Same model, quantized draft  |
 
 ## Performance Considerations
 

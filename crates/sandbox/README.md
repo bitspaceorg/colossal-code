@@ -1,6 +1,7 @@
 # Sessionizer Sandbox
 
 This crate provides sandboxing capabilities for Linux systems using:
+
 - Landlock for filesystem access control
 - Seccomp for system call filtering
 

@@ -1,6 +1,7 @@
 # Sandbox Unification Summary
 
 ## Overview
+
 This document describes how all session components (semantic search, file watcher, tools, and PTY) now operate under the same sandbox rules within a session.
 
 ## Problem Identified
@@ -19,6 +20,7 @@ Previously, there were inconsistencies in how sandbox policies were applied acro
 All components now follow a **consistent pattern**:
 
 #### PTY-based Sessions (ExecCommandSession & PersistentShellSession)
+
 ```
 Location: session.rs:789-940, 953-1105
 Pattern:
@@ -28,6 +30,7 @@ Pattern:
 ```
 
 #### Semantic Search Sessions
+
 ```
 Location: manager.rs:889-908, session.rs:403-461
 Pattern:
@@ -38,6 +41,7 @@ Pattern:
 ```
 
 #### Tools Execution
+
 ```
 Location: tools.rs:38-104
 Pattern:
@@ -50,6 +54,7 @@ Pattern:
 #### File: `session.rs`
 
 **Change 1**: Removed duplicate sandbox application in `SemanticSearchSession::new()`
+
 ```rust
 // BEFORE:
 crate::landlock::apply_sandbox_policy_to_current_thread(&sandbox_policy, &cwd)?;
@@ -60,6 +65,7 @@ crate::landlock::apply_sandbox_policy_to_current_thread(&sandbox_policy, &cwd)?;
 ```
 
 **Change 2**: Added comprehensive module-level documentation
+
 ```rust
 // Session Management Module
 //
@@ -70,6 +76,7 @@ crate::landlock::apply_sandbox_policy_to_current_thread(&sandbox_policy, &cwd)?;
 ```
 
 **Change 3**: Added documentation to `process_file_events()`
+
 ```rust
 /// Process file events (to be called periodically or in a separate task)
 /// NOTE: This method assumes the calling task/thread has already applied
@@ -77,12 +84,14 @@ crate::landlock::apply_sandbox_policy_to_current_thread(&sandbox_policy, &cwd)?;
 ```
 
 **Change 4**: Added function documentation to PTY session creators
+
 - `create_sandboxed_exec_session()`: Documents sandbox application order
 - `create_persistent_shell_session()`: Documents sandbox application order
 
 #### File: `manager.rs`
 
 **Change**: Enhanced documentation in indexing task spawn
+
 ```rust
 // IMPORTANT: Apply sandbox to this spawned task's thread
 // This sandbox policy will apply to:
@@ -107,13 +116,13 @@ create_semantic_search_session(..., sandbox_policy, ...)
 
 #### Sandbox Application Points
 
-| Component | Where Applied | Who Applies It | Inherits? |
-|-----------|---------------|----------------|-----------|
-| PTY (exec) | `session.rs:800` | Before spawning child | ✅ Child inherits |
-| PTY (shell) | `session.rs:964` | Before spawning shell | ✅ Shell inherits |
-| Semantic Indexing | `manager.rs:896` | Inside spawned task | ❌ Must apply explicitly |
-| File Watcher Events | `session.rs:514` | Same task as indexing | ✅ Inherits from task |
-| Tools | `tools.rs:53` | Before spawning tools | ✅ Tools inherit |
+| Component           | Where Applied    | Who Applies It        | Inherits?                |
+| ------------------- | ---------------- | --------------------- | ------------------------ |
+| PTY (exec)          | `session.rs:800` | Before spawning child | ✅ Child inherits        |
+| PTY (shell)         | `session.rs:964` | Before spawning shell | ✅ Shell inherits        |
+| Semantic Indexing   | `manager.rs:896` | Inside spawned task   | ❌ Must apply explicitly |
+| File Watcher Events | `session.rs:514` | Same task as indexing | ✅ Inherits from task    |
+| Tools               | `tools.rs:53`    | Before spawning tools | ✅ Tools inherit         |
 
 #### Critical Rules
 
@@ -132,12 +141,14 @@ The file watcher is currently **disabled** (see `session.rs:191-196`) but the in
 - Therefore, it **automatically inherits** the sandbox policy applied in `manager.rs:896`
 
 To enable file watching:
+
 1. Call `process_file_events()` periodically in the indexing task
 2. No additional sandbox setup needed - it already inherits
 
 ### 5. Verification
 
 The changes compile successfully:
+
 ```bash
 cd crates/sessionizer && cargo check
 ```

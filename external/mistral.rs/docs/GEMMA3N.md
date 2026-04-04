@@ -11,12 +11,12 @@ The Gemma 3n Model has support in the Rust, Python, and HTTP APIs. Additionally,
     Gemma 3n implements the MatFormer architecture, which allows one model to be resized dynamically and tune performance on resource-constrained systems.
 
     Mistral.rs supports this feature!
-    
+
     You can access it using the `matformer_config_path` ([example config](https://github.com/EricLBuehler/mistral.rs/blob/master/matformer_configs/gemma3n.csv)) and `matformer_slice_name` arguments throughout the APIs.
-    
+
 - **Prequantized UQFF models:**
-  - [Gemma 3n E4B](https://huggingface.co/EricB/gemma-3n-E4B-it-UQFF)
-  - [Gemma 3n E2B](https://huggingface.co/EricB/gemma-3n-E2B-it-UQFF)
+    - [Gemma 3n E4B](https://huggingface.co/EricB/gemma-3n-E4B-it-UQFF)
+    - [Gemma 3n E2B](https://huggingface.co/EricB/gemma-3n-E2B-it-UQFF)
 
 ## Using MatFormer with Gemma 3n
 
@@ -27,8 +27,9 @@ You can read more about MatFormer in mistral.rs [here](MATFORMER.md).
 ### Available Slices
 
 The default configuration file ([`matformer_configs/gemma3n.csv`](https://github.com/EricLBuehler/mistral.rs/blob/master/matformer_configs/gemma3n.csv)) includes:
+
 - **Main model** (3.98B params, 35 layers) - Full model with best performance
-- **Config for official E2B Model** (1.91B params, 30 layers) - Balanced performance/efficiency  
+- **Config for official E2B Model** (1.91B params, 30 layers) - Balanced performance/efficiency
 - Various intermediate configurations from E1.96B to E3.79B with different layer and FFN configurations
 
 ### Command Line Example
@@ -119,7 +120,7 @@ async fn main() -> Result<()> {
 
     println!("{}", response.choices[0].message.content.as_ref().unwrap());
     println!("Using E2.49B slice: 35 layers, 2.49B effective params");
-    
+
     Ok(())
 }
 ```
@@ -131,11 +132,13 @@ async fn main() -> Result<()> {
 - **Maximum quality**: Use "Main model" (3.98B params) or omit MatFormer configuration entirely
 
 The slice selection allows you to:
+
 - Reduce memory usage proportionally to the parameter count
 - Speed up inference roughly linearly with the number of layers
 - Maintain acceptable quality for many use cases with smaller slices
 
 ## HTTP server
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/gemma3n.py).
 
 We support an OpenAI compatible HTTP API for vision models. This example demonstrates sending a chat completion request with an image.
@@ -146,29 +149,32 @@ We support an OpenAI compatible HTTP API for vision models. This example demonst
 
 **Image:**
 <img src="https://www.nhmagazine.com/content/uploads/2019/05/mtwashingtonFranconia-2-19-18-108-Edit-Edit.jpg" alt="Mount Washington" width = "1000" height = "666">
+
 <h6><a href = "https://www.nhmagazine.com/mount-washington/">Credit</a></h6>
 
 **Prompt:**
+
 ```
 Please describe this image in detail.
 ```
 
 **Output:**
+
 ```
-The image captures a breathtaking, wide-angle view of a majestic mountain covered in a blanket of snow. The mountain dominates the frame, its peak reaching towards a partly cloudy sky. The snow cover is uneven, with patches of exposed dark rock and textured snow formations creating a visually interesting surface. 
+The image captures a breathtaking, wide-angle view of a majestic mountain covered in a blanket of snow. The mountain dominates the frame, its peak reaching towards a partly cloudy sky. The snow cover is uneven, with patches of exposed dark rock and textured snow formations creating a visually interesting surface.
 
-A winding, snow-covered path or road snakes its way up the mountainside, appearing as a bright white line against the darker slopes. This path draws the eye upwards towards the summit, where a few structures, possibly communication towers or observation points, are visible. 
+A winding, snow-covered path or road snakes its way up the mountainside, appearing as a bright white line against the darker slopes. This path draws the eye upwards towards the summit, where a few structures, possibly communication towers or observation points, are visible.
 
-The lower slopes of the mountain are covered in a dense forest of evergreen trees, their dark green hues contrasting beautifully with the white snow. The forest extends down into a valley, hinting at a wider landscape beyond the frame. 
+The lower slopes of the mountain are covered in a dense forest of evergreen trees, their dark green hues contrasting beautifully with the white snow. The forest extends down into a valley, hinting at a wider landscape beyond the frame.
 
-The sky above is a mix of pale blue and soft grey clouds, with some darker, more dramatic cloud formations near the top of the mountain. The lighting suggests it might be early morning or late afternoon, casting subtle shadows across the mountain's surface and highlighting its contours. 
+The sky above is a mix of pale blue and soft grey clouds, with some darker, more dramatic cloud formations near the top of the mountain. The lighting suggests it might be early morning or late afternoon, casting subtle shadows across the mountain's surface and highlighting its contours.
 
 The overall impression is one of grandeur, tranquility, and the raw beauty of a winter landscape. The scale of the mountain is impressive, and the winding path invites a sense of exploration and adventure.
 ```
 
 ---
 
-1) Start the server
+1. Start the server
 
 ```
 mistralrs serve vision -p 1234 -m google/gemma-3n-E4B-it
@@ -179,7 +185,7 @@ mistralrs serve vision -p 1234 -m google/gemma-3n-E4B-it \
   --matformer-slice-name "Config for E2.49B (block-level)"
 ```
 
-2) Send a request
+2. Send a request
 
 ```py
 from openai import OpenAI
@@ -221,6 +227,7 @@ print(resp)
 ---
 
 ## Rust
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/vision_models/main.rs).
 
 This is a minimal example of running the Gemma 3n model with a dummy image.
@@ -265,6 +272,7 @@ async fn main() -> Result<()> {
 ```
 
 ## Python
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/gemma3n.py).
 
 This example demonstrates loading and sending a chat completion request with an image.
@@ -311,28 +319,31 @@ print(res.choices[0].message.content)
 print(res.usage)
 ```
 
-
 ### OpenAI HTTP API
 
 Audio is delivered with the `audio_url` content-type that mirrors OpenAIʼs official specification:
 
 ```json
 {
-  "role": "user",
-  "content": [
-    {
-      "type": "audio_url",
-      "audio_url": { "url": "https://upload.wikimedia.org/wikipedia/commons/4/42/Bird_singing.ogg" }
-    },
-    {
-      "type": "image_url",
-      "image_url": { "url": "https://www.allaboutbirds.org/guide/assets/og/528129121-1200px.jpg" }
-    },
-    {
-      "type": "text",
-      "text": "Describe what is happening in this clip in as much detail as possible."
-    }
-  ]
+    "role": "user",
+    "content": [
+        {
+            "type": "audio_url",
+            "audio_url": {
+                "url": "https://upload.wikimedia.org/wikipedia/commons/4/42/Bird_singing.ogg"
+            }
+        },
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": "https://www.allaboutbirds.org/guide/assets/og/528129121-1200px.jpg"
+            }
+        },
+        {
+            "type": "text",
+            "text": "Describe what is happening in this clip in as much detail as possible."
+        }
+    ]
 }
 ```
 
@@ -379,7 +390,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-With this, you now have a single-call pipeline that fuses *sound*, *vision*, and *text* – all running locally through `mistral.rs`! 🔥
+With this, you now have a single-call pipeline that fuses _sound_, _vision_, and _text_ – all running locally through `mistral.rs`! 🔥
 
 - You can find an example of encoding the [image via base64 here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/phi3v_base64.py).
 - You can find an example of loading an [image locally here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/phi3v_local_img.py).

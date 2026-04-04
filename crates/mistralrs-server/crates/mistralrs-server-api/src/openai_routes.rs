@@ -2,12 +2,12 @@ use std::convert::Infallible;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
+    Json,
     extract::{Extension, State},
     http::StatusCode,
-    response::{sse::Event, sse::KeepAlive, sse::Sse, IntoResponse, Response},
-    Json,
+    response::{IntoResponse, Response, sse::Event, sse::KeepAlive, sse::Sse},
 };
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use mistralrs_server_core::{
     ChatRequest, EmbeddingRequest, EngineResponse, GenerateRequest, Usage,
 };
@@ -15,7 +15,7 @@ use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::{map_manager_error, record_success, AppState, RequestContext};
+use crate::{AppState, RequestContext, map_manager_error, record_success};
 
 // =================================================================================================
 // OpenAI Response Schemas
@@ -172,70 +172,84 @@ pub async fn handle_chat_completions(
         let stream_response = stream.flat_map(move |result| {
             let events: Vec<Result<Event, Infallible>> = match result {
                 Ok(EngineResponse::Chunk(chunk)) => {
-                     let response = OpenAIChatCompletionChunk {
+                    let response = OpenAIChatCompletionChunk {
                         id: chunk.id,
                         object: "chat.completion.chunk".to_string(),
                         created: chunk.created as u64,
                         model: chunk.model,
-                        choices: chunk.choices.into_iter().map(|c| OpenAIChatChunkChoice {
-                            index: c.index,
-                            delta: OpenAIChatChunkDelta {
-                                role: Some(c.delta.role),
-                                content: c.delta.content,
-                                tool_calls: c.delta.tool_calls.map(|tc| vec![serde_json::to_value(tc).unwrap()]),
-                            },
-                            finish_reason: c.finish_reason,
-                        }).collect(),
+                        choices: chunk
+                            .choices
+                            .into_iter()
+                            .map(|c| OpenAIChatChunkChoice {
+                                index: c.index,
+                                delta: OpenAIChatChunkDelta {
+                                    role: Some(c.delta.role),
+                                    content: c.delta.content,
+                                    tool_calls: c
+                                        .delta
+                                        .tool_calls
+                                        .map(|tc| vec![serde_json::to_value(tc).unwrap()]),
+                                },
+                                finish_reason: c.finish_reason,
+                            })
+                            .collect(),
                         usage: None,
                     };
                     match serde_json::to_string(&response) {
                         Ok(json) => vec![Ok(Event::default().data(json))],
-                        Err(_) => vec![Ok(Event::default().data("{\"error\":\"serialization_error\"}"))],
+                        Err(_) => vec![Ok(
+                            Event::default().data("{\"error\":\"serialization_error\"}")
+                        )],
                     }
                 }
                 Ok(EngineResponse::Done(done)) => {
-                     // Emit any content from the Done response as a final chunk, then [DONE]
-                     // This handles models that don't stream token-by-token
-                     let mut events = Vec::new();
+                    // Emit any content from the Done response as a final chunk, then [DONE]
+                    // This handles models that don't stream token-by-token
+                    let mut events = Vec::new();
 
-                     // Check if there's content in the Done response
-                     if let Some(choice) = done.choices.first() {
-                         if let Some(content) = &choice.message.content {
-                             if !content.is_empty() {
-                                 let final_chunk = OpenAIChatCompletionChunk {
-                                     id: done.id.clone(),
-                                     object: "chat.completion.chunk".to_string(),
-                                     created: done.created,
-                                     model: done.model.clone(),
-                                     choices: vec![OpenAIChatChunkChoice {
-                                         index: 0,
-                                         delta: OpenAIChatChunkDelta {
-                                             role: Some(choice.message.role.clone()),
-                                             content: Some(content.clone()),
-                                             tool_calls: choice.message.tool_calls.as_ref().map(|tc| {
-                                                 vec![serde_json::to_value(tc).unwrap_or_default()]
-                                             }),
-                                         },
-                                         finish_reason: Some(choice.finish_reason.clone()),
-                                     }],
-                                     usage: Some(mistralrs_server_core::Usage {
-                                         prompt_tokens: done.usage.prompt_tokens as u32,
-                                         completion_tokens: done.usage.completion_tokens as u32,
-                                         total_tokens: done.usage.total_tokens as u32,
-                                     }),
-                                 };
-                                 if let Ok(json) = serde_json::to_string(&final_chunk) {
-                                     events.push(Ok(Event::default().data(json)));
-                                 }
-                             }
-                         }
-                     }
+                    // Check if there's content in the Done response
+                    if let Some(choice) = done.choices.first() {
+                        if let Some(content) = &choice.message.content {
+                            if !content.is_empty() {
+                                let final_chunk = OpenAIChatCompletionChunk {
+                                    id: done.id.clone(),
+                                    object: "chat.completion.chunk".to_string(),
+                                    created: done.created,
+                                    model: done.model.clone(),
+                                    choices: vec![OpenAIChatChunkChoice {
+                                        index: 0,
+                                        delta: OpenAIChatChunkDelta {
+                                            role: Some(choice.message.role.clone()),
+                                            content: Some(content.clone()),
+                                            tool_calls: choice.message.tool_calls.as_ref().map(
+                                                |tc| {
+                                                    vec![
+                                                        serde_json::to_value(tc)
+                                                            .unwrap_or_default(),
+                                                    ]
+                                                },
+                                            ),
+                                        },
+                                        finish_reason: Some(choice.finish_reason.clone()),
+                                    }],
+                                    usage: Some(mistralrs_server_core::Usage {
+                                        prompt_tokens: done.usage.prompt_tokens as u32,
+                                        completion_tokens: done.usage.completion_tokens as u32,
+                                        total_tokens: done.usage.total_tokens as u32,
+                                    }),
+                                };
+                                if let Ok(json) = serde_json::to_string(&final_chunk) {
+                                    events.push(Ok(Event::default().data(json)));
+                                }
+                            }
+                        }
+                    }
 
-                     events.push(Ok(Event::default().data("[DONE]")));
-                     events
+                    events.push(Ok(Event::default().data("[DONE]")));
+                    events
                 }
                 Ok(EngineResponse::ModelError(msg, _)) => {
-                     let err = json!({
+                    let err = json!({
                         "error": {
                             "message": msg,
                             "type": "model_error",
@@ -246,7 +260,7 @@ pub async fn handle_chat_completions(
                     vec![Ok(Event::default().data(err.to_string()))]
                 }
                 Ok(EngineResponse::InternalError(err)) => {
-                     let err = json!({
+                    let err = json!({
                         "error": {
                             "message": err.to_string(),
                             "type": "server_error",
@@ -265,7 +279,9 @@ pub async fn handle_chat_completions(
         record_success(&state, endpoint, "POST", StatusCode::OK);
 
         let keep_alive = KeepAlive::new().interval(std::time::Duration::from_secs(10));
-        return Ok(Sse::new(stream_response).keep_alive(keep_alive).into_response());
+        return Ok(Sse::new(stream_response)
+            .keep_alive(keep_alive)
+            .into_response());
     }
 
     let resp = manager
@@ -279,8 +295,8 @@ pub async fn handle_chat_completions(
     let mut content = String::new();
     for part in resp.message.content {
         match part {
-             mistralrs_server_core::ChatContent::Text { text } => content.push_str(&text),
-             _ => {}
+            mistralrs_server_core::ChatContent::Text { text } => content.push_str(&text),
+            _ => {}
         }
     }
 
@@ -324,7 +340,7 @@ pub async fn handle_completions(
     let request_id = format!("cmpl-{}", Uuid::new_v4());
 
     if payload.stream {
-         let stream = manager
+        let stream = manager
             .generate_stream(payload)
             .await
             .map_err(|err| map_manager_error(&state, endpoint, "POST", err).into_response())?;
@@ -338,17 +354,23 @@ pub async fn handle_completions(
                         object: "text_completion".to_string(),
                         created: chunk.created as u64,
                         model: chunk.model,
-                        choices: chunk.choices.into_iter().map(|c| OpenAICompletionChunkChoice {
-                            text: c.text,
-                            index: c.index,
-                            logprobs: c.logprobs.map(|l| serde_json::to_value(l).unwrap()),
-                            finish_reason: c.finish_reason,
-                        }).collect(),
+                        choices: chunk
+                            .choices
+                            .into_iter()
+                            .map(|c| OpenAICompletionChunkChoice {
+                                text: c.text,
+                                index: c.index,
+                                logprobs: c.logprobs.map(|l| serde_json::to_value(l).unwrap()),
+                                finish_reason: c.finish_reason,
+                            })
+                            .collect(),
                         usage: None,
                     };
                     match serde_json::to_string(&response) {
                         Ok(json) => vec![Ok(Event::default().data(json))],
-                        Err(_) => vec![Ok(Event::default().data("{\"error\":\"serialization_error\"}"))],
+                        Err(_) => vec![Ok(
+                            Event::default().data("{\"error\":\"serialization_error\"}")
+                        )],
                     }
                 }
                 Ok(EngineResponse::CompletionDone(done)) => {
@@ -383,8 +405,8 @@ pub async fn handle_completions(
                     events.push(Ok(Event::default().data("[DONE]")));
                     events
                 }
-                 Ok(EngineResponse::CompletionModelError(msg, _)) => {
-                     let err = json!({
+                Ok(EngineResponse::CompletionModelError(msg, _)) => {
+                    let err = json!({
                         "error": {
                             "message": msg,
                             "type": "model_error",
@@ -394,14 +416,16 @@ pub async fn handle_completions(
                     });
                     vec![Ok(Event::default().data(err.to_string()))]
                 }
-                 Ok(_) => vec![Ok(Event::default())],
-                 Err(_) => vec![Ok(Event::default().data("{\"error\":\"stream_error\"}"))],
+                Ok(_) => vec![Ok(Event::default())],
+                Err(_) => vec![Ok(Event::default().data("{\"error\":\"stream_error\"}"))],
             };
             stream::iter(events)
         });
         record_success(&state, endpoint, "POST", StatusCode::OK);
         let keep_alive = KeepAlive::new().interval(std::time::Duration::from_secs(10));
-        return Ok(Sse::new(stream_response).keep_alive(keep_alive).into_response());
+        return Ok(Sse::new(stream_response)
+            .keep_alive(keep_alive)
+            .into_response());
     }
 
     let resp = manager
@@ -448,11 +472,16 @@ pub async fn handle_embeddings_openai(
     log.record_usage(&resp.usage);
     record_success(&state, endpoint, "POST", StatusCode::OK);
 
-    let data = resp.embeddings.into_iter().enumerate().map(|(i, vec)| OpenAIEmbeddingData {
-        object: "embedding".to_string(),
-        embedding: vec,
-        index: i,
-    }).collect();
+    let data = resp
+        .embeddings
+        .into_iter()
+        .enumerate()
+        .map(|(i, vec)| OpenAIEmbeddingData {
+            object: "embedding".to_string(),
+            embedding: vec,
+            index: i,
+        })
+        .collect();
 
     let response = OpenAIEmbeddingResponse {
         object: "list".to_string(),

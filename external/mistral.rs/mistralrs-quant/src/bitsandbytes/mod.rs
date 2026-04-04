@@ -87,7 +87,9 @@ impl BnbLinear {
         if !vb_w.contains_tensor("quant_state.bitsandbytes__nf4")
             && !vb_w.contains_tensor("quant_state.bitsandbytes__fp4")
         {
-            candle_core::bail!("`BnbLinear` expects either `...__nf4` or `...__fp4` tensors, this means the layer is not 4bit.");
+            candle_core::bail!(
+                "`BnbLinear` expects either `...__nf4` or `...__fp4` tensors, this means the layer is not 4bit."
+            );
         }
 
         let bias = if bias {

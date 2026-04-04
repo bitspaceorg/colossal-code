@@ -205,7 +205,9 @@ impl DiffusionModel for FluxStepper {
         if !self.is_guidance {
             match t5_input_ids.dim(1)?.cmp(&256) {
                 Ordering::Greater => {
-                    candle_core::bail!("T5 embedding length greater than 256, please shrink the prompt or use the -dev (with guidance distillation) version.")
+                    candle_core::bail!(
+                        "T5 embedding length greater than 256, please shrink the prompt or use the -dev (with guidance distillation) version."
+                    )
                 }
                 Ordering::Less | Ordering::Equal => {
                     t5_input_ids =

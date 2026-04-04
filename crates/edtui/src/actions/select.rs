@@ -1,8 +1,8 @@
 use jagged::index::RowIndex;
 
-use super::{delete::delete_selection, motion::CharacterClass, Execute};
+use super::{Execute, delete::delete_selection, motion::CharacterClass};
 use crate::{
-    clipboard::ClipboardTrait, state::selection::Selection, EditorMode, EditorState, Index2, Lines,
+    EditorMode, EditorState, Index2, Lines, clipboard::ClipboardTrait, state::selection::Selection,
 };
 
 /// Selects text between specified delimiter characters.
@@ -217,9 +217,9 @@ impl Execute for ChangeSelection {
 
 #[cfg(test)]
 mod tests {
-    use crate::state::selection::Selection;
     use crate::Index2;
     use crate::Lines;
+    use crate::state::selection::Selection;
 
     use super::*;
     fn test_state() -> EditorState {

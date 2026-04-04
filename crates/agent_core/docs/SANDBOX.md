@@ -11,12 +11,14 @@ The tool agent uses a sandboxed environment to restrict file system access for s
 Colon-separated list of additional directories that should be accessible to the sandbox.
 
 **Example:**
+
 ```bash
 export SANDBOX_EXTRA_ROOTS="/home/wise/arsenal/env:/home/wise/data"
 cargo run
 ```
 
 This would allow access to:
+
 - Current working directory (always allowed)
 - `/home/wise/arsenal/env`
 - `/home/wise/data`
@@ -24,6 +26,7 @@ This would allow access to:
 ### Default Behavior
 
 Without `SANDBOX_EXTRA_ROOTS`, only the current working directory is accessible:
+
 ```bash
 cargo run  # Only current directory accessible
 ```
@@ -38,6 +41,7 @@ cargo run  # Only current directory accessible
 ## Testing Sandbox
 
 To verify sandbox is working:
+
 ```bash
 # Should fail - path not in sandbox
 cargo run -- ls /some/other/directory

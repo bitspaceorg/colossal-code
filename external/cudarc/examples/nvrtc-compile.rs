@@ -1,4 +1,4 @@
-use cudarc::nvrtc::{compile_ptx_with_opts, CompileError, CompileOptions};
+use cudarc::nvrtc::{CompileError, CompileOptions, compile_ptx_with_opts};
 
 fn main() -> Result<(), CompileError> {
     let opts = CompileOptions {

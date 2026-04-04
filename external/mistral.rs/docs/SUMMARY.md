@@ -68,7 +68,7 @@
 - [Quantization Overview](QUANTS.md)
 - [ISQ (In-Situ Quantization)](ISQ.md)
 - [UQFF Format](UQFF.md)
-  - [UQFF Layout](UQFF/LAYOUT.md)
+    - [UQFF Layout](UQFF/LAYOUT.md)
 - [Topology](TOPOLOGY.md)
 - [Importance Matrix](IMATRIX.md)
 
@@ -88,8 +88,8 @@
 - [Flash Attention](FLASH_ATTENTION.md)
 - [MLA (Multi-head Latent Attention)](MLA.md)
 - [Distributed Inference](DISTRIBUTED/DISTRIBUTED.md)
-  - [NCCL Backend](DISTRIBUTED/NCCL.md)
-  - [Ring Backend](DISTRIBUTED/RING.md)
+    - [NCCL Backend](DISTRIBUTED/NCCL.md)
+    - [Ring Backend](DISTRIBUTED/RING.md)
 
 # Features
 

@@ -26,14 +26,17 @@ We support the following models' tool calling in OpenAI-compatible and parse nat
 All models that support tool calling will respond according to the OpenAI tool calling API.
 
 ## OpenAI compatible HTTP example
+
 Please see [our example here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/tool_calling.py).
 
 > OpenAI docs: https://platform.openai.com/docs/api-reference/chat/create?lang=curl
 
 ## Rust example
+
 Please see [our example here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/tools/main.rs).
 
 ## Python example
+
 Please see [our notebook here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/tool_calling.ipynb).
 
 ## Tool callbacks

@@ -19,6 +19,7 @@ mistralrs run --isq 4 -m deepseek-ai/DeepSeek-R1 --isq-organization moqe
 ## Running the distill models
 
 The various [distillation](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) models can be run out of the box.
+
 ```bash
 mistralrs run --isq 4 -m deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 mistralrs run --isq 4 -m deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
@@ -57,6 +58,7 @@ while True:
 ```
 
 ## Python SDK
+
 ```py
 from mistralrs import Runner, Which, ChatCompletionRequest, Architecture
 
@@ -84,6 +86,7 @@ print(res.usage)
 ```
 
 ## Rust SDK
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/text_models/main.rs).
 
 ```rust

@@ -1,9 +1,9 @@
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{Layout, alloc, dealloc};
 
 use cudarc::{
     cupti::{
         self,
-        result::{activity, subscribe, unsubscribe, CuptiError},
+        result::{CuptiError, activity, subscribe, unsubscribe},
         sys::{self, CUptiResult},
     },
     driver,

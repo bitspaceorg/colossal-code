@@ -12,7 +12,7 @@
 //! turns into [stream::create()], where [stream] is a module.
 
 use super::sys::{self};
-use core::ffi::{c_uchar, c_uint, c_void, CStr};
+use core::ffi::{CStr, c_uchar, c_uint, c_void};
 use std::mem::MaybeUninit;
 
 /// Wrapper around [sys::CUresult]. See
@@ -95,11 +95,11 @@ pub mod device {
     //! See [cuda docs](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__DEVICE.html#group__CUDA__DEVICE)
 
     use super::{
-        sys::{self},
         DriverError,
+        sys::{self},
     };
     use std::{
-        ffi::{c_int, CStr},
+        ffi::{CStr, c_int},
         mem::MaybeUninit,
         string::String,
     };
@@ -243,8 +243,8 @@ pub mod occupancy {
     };
 
     use super::{
-        sys::{self},
         DriverError,
+        sys::{self},
     };
 
     /// Returns dynamic shared memory available per block when launching numBlocks blocks on SM.
@@ -390,8 +390,8 @@ pub mod primary_ctx {
     //! See [cuda docs](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__PRIMARY__CTX.html#group__CUDA__PRIMARY__CTX)
 
     use super::{
-        sys::{self},
         DriverError,
+        sys::{self},
     };
     use std::mem::MaybeUninit;
 
@@ -427,8 +427,8 @@ pub mod ctx {
     //! See [cuda docs](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__CTX.html#group__CUDA__CTX)
 
     use super::{
-        sys::{self},
         DriverError,
+        sys::{self},
     };
     use std::mem::MaybeUninit;
 
@@ -522,8 +522,8 @@ pub mod stream {
     //! See [cuda docs](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__STREAM.html#group__CUDA__STREAM).
 
     use super::{
-        sys::{self},
         DriverError,
+        sys::{self},
     };
     use std::mem::MaybeUninit;
 
@@ -984,8 +984,8 @@ pub mod module {
     //! See [cuda docs](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__MODULE.html#group__CUDA__MODULE)
 
     use super::{
-        sys::{self},
         DriverError,
+        sys::{self},
     };
     use core::ffi::c_void;
     use std::ffi::CString;
@@ -1067,8 +1067,8 @@ pub mod module {
 
 pub mod event {
     use super::{
-        sys::{self},
         DriverError,
+        sys::{self},
     };
     use std::mem::MaybeUninit;
 
@@ -1227,8 +1227,8 @@ pub mod external_memory {
     use std::mem::MaybeUninit;
 
     use super::{
-        sys::{self},
         DriverError,
+        sys::{self},
     };
 
     /// Imports an external memory object, in this case an OpaqueFd.

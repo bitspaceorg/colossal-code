@@ -237,7 +237,9 @@ pub unsafe fn swap_blocks(
             }
         }
         (src, dst) => {
-            candle_core::bail!("Tensors must be on either the GPU or CPU to swap, got {src:?} (src) and {dst:?} (dst).");
+            candle_core::bail!(
+                "Tensors must be on either the GPU or CPU to swap, got {src:?} (src) and {dst:?} (dst)."
+            );
         }
     }
 

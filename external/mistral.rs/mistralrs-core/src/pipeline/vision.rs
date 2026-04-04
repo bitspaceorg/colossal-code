@@ -316,7 +316,9 @@ impl Loader for VisionLoader {
             } else {
                 // If no slice name is provided but config exists, we'll need to handle this
                 // For now, return None and let the model handle the default slice selection
-                warn!("Matformer config loaded but no slice name specified. Models will use their default slice.");
+                warn!(
+                    "Matformer config loaded but no slice name specified. Models will use their default slice."
+                );
                 None
             }
         } else {
@@ -475,7 +477,9 @@ impl Loader for VisionLoader {
         // This check is not really necessary because `get_device_layers` should prevent it.
         let mapping_uses_cpu = mapper.get_unique_devices().iter().any(Device::is_cpu);
         if mapping_uses_cpu && paged_attn_config.is_some() {
-            warn!("Device mapping contains a mix of GPU and CPU. There is no CPU support for PagedAttention, disabling PagedAttention.");
+            warn!(
+                "Device mapping contains a mix of GPU and CPU. There is no CPU support for PagedAttention, disabling PagedAttention."
+            );
             paged_attn_config = None;
         }
 
@@ -525,7 +529,9 @@ impl Loader for VisionLoader {
                 };
             info!("Applying ISQ to {in_situ_quant:?}");
             if immediate_predicates.is_empty() {
-                warn!("No predicates for this model and ISQ setting detected. ISQ will not be applied to any weights!");
+                warn!(
+                    "No predicates for this model and ISQ setting detected. ISQ will not be applied to any weights!"
+                );
             }
         }
 
@@ -1044,11 +1050,15 @@ impl Pipeline for VisionPipeline {
             (Some(engine), Some(meta)) => Some((engine.get_kv_cache().clone(), meta)),
             (Some(_), None) => {
                 // This can happen if Rust-side user code is wrong
-                candle_core::bail!("Forward step expected a PagedAttention input metadata. This was not provided, please ensure that the scheduler config is correctly configured for PagedAttention.")
+                candle_core::bail!(
+                    "Forward step expected a PagedAttention input metadata. This was not provided, please ensure that the scheduler config is correctly configured for PagedAttention."
+                )
             }
             (None, Some(_)) => {
                 // This should never happen but we handle it anyway
-                candle_core::bail!("Forward step got a PagedAttention input metadata but there is no cache engine. Please raise an issue.")
+                candle_core::bail!(
+                    "Forward step got a PagedAttention input metadata but there is no cache engine. Please raise an issue."
+                )
             }
             (None, None) => None,
         };

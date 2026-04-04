@@ -7,6 +7,7 @@ To start an X-LoRA server with the exactly as presented in [the paper](https://a
 ```bash
 mistralrs serve -p 1234 --xlora lamm-mit/x-lora --xlora-order orderings/xlora-paper-ordering.json
 ```
+
 - LoRA with a model from GGUF
 
 To start a LoRA server with adapters from the X-LoRA paper (you should modify the ordering file to use only one adapter, as the adapter static scalings are all 1 and so the signal will become distorted):

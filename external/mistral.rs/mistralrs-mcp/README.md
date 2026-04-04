@@ -40,13 +40,13 @@ async fn main() -> anyhow::Result<()> {
         tool_timeout_secs: Some(30),
         max_concurrent_calls: Some(10),
     };
-    
+
     let mut client = McpClient::new(config);
     client.initialize().await?;
-    
+
     let tools = client.get_tools();
     println!("Discovered {} tools", tools.len());
-    
+
     Ok(())
 }
 ```

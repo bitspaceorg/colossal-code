@@ -6,14 +6,14 @@ use mistralrs_core::{
     Constraint, Function, MessageContent as CoreMessageContent, NormalRequest, RequestMessage,
     Response, SamplingParams, Tool as CoreTool, ToolChoice as CoreToolChoice, ToolType,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::mpsc::Sender;
 use upstream_mistralrs_server_core::util::parse_image_url;
 
 use crate::{
     ChatContent, ChatMessage, ChatRequest, ContextControls, EmbeddingInput, EmbeddingRequest,
-    GenerateRequest, MessageRole, ModelManagerError, StructuredOutputSchema, ToolChoice,
-    ToolDefinition, ToolCall,
+    GenerateRequest, MessageRole, ModelManagerError, StructuredOutputSchema, ToolCall, ToolChoice,
+    ToolDefinition,
 };
 
 use mistralrs_core::EmbeddingRequest as EngineEmbeddingRequest;
@@ -156,9 +156,7 @@ pub async fn build_chat_request(
     })
 }
 
-fn convert_logit_bias(
-    source: &HashMap<String, f32>,
-) -> Option<HashMap<u32, f32>> {
+fn convert_logit_bias(source: &HashMap<String, f32>) -> Option<HashMap<u32, f32>> {
     let converted: HashMap<u32, f32> = source
         .iter()
         .filter_map(|(token, bias)| token.parse::<u32>().ok().map(|id| (id, *bias)))
@@ -227,7 +225,10 @@ fn convert_chat_messages(
             map.insert("name".to_string(), Either::Left(name.clone()));
         }
         if let Some(tool_call_id) = &message.tool_call_id {
-            map.insert("tool_call_id".to_string(), Either::Left(tool_call_id.clone()));
+            map.insert(
+                "tool_call_id".to_string(),
+                Either::Left(tool_call_id.clone()),
+            );
         }
         if !message.tool_calls.is_empty() {
             let entries = message

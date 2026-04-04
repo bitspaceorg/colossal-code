@@ -69,7 +69,10 @@ impl ModelMetrics {
     }
 
     pub fn inc_request(&self, model: &str, kind: &str) {
-        if let Ok(counter) = self.requests_total.get_metric_with_label_values(&[model, kind]) {
+        if let Ok(counter) = self
+            .requests_total
+            .get_metric_with_label_values(&[model, kind])
+        {
             counter.inc();
         }
     }
@@ -103,10 +106,7 @@ impl ModelMetrics {
     }
 
     pub fn track_active(&self, model: &str, active: i64) {
-        if let Ok(gauge) = self
-            .active_requests
-            .get_metric_with_label_values(&[model])
-        {
+        if let Ok(gauge) = self.active_requests.get_metric_with_label_values(&[model]) {
             gauge.set(active);
         }
     }

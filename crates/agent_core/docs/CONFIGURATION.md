@@ -7,11 +7,13 @@ The tool agent is now production-ready with no hardcoded paths. All configuratio
 ## Environment Variables
 
 ### Required
+
 None - the agent works out of the box with sensible defaults.
 
 ### Optional
 
 #### `SANDBOX_EXTRA_ROOTS`
+
 Add additional writable roots to the sandbox policy (colon-separated paths).
 
 ```bash
@@ -19,6 +21,7 @@ export SANDBOX_EXTRA_ROOTS="/path/to/data:/another/path"
 ```
 
 #### `DISABLE_LANDLOCK`
+
 Disable Landlock sandboxing if you encounter issues on your system.
 
 ```bash
@@ -61,22 +64,26 @@ tool_agent
 ## Shell Sessions
 
 ### Persistent Shell
+
 - Automatically created on first use
 - Maintains environment variables and working directory across commands
 - Automatically cleaned up on exit
 
 ### Working Directory
+
 - Shell starts in the current working directory
 - Stays synchronized with the workspace
 
 ## Semantic Search
 
 ### Vector Database
+
 - Uses Qdrant for semantic code search
 - Collections are automatically created and indexed
 - Collections are automatically deleted on cleanup
 
 ### File Watching
+
 - Automatically watches the workspace for file changes
 - Updates the index in real-time
 - Stopped and cleaned up on exit
@@ -95,12 +102,14 @@ All resources are automatically cleaned up when the agent exits:
 ## Examples
 
 ### Basic Usage
+
 ```bash
 cd /path/to/your/codebase
 tool_agent
 ```
 
 ### With Extra Sandbox Access
+
 ```bash
 cd /path/to/your/codebase
 export SANDBOX_EXTRA_ROOTS="/home/user/shared:/opt/libs"
@@ -108,6 +117,7 @@ tool_agent
 ```
 
 ### Disable Landlock (if needed)
+
 ```bash
 cd /path/to/your/codebase
 export DISABLE_LANDLOCK=1
@@ -129,6 +139,7 @@ cargo run --example test_agent_flow
 ## Deployment
 
 ### Binary Installation
+
 ```bash
 # Build release binary
 cargo build --release
@@ -146,8 +157,8 @@ tool_agent
 - **OS**: Linux (primary), macOS (limited support)
 - **Kernel**: 5.13+ for Landlock support (optional, can be disabled)
 - **Dependencies**:
-  - Qdrant server (for semantic search)
-  - GPU with CUDA support (for model inference)
+    - Qdrant server (for semantic search)
+    - GPU with CUDA support (for model inference)
 
 ### Model Configuration
 
@@ -158,6 +169,7 @@ The agent uses **mistral.rs** with the following optimizations:
 - ✅ **GGUF quantized models** - Reduced model size with minimal quality loss
 
 **Memory management**:
+
 - PagedAttention allocates 95% of available GPU VRAM for KV cache
 - Block size: 32 tokens per block
 - Helps prevent CUDA OOM errors during long conversations
@@ -169,20 +181,22 @@ The agent uses **mistral.rs** with the following optimizations:
 If you get "Permission denied" errors:
 
 1. **Check Landlock compatibility**:
-   ```bash
-   export DISABLE_LANDLOCK=1
-   tool_agent
-   ```
+
+    ```bash
+    export DISABLE_LANDLOCK=1
+    tool_agent
+    ```
 
 2. **Add paths to sandbox**:
-   ```bash
-   export SANDBOX_EXTRA_ROOTS="/path/that/needs/access"
-   tool_agent
-   ```
+    ```bash
+    export SANDBOX_EXTRA_ROOTS="/path/that/needs/access"
+    tool_agent
+    ```
 
 ### Semantic Search Not Working
 
 Ensure Qdrant is running:
+
 ```bash
 # Check if Qdrant is accessible
 curl http://localhost:6333/
@@ -191,6 +205,7 @@ curl http://localhost:6333/
 ### Model Loading Issues
 
 Ensure CUDA is available:
+
 ```bash
 nvidia-smi
 ```

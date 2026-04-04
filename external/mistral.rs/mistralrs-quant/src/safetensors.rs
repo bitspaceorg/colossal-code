@@ -527,7 +527,7 @@ impl Backend for ShardedSafeTensors {
                         Default::default(),
                         dtype,
                         dev,
-                    )
+                    );
                 }
             }
         }

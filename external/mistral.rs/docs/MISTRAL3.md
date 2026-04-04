@@ -5,6 +5,7 @@ The Mistral Small 3.1 model is a strong multimodal (text+vision) model with 128k
 We support the Mistral 3 Model in the Rust, Python, and HTTP APIs, including ISQ for increased performance.
 
 The Python and HTTP APIs support sending images as:
+
 - URL
 - Path to a local image
 - [Base64](https://en.wikipedia.org/wiki/Base64) encoded string
@@ -20,8 +21,8 @@ tool calling with Mistral Small 3.1, and you can use it by specifying the `jinja
 mistralrs serve -p 1234 --isq 4 --jinja-explicit chat_templates/mistral_small_tool_call.jinja -m mistralai/Mistral-Small-3.1-24B-Instruct-2503
 ```
 
-
 ## HTTP server
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/mistral3.py).
 
 We support an OpenAI compatible HTTP API for vision models. This example demonstrates sending a chat completion request with an image.
@@ -36,11 +37,13 @@ We support an OpenAI compatible HTTP API for vision models. This example demonst
 <h6><a href = "https://upload.wikimedia.org/wikipedia/commons/f/fd/Pink_flower.jpg">Credit</a></h6>
 
 **Prompt:**
+
 ```
 What is this?
 ```
 
 **Output:**
+
 ```
 The image shows a close-up of a vibrant flower with pink petals and a central cluster of yellowish-brown stamens. This flower appears to be from the genus *Gazania*, commonly known as treasure flowers or gazanias. These flowers are known for their daisy-like appearance and bright colors.
 
@@ -51,13 +54,13 @@ If there's anything specific about this flower or its care that interests you fu
 
 ---
 
-1) Start the server
+1. Start the server
 
 ```
 mistralrs serve vision -p 1234 -m mistralai/Mistral-Small-3.1-24B-Instruct-2503
 ```
 
-2) Send a request
+2. Send a request
 
 ```py
 from openai import OpenAI
@@ -104,6 +107,7 @@ print(resp)
 ---
 
 ## Rust
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/vision_models/main.rs).
 
 This is a minimal example of running the Mistral 3 model with a dummy image.
@@ -148,6 +152,7 @@ async fn main() -> Result<()> {
 ```
 
 ## Python
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/mistral3.py).
 
 This example demonstrates loading and sending a chat completion request with an image.

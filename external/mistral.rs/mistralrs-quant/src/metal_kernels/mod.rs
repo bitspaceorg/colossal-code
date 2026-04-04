@@ -359,7 +359,7 @@ pub fn call_dequant_8bit(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -398,7 +398,7 @@ pub fn call_dequant_4bit(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -437,7 +437,7 @@ pub fn call_dequant_2bit(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -476,7 +476,7 @@ pub fn call_dequant_1bit(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -515,7 +515,7 @@ pub fn call_dequant_3bit(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -553,7 +553,7 @@ pub fn call_bitwise_not(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::U8, DType::U32, DType::I64, DType::I32],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -591,7 +591,7 @@ pub fn call_bitwise_or(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::U8, DType::U32, DType::I64, DType::I32],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -629,7 +629,7 @@ pub fn call_bitwise_and(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::U8, DType::U32, DType::I64, DType::I32],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -667,7 +667,7 @@ pub fn call_bitwise_xor(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::U8, DType::U32, DType::I64, DType::I32],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -704,7 +704,7 @@ pub fn call_bitwise_leftshift(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::U8, DType::U32, DType::I64, DType::I32],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -741,7 +741,7 @@ pub fn call_dequant_bnb_nf4(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -781,7 +781,7 @@ pub fn call_dequant_bnb_fp4(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -821,7 +821,7 @@ pub fn call_dequant_bnb_int8(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -866,7 +866,7 @@ pub fn call_affine_quantize(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let kernel_func = if dequantize {
@@ -1111,7 +1111,7 @@ pub fn call_afq_qmm(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
 
@@ -1236,7 +1236,7 @@ pub fn call_mxfp4_matmul(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
 
@@ -1306,7 +1306,7 @@ pub fn call_mxfp4_moe_gemm(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
 
@@ -1403,7 +1403,7 @@ pub fn call_dequant_blockwise_fp8(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -1516,7 +1516,7 @@ pub fn call_scan(
                     DType::I64,
                 ],
                 got: other,
-            })
+            });
         }
     };
     name.push_str(&format!("{type_name}_{type_name}"));
@@ -2633,7 +2633,7 @@ pub fn call_fused_glu(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -2686,7 +2686,7 @@ pub fn call_softmax_with_sinks(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -2964,7 +2964,7 @@ pub fn call_flash_attn_sinks_prefill(
         _ => {
             return Err(MetalKernelError::CompilationError(format!(
                 "flash_attn_sinks: unsupported head_dim={head_dim}"
-            )))
+            )));
         }
     };
 
@@ -3055,7 +3055,7 @@ pub fn call_flash_attn_sinks_varlen_prefill(
         _ => {
             return Err(MetalKernelError::CompilationError(format!(
                 "flash_attn_sinks_varlen: unsupported head_dim={head_dim}"
-            )))
+            )));
         }
     };
 
@@ -3130,7 +3130,7 @@ pub fn call_fp8_to_dtype(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -3165,7 +3165,7 @@ pub fn call_dtype_to_fp8(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -3202,7 +3202,7 @@ pub fn call_fp8_pertensor_dequant(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -3239,7 +3239,7 @@ pub fn call_fp8_vector_dequant(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;

@@ -292,7 +292,9 @@ async fn text_interactive_mode(
                 let parsed = match &prompt_trimmed.split(SYSTEM_CMD).collect::<Vec<_>>()[..] {
                     &["", a] => a.trim(),
                     _ => {
-                        println!("Error: Setting the system command should be done with this format: `{SYSTEM_CMD} This is a system message.`");
+                        println!(
+                            "Error: Setting the system command should be done with this format: `{SYSTEM_CMD} This is a system message.`"
+                        );
                         continue;
                     }
                 };
@@ -539,7 +541,9 @@ async fn vision_interactive_mode(
                 let parsed = match &prompt_trimmed.split(SYSTEM_CMD).collect::<Vec<_>>()[..] {
                     &["", a] => a.trim(),
                     _ => {
-                        println!("Error: Setting the system command should be done with this format: `{SYSTEM_CMD} This is a system message.`");
+                        println!(
+                            "Error: Setting the system command should be done with this format: `{SYSTEM_CMD} This is a system message.`"
+                        );
                         continue;
                     }
                 };

@@ -48,6 +48,7 @@ while True:
 ```
 
 ## Python SDK
+
 ```py
 from mistralrs import Runner, Which, ChatCompletionRequest, Architecture
 
@@ -75,6 +76,7 @@ print(res.usage)
 ```
 
 ## Rust SDK
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/text_models/main.rs).
 
 ```rust

@@ -12,9 +12,11 @@ mistralrs run --isq 4 -m Qwen/Qwen3-30B-A3B
 > Note: tool calling support is fully implemented for the Qwen 3 models, including agentic web search.
 
 ## Enabling thinking
+
 The Qwen 3 models are hybrid reasoning models which can be controlled at inference-time. **By default, reasoning is enabled for these models.** To dynamically control this, it is recommended to either add `/no_think` or `/think` to your prompt. Alternatively, you can specify the `enable_thinking` flag as detailed by the API-specific examples.
 
 ## HTTP API
+
 You can find a more detailed example demonstrating enabling/disabling thinking [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/qwen3.py).
 
 ```bash
@@ -48,6 +50,7 @@ while True:
 ```
 
 ## Python SDK
+
 You can find a more detailed example demonstrating enabling/disabling thinking [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/qwen3.py).
 
 ```py
@@ -78,6 +81,7 @@ print(res.usage)
 ```
 
 ## Rust SDK
+
 You can find a more detailed example demonstrating enabling/disabling thinking [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/text_models/main.rs).
 
 ```rust

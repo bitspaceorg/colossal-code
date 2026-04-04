@@ -5,11 +5,13 @@ GLM-4.7-Flash is a mixture of experts (MoE) model from the GLM family with MLA (
 ## HTTP API
 
 Start the server:
+
 ```bash
 mistralrs serve --isq 4 -p 1234 -m zai-org/GLM-4.7-Flash
 ```
 
 Send requests using an OpenAI-compatible client:
+
 ```py
 import openai
 
@@ -38,6 +40,7 @@ while True:
 ```
 
 ## Python SDK
+
 ```py
 from mistralrs import Runner, Which, ChatCompletionRequest, Architecture
 
@@ -65,6 +68,7 @@ print(res.usage)
 ```
 
 ## Rust SDK
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/text_models/main.rs).
 
 ```rust

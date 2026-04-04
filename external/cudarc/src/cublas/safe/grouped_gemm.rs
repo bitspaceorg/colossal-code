@@ -5,7 +5,7 @@ use std::vec::Vec;
 
 #[allow(unused_imports)]
 use crate::{
-    cublas::{result::CublasError, sys, CudaBlas},
+    cublas::{CudaBlas, result::CublasError, sys},
     driver::{CudaSlice, DevicePtr, DevicePtrMut, DeviceRepr},
 };
 

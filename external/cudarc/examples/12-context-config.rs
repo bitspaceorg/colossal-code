@@ -1,4 +1,4 @@
-use cudarc::driver::{sys, CudaContext, DriverError};
+use cudarc::driver::{CudaContext, DriverError, sys};
 
 fn main() -> Result<(), DriverError> {
     let dev = CudaContext::new(0)?;
