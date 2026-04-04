@@ -33,4 +33,4 @@ result
 result-*
 
 # Generated pre-commit config
-.pre-commit-config.yaml
+# NOTE: .pre-commit-config.yaml is now committed to git for deterministic CI builds
