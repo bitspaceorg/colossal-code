@@ -20,6 +20,7 @@
                     rustfmt = {
                         enable = true;
                         includes = [ "**/*.rs" ];
+                        edition = "2024";
                     };
 
                     nixfmt = {
