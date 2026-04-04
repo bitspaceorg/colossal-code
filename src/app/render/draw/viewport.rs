@@ -70,10 +70,8 @@ impl App {
         let current_scroll = self.nav_scroll_offset;
         let scroll_offset = if total_lines <= visible_lines {
             0
-        } else if cursor_row >= current_scroll + visible_lines
-            || (current_scroll == 0 && cursor_row > visible_lines)
-        {
-            total_lines.saturating_sub(visible_lines)
+        } else if cursor_row >= current_scroll + visible_lines {
+            cursor_row.saturating_sub(visible_lines.saturating_sub(1))
         } else if cursor_row < current_scroll {
             cursor_row
         } else {
@@ -82,6 +80,7 @@ impl App {
         let messages_widget =
             Paragraph::new(Text::from(message_lines.clone())).scroll((scroll_offset as u16, 0));
         frame.render_widget(messages_widget, messages_area);
+        self.editor.state.set_viewport_offset_y(scroll_offset);
         self.paint_navigation_search_matches(
             frame,
             messages_area,
@@ -113,11 +112,17 @@ impl App {
 
         self.nav_scroll_offset = scroll_offset;
         let mode_content = self.get_mode_content();
+        let mode_area = ratatui::layout::Rect {
+            x: input_area.x,
+            y: input_area.bottom().saturating_sub(3),
+            width: input_area.width,
+            height: input_area.height.min(3),
+        };
         let mode_widget = Paragraph::new(mode_content).block(
             Block::bordered()
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(self.get_mode_border_color())),
         );
-        frame.render_widget(mode_widget, input_area);
+        frame.render_widget(mode_widget, mode_area);
     }
 }

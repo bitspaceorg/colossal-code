@@ -121,7 +121,7 @@ impl SearchState {
     pub(crate) fn find_previous(&mut self) -> Option<&Index2> {
         if let Some(selected) = self.selected_index {
             let new_selected = if selected == 0 {
-                self.matches.len().saturating_sub(0)
+                self.matches.len().saturating_sub(1)
             } else {
                 selected - 1
             };

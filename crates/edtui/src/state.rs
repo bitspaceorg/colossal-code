@@ -96,6 +96,24 @@ impl EditorState {
         self.view.num_rows = num_rows;
     }
 
+    /// Returns the number of visible viewport rows.
+    #[must_use]
+    pub fn viewport_rows(&self) -> usize {
+        self.view.num_rows
+    }
+
+    /// Sets the current vertical viewport offset.
+    /// This lets external renderers keep screen-relative motions in sync.
+    pub fn set_viewport_offset_y(&mut self, offset_y: usize) {
+        self.view.viewport.y = offset_y;
+    }
+
+    /// Returns the current vertical viewport offset.
+    #[must_use]
+    pub fn viewport_offset_y(&self) -> usize {
+        self.view.viewport.y
+    }
+
     /// Returns the search matches.
     #[must_use]
     pub fn search_matches(&self) -> &[Index2] {

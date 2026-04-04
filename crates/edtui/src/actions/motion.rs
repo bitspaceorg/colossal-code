@@ -8,8 +8,8 @@ use jagged::Index2;
 
 use super::Execute;
 use crate::{
-    helper::{max_col, max_col_normal, skip_whitespace, skip_whitespace_rev},
     EditorMode, EditorState,
+    helper::{max_col, max_col_normal, skip_whitespace, skip_whitespace_rev},
 };
 
 #[derive(Clone, Debug, Copy)]
@@ -432,6 +432,450 @@ impl Execute for MoveHalfPageUp {
     }
 }
 
+/// Move a full page down (Ctrl-f in vim)
+/// Moves cursor down by num_rows - 2 lines (keeping 2 lines of overlap like vim)
+#[derive(Clone, Debug, Copy)]
+pub struct MoveFullPageDown();
+
+impl Execute for MoveFullPageDown {
+    fn execute(&mut self, state: &mut EditorState) {
+        let jump_rows = state.view.num_rows.saturating_sub(2).max(1);
+        state.cursor.row = min(state.cursor.row + jump_rows, state.lines.last_row_index());
+
+        // Apply desired column behavior
+        if let Some(desired) = state.desired_col {
+            let line_len = state.lines.len_col(state.cursor.row).unwrap_or(0);
+            state.cursor.col = desired.min(line_len.saturating_sub(1).max(0));
+        } else {
+            state.cursor.col = max_col(&state.lines, &state.cursor, state.mode);
+        }
+
+        if state.mode == EditorMode::Visual {
+            set_selection(&mut state.selection, state.cursor);
+        }
+    }
+}
+
+/// Move a full page up (Ctrl-b in vim)
+/// Moves cursor up by num_rows - 2 lines (keeping 2 lines of overlap like vim)
+#[derive(Clone, Debug, Copy)]
+pub struct MoveFullPageUp();
+
+impl Execute for MoveFullPageUp {
+    fn execute(&mut self, state: &mut EditorState) {
+        let jump_rows = state.view.num_rows.saturating_sub(2).max(1);
+        state.cursor.row = state.cursor.row.saturating_sub(jump_rows);
+
+        // Apply desired column behavior
+        if let Some(desired) = state.desired_col {
+            let line_len = state.lines.len_col(state.cursor.row).unwrap_or(0);
+            state.cursor.col = desired.min(line_len.saturating_sub(1).max(0));
+        } else {
+            state.cursor.col = max_col(&state.lines, &state.cursor, state.mode);
+        }
+
+        if state.mode == EditorMode::Visual {
+            set_selection(&mut state.selection, state.cursor);
+        }
+    }
+}
+
+/// Move cursor to top of visible screen (H in vim)
+#[derive(Clone, Debug, Copy)]
+pub struct MoveToScreenTop();
+
+impl Execute for MoveToScreenTop {
+    fn execute(&mut self, state: &mut EditorState) {
+        let top_row = state.view.viewport.y;
+        state.cursor.row = top_row.min(state.lines.last_row_index());
+        state.cursor.col = 0;
+        skip_whitespace(&state.lines, &mut state.cursor);
+        state.desired_col = Some(state.cursor.col);
+
+        if state.mode == EditorMode::Visual {
+            set_selection(&mut state.selection, state.cursor);
+        }
+    }
+}
+
+/// Move cursor to middle of visible screen (M in vim)
+#[derive(Clone, Debug, Copy)]
+pub struct MoveToScreenMiddle();
+
+impl Execute for MoveToScreenMiddle {
+    fn execute(&mut self, state: &mut EditorState) {
+        let top_row = state.view.viewport.y;
+        let middle_row = top_row + state.view.num_rows / 2;
+        state.cursor.row = middle_row.min(state.lines.last_row_index());
+        state.cursor.col = 0;
+        skip_whitespace(&state.lines, &mut state.cursor);
+        state.desired_col = Some(state.cursor.col);
+
+        if state.mode == EditorMode::Visual {
+            set_selection(&mut state.selection, state.cursor);
+        }
+    }
+}
+
+/// Move cursor to bottom of visible screen (L in vim)
+#[derive(Clone, Debug, Copy)]
+pub struct MoveToScreenBottom();
+
+impl Execute for MoveToScreenBottom {
+    fn execute(&mut self, state: &mut EditorState) {
+        let top_row = state.view.viewport.y;
+        let bottom_row = top_row + state.view.num_rows.saturating_sub(1);
+        state.cursor.row = bottom_row.min(state.lines.last_row_index());
+        state.cursor.col = 0;
+        skip_whitespace(&state.lines, &mut state.cursor);
+        state.desired_col = Some(state.cursor.col);
+
+        if state.mode == EditorMode::Visual {
+            set_selection(&mut state.selection, state.cursor);
+        }
+    }
+}
+
+/// Move to next paragraph boundary (} in vim)
+/// A paragraph boundary is an empty line (or start/end of buffer)
+#[derive(Clone, Debug, Copy)]
+pub struct MoveParagraphDown();
+
+impl Execute for MoveParagraphDown {
+    fn execute(&mut self, state: &mut EditorState) {
+        let last_row = state.lines.last_row_index();
+        let start_row = state.cursor.row;
+
+        // Skip current blank lines
+        let mut row = start_row + 1;
+        while row <= last_row {
+            if let Some(line) = state.lines.get(jagged::index::RowIndex::new(row)) {
+                if !line.is_empty() {
+                    break;
+                }
+            }
+            row += 1;
+        }
+
+        // Now find the next blank line (or end of buffer)
+        while row <= last_row {
+            if let Some(line) = state.lines.get(jagged::index::RowIndex::new(row)) {
+                if line.is_empty() {
+                    break;
+                }
+            }
+            row += 1;
+        }
+
+        state.cursor.row = row.min(last_row);
+        state.cursor.col = 0;
+        state.desired_col = Some(0);
+
+        if state.mode == EditorMode::Visual {
+            set_selection(&mut state.selection, state.cursor);
+        }
+    }
+}
+
+/// Move to previous paragraph boundary ({ in vim)
+#[derive(Clone, Debug, Copy)]
+pub struct MoveParagraphUp();
+
+impl Execute for MoveParagraphUp {
+    fn execute(&mut self, state: &mut EditorState) {
+        if state.cursor.row == 0 {
+            state.cursor.col = 0;
+            state.desired_col = Some(0);
+            if state.mode == EditorMode::Visual {
+                set_selection(&mut state.selection, state.cursor);
+            }
+            return;
+        }
+
+        let start_row = state.cursor.row;
+
+        // Skip current blank lines
+        let mut row = start_row.saturating_sub(1);
+        while row > 0 {
+            if let Some(line) = state.lines.get(jagged::index::RowIndex::new(row)) {
+                if !line.is_empty() {
+                    break;
+                }
+            }
+            row = row.saturating_sub(1);
+        }
+
+        // Now find the previous blank line (or start of buffer)
+        while row > 0 {
+            if let Some(line) = state.lines.get(jagged::index::RowIndex::new(row)) {
+                if line.is_empty() {
+                    break;
+                }
+            }
+            row = row.saturating_sub(1);
+        }
+
+        state.cursor.row = row;
+        state.cursor.col = 0;
+        state.desired_col = Some(0);
+
+        if state.mode == EditorMode::Visual {
+            set_selection(&mut state.selection, state.cursor);
+        }
+    }
+}
+
+/// Move one WORD forward (W in vim) - whitespace-delimited words
+#[derive(Clone, Debug, Copy)]
+pub struct MoveWORDForward(pub usize);
+
+impl Execute for MoveWORDForward {
+    fn execute(&mut self, state: &mut EditorState) {
+        if state.lines.is_empty() {
+            return;
+        }
+        state.clamp_column();
+
+        for _ in 0..self.0 {
+            move_word_forward_big(state);
+        }
+
+        state.desired_col = Some(state.cursor.col);
+        if state.mode == EditorMode::Visual {
+            set_selection(&mut state.selection, state.cursor);
+        }
+    }
+}
+
+fn move_word_forward_big(state: &mut EditorState) {
+    let start_index = match (
+        state.lines.is_last_col(state.cursor),
+        state.lines.is_last_row(state.cursor),
+    ) {
+        (true, true) => return,
+        (true, false) => {
+            state.cursor = Index2::new(state.cursor.row.saturating_add(1), 0);
+            // Skip whitespace on the new line
+            skip_whitespace(&state.lines, &mut state.cursor);
+            return;
+        }
+        _ => Index2::new(state.cursor.row, state.cursor.col.saturating_add(1)),
+    };
+
+    // Scan forward past non-whitespace
+    let mut found_ws = false;
+    for (next_char, index) in state.lines.iter().from(start_index) {
+        if let Some(&ch) = next_char {
+            if ch.is_ascii_whitespace() {
+                found_ws = true;
+            } else if found_ws {
+                state.cursor = index;
+                return;
+            }
+        } else {
+            // End of line boundary acts like whitespace
+            found_ws = true;
+        }
+        state.cursor = index;
+    }
+}
+
+/// Move one WORD backward (B in vim) - whitespace-delimited words
+#[derive(Clone, Debug, Copy)]
+pub struct MoveWORDBackward(pub usize);
+
+impl Execute for MoveWORDBackward {
+    fn execute(&mut self, state: &mut EditorState) {
+        if state.lines.is_empty() {
+            return;
+        }
+        let max_col = max_col(&state.lines, &state.cursor, state.mode);
+        if state.cursor.col > max_col {
+            state.cursor.col = max_col;
+        }
+
+        for _ in 0..self.0 {
+            move_word_backward_big(state);
+        }
+
+        state.desired_col = Some(state.cursor.col);
+        if state.mode == EditorMode::Visual {
+            set_selection(&mut state.selection, state.cursor);
+        }
+    }
+}
+
+fn move_word_backward_big(state: &mut EditorState) {
+    let mut start_index = state.cursor;
+    if start_index.row == 0 && start_index.col == 0 {
+        return;
+    }
+
+    if start_index.col == 0 {
+        state.cursor.row = start_index.row.saturating_sub(1);
+        state.cursor.col = state.lines.last_col_index(state.cursor.row);
+        return;
+    }
+
+    start_index.col = start_index.col.saturating_sub(1);
+
+    // Skip whitespace backward
+    let mut found_nonws = false;
+    let mut result = start_index;
+    for (next_char, i) in state.lines.iter().from(start_index).rev() {
+        if let Some(&ch) = next_char {
+            if ch.is_ascii_whitespace() {
+                if found_nonws {
+                    break;
+                }
+            } else {
+                found_nonws = true;
+                result = i;
+            }
+        }
+        if i.col == 0 {
+            if found_nonws {
+                result = i;
+            }
+            break;
+        }
+    }
+
+    state.cursor = result;
+}
+
+/// Move one WORD forward to end of WORD (E in vim) - whitespace-delimited
+#[derive(Clone, Debug, Copy)]
+pub struct MoveWORDForwardToEnd(pub usize);
+
+impl Execute for MoveWORDForwardToEnd {
+    fn execute(&mut self, state: &mut EditorState) {
+        if state.lines.is_empty() {
+            return;
+        }
+        state.clamp_column();
+
+        for _ in 0..self.0 {
+            move_word_forward_to_end_big(state);
+        }
+
+        state.desired_col = Some(state.cursor.col);
+        if state.mode == EditorMode::Visual {
+            set_selection(&mut state.selection, state.cursor);
+        }
+    }
+}
+
+fn move_word_forward_to_end_big(state: &mut EditorState) {
+    let mut start_index = match (
+        state.lines.is_last_col(state.cursor),
+        state.lines.is_last_row(state.cursor),
+    ) {
+        (true, true) => return,
+        (true, false) => Index2::new(state.cursor.row.saturating_add(1), 0),
+        _ => Index2::new(state.cursor.row, state.cursor.col.saturating_add(1)),
+    };
+
+    // Skip whitespace and empty lines
+    skip_empty_lines(&state.lines, &mut start_index.row);
+    skip_whitespace(&state.lines, &mut start_index);
+
+    // Scan forward to find end of WORD (next whitespace or end of line)
+    for (next_char, index) in state.lines.iter().from(start_index) {
+        if let Some(&ch) = next_char {
+            if ch.is_ascii_whitespace() {
+                break;
+            }
+        }
+        state.cursor = index;
+        if state.lines.is_last_col(index) {
+            break;
+        }
+    }
+}
+
+/// Move backward to end of previous word (ge in vim)
+#[derive(Clone, Debug, Copy)]
+pub struct MoveWordBackwardToEndOfWord(pub usize);
+
+impl Execute for MoveWordBackwardToEndOfWord {
+    fn execute(&mut self, state: &mut EditorState) {
+        if state.lines.is_empty() {
+            return;
+        }
+        let max_col = max_col(&state.lines, &state.cursor, state.mode);
+        if state.cursor.col > max_col {
+            state.cursor.col = max_col;
+        }
+
+        for _ in 0..self.0 {
+            move_word_backward_to_end_of_word(state);
+        }
+
+        state.desired_col = Some(state.cursor.col);
+        if state.mode == EditorMode::Visual {
+            set_selection(&mut state.selection, state.cursor);
+        }
+    }
+}
+
+fn move_word_backward_to_end_of_word(state: &mut EditorState) {
+    if state.cursor.row == 0 && state.cursor.col == 0 {
+        return;
+    }
+
+    let mut start_index = state.cursor;
+    if start_index.col == 0 {
+        start_index.row = start_index.row.saturating_sub(1);
+        start_index.col = state.lines.last_col_index(start_index.row);
+    } else {
+        start_index.col = start_index.col.saturating_sub(1);
+    }
+
+    let mut line = match state
+        .lines
+        .get(jagged::index::RowIndex::new(start_index.row))
+    {
+        Some(line) => line,
+        None => return,
+    };
+
+    // If we start on a word, first step left past that word so `ge` reaches the previous one.
+    while start_index.col > 0 {
+        let class = CharacterClass::from(line.get(start_index.col));
+        if class == CharacterClass::Whitespace {
+            break;
+        }
+        let prev_col = start_index.col.saturating_sub(1);
+        if CharacterClass::from(line.get(prev_col)) != class {
+            start_index.col = prev_col;
+            break;
+        }
+        start_index.col = prev_col;
+    }
+
+    skip_whitespace_rev(&state.lines, &mut start_index);
+
+    // Move right to the end of the previous word if we stopped on its start.
+    line = match state
+        .lines
+        .get(jagged::index::RowIndex::new(start_index.row))
+    {
+        Some(line) => line,
+        None => return,
+    };
+    let class = CharacterClass::from(line.get(start_index.col));
+    while start_index.col + 1 < line.len() {
+        let next_col = start_index.col + 1;
+        if CharacterClass::from(line.get(next_col)) != class {
+            break;
+        }
+        start_index.col = next_col;
+    }
+
+    state.cursor = start_index;
+}
+
 /// Find character forward on current line (f in vim)
 #[derive(Clone, Debug, Copy)]
 pub struct FindCharForward {
@@ -571,7 +1015,7 @@ impl Execute for TillCharBackward {
 }
 
 #[derive(Debug, Clone, Eq)]
-pub(crate) enum CharacterClass {
+pub enum CharacterClass {
     Unknown,
     Alphanumeric,
     Punctuation,
@@ -777,5 +1221,17 @@ mod tests {
 
         MoveToFirst().execute(&mut state);
         assert_eq!(state.cursor, Index2::new(0, 1));
+    }
+
+    #[test]
+    fn test_move_word_backward_to_end_of_word() {
+        let mut state = EditorState::new(Lines::from("alpha beta gamma"));
+        state.cursor = Index2::new(0, 11);
+
+        MoveWordBackwardToEndOfWord(1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 9));
+
+        MoveWordBackwardToEndOfWord(1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 4));
     }
 }

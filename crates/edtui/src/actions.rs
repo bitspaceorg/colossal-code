@@ -18,14 +18,17 @@ pub use self::delete::{
 };
 pub use self::insert::{AppendNewline, InsertChar, InsertNewline, LineBreak};
 pub use self::motion::{
-    FindCharBackward, FindCharForward, MoveBackward, MoveDown, MoveForward, MoveHalfPageDown,
-    MoveHalfPageUp, MoveToEndOfLine, MoveToFirst, MoveToMatchinBracket, MoveToStartOfLine, MoveUp,
-    MoveWordBackward, MoveWordForward, MoveWordForwardToEndOfWord, TillCharBackward,
-    TillCharForward,
+    FindCharBackward, FindCharForward, MoveBackward, MoveDown, MoveForward, MoveFullPageDown,
+    MoveFullPageUp, MoveHalfPageDown, MoveHalfPageUp, MoveParagraphDown, MoveParagraphUp,
+    MoveToEndOfLine, MoveToFirst, MoveToMatchinBracket, MoveToScreenBottom, MoveToScreenMiddle,
+    MoveToScreenTop, MoveToStartOfLine, MoveUp, MoveWORDBackward, MoveWORDForward,
+    MoveWORDForwardToEnd, MoveWordBackward, MoveWordBackwardToEndOfWord, MoveWordForward,
+    MoveWordForwardToEndOfWord, TillCharBackward, TillCharForward,
 };
 use self::search::StartSearch;
 pub use self::search::{
-    AppendCharToSearch, FindNext, FindPrevious, RemoveCharFromSearch, StopSearch, TriggerSearch,
+    AppendCharToSearch, FindNext, FindPrevious, RemoveCharFromSearch, SearchWordUnderCursor,
+    StopSearch, TriggerSearch,
 };
 pub use self::select::{
     ChangeInnerBetween, ChangeInnerWord, ChangeSelection, SelectInnerBetween, SelectInnerWord,
@@ -52,6 +55,17 @@ pub enum Action {
     MoveToMatchingBracket(MoveToMatchinBracket),
     MoveHalfPageDown(MoveHalfPageDown),
     MoveHalfPageUp(MoveHalfPageUp),
+    MoveFullPageDown(MoveFullPageDown),
+    MoveFullPageUp(MoveFullPageUp),
+    MoveToScreenTop(MoveToScreenTop),
+    MoveToScreenMiddle(MoveToScreenMiddle),
+    MoveToScreenBottom(MoveToScreenBottom),
+    MoveParagraphDown(MoveParagraphDown),
+    MoveParagraphUp(MoveParagraphUp),
+    MoveWORDForward(MoveWORDForward),
+    MoveWORDBackward(MoveWORDBackward),
+    MoveWORDForwardToEnd(MoveWORDForwardToEnd),
+    MoveWordBackwardToEndOfWord(MoveWordBackwardToEndOfWord),
     FindCharForward(FindCharForward),
     FindCharBackward(FindCharBackward),
     TillCharForward(TillCharForward),
@@ -87,6 +101,7 @@ pub enum Action {
     FindPrevious(FindPrevious),
     AppendCharToSearch(AppendCharToSearch),
     RemoveCharFromSearch(RemoveCharFromSearch),
+    SearchWordUnderCursor(SearchWordUnderCursor),
 }
 
 #[enum_dispatch]
@@ -174,9 +189,9 @@ impl Execute for Composed {
 
 #[cfg(test)]
 mod tests {
-    use crate::clipboard::InternalClipboard;
     use crate::Index2;
     use crate::Lines;
+    use crate::clipboard::InternalClipboard;
 
     use super::*;
     fn test_state() -> EditorState {

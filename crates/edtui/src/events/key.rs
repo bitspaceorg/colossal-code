@@ -1,10 +1,12 @@
 use crate::actions::cpaste::PasteOverSelection;
 use crate::actions::delete::DeleteToEndOfLine;
 use crate::actions::motion::{
-    FindCharBackward, FindCharForward, MoveHalfPageDown, MoveToFirstRow, MoveToLastRow,
-    TillCharBackward, TillCharForward,
+    FindCharBackward, FindCharForward, MoveFullPageDown, MoveFullPageUp, MoveHalfPageDown,
+    MoveParagraphDown, MoveParagraphUp, MoveToFirstRow, MoveToLastRow, MoveToScreenBottom,
+    MoveToScreenMiddle, MoveToScreenTop, MoveWORDBackward, MoveWORDForward, MoveWORDForwardToEnd,
+    MoveWordBackwardToEndOfWord, TillCharBackward, TillCharForward,
 };
-use crate::actions::search::StartSearch;
+use crate::actions::search::{SearchWordUnderCursor, StartSearch};
 use crate::actions::{
     Action, Append, AppendCharToSearch, ChangeInnerBetween, ChangeInnerWord, ChangeSelection,
     Composed, CopyLine, CopySelection, DeleteChar, DeleteLine, DeleteSelection, Execute, FindNext,
@@ -64,6 +66,8 @@ pub struct KeyEventHandler {
     register: HashMap<KeyEventRegister, Action>,
     /// Pending find/till operation waiting for a character
     pending_find: Option<PendingFind>,
+    /// Last completed find/till operation for `;` and `,` repeat
+    last_find: Option<(PendingFind, char)>,
 }
 
 #[derive(Clone, Debug, Copy)]
@@ -191,6 +195,56 @@ impl Default for KeyEventHandler {
                 KeyEventRegister::s(vec![KeyEvent::Ctrl('u')]),
                 MoveHalfPageUp().into(),
             ),
+            // Full page up/down with Ctrl+f and Ctrl+b
+            (
+                KeyEventRegister::n(vec![KeyEvent::Ctrl('f')]),
+                MoveFullPageDown().into(),
+            ),
+            (
+                KeyEventRegister::n(vec![KeyEvent::Ctrl('b')]),
+                MoveFullPageUp().into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Ctrl('f')]),
+                MoveFullPageDown().into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Ctrl('b')]),
+                MoveFullPageUp().into(),
+            ),
+            (
+                KeyEventRegister::s(vec![KeyEvent::Ctrl('f')]),
+                MoveFullPageDown().into(),
+            ),
+            (
+                KeyEventRegister::s(vec![KeyEvent::Ctrl('b')]),
+                MoveFullPageUp().into(),
+            ),
+            // Screen-relative cursor positioning (H, M, L)
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('H')]),
+                MoveToScreenTop().into(),
+            ),
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('M')]),
+                MoveToScreenMiddle().into(),
+            ),
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('L')]),
+                MoveToScreenBottom().into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('H')]),
+                MoveToScreenTop().into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('M')]),
+                MoveToScreenMiddle().into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('L')]),
+                MoveToScreenBottom().into(),
+            ),
             // Move cursor forward
             (
                 KeyEventRegister::n(vec![KeyEvent::Char('l')]),
@@ -293,6 +347,66 @@ impl Default for KeyEventHandler {
                 KeyEventRegister::v(vec![KeyEvent::Char('b')]),
                 MoveWordBackward(1).into(),
             ),
+            // WORD motions (whitespace-delimited) W, B, E
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('W')]),
+                MoveWORDForward(1).into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('W')]),
+                MoveWORDForward(1).into(),
+            ),
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('E')]),
+                MoveWORDForwardToEnd(1).into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('E')]),
+                MoveWORDForwardToEnd(1).into(),
+            ),
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('B')]),
+                MoveWORDBackward(1).into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('B')]),
+                MoveWORDBackward(1).into(),
+            ),
+            // ge - move backward to end of previous word
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('g'), KeyEvent::Char('e')]),
+                MoveWordBackwardToEndOfWord(1).into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('g'), KeyEvent::Char('e')]),
+                MoveWordBackwardToEndOfWord(1).into(),
+            ),
+            // Paragraph motions { and }
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('{')]),
+                MoveParagraphUp().into(),
+            ),
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('}')]),
+                MoveParagraphDown().into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('{')]),
+                MoveParagraphUp().into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('}')]),
+                MoveParagraphDown().into(),
+            ),
+            // Word under cursor search (* and #)
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('*')]),
+                SearchWordUnderCursor { forward: true }.into(),
+            ),
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('#')]),
+                SearchWordUnderCursor { forward: false }.into(),
+            ),
             // Move cursor to start/first/last position
             (
                 KeyEventRegister::n(vec![KeyEvent::Char('0')]),
@@ -300,6 +414,10 @@ impl Default for KeyEventHandler {
             ),
             (
                 KeyEventRegister::n(vec![KeyEvent::Char('_')]),
+                MoveToFirst().into(),
+            ),
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('^')]),
                 MoveToFirst().into(),
             ),
             (
@@ -312,6 +430,10 @@ impl Default for KeyEventHandler {
             ),
             (
                 KeyEventRegister::v(vec![KeyEvent::Char('_')]),
+                MoveToFirst().into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('^')]),
                 MoveToFirst().into(),
             ),
             (
@@ -565,6 +687,7 @@ impl Default for KeyEventHandler {
             lookup: Vec::new(),
             register,
             pending_find: None,
+            last_find: None,
         }
     }
 }
@@ -577,6 +700,7 @@ impl KeyEventHandler {
             lookup: Vec::new(),
             register,
             pending_find: None,
+            last_find: None,
         }
     }
 
@@ -696,6 +820,7 @@ impl KeyEventHandler {
                     PendingFind::TillForward => TillCharForward { ch }.execute(state),
                     PendingFind::TillBackward => TillCharBackward { ch }.execute(state),
                 }
+                self.last_find = Some((pending, ch));
             }
             return;
         }
@@ -707,6 +832,28 @@ impl KeyEventHandler {
             KeyEvent::Backspace if mode == EditorMode::Insert => DeleteChar(1).execute(state),
             // Always add characters to search in search mode
             KeyEvent::Char(c) if mode == EditorMode::Search => AppendCharToSearch(c).execute(state),
+            // Repeat last find in same direction (;)
+            KeyEvent::Char(';') if mode == EditorMode::Normal || mode == EditorMode::Visual => {
+                if let Some((pending, ch)) = self.last_find {
+                    match pending {
+                        PendingFind::FindForward => FindCharForward { ch }.execute(state),
+                        PendingFind::FindBackward => FindCharBackward { ch }.execute(state),
+                        PendingFind::TillForward => TillCharForward { ch }.execute(state),
+                        PendingFind::TillBackward => TillCharBackward { ch }.execute(state),
+                    }
+                }
+            }
+            // Repeat last find in opposite direction (,)
+            KeyEvent::Char(',') if mode == EditorMode::Normal || mode == EditorMode::Visual => {
+                if let Some((pending, ch)) = self.last_find {
+                    match pending {
+                        PendingFind::FindForward => FindCharBackward { ch }.execute(state),
+                        PendingFind::FindBackward => FindCharForward { ch }.execute(state),
+                        PendingFind::TillForward => TillCharBackward { ch }.execute(state),
+                        PendingFind::TillBackward => TillCharForward { ch }.execute(state),
+                    }
+                }
+            }
             // Handle f/F/t/T keys in Normal and Visual modes
             KeyEvent::Char('f') if mode == EditorMode::Normal || mode == EditorMode::Visual => {
                 self.pending_find = Some(PendingFind::FindForward);
@@ -795,6 +942,56 @@ impl KeyEventHandler {
                 KeyEventRegister::s(vec![KeyEvent::Ctrl('u')]),
                 MoveHalfPageUp().into(),
             ),
+            // Full page up/down with Ctrl+f and Ctrl+b
+            (
+                KeyEventRegister::n(vec![KeyEvent::Ctrl('f')]),
+                MoveFullPageDown().into(),
+            ),
+            (
+                KeyEventRegister::n(vec![KeyEvent::Ctrl('b')]),
+                MoveFullPageUp().into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Ctrl('f')]),
+                MoveFullPageDown().into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Ctrl('b')]),
+                MoveFullPageUp().into(),
+            ),
+            (
+                KeyEventRegister::s(vec![KeyEvent::Ctrl('f')]),
+                MoveFullPageDown().into(),
+            ),
+            (
+                KeyEventRegister::s(vec![KeyEvent::Ctrl('b')]),
+                MoveFullPageUp().into(),
+            ),
+            // Screen-relative cursor positioning (H, M, L)
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('H')]),
+                MoveToScreenTop().into(),
+            ),
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('M')]),
+                MoveToScreenMiddle().into(),
+            ),
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('L')]),
+                MoveToScreenBottom().into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('H')]),
+                MoveToScreenTop().into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('M')]),
+                MoveToScreenMiddle().into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('L')]),
+                MoveToScreenBottom().into(),
+            ),
             // Move cursor forward
             (
                 KeyEventRegister::n(vec![KeyEvent::Char('l')]),
@@ -882,6 +1079,66 @@ impl KeyEventHandler {
                 KeyEventRegister::v(vec![KeyEvent::Char('b')]),
                 MoveWordBackward(1).into(),
             ),
+            // WORD motions (whitespace-delimited) W, B, E
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('W')]),
+                MoveWORDForward(1).into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('W')]),
+                MoveWORDForward(1).into(),
+            ),
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('E')]),
+                MoveWORDForwardToEnd(1).into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('E')]),
+                MoveWORDForwardToEnd(1).into(),
+            ),
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('B')]),
+                MoveWORDBackward(1).into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('B')]),
+                MoveWORDBackward(1).into(),
+            ),
+            // ge - move backward to end of previous word
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('g'), KeyEvent::Char('e')]),
+                MoveWordBackwardToEndOfWord(1).into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('g'), KeyEvent::Char('e')]),
+                MoveWordBackwardToEndOfWord(1).into(),
+            ),
+            // Paragraph motions { and }
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('{')]),
+                MoveParagraphUp().into(),
+            ),
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('}')]),
+                MoveParagraphDown().into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('{')]),
+                MoveParagraphUp().into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('}')]),
+                MoveParagraphDown().into(),
+            ),
+            // Word under cursor search (* and #)
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('*')]),
+                SearchWordUnderCursor { forward: true }.into(),
+            ),
+            (
+                KeyEventRegister::n(vec![KeyEvent::Char('#')]),
+                SearchWordUnderCursor { forward: false }.into(),
+            ),
             // Move cursor to start/first/last position
             (
                 KeyEventRegister::n(vec![KeyEvent::Char('0')]),
@@ -896,7 +1153,15 @@ impl KeyEventHandler {
                 MoveToFirst().into(),
             ),
             (
+                KeyEventRegister::n(vec![KeyEvent::Char('^')]),
+                MoveToFirst().into(),
+            ),
+            (
                 KeyEventRegister::v(vec![KeyEvent::Char('_')]),
+                MoveToFirst().into(),
+            ),
+            (
+                KeyEventRegister::v(vec![KeyEvent::Char('^')]),
                 MoveToFirst().into(),
             ),
             (
@@ -995,6 +1260,7 @@ impl KeyEventHandler {
             lookup: Vec::new(),
             register,
             pending_find: None,
+            last_find: None,
         }
     }
 }
