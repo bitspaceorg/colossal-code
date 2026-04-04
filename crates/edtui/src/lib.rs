@@ -148,12 +148,12 @@ mod helper;
 pub mod state;
 mod view;
 
+pub use events::EditorEventHandler;
 #[allow(deprecated)]
 pub use events::deprecated_input::EditorInput;
 pub use events::read_only::ReadOnlyEventHandler;
-pub use events::EditorEventHandler;
-pub use state::{mode::EditorMode, EditorState};
-pub use view::{theme::EditorTheme, EditorStatusLine, EditorView};
+pub use state::{EditorState, mode::EditorMode};
+pub use view::{EditorStatusLine, EditorView, theme::EditorTheme};
 
 #[cfg(feature = "syntax-highlighting")]
 pub use view::syntax_higlighting::SyntaxHighlighter;
@@ -163,5 +163,5 @@ pub use syntect;
 
 /// A data structure that contains chars organized in rows and columns
 pub type Lines = jagged::Jagged<char>;
-pub use jagged::index::RowIndex;
 pub use jagged::Index2;
+pub use jagged::index::RowIndex;

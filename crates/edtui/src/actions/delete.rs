@@ -2,10 +2,10 @@ use jagged::index::RowIndex;
 
 use super::Execute;
 use crate::{
+    EditorMode, EditorState, Index2, Lines,
     clipboard::ClipboardTrait,
     helper::{is_out_of_bounds, max_col_insert},
     state::selection::Selection,
-    EditorMode, EditorState, Index2, Lines,
 };
 
 /// Deletes a character at the current cursor position. Does not
@@ -182,9 +182,9 @@ impl Execute for JoinLineWithLineBelow {
 
 #[cfg(test)]
 mod tests {
-    use crate::state::selection::Selection;
     use crate::Index2;
     use crate::Lines;
+    use crate::state::selection::Selection;
 
     use super::*;
     fn test_state() -> EditorState {

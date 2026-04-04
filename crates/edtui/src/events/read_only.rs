@@ -1,4 +1,4 @@
-use crate::{events::key::KeyEventHandler, EditorMode, EditorState};
+use crate::{EditorMode, EditorState, events::key::KeyEventHandler};
 
 #[derive(Clone, Debug)]
 pub struct ReadOnlyEventHandler {
