@@ -4,6 +4,13 @@ use crate::Lines;
 
 use super::selection::Selection;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchDirection {
+    #[default]
+    Forward,
+    Backward,
+}
+
 /// Represents the state of a search operation, including the search pattern,
 /// matched indices, and selected index.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -12,6 +19,9 @@ pub struct SearchState {
     pub(crate) pattern: String,
     pub(crate) matches: Vec<Index2>,
     pub(crate) selected_index: Option<usize>,
+    pub(crate) direction: SearchDirection,
+    pub(crate) history: Vec<String>,
+    pub(crate) history_index: Option<usize>,
     /// Cached pattern length (needed for highlighting after pattern is cleared)
     pub(crate) cached_pattern_len: usize,
 }
@@ -23,9 +33,11 @@ impl SearchState {
     }
 
     /// Starts a search by setting the start index and clearing all previous state.
-    pub(crate) fn start(&mut self, start_cursor: Index2) {
+    pub(crate) fn start(&mut self, start_cursor: Index2, direction: SearchDirection) {
         self.clear();
         self.start_cursor = start_cursor;
+        self.direction = direction;
+        self.history_index = None;
     }
 
     /// Clears both the search pattern and matched indices.
@@ -34,6 +46,7 @@ impl SearchState {
         self.matches.clear();
         self.selected_index = None;
         self.cached_pattern_len = 0;
+        self.history_index = None;
     }
 
     /// Clears only the search pattern, keeping matches visible.
@@ -79,28 +92,92 @@ impl SearchState {
 
     /// Appends a character to the search pattern.
     pub(crate) fn push_char(&mut self, ch: char) {
+        self.history_index = None;
         self.pattern.push(ch);
     }
 
     /// Removes the last character from the search pattern.
     pub(crate) fn remove_char(&mut self) {
+        self.history_index = None;
         self.pattern.pop();
+    }
+
+    pub(crate) fn push_history(&mut self) {
+        if self.pattern.is_empty() {
+            return;
+        }
+
+        if self.history.last() == Some(&self.pattern) {
+            return;
+        }
+
+        self.history.push(self.pattern.clone());
+    }
+
+    pub(crate) fn history_older(&mut self) -> Option<&str> {
+        let next_index = match self.history_index {
+            Some(index) if index > 0 => index - 1,
+            Some(_) => 0,
+            None => self.history.len().checked_sub(1)?,
+        };
+
+        self.history_index = Some(next_index);
+        self.pattern = self.history.get(next_index)?.clone();
+        Some(&self.pattern)
+    }
+
+    pub(crate) fn history_newer(&mut self) -> Option<&str> {
+        let Some(index) = self.history_index else {
+            return Some(&self.pattern);
+        };
+
+        if index + 1 >= self.history.len() {
+            self.history_index = None;
+            self.pattern.clear();
+            return Some(&self.pattern);
+        }
+
+        let next_index = index + 1;
+        self.history_index = Some(next_index);
+        self.pattern = self.history.get(next_index)?.clone();
+        Some(&self.pattern)
     }
 
     /// Finds and returns the next matched index after the selected index.
     pub(crate) fn find_first(&mut self) -> Option<&Index2> {
-        for (i, index) in self.matches.iter().enumerate() {
-            if index >= &self.start_cursor {
-                self.selected_index = Some(i);
-                return Some(index);
+        match self.direction {
+            SearchDirection::Forward => {
+                for (i, index) in self.matches.iter().enumerate() {
+                    if index >= &self.start_cursor {
+                        self.selected_index = Some(i);
+                        return Some(index);
+                    }
+                }
+
+                match self.matches.first() {
+                    Some(index) => {
+                        self.selected_index = Some(0);
+                        Some(index)
+                    }
+                    None => None,
+                }
             }
-        }
-        match self.matches.first() {
-            Some(index) => {
-                self.selected_index = Some(0);
-                Some(index)
+            SearchDirection::Backward => {
+                for (i, index) in self.matches.iter().enumerate().rev() {
+                    if index <= &self.start_cursor {
+                        self.selected_index = Some(i);
+                        return Some(index);
+                    }
+                }
+
+                match self.matches.last() {
+                    Some(index) => {
+                        self.selected_index = Some(self.matches.len().saturating_sub(1));
+                        Some(index)
+                    }
+                    None => None,
+                }
             }
-            None => None,
         }
     }
 
@@ -129,6 +206,20 @@ impl SearchState {
             return self.matches.get(new_selected);
         }
         None
+    }
+
+    pub(crate) fn repeat_same_direction(&mut self) -> Option<&Index2> {
+        match self.direction {
+            SearchDirection::Forward => self.find_next(),
+            SearchDirection::Backward => self.find_previous(),
+        }
+    }
+
+    pub(crate) fn repeat_opposite_direction(&mut self) -> Option<&Index2> {
+        match self.direction {
+            SearchDirection::Forward => self.find_previous(),
+            SearchDirection::Backward => self.find_next(),
+        }
     }
 }
 

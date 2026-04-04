@@ -395,7 +395,10 @@ impl App {
                 ),
             ]),
             Mode::Search => Line::from(vec![
-                Span::styled(" > SEARCH MODE / ", Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    format!(" > SEARCH MODE {} ", self.editor.state.search_prompt_char()),
+                    Style::default().fg(Color::Cyan),
+                ),
                 Span::styled(
                     self.editor.search_query.clone(),
                     Style::default().fg(Color::Cyan),

@@ -1,7 +1,7 @@
 use jagged::index::RowIndex;
 
 use crate::actions::motion::CharacterClass;
-use crate::{EditorMode, EditorState, Index2};
+use crate::{EditorMode, EditorState, Index2, state::SearchDirection};
 
 use super::Execute;
 
@@ -44,6 +44,7 @@ impl Execute for TriggerSearch {
     /// Switches to normal mode.
     fn execute(&mut self, state: &mut EditorState) {
         state.mode = EditorMode::Normal;
+        state.search.push_history();
         if let Some(index) = state.search.find_first() {
             state.cursor = *index;
         }
@@ -59,7 +60,7 @@ impl Execute for FindNext {
     /// Switches to normal mode.
     fn execute(&mut self, state: &mut EditorState) {
         state.mode = EditorMode::Normal;
-        if let Some(index) = state.search.find_next() {
+        if let Some(index) = state.search.repeat_same_direction() {
             state.cursor = *index;
         }
     }
@@ -74,7 +75,7 @@ impl Execute for FindPrevious {
     /// Switches to normal mode.
     fn execute(&mut self, state: &mut EditorState) {
         state.mode = EditorMode::Normal;
-        if let Some(index) = state.search.find_previous() {
+        if let Some(index) = state.search.repeat_opposite_direction() {
             state.cursor = *index;
         }
     }
@@ -82,13 +83,22 @@ impl Execute for FindPrevious {
 
 /// Command to clear to start of the search and switch into search mode.
 #[derive(Clone, Debug)]
-pub struct StartSearch;
+pub struct StartSearch {
+    pub forward: bool,
+}
 
 impl Execute for StartSearch {
     /// Executes the command, starting the search state and switching to search mode.
     fn execute(&mut self, state: &mut EditorState) {
         state.mode = EditorMode::Search;
-        state.search.start(state.cursor);
+        state.search.start(
+            state.cursor,
+            if self.forward {
+                SearchDirection::Forward
+            } else {
+                SearchDirection::Backward
+            },
+        );
     }
 }
 /// Command to clear the search state and switch to normal mode.
@@ -156,7 +166,14 @@ impl Execute for SearchWordUnderCursor {
         let word: String = line[word_start..=word_end].iter().collect();
 
         // Start a fresh search anchored at the current cursor.
-        state.search.start(state.cursor);
+        state.search.start(
+            state.cursor,
+            if self.forward {
+                SearchDirection::Forward
+            } else {
+                SearchDirection::Backward
+            },
+        );
         state.search.pattern = word;
         state.search.trigger_search(&state.lines);
 
@@ -183,7 +200,38 @@ impl Execute for SearchWordUnderCursor {
             state.cursor = state.search.matches[selected];
         }
 
+        state.search.push_history();
         state.mode = EditorMode::Normal;
+    }
+}
+
+/// Load an older search pattern into the live search prompt.
+#[derive(Clone, Debug)]
+pub struct SearchHistoryOlder;
+
+impl Execute for SearchHistoryOlder {
+    fn execute(&mut self, state: &mut EditorState) {
+        if state.search.history_older().is_some() {
+            state.search.trigger_search(&state.lines);
+            if let Some(index) = state.search.find_first() {
+                state.cursor = *index;
+            }
+        }
+    }
+}
+
+/// Load a newer search pattern into the live search prompt.
+#[derive(Clone, Debug)]
+pub struct SearchHistoryNewer;
+
+impl Execute for SearchHistoryNewer {
+    fn execute(&mut self, state: &mut EditorState) {
+        if state.search.history_newer().is_some() {
+            state.search.trigger_search(&state.lines);
+            if let Some(index) = state.search.find_first() {
+                state.cursor = *index;
+            }
+        }
     }
 }
 
@@ -213,5 +261,23 @@ mod tests {
 
         assert_eq!(state.search_pattern(), "foo");
         assert_eq!(state.cursor, Index2::new(0, 0));
+    }
+
+    #[test]
+    fn test_search_history_navigation() {
+        let mut state = EditorState::new(Lines::from("foo bar foo"));
+
+        StartSearch { forward: true }.execute(&mut state);
+        AppendCharToSearch('f').execute(&mut state);
+        AppendCharToSearch('o').execute(&mut state);
+        AppendCharToSearch('o').execute(&mut state);
+        TriggerSearch.execute(&mut state);
+
+        StartSearch { forward: false }.execute(&mut state);
+        let mut older = SearchHistoryOlder;
+        older.execute(&mut state);
+
+        assert_eq!(state.search_pattern(), "foo");
+        assert_eq!(state.search_direction(), SearchDirection::Backward);
     }
 }

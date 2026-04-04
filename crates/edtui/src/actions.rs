@@ -20,15 +20,16 @@ pub use self::insert::{AppendNewline, InsertChar, InsertNewline, LineBreak};
 pub use self::motion::{
     FindCharBackward, FindCharForward, MoveBackward, MoveDown, MoveForward, MoveFullPageDown,
     MoveFullPageUp, MoveHalfPageDown, MoveHalfPageUp, MoveParagraphDown, MoveParagraphUp,
-    MoveToEndOfLine, MoveToFirst, MoveToMatchinBracket, MoveToScreenBottom, MoveToScreenMiddle,
-    MoveToScreenTop, MoveToStartOfLine, MoveUp, MoveWORDBackward, MoveWORDForward,
-    MoveWORDForwardToEnd, MoveWordBackward, MoveWordBackwardToEndOfWord, MoveWordForward,
-    MoveWordForwardToEndOfWord, TillCharBackward, TillCharForward,
+    MoveSentenceBackward, MoveSentenceForward, MoveToEndOfLine, MoveToFirst, MoveToLastNonBlank,
+    MoveToMatchinBracket, MoveToScreenBottom, MoveToScreenMiddle, MoveToScreenTop,
+    MoveToStartOfLine, MoveUp, MoveWORDBackward, MoveWORDForward, MoveWORDForwardToEnd,
+    MoveWordBackward, MoveWordBackwardToEndOfWord, MoveWordForward, MoveWordForwardToEndOfWord,
+    TillCharBackward, TillCharForward,
 };
 use self::search::StartSearch;
 pub use self::search::{
-    AppendCharToSearch, FindNext, FindPrevious, RemoveCharFromSearch, SearchWordUnderCursor,
-    StopSearch, TriggerSearch,
+    AppendCharToSearch, FindNext, FindPrevious, RemoveCharFromSearch, SearchHistoryNewer,
+    SearchHistoryOlder, SearchWordUnderCursor, StopSearch, TriggerSearch,
 };
 pub use self::select::{
     ChangeInnerBetween, ChangeInnerWord, ChangeSelection, SelectInnerBetween, SelectInnerWord,
@@ -49,6 +50,7 @@ pub enum Action {
     MoveWordBackward(MoveWordBackward),
     MoveToStartOfLine(MoveToStartOfLine),
     MoveToFirst(MoveToFirst),
+    MoveToLastNonBlank(MoveToLastNonBlank),
     MoveToEndOfLine(MoveToEndOfLine),
     MoveToFirstRow(MoveToFirstRow),
     MoveToLastRow(MoveToLastRow),
@@ -66,6 +68,8 @@ pub enum Action {
     MoveWORDBackward(MoveWORDBackward),
     MoveWORDForwardToEnd(MoveWORDForwardToEnd),
     MoveWordBackwardToEndOfWord(MoveWordBackwardToEndOfWord),
+    MoveSentenceForward(MoveSentenceForward),
+    MoveSentenceBackward(MoveSentenceBackward),
     FindCharForward(FindCharForward),
     FindCharBackward(FindCharBackward),
     TillCharForward(TillCharForward),
@@ -101,6 +105,8 @@ pub enum Action {
     FindPrevious(FindPrevious),
     AppendCharToSearch(AppendCharToSearch),
     RemoveCharFromSearch(RemoveCharFromSearch),
+    SearchHistoryOlder(SearchHistoryOlder),
+    SearchHistoryNewer(SearchHistoryNewer),
     SearchWordUnderCursor(SearchWordUnderCursor),
 }
 

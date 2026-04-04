@@ -322,6 +322,168 @@ impl Execute for MoveToEndOfLine {
     }
 }
 
+// Move the cursor to the last non-whitespace character in the line.
+#[derive(Clone, Debug, Copy)]
+pub struct MoveToLastNonBlank();
+
+impl Execute for MoveToLastNonBlank {
+    fn execute(&mut self, state: &mut EditorState) {
+        state.cursor.col = max_col(&state.lines, &state.cursor, state.mode);
+
+        while state.cursor.col > 0 {
+            let Some(ch) = state.lines.get(state.cursor).copied() else {
+                break;
+            };
+            if !ch.is_ascii_whitespace() {
+                break;
+            }
+            state.cursor.col = state.cursor.col.saturating_sub(1);
+        }
+
+        state.desired_col = Some(state.cursor.col);
+
+        if state.mode == EditorMode::Visual {
+            set_selection(&mut state.selection, state.cursor);
+        }
+    }
+}
+
+#[derive(Clone, Debug, Copy)]
+pub struct MoveSentenceForward(pub usize);
+
+impl Execute for MoveSentenceForward {
+    fn execute(&mut self, state: &mut EditorState) {
+        for _ in 0..self.0 {
+            move_sentence_forward(state);
+        }
+
+        state.desired_col = Some(state.cursor.col);
+
+        if state.mode == EditorMode::Visual {
+            set_selection(&mut state.selection, state.cursor);
+        }
+    }
+}
+
+#[derive(Clone, Debug, Copy)]
+pub struct MoveSentenceBackward(pub usize);
+
+impl Execute for MoveSentenceBackward {
+    fn execute(&mut self, state: &mut EditorState) {
+        for _ in 0..self.0 {
+            move_sentence_backward(state);
+        }
+
+        state.desired_col = Some(state.cursor.col);
+
+        if state.mode == EditorMode::Visual {
+            set_selection(&mut state.selection, state.cursor);
+        }
+    }
+}
+
+fn next_index(state: &EditorState, index: Index2) -> Option<Index2> {
+    let line_len = state.lines.len_col(index.row)?;
+    if index.col + 1 < line_len {
+        Some(Index2::new(index.row, index.col + 1))
+    } else if index.row + 1 < state.lines.len() {
+        Some(Index2::new(index.row + 1, 0))
+    } else {
+        None
+    }
+}
+
+fn previous_index(state: &EditorState, index: Index2) -> Option<Index2> {
+    if index.col > 0 {
+        Some(Index2::new(index.row, index.col - 1))
+    } else if index.row > 0 {
+        Some(Index2::new(
+            index.row - 1,
+            state.lines.last_col_index(index.row - 1),
+        ))
+    } else {
+        None
+    }
+}
+
+fn is_sentence_terminator(ch: char) -> bool {
+    matches!(ch, '.' | '!' | '?')
+}
+
+fn move_sentence_forward(state: &mut EditorState) {
+    let mut current = state.cursor;
+
+    while let Some(next) = next_index(state, current) {
+        current = next;
+        let Some(ch) = state.lines.get(current).copied() else {
+            continue;
+        };
+
+        if !is_sentence_terminator(ch) {
+            continue;
+        }
+
+        let mut probe = current;
+        while let Some(after) = next_index(state, probe) {
+            probe = after;
+            let Some(after_ch) = state.lines.get(probe).copied() else {
+                continue;
+            };
+            if after_ch.is_ascii_whitespace() {
+                continue;
+            }
+            state.cursor = probe;
+            return;
+        }
+    }
+}
+
+fn move_sentence_backward(state: &mut EditorState) {
+    let mut current = state.cursor;
+
+    // If we're already at a sentence start, move left past the terminator that starts this one.
+    let mut probe = current;
+    while let Some(prev) = previous_index(state, probe) {
+        probe = prev;
+        let Some(ch) = state.lines.get(probe).copied() else {
+            continue;
+        };
+        if ch.is_ascii_whitespace() {
+            continue;
+        }
+        if is_sentence_terminator(ch) {
+            current = probe;
+        }
+        break;
+    }
+
+    while let Some(prev) = previous_index(state, current) {
+        current = prev;
+        let Some(ch) = state.lines.get(current).copied() else {
+            continue;
+        };
+
+        if !is_sentence_terminator(ch) {
+            continue;
+        }
+
+        let mut probe = current;
+        while let Some(after) = next_index(state, probe) {
+            probe = after;
+            let Some(after_ch) = state.lines.get(probe).copied() else {
+                continue;
+            };
+            if after_ch.is_ascii_whitespace() {
+                continue;
+            }
+            state.cursor = probe;
+            return;
+        }
+    }
+
+    state.cursor = Index2::new(0, 0);
+}
+
 // Move the cursor to the start of the buffer.
 #[derive(Clone, Debug, Copy)]
 pub struct MoveToFirstRow();
@@ -1094,26 +1256,31 @@ mod tests {
     fn test_move_down() {
         let mut state = test_state();
         state.cursor = Index2::new(0, 6);
+        state.desired_col = Some(6);
 
         MoveDown(1).execute(&mut state);
-        assert_eq!(state.cursor, Index2::new(1, 6));
+        // Line 1 is empty ("\n"), so column is clamped to 0
+        assert_eq!(state.cursor, Index2::new(1, 0));
 
         MoveDown(1).execute(&mut state);
-        assert_eq!(state.cursor, Index2::new(2, 6));
-
+        // Line 2 has "123." (4 chars), can hold column 2
+        state.desired_col = Some(2);
         MoveDown(1).execute(&mut state);
-        assert_eq!(state.cursor, Index2::new(2, 6));
+        assert_eq!(state.cursor, Index2::new(2, 2));
     }
 
     #[test]
     fn test_move_up() {
         let mut state = test_state();
         state.cursor = Index2::new(2, 2);
+        state.desired_col = Some(2);
 
         MoveUp(1).execute(&mut state);
-        assert_eq!(state.cursor, Index2::new(1, 2));
+        // Line 1 is empty, column is clamped to 0
+        assert_eq!(state.cursor, Index2::new(1, 0));
 
         MoveUp(1).execute(&mut state);
+        // Line 0 has "Hello World!" (12 chars), can hold column 2
         assert_eq!(state.cursor, Index2::new(0, 2));
 
         MoveUp(1).execute(&mut state);
@@ -1233,5 +1400,29 @@ mod tests {
 
         MoveWordBackwardToEndOfWord(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(0, 4));
+    }
+
+    #[test]
+    fn test_move_to_last_non_blank() {
+        let mut state = EditorState::new(Lines::from("abc   "));
+        state.cursor = Index2::new(0, 0);
+
+        MoveToLastNonBlank().execute(&mut state);
+
+        assert_eq!(state.cursor, Index2::new(0, 2));
+    }
+
+    #[test]
+    fn test_move_sentence_forward_and_backward() {
+        let mut state = EditorState::new(Lines::from("One. Two? Three!"));
+
+        MoveSentenceForward(1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 5));
+
+        MoveSentenceForward(1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 10));
+
+        MoveSentenceBackward(1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 5));
     }
 }

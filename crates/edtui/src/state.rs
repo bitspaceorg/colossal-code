@@ -5,6 +5,8 @@ pub mod selection;
 mod undo;
 mod view;
 
+pub use self::search::SearchDirection;
+
 use self::search::SearchState;
 use self::view::ViewState;
 use self::{mode::EditorMode, selection::Selection, undo::Stack};
@@ -88,6 +90,21 @@ impl EditorState {
     #[must_use]
     pub fn search_pattern(&self) -> String {
         self.search.pattern.clone()
+    }
+
+    /// Returns the active search direction.
+    #[must_use]
+    pub fn search_direction(&self) -> SearchDirection {
+        self.search.direction
+    }
+
+    /// Returns the prompt prefix for the active search direction.
+    #[must_use]
+    pub fn search_prompt_char(&self) -> char {
+        match self.search.direction {
+            SearchDirection::Forward => '/',
+            SearchDirection::Backward => '?',
+        }
     }
 
     /// Sets the number of visible rows in the viewport.
