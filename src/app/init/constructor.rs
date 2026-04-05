@@ -5,6 +5,7 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 
 use crate::app::init::constructor_backend::BackendConfig;
+use crate::app::input::vim_context::VimKeyProcessor;
 use crate::app::persistence::auth_store::load_auth_store;
 use crate::app::{
     AgentState, App, Mode, PersistenceState, Phase, RichEditor, SafetyState, SessionManager,
@@ -105,7 +106,7 @@ impl App {
             visible_edit_file_artifacts: Vec::new(),
             terminal_cursor_hidden: false,
             nav_needs_init: false,
-            nav_pending_z: false,
+            vim_processor: VimKeyProcessor::new(),
             flash_highlight: None,
             ctrl_c_pressed: None,
             survey: Survey::new(10, 0.33),

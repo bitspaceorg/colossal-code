@@ -3,7 +3,39 @@ use std::time::Instant;
 use agent_core::AgentMessage;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
+use crate::app::input::vim_context::{VimKeyContext, VimKeyResult};
+use crate::app::input::vim_sync::RichEditor;
 use crate::app::{App, AppSnapshot, MessageState, MessageType, Mode, Phase};
+
+// ---------------------------------------------------------------------------
+// Input-bar context – implements VimKeyContext for the read-write input editor
+// ---------------------------------------------------------------------------
+
+struct InputBarContext<'a> {
+    editor: &'a mut RichEditor,
+}
+
+impl VimKeyContext for InputBarContext<'_> {
+    fn editor(&mut self) -> &mut RichEditor {
+        self.editor
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn exit_on_q(&self) -> bool {
+        false
+    }
+
+    fn command_on_colon(&self) -> bool {
+        false
+    }
+
+    fn supports_viewport_scroll(&self) -> bool {
+        false // Input bar has no message viewport to scroll
+    }
+}
 
 pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
     if app.dispatch_panel_key_from_runtime(key) {
@@ -134,7 +166,7 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
         app.mode = Mode::Navigation;
         app.nav_needs_init = true;
         app.nav_scroll_offset = 0;
-        app.nav_pending_z = false;
+        app.vim_processor.reset();
         return;
     }
 
@@ -152,36 +184,78 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
     let vim_insert_mode = app.vim_mode_enabled
         && matches!(app.vim_input_editor.get_mode(), edtui::EditorMode::Insert);
 
+    // --- Shared vim processor for the input bar ---
+    // When vim mode is active and the editor is in Normal/Visual/Search mode,
+    // route ALL keys through the shared processor so every vim motion,
+    // command, and multi-key sequence works identically to nav mode.
     if app.vim_mode_enabled
         && app.phase == Phase::Input
         && !app.show_background_tasks
         && (!prompt_active || !vim_insert_mode)
     {
-        let handled = match key.code {
-            KeyCode::Char(c) => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
-                    false
-                } else {
-                    app.handle_input_char_key(key, c);
+        let vim_mode = app.vim_input_editor.get_mode();
+
+        // In Insert mode, only forward specific keys to edtui;
+        // the rest fall through to the main match for app-level handling.
+        if vim_mode == edtui::EditorMode::Insert {
+            let handled = match key.code {
+                KeyCode::Char(c) => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
+                        false
+                    } else {
+                        app.vim_input_editor.handle_event(Event::Key(key));
+                        app.sync_vim_input();
+                        app.update_autocomplete();
+                        true
+                    }
+                }
+                KeyCode::Backspace
+                | KeyCode::Delete
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::Left
+                | KeyCode::Right => {
+                    app.vim_input_editor.handle_event(Event::Key(key));
+                    app.sync_vim_input();
                     app.update_autocomplete();
                     true
                 }
+                _ => false,
+            };
+            if handled {
+                return;
             }
-            KeyCode::Backspace
-            | KeyCode::Delete
-            | KeyCode::Home
-            | KeyCode::End
-            | KeyCode::Left
-            | KeyCode::Right => {
-                app.vim_input_editor.handle_event(Event::Key(key));
-                app.sync_vim_input();
-                app.update_autocomplete();
-                true
+        } else {
+            // Normal, Visual, or Search mode – use the shared processor
+            let mut ctx = InputBarContext {
+                editor: &mut app.vim_input_editor,
+            };
+            let result = app.vim_processor.process_key(&mut ctx, key);
+
+            match result {
+                VimKeyResult::Handled | VimKeyResult::ModeChanged(_) => {
+                    app.sync_vim_input();
+                    app.update_autocomplete();
+                    return;
+                }
+                VimKeyResult::ClipboardChanged { .. } => {
+                    app.sync_vim_input();
+                    app.update_autocomplete();
+                    return;
+                }
+                VimKeyResult::ViewportScroll(_) => {
+                    // Input bar doesn't support viewport scroll, but
+                    // the processor won't emit this (supports_viewport_scroll=false)
+                    return;
+                }
+                VimKeyResult::ExitRequested | VimKeyResult::CommandRequested => {
+                    // Input bar doesn't support these
+                    return;
+                }
+                VimKeyResult::Unhandled => {
+                    // Fall through to the main match block
+                }
             }
-            _ => false,
-        };
-        if handled {
-            return;
         }
     }
 

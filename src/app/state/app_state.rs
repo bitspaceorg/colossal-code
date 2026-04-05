@@ -16,6 +16,7 @@ use std::{
 use tokio::{sync::mpsc, task};
 
 use crate::app::init::startup::Phase;
+use crate::app::input::vim_context::VimKeyProcessor;
 use crate::app::input::vim_sync::RichEditor;
 use crate::app::render::panels::survey::Survey;
 use crate::app::{
@@ -153,8 +154,8 @@ pub(crate) struct App {
     pub(crate) terminal_cursor_hidden: bool,
     // Flag to track if we need to position cursor on first nav render
     pub(crate) nav_needs_init: bool,
-    // Pending `z` viewport command in nav mode (`zz`, `zt`, `zb`)
-    pub(crate) nav_pending_z: bool,
+    // Shared vim key processor (owns pending-z state, used by both nav and input bar)
+    pub(crate) vim_processor: VimKeyProcessor,
     // Flash highlight for yank operations
     pub(crate) flash_highlight: Option<(edtui::state::selection::Selection, std::time::Instant)>,
     // Ctrl+C confirmation state
