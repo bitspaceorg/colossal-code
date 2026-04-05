@@ -7,8 +7,9 @@ use mistralrs::{
 };
 use mistralrs_core::{CalledFunction, MessageContent, ToolCallResponse, ToolCallType};
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
@@ -72,11 +73,17 @@ pub(super) async fn stream_responses_request(
             let retried_status = retried.status();
             if retried_status.is_success() {
                 let (tx, rx) = mpsc::unbounded_channel();
+                let shared_usage = backend.latest_usage.clone();
                 tokio::spawn(async move {
                     let sender = tx;
-                    if let Err(err) =
-                        process_responses_sse(retried, model_name, sender.clone(), request_start)
-                            .await
+                    if let Err(err) = process_responses_sse(
+                        retried,
+                        model_name,
+                        sender.clone(),
+                        request_start,
+                        shared_usage,
+                    )
+                    .await
                     {
                         let _ = sender.send(Response::InternalError(err.into()));
                     }
@@ -99,10 +106,17 @@ pub(super) async fn stream_responses_request(
     }
 
     let (tx, rx) = mpsc::unbounded_channel();
+    let shared_usage = backend.latest_usage.clone();
     tokio::spawn(async move {
         let sender = tx;
-        if let Err(err) =
-            process_responses_sse(response, model_name, sender.clone(), request_start).await
+        if let Err(err) = process_responses_sse(
+            response,
+            model_name,
+            sender.clone(),
+            request_start,
+            shared_usage,
+        )
+        .await
         {
             let _ = sender.send(Response::InternalError(err.into()));
         }
@@ -303,6 +317,7 @@ async fn process_responses_sse(
     fallback_model: String,
     tx: mpsc::UnboundedSender<Response>,
     request_start: Instant,
+    shared_usage: Arc<Mutex<Option<Usage>>>,
 ) -> Result<()> {
     let mut body_stream = response.bytes_stream();
     let mut buffer = Vec::new();
@@ -318,6 +333,9 @@ async fn process_responses_sse(
 
     while let Some(item) = futures::StreamExt::next(&mut body_stream).await {
         if tx.is_closed() {
+            if let Some(ref u) = usage {
+                *shared_usage.lock().await = Some(u.clone());
+            }
             return Ok(());
         }
 
@@ -427,6 +445,9 @@ async fn process_responses_sse(
                         accumulated = extract_text_from_output(response_value);
                     }
                     usage = Some(extract_usage(response_value, &accumulated));
+                    if let Some(ref u) = usage {
+                        *shared_usage.lock().await = Some(u.clone());
+                    }
 
                     let done = make_done_response(
                         response_id,

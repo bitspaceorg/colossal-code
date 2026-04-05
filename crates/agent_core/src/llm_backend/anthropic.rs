@@ -9,8 +9,9 @@ use mistralrs::{
 use mistralrs_core::{CalledFunction, MessageContent, ToolCallResponse, ToolCallType, ToolChoice};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
@@ -105,10 +106,17 @@ pub(super) async fn stream_anthropic_request(
 
     let (tx, rx) = mpsc::unbounded_channel();
     let request_start = Instant::now();
+    let shared_usage = backend.latest_usage.clone();
     tokio::spawn(async move {
         let sender = tx;
-        if let Err(err) =
-            process_anthropic_sse(response, model_name, sender.clone(), request_start).await
+        if let Err(err) = process_anthropic_sse(
+            response,
+            model_name,
+            sender.clone(),
+            request_start,
+            shared_usage,
+        )
+        .await
         {
             let _ = sender.send(Response::InternalError(err.into()));
         }
@@ -453,6 +461,7 @@ async fn process_anthropic_sse(
     fallback_model: String,
     tx: mpsc::UnboundedSender<Response>,
     request_start: Instant,
+    shared_usage: Arc<Mutex<Option<Usage>>>,
 ) -> Result<()> {
     let mut body_stream = response.bytes_stream();
     let mut buffer = Vec::new();
@@ -497,6 +506,8 @@ async fn process_anthropic_sse(
                         response_model = message.model;
                         if let Some(message_usage) = message.usage {
                             usage.prompt_tokens = message_usage.input_tokens.unwrap_or(0);
+                            // Eagerly propagate prompt_tokens so cancellation can read it
+                            *shared_usage.lock().await = Some(usage.clone());
                         }
                     }
                 }
@@ -582,6 +593,7 @@ async fn process_anthropic_sse(
                     if let Some(delta_usage) = parsed.usage {
                         usage.completion_tokens = delta_usage.output_tokens.unwrap_or(0);
                         usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+                        *shared_usage.lock().await = Some(usage.clone());
                     }
                 }
                 "message_stop" => {

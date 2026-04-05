@@ -8,14 +8,12 @@ use chrono::Utc;
 use colossal_linux_sandbox::protocol::SandboxPolicy;
 use colossal_linux_sandbox::tools::execute_tools_with_sandbox;
 use colossal_linux_sandbox::types::{ExitStatus, SessionId};
-use either::Either;
 use futures::StreamExt;
 use indexmap::IndexMap;
 use mistralrs::{
     ChatCompletionChunkResponse, Delta, Model, RequestBuilder, RequestLike, Response,
     TextMessageRole, Tool, ToolCallResponse, ToolChoice,
 };
-use mistralrs_core::MessageContent;
 use once_cell::sync::OnceCell;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -25,14 +23,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokenizers::Tokenizer;
 use tokio::sync::{Mutex, mpsc};
 
 static WORKSPACE_ROOT_OVERRIDE: OnceCell<std::sync::Mutex<Option<PathBuf>>> = OnceCell::new();
 
 pub mod config;
 mod llm_backend;
-pub use llm_backend::{HttpBackend, LLMBackend, LocalBackend};
+pub use llm_backend::{HttpBackend, LLMBackend, LocalBackend, NoneBackend};
 pub mod a2a;
 pub mod model_config;
 pub mod orchestrator;
@@ -980,6 +977,8 @@ pub use tools::{generate_tools_section, get_all_tools};
 /// Configuration for selecting which LLM backend to use
 #[derive(Debug, Clone)]
 pub enum BackendConfig {
+    /// No backend configured — TUI starts in setup mode
+    None,
     /// Use a local GGUF model
     Local {
         model_path: String,
@@ -997,6 +996,7 @@ pub enum BackendConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
+    None,
     Local,
     Http,
     ExternalHttp,
@@ -1105,8 +1105,6 @@ pub struct Agent {
     thinking_summarizer: Arc<Mutex<thinking_summarizer::ThinkingSummarizer>>,
     /// Flag to cancel current generation
     cancel_requested: Arc<AtomicBool>,
-    /// Tokenizer for accurate token counting
-    tokenizer: Arc<Tokenizer>,
     /// Conversation history (RequestBuilder maintains all messages)
     conversation: Arc<Mutex<Option<RequestBuilder>>>,
     /// Thinking tags configuration (opening/closing tags and summary interval)
@@ -1167,6 +1165,7 @@ impl Agent {
 
     fn model_label_from_backend(backend_config: &BackendConfig) -> String {
         match backend_config {
+            BackendConfig::None => String::new(),
             BackendConfig::Local {
                 model_path,
                 model_files,
@@ -1243,7 +1242,6 @@ impl Agent {
         backend_config: BackendConfig,
         system_prompt: String,
         tools: Vec<Tool>,
-        tokenizer: Tokenizer,
         safety_config: safety_config::SafetyConfig,
         model_label: String,
     ) -> Self {
@@ -1253,6 +1251,15 @@ impl Agent {
             BackendKind,
             model_config::ThinkingTags,
         ) = match backend_config {
+            BackendConfig::None => {
+                let backend: Arc<Box<dyn LLMBackend>> =
+                    Arc::new(Box::new(NoneBackend) as Box<dyn LLMBackend>);
+                (
+                    backend,
+                    BackendKind::None,
+                    model_config::ThinkingTags::default(),
+                )
+            }
             BackendConfig::Local {
                 model_path,
                 model_files,
@@ -1308,7 +1315,6 @@ impl Agent {
             tools: Arc::new(Mutex::new(tools)),
             thinking_summarizer: Arc::new(Mutex::new(summarizer)),
             cancel_requested: Arc::new(AtomicBool::new(false)),
-            tokenizer: Arc::new(tokenizer),
             conversation: Arc::new(Mutex::new(None)),
             thinking_tags: Arc::new(Mutex::new(thinking_tags)),
             safety_config: Arc::new(Mutex::new(safety_config)),
@@ -1327,7 +1333,6 @@ impl Agent {
             tools: self.tools.clone(),
             thinking_summarizer: self.thinking_summarizer.clone(),
             cancel_requested: Arc::new(AtomicBool::new(false)),
-            tokenizer: self.tokenizer.clone(),
             conversation: Arc::new(Mutex::new(None)), // Fresh conversation for worktree agent
             thinking_tags: self.thinking_tags.clone(),
             safety_config: self.safety_config.clone(),
@@ -1387,7 +1392,6 @@ impl Agent {
         model_files: Vec<String>,
         system_prompt: String,
         tools: Vec<Tool>,
-        tokenizer: Tokenizer,
         safety_config: safety_config::SafetyConfig,
     ) -> Self {
         let backend_config = BackendConfig::Local {
@@ -1400,7 +1404,6 @@ impl Agent {
             backend_config,
             system_prompt,
             tools,
-            tokenizer,
             safety_config,
             model_label,
         )
@@ -1411,7 +1414,10 @@ impl Agent {
         Self::new_with_model(None).await
     }
 
-    /// Create a new agent with a specific model (or default if None)
+    /// Create a new agent with a specific model (or default if None).
+    /// When no model is configured and no backend environment is set,
+    /// creates an agent with a `NoneBackend` that allows the TUI to
+    /// start up and prompt the user to configure a provider.
     pub async fn new_with_model(model_filename: Option<String>) -> Result<Self> {
         // Initialize config
         if let Err(_e) = initialize_config() {
@@ -1454,11 +1460,64 @@ impl Agent {
             get_default_niterules()
         });
 
-        let model_path = "/home/wise/.config/.nite/models".to_string();
-        let selected_model =
-            model_filename.unwrap_or_else(|| "Qwen_Qwen3-4B-Thinking-2507-Q8_0.gguf".to_string());
+        let backend_mode =
+            std::env::var("NITE_BACKEND_MODE").unwrap_or_else(|_| "http".to_string());
+        let backend_mode = backend_mode.to_lowercase();
 
-        let model_label = Self::label_from_filename(&selected_model);
+        // Determine whether we actually have a usable backend configured.
+        // If backend_mode is "none" or is "http" with no API key and default localhost,
+        // and no model file was specified, use NoneBackend so the TUI can start.
+        let has_api_key = std::env::var("NITE_HTTP_API_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty())
+            .is_some();
+
+        let backend_config = if backend_mode == "none"
+            || (model_filename.is_none() && !has_api_key && backend_mode != "local")
+        {
+            BackendConfig::None
+        } else {
+            let model_path = "/home/wise/.config/.nite/models".to_string();
+            let selected_model = model_filename
+                .unwrap_or_else(|| "Qwen_Qwen3-4B-Thinking-2507-Q8_0.gguf".to_string());
+
+            match backend_mode.as_str() {
+                "local" => BackendConfig::Local {
+                    model_path,
+                    model_files: vec![selected_model],
+                },
+                "external" => {
+                    let base_url = std::env::var("NITE_HTTP_BASE_URL")
+                        .unwrap_or_else(|_| "https://api.openai.com".to_string());
+                    let api_key = std::env::var("NITE_HTTP_API_KEY").unwrap_or_default();
+                    let completions_path = std::env::var("NITE_HTTP_COMPLETIONS_PATH")
+                        .unwrap_or_else(|_| "/v1/chat/completions".to_string());
+                    BackendConfig::Http {
+                        base_url,
+                        api_key,
+                        model: selected_model,
+                        completions_path,
+                        requires_model_load: false,
+                    }
+                }
+                _ => {
+                    let base_url = std::env::var("NITE_HTTP_BASE_URL")
+                        .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
+                    let api_key = std::env::var("NITE_HTTP_API_KEY").unwrap_or_default();
+                    let completions_path = std::env::var("NITE_HTTP_COMPLETIONS_PATH")
+                        .unwrap_or_else(|_| "/v1/chat/completions".to_string());
+                    BackendConfig::Http {
+                        base_url,
+                        api_key,
+                        model: selected_model,
+                        completions_path,
+                        requires_model_load: true,
+                    }
+                }
+            }
+        };
+
+        let model_label = Self::model_label_from_backend(&backend_config);
         let mut system_prompt = Self::render_system_prompt(
             &system_prompt_template,
             &tools_section,
@@ -1471,104 +1530,10 @@ impl Agent {
             system_prompt.push_str(&suffix);
         }
 
-        // Detect tokenizer from model filename
-        let tokenizer_name = Self::detect_tokenizer_from_model(&selected_model);
-
-        // Load tokenizer from HuggingFace
-        // Suppress output during loading
-        #[cfg(unix)]
-        let tokenizer = {
-            use std::fs::OpenOptions;
-            use std::os::unix::io::AsRawFd;
-
-            // Save original stdout and stderr
-            let stdout_fd = std::io::stdout().as_raw_fd();
-            let stderr_fd = std::io::stderr().as_raw_fd();
-            let saved_stdout = unsafe { libc::dup(stdout_fd) };
-            let saved_stderr = unsafe { libc::dup(stderr_fd) };
-
-            // Open /dev/null
-            let devnull = OpenOptions::new().write(true).open("/dev/null").ok();
-
-            let result = if let Some(devnull) = devnull {
-                let devnull_fd = devnull.as_raw_fd();
-
-                // Redirect stdout and stderr to /dev/null
-                unsafe {
-                    libc::dup2(devnull_fd, stdout_fd);
-                    libc::dup2(devnull_fd, stderr_fd);
-                }
-
-                // Load tokenizer
-                let tokenizer = Tokenizer::from_pretrained(&tokenizer_name, None);
-
-                // Restore stdout and stderr
-                unsafe {
-                    libc::dup2(saved_stdout, stdout_fd);
-                    libc::dup2(saved_stderr, stderr_fd);
-                    libc::close(saved_stdout);
-                    libc::close(saved_stderr);
-                }
-
-                tokenizer
-            } else {
-                // Fallback if /dev/null can't be opened
-                Tokenizer::from_pretrained(&tokenizer_name, None)
-            };
-
-            result.map_err(|e| {
-                anyhow::anyhow!("Failed to load tokenizer '{}': {}", tokenizer_name, e)
-            })?
-        };
-
-        #[cfg(not(unix))]
-        let tokenizer = Tokenizer::from_pretrained(&tokenizer_name, None)
-            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer '{}': {}", tokenizer_name, e))?;
-
-        let backend_mode =
-            std::env::var("NITE_BACKEND_MODE").unwrap_or_else(|_| "http".to_string());
-        let backend_mode = backend_mode.to_lowercase();
-
-        let backend_config = match backend_mode.as_str() {
-            "local" => BackendConfig::Local {
-                model_path,
-                model_files: vec![selected_model],
-            },
-            "external" => {
-                let base_url = std::env::var("NITE_HTTP_BASE_URL")
-                    .unwrap_or_else(|_| "https://api.openai.com".to_string());
-                let api_key = std::env::var("NITE_HTTP_API_KEY").unwrap_or_default();
-                let completions_path = std::env::var("NITE_HTTP_COMPLETIONS_PATH")
-                    .unwrap_or_else(|_| "/v1/chat/completions".to_string());
-                BackendConfig::Http {
-                    base_url,
-                    api_key,
-                    model: selected_model,
-                    completions_path,
-                    requires_model_load: false,
-                }
-            }
-            _ => {
-                let base_url = std::env::var("NITE_HTTP_BASE_URL")
-                    .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
-                let api_key = std::env::var("NITE_HTTP_API_KEY").unwrap_or_default();
-                let completions_path = std::env::var("NITE_HTTP_COMPLETIONS_PATH")
-                    .unwrap_or_else(|_| "/v1/chat/completions".to_string());
-                BackendConfig::Http {
-                    base_url,
-                    api_key,
-                    model: selected_model,
-                    completions_path,
-                    requires_model_load: true,
-                }
-            }
-        };
-
         Ok(Self::new_with_backend(
             backend_config,
             system_prompt,
             tools,
-            tokenizer,
             safety_config,
             model_label,
         ))
@@ -1655,131 +1620,12 @@ impl Agent {
         self.cancel_requested.load(Ordering::SeqCst)
     }
 
-    /// Detect the appropriate HuggingFace tokenizer from a model filename
-    fn detect_tokenizer_from_model(model_filename: &str) -> String {
-        let filename_lower = model_filename.to_lowercase();
-
-        // Qwen models
-        if filename_lower.contains("qwen3") || filename_lower.contains("qwen-3") {
-            // Qwen 3 models
-            if filename_lower.contains("32b") {
-                "Qwen/Qwen3-32B".to_string()
-            } else if filename_lower.contains("14b") {
-                "Qwen/Qwen3-14B".to_string()
-            } else if filename_lower.contains("8b") {
-                "Qwen/Qwen3-8B".to_string()
-            } else if filename_lower.contains("4b") {
-                "Qwen/Qwen3-4B".to_string()
-            } else if filename_lower.contains("1.7b") || filename_lower.contains("1_7b") {
-                "Qwen/Qwen3-1.7B".to_string()
-            } else if filename_lower.contains("0.6b") || filename_lower.contains("0_6b") {
-                "Qwen/Qwen3-0.6B".to_string()
-            } else {
-                "Qwen/Qwen3-4B".to_string() // Default Qwen3
-            }
-        } else if filename_lower.contains("qwen2.5") || filename_lower.contains("qwen2_5") {
-            // Qwen 2.5 models
-            if filename_lower.contains("72b") {
-                "Qwen/Qwen2.5-72B".to_string()
-            } else if filename_lower.contains("32b") {
-                "Qwen/Qwen2.5-32B".to_string()
-            } else if filename_lower.contains("14b") {
-                "Qwen/Qwen2.5-14B".to_string()
-            } else if filename_lower.contains("7b") {
-                "Qwen/Qwen2.5-7B".to_string()
-            } else if filename_lower.contains("3b") {
-                "Qwen/Qwen2.5-3B".to_string()
-            } else if filename_lower.contains("1.5b") || filename_lower.contains("1_5b") {
-                "Qwen/Qwen2.5-1.5B".to_string()
-            } else if filename_lower.contains("0.5b") || filename_lower.contains("0_5b") {
-                "Qwen/Qwen2.5-0.5B".to_string()
-            } else {
-                "Qwen/Qwen2.5-7B".to_string() // Default Qwen2.5
-            }
-        } else if filename_lower.contains("qwen2") || filename_lower.contains("qwen-2") {
-            // Qwen 2 models
-            "Qwen/Qwen2-7B".to_string()
-        } else if filename_lower.contains("qwen") {
-            // Generic Qwen - assume Qwen 2.5
-            "Qwen/Qwen2.5-7B".to_string()
-        }
-        // Llama models
-        else if filename_lower.contains("llama-3.3") || filename_lower.contains("llama3.3") {
-            "meta-llama/Llama-3.3-70B-Instruct".to_string()
-        } else if filename_lower.contains("llama-3.2") || filename_lower.contains("llama3.2") {
-            if filename_lower.contains("3b") {
-                "meta-llama/Llama-3.2-3B".to_string()
-            } else if filename_lower.contains("1b") {
-                "meta-llama/Llama-3.2-1B".to_string()
-            } else {
-                "meta-llama/Llama-3.2-3B".to_string()
-            }
-        } else if filename_lower.contains("llama-3.1") || filename_lower.contains("llama3.1") {
-            if filename_lower.contains("405b") {
-                "meta-llama/Llama-3.1-405B".to_string()
-            } else if filename_lower.contains("70b") {
-                "meta-llama/Llama-3.1-70B".to_string()
-            } else {
-                "meta-llama/Llama-3.1-8B".to_string()
-            }
-        } else if filename_lower.contains("llama-3") || filename_lower.contains("llama3") {
-            if filename_lower.contains("70b") {
-                "meta-llama/Meta-Llama-3-70B".to_string()
-            } else {
-                "meta-llama/Meta-Llama-3-8B".to_string()
-            }
-        } else if filename_lower.contains("llama") {
-            "meta-llama/Llama-3.1-8B".to_string()
-        }
-        // Mistral models
-        else if filename_lower.contains("mistral") {
-            if filename_lower.contains("nemo") {
-                "mistralai/Mistral-Nemo-Base-2407".to_string()
-            } else if filename_lower.contains("large") {
-                "mistralai/Mistral-Large-Instruct-2407".to_string()
-            } else {
-                "mistralai/Mistral-7B-v0.3".to_string()
-            }
-        }
-        // Gemma models
-        else if filename_lower.contains("gemma-2") || filename_lower.contains("gemma2") {
-            if filename_lower.contains("27b") {
-                "google/gemma-2-27b".to_string()
-            } else if filename_lower.contains("9b") {
-                "google/gemma-2-9b".to_string()
-            } else {
-                "google/gemma-2-2b".to_string()
-            }
-        } else if filename_lower.contains("gemma") {
-            "google/gemma-7b".to_string()
-        }
-        // Phi models
-        else if filename_lower.contains("phi-4") || filename_lower.contains("phi4") {
-            "microsoft/phi-4".to_string()
-        } else if filename_lower.contains("phi-3") || filename_lower.contains("phi3") {
-            "microsoft/Phi-3-mini-4k-instruct".to_string()
-        } else if filename_lower.contains("phi") {
-            "microsoft/phi-2".to_string()
-        }
-        // DeepSeek models
-        else if filename_lower.contains("deepseek") {
-            if filename_lower.contains("r1") {
-                "deepseek-ai/DeepSeek-R1".to_string()
-            } else if filename_lower.contains("v3") {
-                "deepseek-ai/DeepSeek-V3".to_string()
-            } else if filename_lower.contains("coder") {
-                "deepseek-ai/deepseek-coder-7b-base-v1.5".to_string()
-            } else {
-                "deepseek-ai/deepseek-llm-7b-base".to_string()
-            }
-        }
-        // Default fallback
-        else {
-            "Qwen/Qwen2.5-7B".to_string()
-        }
+    /// Get the thinking tags configuration
+    /// Returns the kind of backend this agent is using.
+    pub fn backend_kind(&self) -> BackendKind {
+        self.backend_kind
     }
 
-    /// Get the thinking tags configuration
     pub async fn get_thinking_tags(&self) -> model_config::ThinkingTags {
         self.thinking_tags.lock().await.clone()
     }
@@ -2484,38 +2330,13 @@ impl Agent {
     }
 
     /// Convert a structured chat message field into a plain string for token estimation.
-    fn message_content_to_string(value: &MessageContent) -> String {
-        match value {
-            Either::Left(text) => text.clone(),
-            Either::Right(chunks) => chunks
-                .iter()
-                .map(|chunk| serde_json::to_string(chunk).unwrap_or_default())
-                .collect::<Vec<_>>()
-                .join(" "),
-        }
-    }
-
-    /// Roughly estimate the prompt tokens for a pending request by flattening all messages.
-    fn estimate_prompt_tokens(&self, request_builder: &RequestBuilder) -> usize {
-        let mut flattened = String::new();
-        for message in request_builder.messages_ref() {
-            for (key, value) in message {
-                flattened.push_str(key);
-                flattened.push(':');
-                flattened.push_str(&Self::message_content_to_string(value));
-                flattened.push('\n');
-            }
-            flattened.push('\n');
-        }
-        self.count_tokens(&flattened)
-    }
-
-    /// Count tokens in text using the tokenizer
-    fn count_tokens(&self, text: &str) -> usize {
-        match self.tokenizer.encode(text, false) {
-            Ok(encoding) => encoding.len(),
-            Err(_) => 0, // Fallback to 0 if encoding fails
-        }
+    /// Approximate token count for a block of text using the ~4 chars/token heuristic.
+    /// Used for bulk text estimation (thinking buffer flushes, cancellation stats).
+    /// Real-time streaming counts use 1-per-SSE-delta instead (more accurate).
+    /// Final accurate counts come from the provider API response.
+    fn estimate_tokens_heuristic(text: &str) -> usize {
+        // ~4 chars per token, consistent with APPROX_CHARS_PER_TOKEN in constants.rs
+        text.len() / 4
     }
 
     /// Process a user message and stream responses back through the channel
@@ -2568,8 +2389,6 @@ impl Agent {
         let mut _final_accumulated_content = String::new();
 
         while has_more_tool_calls {
-            let prompt_token_estimate = self.estimate_prompt_tokens(&current_request_builder);
-
             let mut stream = self
                 .backend
                 .stream_chat_request(current_request_builder.clone())
@@ -2614,21 +2433,26 @@ impl Agent {
 
                             // Send any accumulated content as partial response
                             if !accumulated_content.is_empty() && !in_thinking {
-                                let token_count = self.count_tokens(&accumulated_content);
+                                let token_count =
+                                    Self::estimate_tokens_heuristic(&accumulated_content);
                                 let _ = tx.send(AgentMessage::AgentResponse(
                                     accumulated_content.clone(),
                                     token_count,
                                 ));
                             }
 
-                            // Send partial GenerationStats even when cancelled
-                            // This ensures context tracking continues to work
-                            // Use local timing to calculate proper stats
+                            // Send partial GenerationStats even when cancelled.
+                            // Use API-reported usage via get_latest_usage() when available
+                            // (populated by stream_options.include_usage for OpenAI,
+                            //  or message_start for Anthropic).
                             let elapsed_sec = stream_start_time.elapsed().as_secs_f32();
                             let time_to_first = first_token_time
                                 .map(|t| t.duration_since(stream_start_time).as_secs_f32())
                                 .unwrap_or(0.0);
-                            let completion_tokens = self.count_tokens(&accumulated_content);
+                            let api_usage = self.backend.get_latest_usage().await;
+                            let completion_tokens = total_generated_tokens;
+                            let prompt_tokens =
+                                api_usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0);
                             // Calculate tok/sec using ALL generated tokens (thinking + completion)
                             let avg_tok_per_sec = if elapsed_sec > 0.0 && total_generated_tokens > 0
                             {
@@ -2639,7 +2463,7 @@ impl Agent {
                             let stats = GenerationStats {
                                 avg_completion_tok_per_sec: avg_tok_per_sec,
                                 completion_tokens,
-                                prompt_tokens: prompt_token_estimate,
+                                prompt_tokens,
                                 time_to_first_token_sec: time_to_first,
                                 stop_reason: "cancelled".to_string(),
                             };
@@ -2784,7 +2608,8 @@ impl Agent {
 
                                             let final_thinking = &thinking_buffer[..end_idx];
                                             if !final_thinking.is_empty() {
-                                                let token_count = self.count_tokens(final_thinking);
+                                                let token_count =
+                                                    Self::estimate_tokens_heuristic(final_thinking);
                                                 // Track first token time and total tokens for stats
                                                 if first_token_time.is_none() && token_count > 0 {
                                                     first_token_time =
@@ -2855,7 +2680,8 @@ impl Agent {
                                                     }
                                                     outbound.push_str(after_think);
                                                     accumulated_content.push_str(&outbound);
-                                                    let token_count = self.count_tokens(&outbound);
+                                                    let token_count =
+                                                        Self::estimate_tokens_heuristic(&outbound);
                                                     // Track first token time and total tokens for stats
                                                     if first_token_time.is_none() && token_count > 0
                                                     {
@@ -2896,7 +2722,9 @@ impl Agent {
                                                             let chunk =
                                                                 &remaining[..chunk_byte_end];
                                                             let token_count =
-                                                                self.count_tokens(chunk);
+                                                                Self::estimate_tokens_heuristic(
+                                                                    chunk,
+                                                                );
                                                             // Track first token time and total tokens for stats
                                                             if first_token_time.is_none()
                                                                 && token_count > 0
@@ -2920,7 +2748,9 @@ impl Agent {
                                                                 &remaining[chunk_byte_end..];
                                                         } else {
                                                             let token_count =
-                                                                self.count_tokens(remaining);
+                                                                Self::estimate_tokens_heuristic(
+                                                                    remaining,
+                                                                );
                                                             // Track first token time and total tokens for stats
                                                             if first_token_time.is_none()
                                                                 && token_count > 0
@@ -2983,7 +2813,12 @@ impl Agent {
                                         }
                                         outbound.push_str(&chunk_content);
                                         accumulated_content.push_str(&outbound);
-                                        let token_count = self.count_tokens(&outbound);
+                                        // Each SSE delta is ~1 token; if prefix was prepended, estimate it separately
+                                        let token_count = 1 + Self::estimate_tokens_heuristic(
+                                            &outbound[..outbound
+                                                .len()
+                                                .saturating_sub(chunk_content.len())],
+                                        );
                                         // Track first token time and total tokens for stats
                                         if first_token_time.is_none() && token_count > 0 {
                                             first_token_time = Some(std::time::Instant::now());
@@ -3007,7 +2842,8 @@ impl Agent {
                                     // Before processing tool calls, flush any remaining thinking content
                                     if in_thinking && !thinking_buffer.is_empty() {
                                         // Send remaining thinking content
-                                        let token_count = self.count_tokens(&thinking_buffer);
+                                        let token_count =
+                                            Self::estimate_tokens_heuristic(&thinking_buffer);
                                         // Track first token time and total tokens for stats
                                         if first_token_time.is_none() && token_count > 0 {
                                             first_token_time = Some(std::time::Instant::now());
@@ -3144,7 +2980,7 @@ impl Agent {
 
             if !pending_prefix.is_empty() {
                 accumulated_content.push_str(&pending_prefix);
-                let token_count = self.count_tokens(&pending_prefix);
+                let token_count = Self::estimate_tokens_heuristic(&pending_prefix);
                 let _ = tx.send(AgentMessage::AgentResponse(
                     pending_prefix.clone(),
                     token_count,
@@ -3153,7 +2989,7 @@ impl Agent {
 
             // After stream ends, if still in thinking (no </think> found), flush residual
             if in_thinking && !thinking_buffer.is_empty() {
-                let token_count = self.count_tokens(&thinking_buffer);
+                let token_count = Self::estimate_tokens_heuristic(&thinking_buffer);
                 let _ = tx.send(AgentMessage::ThinkingContent(
                     thinking_buffer.clone(),
                     token_count,

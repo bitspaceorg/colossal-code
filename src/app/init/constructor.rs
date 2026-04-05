@@ -71,8 +71,14 @@ impl App {
             .await
             .map_err(|e| color_eyre::eyre::eyre!("Failed to load backend: {}", e))?;
 
+        let backend_is_none = agent.backend_kind() == agent_core::BackendKind::None;
         let agent_arc = Arc::new(agent);
         Self::spawn_agent_runtime(Arc::clone(&agent_arc), input_rx, output_tx);
+
+        // If no backend is configured, auto-open the /connect modal
+        let auto_open_connect = backend_is_none
+            && auth_store.active_connection_id.is_none()
+            && auth_store.connections.is_empty();
 
         Ok(Self {
             input: String::new(),
@@ -309,6 +315,7 @@ impl App {
             ui_state: UiState::default(),
             help_commands_selected: 0,
             connect: crate::app::connect::ConnectState {
+                show_connect_modal: auto_open_connect,
                 saved_connections: auth_store.connections.clone(),
                 active_connection_id: auth_store.active_connection_id.clone(),
                 ..Default::default()

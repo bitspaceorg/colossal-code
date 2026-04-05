@@ -1,6 +1,4 @@
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use tokenizers::Tokenizer;
 use tokio::sync::mpsc::{
     UnboundedReceiver, UnboundedSender, error::TryRecvError, unbounded_channel,
 };
@@ -31,15 +29,6 @@ struct ChatChoice {
 struct ChatResponse {
     choices: Vec<ChatChoice>,
 }
-
-// Load SmolLM2-135M tokenizer from HuggingFace
-static SMOLLM_TOKENIZER: Lazy<Option<Tokenizer>> = Lazy::new(|| {
-    // Try to load from HuggingFace hub
-    if let Ok(tokenizer) = Tokenizer::from_pretrained("HuggingFaceTB/SmolLM2-135M", None) {
-        return Some(tokenizer);
-    }
-    None
-});
 
 pub struct ThinkingSummarizer {
     buffer: String,
@@ -80,15 +69,8 @@ impl ThinkingSummarizer {
         self.buffer.push_str(chunk);
         self.chunk_count += 1; // Each stream chunk = 1 chunk
 
-        // Count real tokens using SmolLM2 tokenizer
-        if let Some(tokenizer) = SMOLLM_TOKENIZER.as_ref() {
-            if let Ok(encoding) = tokenizer.encode(self.buffer.clone(), false) {
-                self.token_count = encoding.len();
-            }
-        } else {
-            // Fallback if tokenizer fails: approximate 1 token ~= 4 chars
-            self.token_count = self.buffer.len() / 4;
-        }
+        // Approximate 1 token ~= 4 chars
+        self.token_count = self.buffer.len() / 4;
 
         if self.token_count >= self.token_threshold {
             self.spawn_summary_job();
