@@ -12,6 +12,7 @@ Implemented a modular configuration system for Nite with the following features:
 ## Files Modified
 
 ### 1. `src/main.rs`
+
 - Added module imports for `config` and `tools`
 - Added config initialization at startup
 - Replaced hardcoded tools with modular tool generation
@@ -20,7 +21,9 @@ Implemented a modular configuration system for Nite with the following features:
 - Removed hardcoded system prompt
 
 ### 2. `src/config.rs` (NEW)
+
 Functions:
+
 - `get_config_dir()` - Returns `~/.config/.nite` path
 - `get_models_dir()` - Returns `~/.config/.nite/models` path
 - `get_local_niterules_path()` - Returns `./.niterules` path (local project)
@@ -31,15 +34,19 @@ Functions:
 - `get_default_niterules()` - Returns default template
 
 **Priority System:**
+
 1. `./.niterules` (local project config) - checked first
 2. `~/.config/.nite/.niterules` (global user config) - fallback
 3. Built-in default - if no files exist
 
 ### 3. `src/tools.rs` (NEW)
+
 Types:
+
 - `ToolName` enum - All available tools as enum variants
 
 Functions:
+
 - `build_tool(ToolName)` - Builds a single tool definition
 - `build_tools(&[ToolName])` - Builds multiple tools
 - `get_all_tools()` - Returns all 8 tools (full mode - read + write)
@@ -47,12 +54,14 @@ Functions:
 - `generate_tools_section(&[Tool])` - Generates XML tools section for prompt
 
 **Two Primary Modes:**
+
 1. **Full Mode**: `get_all_tools()` - All 8 tools (exec_command, delete_path, delete_many, get_files, get_files_recursive, search_files_with_regex, read_file, semantic_search)
 2. **Read-Only Mode**: `get_readonly_tools()` - 5 safe tools (get_files, get_files_recursive, search_files_with_regex, read_file, semantic_search)
 
 ## How to Use
 
 ### Full Mode (All 8 Tools)
+
 ```rust
 let tools = tools::get_all_tools();
 // Includes: exec_command, delete_path, delete_many,
@@ -61,6 +70,7 @@ let tools = tools::get_all_tools();
 ```
 
 ### Read-Only Mode (5 Safe Tools)
+
 ```rust
 let tools = tools::get_readonly_tools();
 // Includes: get_files, get_files_recursive, search_files_with_regex,
@@ -69,6 +79,7 @@ let tools = tools::get_readonly_tools();
 ```
 
 ### Custom Tool Subset
+
 ```rust
 let tools = tools::build_tools(&[
     ToolName::ReadFile,
@@ -85,15 +96,15 @@ When the agent starts:
 3. Creates `models/` subdirectory if missing (prints message)
 4. Creates global `.niterules` with default template if neither local nor global exists (prints message)
 5. Reads system prompt from `.niterules` with priority:
-   - First checks `./.niterules` (local project)
-   - Then checks `~/.config/.nite/.niterules` (global)
-   - Falls back to built-in default if neither exists
+    - First checks `./.niterules` (local project)
+    - Then checks `~/.config/.nite/.niterules` (global)
+    - Falls back to built-in default if neither exists
 6. Prints which .niterules file is being used (or if using default)
 7. Generates tool section based on enabled tools
 8. Replaces placeholders in template:
-   - `{tools_section}` → Generated XML tools
-   - `{os_version}` → Detected OS version
-   - `{workspace_path}` → Current workspace path
+    - `{tools_section}` → Generated XML tools
+    - `{os_version}` → Detected OS version
+    - `{workspace_path}` → Current workspace path
 
 ## User Benefits
 

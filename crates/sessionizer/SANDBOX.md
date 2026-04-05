@@ -30,12 +30,12 @@ pub struct SemanticSearchSession {
 
 ### Application Points
 
-| Component | Where Applied | File:Line |
-|-----------|---------------|-----------|
-| PTY (ExecCommand) | Before spawning command | `session.rs:800` |
-| PTY (PersistentShell) | Before spawning shell | `session.rs:972` |
-| Semantic Search | In indexing task | `manager.rs:896` |
-| Tools Execution | In spawn_blocking | `tools.rs:59` |
+| Component             | Where Applied           | File:Line        |
+| --------------------- | ----------------------- | ---------------- |
+| PTY (ExecCommand)     | Before spawning command | `session.rs:800` |
+| PTY (PersistentShell) | Before spawning shell   | `session.rs:972` |
+| Semantic Search       | In indexing task        | `manager.rs:896` |
+| Tools Execution       | In spawn_blocking       | `tools.rs:59`    |
 
 ### Flow: PTY Sessions
 
@@ -69,6 +69,7 @@ pub struct SemanticSearchSession {
 **Spawned async tasks DO NOT automatically inherit sandbox!**
 
 ### ❌ Wrong
+
 ```rust
 apply_sandbox_policy_to_current_thread(&policy, &cwd)?;
 tokio::spawn(async move {
@@ -77,6 +78,7 @@ tokio::spawn(async move {
 ```
 
 ### ✅ Correct
+
 ```rust
 tokio::spawn(async move {
     apply_sandbox_policy_to_current_thread(&policy, &cwd)?; // ✓ Apply inside
@@ -87,6 +89,7 @@ tokio::spawn(async move {
 ## Platform Implementation
 
 ### Linux (Landlock)
+
 - Uses Landlock LSM (Linux Security Module)
 - Thread-level sandbox application
 - Child processes inherit automatically
@@ -101,6 +104,7 @@ ruleset.restrict_self() // Applies to current thread
 ```
 
 ### macOS (Seatbelt)
+
 - Uses Apple Seatbelt sandbox
 - Process-level via `sandbox-exec`
 - File: `seatbelt.rs`
@@ -115,15 +119,18 @@ ruleset.restrict_self() // Applies to current thread
 ## What Changed
 
 ### Session Structures
+
 - Added `sandbox_policy` field to all session types
 - Added `sandbox_policy()` accessor methods
 - `ExecCommandSession` also stores `cwd`
 
 ### Tools Execution Fix
+
 - **Problem**: Race condition when applying sandbox before spawning
 - **Solution**: Use `spawn_blocking()` to ensure sandbox applied in correct thread
 
 **Before**:
+
 ```rust
 apply_sandbox_policy_to_current_thread(sandbox_policy, &cwd)?;
 let mut cmd = Command::new(tools_path);
@@ -131,6 +138,7 @@ cmd.output().await? // ← May not inherit sandbox
 ```
 
 **After**:
+
 ```rust
 tokio::task::spawn_blocking(move || {
     apply_sandbox_policy_to_current_thread(&sandbox_policy, &cwd)?;

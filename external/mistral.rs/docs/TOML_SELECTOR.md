@@ -7,10 +7,13 @@ There are a few cases which add functionality that cannot be found in the CLI.
 ## Speculative decoding
 
 ### What to specify
+
 **Under `[speculative]`**
+
 - Specify the `gamma` parameter
 
 **Under `[speculative.draft_model]`**
+
 - Choose a draft model, just like under `[model]` (only requirement is that they have the same tokenizer)
 
 ```toml
@@ -34,7 +37,9 @@ mistralrs from-config -f toml-selectors/speculative-gguf.toml
 ## AnyMoE
 
 ### What to specify
+
 **Under `[anymoe]`, required unless specified**
+
 - Specify the dataset
 - Find and specify the prefix/mlp values
     - Go to `https://huggingface.co/<MODEL ID>/tree/main?show_file_info=model.safetensors.index.json`
@@ -43,9 +48,11 @@ mistralrs from-config -f toml-selectors/speculative-gguf.toml
 - (Optional) Specify layers to apply AnyMoE to.
 
 **Under `[anymoe.config]`**
+
 - Hidden size, typically found at `https://huggingface.co/<BASE MODEL ID>/blob/main/config.json`
 
 **(For LoRA experts) Under `[anymoe.config.expert_type.lora_adapter]`**
+
 - Rank
 - Alpha
 - Target modules
@@ -55,6 +62,7 @@ mistralrs from-config -f toml-selectors/anymoe.toml
 ```
 
 ### With fine-tuned experts
+
 ```toml
 [model]
 model_id = "mistralai/Mistral-7B-Instruct-v0.1"
@@ -73,6 +81,7 @@ expert_type = "fine_tuned"
 ```
 
 ### With LoRA adapter experts
+
 ```toml
 [model]
 model_id = "HuggingFaceH4/zephyr-7b-beta"

@@ -61,6 +61,7 @@ The file watcher runs in a background task and processes events in real-time:
 - **File type filtering**: Only indexes supported code files
 
 **Supported File Types**:
+
 - Python: `.py`
 - Rust: `.rs`
 - JavaScript/TypeScript: `.js`, `.ts`, `.jsx`, `.tsx`
@@ -79,18 +80,21 @@ The file watcher runs in a background task and processes events in real-time:
 ## Point ID Strategy
 
 ### Problem (Old)
+
 ```rust
 // ❌ Caused collisions - same ID for different versions
 let point_id = format!("{}-{}", path, chunk_index);
 ```
 
 ### Solution (New)
+
 ```rust
 // ✅ UUID ensures uniqueness
 let point_id = uuid::Uuid::new_v4().to_string();
 ```
 
 Each chunk gets a unique UUID. When a file is updated:
+
 1. Old chunks are deleted by file_name filter
 2. New chunks get new UUIDs
 3. No ID collisions possible

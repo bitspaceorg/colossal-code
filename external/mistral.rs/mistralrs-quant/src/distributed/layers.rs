@@ -974,7 +974,9 @@ impl PackedExperts {
                     if !vb.contains_tensor("gate_up_proj")
                         || !vb.contains_tensor("gate_up_proj.weight")
                     {
-                        candle_core::bail!("PackedExperts with AFQ quantization config does not support `gate_up_proj` format.");
+                        candle_core::bail!(
+                            "PackedExperts with AFQ quantization config does not support `gate_up_proj` format."
+                        );
                     }
 
                     let base_vb = vb.clone();
@@ -1029,7 +1031,9 @@ impl PackedExperts {
                     // FP8 quantization for PackedExperts
                     // Keep weights as FP8 using BlockwiseFP8Linear to leverage native FP8 GEMM
                     let Some(weight_block_size) = weight_block_size else {
-                        candle_core::bail!("Blockwise FP8 for PackedExperts requires weight_block_size to be set.")
+                        candle_core::bail!(
+                            "Blockwise FP8 for PackedExperts requires weight_block_size to be set."
+                        )
                     };
                     if weight_block_size.len() != 2 {
                         candle_core::bail!(
@@ -1116,8 +1120,8 @@ impl PackedExperts {
                                 )?;
 
                                 // Create BlockwiseFP8Linear for each projection
-                                use crate::blockwise_fp8::BlockwiseFP8Linear;
                                 use crate::QuantMethodConfig;
+                                use crate::blockwise_fp8::BlockwiseFP8Linear;
 
                                 let gate_layer: Arc<dyn QuantMethod> = Arc::new(
                                     BlockwiseFP8Linear::new(QuantMethodConfig::BlockwiseFP8 {
@@ -1217,8 +1221,8 @@ impl PackedExperts {
                             )?;
 
                             // Create BlockwiseFP8Linear for each projection
-                            use crate::blockwise_fp8::BlockwiseFP8Linear;
                             use crate::QuantMethodConfig;
+                            use crate::blockwise_fp8::BlockwiseFP8Linear;
 
                             let gate_layer: Arc<dyn QuantMethod> = Arc::new(
                                 BlockwiseFP8Linear::new(QuantMethodConfig::BlockwiseFP8 {
@@ -1578,9 +1582,9 @@ impl FusedExperts {
             } else {
                 // FP8 config but no scale tensors - weights are actually unquantized
                 tracing::warn!(
-                        "FP8 quantization config specified but no scale tensors found for stacked MoE experts. \
+                    "FP8 quantization config specified but no scale tensors found for stacked MoE experts. \
                         Loading as unquantized."
-                    );
+                );
                 let gate_up_proj = experts_vb.get(
                     (num_experts, hidden_size, moe_intermediate_size * 2),
                     "gate_up_proj",

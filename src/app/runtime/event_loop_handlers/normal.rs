@@ -134,6 +134,7 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
         app.mode = Mode::Navigation;
         app.nav_needs_init = true;
         app.nav_scroll_offset = 0;
+        app.nav_pending_z = false;
         return;
     }
 

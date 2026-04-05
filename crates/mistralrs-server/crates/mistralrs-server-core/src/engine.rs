@@ -21,9 +21,7 @@ impl SharedMistralRsState {
     }
 }
 
-impl From<upstream_mistralrs_server_core::types::SharedMistralRsState>
-    for SharedMistralRsState
-{
+impl From<upstream_mistralrs_server_core::types::SharedMistralRsState> for SharedMistralRsState {
     fn from(value: upstream_mistralrs_server_core::types::SharedMistralRsState) -> Self {
         Self { inner: value }
     }

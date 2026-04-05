@@ -5,6 +5,7 @@ The Gemma 3 model is a family of multimodal (text+vision) models with 128k conte
 We support the Gemma 3 Model in the Rust, Python, and HTTP APIs, including ISQ for increased performance.
 
 The Python and HTTP APIs support sending images as:
+
 - URL
 - Path to a local image
 - [Base64](https://en.wikipedia.org/wiki/Base64) encoded string
@@ -12,6 +13,7 @@ The Python and HTTP APIs support sending images as:
 The Rust SDK takes an image from the [image](https://docs.rs/image/latest/image/index.html) crate.
 
 ## HTTP server
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/gemma3.py).
 
 We support an OpenAI compatible HTTP API for vision models. This example demonstrates sending a chat completion request with an image.
@@ -26,11 +28,13 @@ We support an OpenAI compatible HTTP API for vision models. This example demonst
 <h6><a href = "https://www.nhmagazine.com/mount-washington/">Credit</a></h6>
 
 **Prompt:**
+
 ```
 What is this?
 ```
 
 **Output:**
+
 ```
 image shows Mount Washington in New Hampshire, USA. It's a prominent peak in the White Mountains, known for its extreme weather conditions and being the highest peak in the Northeastern United States. The image captures it covered in snow with a dramatic sky above. The structures at the summit are communication towers.
 
@@ -41,13 +45,13 @@ The winding path visible on the mountain slopes appears to be part of the Mount 
 
 ---
 
-1) Start the server
+1. Start the server
 
 ```
 mistralrs serve vision -p 1234 -m google/gemma-3-12b-it
 ```
 
-2) Send a request
+2. Send a request
 
 ```py
 from openai import OpenAI
@@ -94,6 +98,7 @@ print(resp)
 ---
 
 ## Rust
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/vision_models/main.rs).
 
 This is a minimal example of running the Gemma 3 model with a dummy image.
@@ -138,6 +143,7 @@ async fn main() -> Result<()> {
 ```
 
 ## Python
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/gemma3.py).
 
 This example demonstrates loading and sending a chat completion request with an image.

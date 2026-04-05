@@ -3,14 +3,15 @@
 The [LLaVA](https://arxiv.org/abs/2310.03744) and [LLaVANext](https://llava-vl.github.io/blog/2024-01-30-llava-next/) are great multimodal models that can handle both text and vision inputs.
 
 This implementation supports both LLaVA and LLaVANext(which adds multi resolution image processing) and two types of LLM base model: llama and mistral. Currently it is tested on:
-* llava-hf/llava-v1.6-mistral-7b-hf
-* llava-hf/llava-v1.6-vicuna-7b-hf
-* llava-hf/llava-1.5-7b-hf
 
+- llava-hf/llava-v1.6-mistral-7b-hf
+- llava-hf/llava-v1.6-vicuna-7b-hf
+- llava-hf/llava-1.5-7b-hf
 
-The LLaVA and LLaVANext Model has support in the Rust, Python, and HTTP APIs. The LLaVA and LLaVANext Model also supports ISQ for increased performance. 
+The LLaVA and LLaVANext Model has support in the Rust, Python, and HTTP APIs. The LLaVA and LLaVANext Model also supports ISQ for increased performance.
 
 The Python and HTTP APIs support sending images as:
+
 - URL
 - Path to a local image
 - [Base64](https://en.wikipedia.org/wiki/Base64) encoded string
@@ -18,6 +19,7 @@ The Python and HTTP APIs support sending images as:
 The Rust SDK takes an image from the [image](https://docs.rs/image/latest/image/index.html) crate.
 
 ## HTTP server
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/llava_next.py).
 
 We support an OpenAI compatible HTTP API for vision models. This example demonstrates sending a chat completion request with an image.
@@ -28,21 +30,24 @@ We support an OpenAI compatible HTTP API for vision models. This example demonst
 
 **Image:**
 <img src="https://www.nhmagazine.com/content/uploads/2019/05/mtwashingtonFranconia-2-19-18-108-Edit-Edit.jpg" alt="Mount Washington" width = "1000" height = "666">
+
 <h6><a href = "https://www.nhmagazine.com/mount-washington/">Credit</a></h6>
 
 **Prompt:**
+
 ```
 What is shown in this image?
 ```
 
 **Output:**
+
 ```
 Text: The image shows a steep, snow-covered hillside with a pine tree on the right side, close to the top. The landscape appears to be a mountainous area with winter conditions. There are no visible humans or permanent structures in the immediate vicinity that suggest this is a summer or recreational location. It's likely a cold, snowy day or season, and the slopes might be part of a mountainous region.
 ```
 
 ---
 
-1) Start the server
+1. Start the server
 
 ```
 mistralrs serve vision -p 1234 --isq 4 -m llava-hf/llava-v1.6-mistral-7b-hf
@@ -50,7 +55,7 @@ mistralrs serve vision -p 1234 --isq 4 -m llava-hf/llava-v1.6-mistral-7b-hf
 mistralrs serve vision -p 1234 --isq 4 -c ./chat_templates/vicuna.json -m llava-hf/llava-v1.6-vicuna-7b-hf
 ```
 
-2) Send a request
+2. Send a request
 
 ```py
 from openai import OpenAI
@@ -91,6 +96,7 @@ print(resp)
 ---
 
 ## Rust
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/vision_models/main.rs).
 
 This is a minimal example of running the LLaVA and LLaVANext model with a dummy image.
@@ -136,6 +142,7 @@ async fn main() -> Result<()> {
 ```
 
 ## Python
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/llava_next.py).
 
 This example demonstrates loading and sending a chat completion request with an image.

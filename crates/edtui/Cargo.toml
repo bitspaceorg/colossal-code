@@ -1,7 +1,7 @@
 [package]
 name = "edtui"
 version = "0.9.6"
-edition = "2021"
+edition = "2024"
 repository = "https://github.com/preiter93/edtui"
 keywords = ["ratatui", "tui", "editor", "text", "vim"]
 description = "A TUI based vim inspired editor"

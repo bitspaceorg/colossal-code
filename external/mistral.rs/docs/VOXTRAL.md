@@ -10,13 +10,13 @@ The Voxtral Model has support in the Rust, Python, and HTTP APIs. Additionally, 
 
 We support an OpenAI compatible HTTP API for audio models.
 
-1) Start the server
+1. Start the server
 
 ```
 mistralrs serve vision -m mistralai/Voxtral-Mini-4B-Realtime-2602
 ```
 
-2) Send a request
+2. Send a request
 
 ```py
 import base64
@@ -55,6 +55,7 @@ print(resp)
 ```
 
 ## Rust
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/asr/main.rs).
 
 ```rust

@@ -3,6 +3,7 @@
 AnyMoE is technique to dynamically and efficiently create MoE models. By providing a set of experts and a small pretraining dataset, you can create an MoE locally!
 
 It has the following features:
+
 - Apply AnyMoE to any supported model
     - `plain`
     - `vision-plain`
@@ -15,7 +16,9 @@ https://github.com/EricLBuehler/mistral.rs/assets/65165915/33593903-d907-4c08-a0
 > Note: By default, this has the capability to create an csv loss image. When building from source (for Python or CLI), you may use `--no-default-features` command line to disable this. This may be necessary if networking is unavailable.
 
 ## Dataset
+
 Currently, AnyMoE expects a JSON dataset with one top-level key `row`, which is an array of objects with keys `prompt` (string), `expert` (integer), and `image_urls` (optional array of strings). For example:
+
 ```json
 {
     "rows": [
@@ -26,20 +29,21 @@ Currently, AnyMoE expects a JSON dataset with one top-level key `row`, which is 
         {
             "prompt": "Explain the significance of the theory of relativity in modern physics",
             "expert": 1
-        },
+        }
     ]
 }
-  
 ```
 
 For a vision model, `image_urls` may contain an array of image URLs/local paths or Base64 encoded images.
 
 ## Experts
+
 AnyMoE experts can be either fine-tuned models or LoRA adapter models. Only the mlp layers will be loaded from each. The experts must be homogeneous: they must be all fine-tuned or all adapter. Additionally, certain layers can be specified to apply AnyMoE.
 
 > Note: When using LoRA adapter experts, it may not be necessary to set the layers where AnyMoE will be applied due to the lower memory usage.
 
 ### Example of TOML selector with fine-tuned experts
+
 ```toml
 [model]
 model_id = "mistralai/Mistral-7B-Instruct-v0.1"
@@ -58,6 +62,7 @@ expert_type = "fine_tuned"
 ```
 
 ### Example of TOML selector with LoRA adapter experts
+
 ```toml
 [model]
 model_id = "HuggingFaceH4/zephyr-7b-beta"
@@ -86,16 +91,19 @@ target_modules = ["gate_proj"]
 CLI usage is via the [TOML selector](TOML_SELECTOR.md#anymoe) where you can also find docs on the required fields.
 
 For example, to use the demo fine-tuned expert:
+
 ```bash
 mistralrs from-config --file toml-selectors/anymoe.toml
 ```
 
 To use the demo LoRA expert:
+
 ```bash
 mistralrs from-config --file toml-selectors/anymoe_lora.toml
 ```
 
 ## Python example
+
 ```py
 from mistralrs import (
     Runner,
@@ -141,6 +149,7 @@ print(res.usage)
 ```
 
 ## Rust SDK
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/anymoe/main.rs).
 
 ```rust

@@ -1,23 +1,23 @@
-use std::sync::Arc;
 #[cfg(feature = "mock-manager")]
 use std::env;
+use std::sync::Arc;
 
-use axum::body::{to_bytes, Body};
+use axum::Router;
+use axum::body::{Body, to_bytes};
 use axum::http::Request;
 #[cfg(feature = "mock-manager")]
 use axum::http::StatusCode;
-use axum::Router;
-use serde_json::{json, Value};
-use tower::util::ServiceExt;
+use serde_json::{Value, json};
 use tokio::sync::RwLock;
+use tower::util::ServiceExt;
 
-use mistralrs_server_api::{build_router, AppState, AuthState, HttpMetrics};
-use mistralrs_server_config::{ConfigManager, ConfigSource, ServerConfig};
+use mistralrs_server_api::{AppState, AuthState, HttpMetrics, build_router};
 #[cfg(feature = "mock-manager")]
 use mistralrs_server_config::RateLimitSection;
-use mistralrs_server_core::{DynModelManager, NoopScheduler};
+use mistralrs_server_config::{ConfigManager, ConfigSource, ServerConfig};
 #[cfg(feature = "mock-manager")]
 use mistralrs_server_core::ManagerConfig;
+use mistralrs_server_core::{DynModelManager, NoopScheduler};
 #[cfg(feature = "mock-manager")]
 use mistralrs_server_core::{InMemoryModelManager, LoadModelRequest, SystemClock};
 
@@ -46,15 +46,16 @@ async fn build_app(config: ServerConfig) -> Router {
         .expect("config manager");
     let cfg_snapshot = config_manager.get().await;
     let metrics = HttpMetrics::new().unwrap();
-    
-    let factory: mistralrs_server_api::ManagerFactory = Arc::new(|cfg: &ServerConfig, scheduler, _| {
-        let manager: DynModelManager = Arc::new(InMemoryModelManager::new(
-            ManagerConfig::from(cfg),
-            scheduler,
-            SystemClock,
-        ));
-        Box::pin(async move { Ok(manager) })
-    });
+
+    let factory: mistralrs_server_api::ManagerFactory =
+        Arc::new(|cfg: &ServerConfig, scheduler, _| {
+            let manager: DynModelManager = Arc::new(InMemoryModelManager::new(
+                ManagerConfig::from(cfg),
+                scheduler,
+                SystemClock,
+            ));
+            Box::pin(async move { Ok(manager) })
+        });
 
     let state = AppState {
         manager: Arc::new(RwLock::new(manager)),
@@ -93,10 +94,12 @@ async fn generate_returns_envelope() {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(value.get("data").is_some());
-    assert!(value
-        .get("meta")
-        .and_then(|meta| meta.get("request_id"))
-        .is_some());
+    assert!(
+        value
+            .get("meta")
+            .and_then(|meta| meta.get("request_id"))
+            .is_some()
+    );
 }
 
 #[cfg(feature = "mock-manager")]
@@ -122,10 +125,7 @@ async fn streaming_generate_emits_sse() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let headers = response.headers().clone();
-    assert_eq!(
-        headers.get("content-type").unwrap(),
-        "text/event-stream"
-    );
+    assert_eq!(headers.get("content-type").unwrap(), "text/event-stream");
     assert!(headers.get("x-request-id").is_some());
     let payload = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body = String::from_utf8(payload.to_vec()).unwrap();
@@ -160,10 +160,12 @@ async fn auth_rate_limit_is_enforced() {
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(value
-        .get("meta")
-        .and_then(|meta| meta.get("request_id"))
-        .is_some());
+    assert!(
+        value
+            .get("meta")
+            .and_then(|meta| meta.get("request_id"))
+            .is_some()
+    );
 }
 
 #[cfg(feature = "mock-manager")]
@@ -188,7 +190,7 @@ async fn admin_evict_offloads_model() {
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&bytes).unwrap();
-    
+
     let data = value["data"].as_array().expect("data is array");
     assert_eq!(data.len(), 1);
     assert_eq!(data[0], "demo");
@@ -229,26 +231,13 @@ mod real_manager {
     use async_trait::async_trait;
     use axum::http::StatusCode;
     use mistralrs_core::{
-        ChatCompletionChunkResponse,
-        ChatCompletionResponse,
-        Choice,
-        ChunkChoice,
-        CompletionChoice,
-        CompletionChunkChoice,
-        CompletionChunkResponse,
-        CompletionResponse,
-        Delta,
-        NormalRequest,
-        Request as EngineRequest,
-        RequestMessage,
-        Response as EngineResponse,
-        ResponseMessage,
-        Tool as CoreTool,
-        ToolChoice,
+        ChatCompletionChunkResponse, ChatCompletionResponse, Choice, ChunkChoice, CompletionChoice,
+        CompletionChunkChoice, CompletionChunkResponse, CompletionResponse, Delta,
+        EmbeddingResponse as EngineEmbeddingResponse, NormalRequest, Request as EngineRequest,
+        RequestMessage, Response as EngineResponse, ResponseMessage, Tool as CoreTool, ToolChoice,
         Usage as EngineUsage,
-        EmbeddingResponse as EngineEmbeddingResponse,
     };
-    use mistralrs_server_config::{ModelConfig, MistralBuilderConfig};
+    use mistralrs_server_config::{MistralBuilderConfig, ModelConfig};
     use mistralrs_server_core::{
         EngineHandle, ManagerConfig, MistralModelManager, ModelManagerError, RuntimeAdapters,
     };
@@ -291,17 +280,20 @@ mod real_manager {
             )
             .expect("manager"),
         ) as DynModelManager;
-        
-        let factory: mistralrs_server_api::ManagerFactory = Arc::new(|cfg: &ServerConfig, scheduler, metrics| {
-             // In real harness, we might just return the existing manager or create a new one.
-             // For simplicity, let's just error or create a dummy if called.
-             // Ideally we would construct a new MistralModelManager with the SAME MockEngine.
-             // But MockEngine is local here.
-             // Since we don't test reload in real_manager harness yet, a dummy is fine.
-             Box::pin(async move { 
-                 Err(mistralrs_server_core::ModelManagerError::Other("reload not supported in harness".into()))
-             })
-        });
+
+        let factory: mistralrs_server_api::ManagerFactory =
+            Arc::new(|cfg: &ServerConfig, scheduler, metrics| {
+                // In real harness, we might just return the existing manager or create a new one.
+                // For simplicity, let's just error or create a dummy if called.
+                // Ideally we would construct a new MistralModelManager with the SAME MockEngine.
+                // But MockEngine is local here.
+                // Since we don't test reload in real_manager harness yet, a dummy is fine.
+                Box::pin(async move {
+                    Err(mistralrs_server_core::ModelManagerError::Other(
+                        "reload not supported in harness".into(),
+                    ))
+                })
+            });
 
         let auth = AuthState::from_section(&cfg_snapshot.auth);
         let state = AppState {
@@ -340,7 +332,7 @@ mod real_manager {
     impl MockEngine {
         fn new() -> Self {
             Self {
-                requests: Arc::new(Mutex::new(Vec::new()))
+                requests: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -506,7 +498,7 @@ mod real_manager {
                 is_streaming,
                 tools,
                 tool_choice,
-                .. 
+                ..
             } = req;
             match messages {
                 RequestMessage::Completion { text: _, .. } => {
@@ -514,7 +506,9 @@ mod real_manager {
                     if is_streaming {
                         let _ = response.send(Self::completion_chunk()).await;
                     }
-                    let _ = response.send(Self::completion_done("all done".into())).await;
+                    let _ = response
+                        .send(Self::completion_done("all done".into()))
+                        .await;
                 }
                 RequestMessage::Chat { .. } => {
                     self.record(is_streaming, tools, tool_choice, RequestKind::Chat);
@@ -525,19 +519,15 @@ mod real_manager {
                 }
                 _ => {
                     let _ = response
-                        .send(EngineResponse::InternalError(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "unsupported",
-                        ))))
+                        .send(EngineResponse::InternalError(Box::new(
+                            std::io::Error::new(std::io::ErrorKind::Other, "unsupported"),
+                        )))
                         .await;
                 }
             }
         }
 
-        async fn handle_embedding_request(
-            &self,
-            req: mistralrs_core::EmbeddingRequest,
-        ) {
+        async fn handle_embedding_request(&self, req: mistralrs_core::EmbeddingRequest) {
             self.record(false, None, None, RequestKind::Embeddings);
             let _ = req
                 .response
@@ -661,7 +651,9 @@ mod real_manager {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let value: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let value: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
         assert_eq!(value["data"]["embeddings"].as_array().unwrap().len(), 1);
 
         let multiple = json!({
@@ -683,7 +675,9 @@ mod real_manager {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let value: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let value: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
         assert_eq!(value["data"]["embeddings"].as_array().unwrap().len(), 2);
     }
 
@@ -738,10 +732,13 @@ mod real_manager {
                     .method("POST")
                     .uri("/api/pull")
                     .header("content-type", "application/json")
-                    .body(Body::from(json!({
-                        "model": "demo",
-                        "source": "hf://repo"
-                    }).to_string()))
+                    .body(Body::from(
+                        json!({
+                            "model": "demo",
+                            "source": "hf://repo"
+                        })
+                        .to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -810,7 +807,7 @@ mod real_manager {
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
-        
+
         assert!(value.get("id").is_some());
         assert_eq!(value["object"], "chat.completion");
         assert!(value["choices"].is_array());
@@ -840,11 +837,14 @@ mod real_manager {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers().get("content-type").unwrap(), "text/event-stream");
-        
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "text/event-stream"
+        );
+
         let payload = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body = String::from_utf8(payload.to_vec()).unwrap();
-        
+
         // Check for data: prefix
         assert!(body.contains("data: {"));
         // Check for [DONE]

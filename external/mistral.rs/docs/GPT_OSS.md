@@ -16,6 +16,7 @@ mistralrs run -m openai/gpt-oss-20b
 > Note: PagedAttention is not supported for GPT-OSS due to custom attention with sinks.
 
 ## HTTP API
+
 You can find a more detailed example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/gpt_oss.py).
 
 ```bash
@@ -49,6 +50,7 @@ while True:
 ```
 
 ## Python SDK
+
 You can find a more detailed example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/gpt_oss.py).
 
 ```py
@@ -78,6 +80,7 @@ print(res.usage)
 ```
 
 ## Rust SDK
+
 You can find a more detailed example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/text_models/main.rs).
 
 ```rust
@@ -116,16 +119,21 @@ async fn main() -> Result<()> {
 ## Technical Details
 
 ### MXFP4 Quantization
+
 GPT-OSS MoE experts use MXFP4 (4-bit microscaling floating point) quantization for compact and efficient storage:
+
 - `gate_up_proj`: Packed experts with MXFP4 weights
 - `down_proj`: Packed experts with MXFP4 weights
 - Scales stored at 1 byte per 32 elements
 
 ### Attention with Sinks
+
 The model uses per-head attention sinks that are added to attention logits before softmax, helping to regularize attention patterns. This custom attention mechanism is incompatible with PagedAttention.
 
 ### ISQ Support
+
 In-situ quantization (ISQ) can be applied to attention projection layers:
+
 - `q_proj`, `k_proj`, `v_proj`, `o_proj`
 - `lm_head`
 

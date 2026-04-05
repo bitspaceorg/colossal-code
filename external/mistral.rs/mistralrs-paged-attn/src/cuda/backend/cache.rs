@@ -182,7 +182,11 @@ pub unsafe fn swap_blocks(
     match (src.device(), dst.device()) {
         (Device::Cuda(src_dev), Device::Cuda(dst_dev)) => {
             if src_dev.location() != dst_dev.location() {
-                candle_core::bail!("Tensors must be on the same device to copy, got locations {:?} (src) and {:?} (dst).", src_dev.location(), dst_dev.location());
+                candle_core::bail!(
+                    "Tensors must be on the same device to copy, got locations {:?} (src) and {:?} (dst).",
+                    src_dev.location(),
+                    dst_dev.location()
+                );
             }
             let (src_storage, src_layout) = src.storage_and_layout();
             let (dst_storage, dst_layout) = dst.storage_and_layout();
@@ -267,7 +271,9 @@ pub unsafe fn swap_blocks(
             }
         }
         (src, dst) => {
-            candle_core::bail!("Tensors must be on either the GPU or CPU to swap, got {src:?} (src) and {dst:?} (dst).");
+            candle_core::bail!(
+                "Tensors must be on either the GPU or CPU to swap, got {src:?} (src) and {dst:?} (dst)."
+            );
         }
     }
 

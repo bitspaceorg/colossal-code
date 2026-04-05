@@ -127,7 +127,9 @@ impl DeviceMapSetting {
                             })
                             .collect::<Vec<_>>();
 
-                        info!("Loading model according to the following repeating layer mappings based on topology:");
+                        info!(
+                            "Loading model according to the following repeating layer mappings based on topology:"
+                        );
                         for (i, dev) in layers.iter().enumerate() {
                             info!("Layer {i}: {}", dev.device_pretty_repr());
                         }
@@ -157,7 +159,9 @@ impl DeviceMapSetting {
                 let n_host_layers =
                     host_layers.unwrap_or(model_layers.saturating_sub(n_device_layers));
                 if n_device_layers + n_host_layers != model_layers {
-                    candle_core::bail!("Expected the total number of GPU ({n_device_layers}) and host layers ({n_host_layers}) to sum to the number of model hidden layers ({model_layers})");
+                    candle_core::bail!(
+                        "Expected the total number of GPU ({n_device_layers}) and host layers ({n_host_layers}) to sum to the number of model hidden layers ({model_layers})"
+                    );
                 }
                 once_log_info(format!("Model has {model_layers} repeating layers."));
 
@@ -273,7 +277,9 @@ impl DeviceMapSetting {
                 }))
             }
             Self::Auto(_) => {
-                candle_core::bail!(".into_mapper does not work on Auto device map, convert it to a Map with DeviceMappedModelLoader::get_device_layers")
+                candle_core::bail!(
+                    ".into_mapper does not work on Auto device map, convert it to a Map with DeviceMappedModelLoader::get_device_layers"
+                )
             }
         }
     }

@@ -2,11 +2,11 @@ use jagged::Index2;
 use ratatui::crossterm::event::{MouseEvent as CTMouseEvent, MouseEventKind};
 
 use crate::{
+    EditorMode, EditorState,
     actions::{Execute, SwitchMode},
     helper::char_width,
     state::selection::set_selection,
     view::line_wrapper::LineWrapper,
-    EditorMode, EditorState,
 };
 
 /// Handles a mouse event.

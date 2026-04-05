@@ -12,11 +12,11 @@
 
 ## File Locations
 
-| File | Location | Purpose |
-|------|----------|---------|
-| Local .niterules | `./.niterules` | Project-specific AI instructions |
-| Global .niterules | `~/.config/.nite/.niterules` | Your default AI preferences |
-| Models directory | `~/.config/.nite/models/` | Store model files |
+| File              | Location                     | Purpose                          |
+| ----------------- | ---------------------------- | -------------------------------- |
+| Local .niterules  | `./.niterules`               | Project-specific AI instructions |
+| Global .niterules | `~/.config/.nite/.niterules` | Your default AI preferences      |
+| Models directory  | `~/.config/.nite/models/`    | Store model files                |
 
 ## Quick Commands
 
@@ -38,11 +38,11 @@ ls -la ~/.config/.nite/
 
 ## Template Placeholders
 
-| Placeholder | Replaced With |
-|-------------|---------------|
-| `{tools_section}` | Generated XML tool definitions |
-| `{os_version}` | Detected operating system version |
-| `{workspace_path}` | Current working directory path |
+| Placeholder        | Replaced With                     |
+| ------------------ | --------------------------------- |
+| `{tools_section}`  | Generated XML tool definitions    |
+| `{os_version}`     | Detected operating system version |
+| `{workspace_path}` | Current working directory path    |
 
 ## Tool Modes (in code)
 
@@ -62,11 +62,11 @@ let tools = tools::build_tools(&[
 
 ### Tool Modes Explained
 
-| Mode | Function | Tools Included |
-|------|----------|----------------|
-| **Full Mode** | `get_all_tools()` | All 11 tools (exec, delete, edit, read, search, web) |
+| Mode               | Function               | Tools Included                                                                                |
+| ------------------ | ---------------------- | --------------------------------------------------------------------------------------------- |
+| **Full Mode**      | `get_all_tools()`      | All 11 tools (exec, delete, edit, read, search, web)                                          |
 | **Read-Only Mode** | `get_readonly_tools()` | 5 tools (get_files, get_files_recursive, search_files_with_regex, read_file, semantic_search) |
-| **Custom** | `build_tools(&[...])` | Your selection |
+| **Custom**         | `build_tools(&[...])`  | Your selection                                                                                |
 
 ## Available Tools
 
@@ -85,21 +85,25 @@ let tools = tools::build_tools(&[
 ## Common Use Cases
 
 ### Global Preferences
+
 **Edit**: `~/.config/.nite/.niterules`
 **Use for**: Your general coding style, default behavior, common rules
 
 ### Project-Specific Rules
+
 **Create**: `./.niterules` in your project
 **Use for**: Special instructions for this codebase, project conventions
 
 ### Examples
 
 #### Prefer Global When:
+
 - You want consistent behavior across all projects
 - Setting up general coding standards
 - Defining your personal AI preferences
 
 #### Prefer Local When:
+
 - Working on a unique project with special requirements
 - Need different tools/behavior for this specific codebase
 - Collaborating and want to share project AI rules (commit .niterules)
@@ -134,12 +138,14 @@ diff ./.niterules ~/.config/.nite/.niterules
 ## Tips
 
 ✅ **DO**:
+
 - Use global for general preferences
 - Use local for project-specific rules
 - Commit `.niterules` to your repo if you want to share project AI configuration
 - Test changes by running the agent
 
 ❌ **DON'T**:
+
 - Don't forget placeholders `{tools_section}`, `{os_version}`, `{workspace_path}`
 - Don't edit both files and wonder why only local is used (priority!)
 - Don't hardcode paths or system-specific info (use placeholders)

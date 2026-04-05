@@ -9,21 +9,21 @@ use std::{
 
 use anyhow::Result;
 use axum::{
-    extract::{Extension, Path, Query, State},
-    http::{header, HeaderMap, Request, StatusCode},
-    middleware,
-    response::{sse::Event, sse::KeepAlive, sse::Sse, IntoResponse, Response},
-    routing::{delete, get, post},
     Json, Router,
+    extract::{Extension, Path, Query, State},
+    http::{HeaderMap, Request, StatusCode, header},
+    middleware,
+    response::{IntoResponse, Response, sse::Event, sse::KeepAlive, sse::Sse},
+    routing::{delete, get, post},
 };
 use dashmap::DashMap;
 use mistralrs_server_config::{AuthSection, ConfigManager, ServerConfig};
 use mistralrs_server_core::{
     ActiveModel, ChatCompletionChunkResponse, ChatRequest, ChatStreamWrapper,
     CompletionChunkResponse, CompletionStreamWrapper, DynModelManager, EmbeddingRequest,
-    EmbeddingResponse, EngineResponse, EngineUsage, GenerateRequest,
-    LoadModelRequest, ModelManagerError, ModelMetadata, ModelMetrics, ModelRecord,
-    ModelScheduler, StructuredLog, Usage,
+    EmbeddingResponse, EngineResponse, EngineUsage, GenerateRequest, LoadModelRequest,
+    ModelManagerError, ModelMetadata, ModelMetrics, ModelRecord, ModelScheduler, StructuredLog,
+    Usage,
 };
 use prometheus::{Encoder, IntCounterVec, Opts, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
@@ -398,10 +398,7 @@ pub async fn auth_middleware(
     }
 }
 
-async fn log_requests(
-    mut request: Request<axum::body::Body>,
-    next: middleware::Next,
-) -> Response {
+async fn log_requests(mut request: Request<axum::body::Body>, next: middleware::Next) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
     let request_id = request
@@ -450,9 +447,15 @@ pub async fn build_router(state: AppState) -> Result<Router> {
         .route("/api/unload", post(handle_unload))
         .route("/api/jobs/:id", get(handle_job_status))
         .route("/api/logs/:model", get(handle_logs))
-        .route("/v1/chat/completions", post(openai_routes::handle_chat_completions))
+        .route(
+            "/v1/chat/completions",
+            post(openai_routes::handle_chat_completions),
+        )
         .route("/v1/completions", post(openai_routes::handle_completions))
-        .route("/v1/embeddings", post(openai_routes::handle_embeddings_openai))
+        .route(
+            "/v1/embeddings",
+            post(openai_routes::handle_embeddings_openai),
+        )
         .route("/healthz", get(handle_health))
         .route("/metrics", get(handle_metrics))
         .route("/admin/reload-config", post(handle_reload_config))
@@ -596,9 +599,12 @@ fn completion_stream_events(
         let rid_local = rid.clone();
         let log = log_handle.clone();
         let event = match response {
-            EngineResponse::CompletionChunk(chunk) => {
-                sse_event("token", &rid_local, Some(completion_token_payload(chunk)), None)
-            }
+            EngineResponse::CompletionChunk(chunk) => sse_event(
+                "token",
+                &rid_local,
+                Some(completion_token_payload(chunk)),
+                None,
+            ),
             EngineResponse::CompletionDone(done) => {
                 let usage = convert_usage(&done.usage);
                 log.record_usage(&usage);
@@ -609,7 +615,10 @@ fn completion_stream_events(
                 sse_event(
                     "usage",
                     &rid_local,
-                    Some(UsageEventPayload { usage, finish_reason }),
+                    Some(UsageEventPayload {
+                        usage,
+                        finish_reason,
+                    }),
                     None,
                 )
             }
@@ -658,7 +667,10 @@ fn chat_stream_events(
                 sse_event(
                     "usage",
                     &rid_local,
-                    Some(UsageEventPayload { usage, finish_reason }),
+                    Some(UsageEventPayload {
+                        usage,
+                        finish_reason,
+                    }),
                     None,
                 )
             }
@@ -883,9 +895,7 @@ async fn handle_show(
         Some(metadata) => metadata,
         None => {
             let err = ApiError::new(StatusCode::NOT_FOUND, "not_found", "model not found");
-            state
-                .metrics
-                .record(endpoint, "GET", err.status().as_u16());
+            state.metrics.record(endpoint, "GET", err.status().as_u16());
             return Err(err);
         }
     };
@@ -1071,7 +1081,7 @@ async fn handle_reload_config(
     })?;
 
     let new_scheduler = (state.scheduler_factory)(&new_config);
-    
+
     let new_manager = (state.factory)(&new_config, new_scheduler.clone(), &state.metrics)
         .await
         .map_err(|err| {
@@ -1123,9 +1133,7 @@ mod tests {
     use tower::util::ServiceExt;
 
     use mistralrs_server_config::{ConfigManager, ConfigSource, ServerConfig};
-    use mistralrs_server_core::{
-        InMemoryModelManager, ManagerConfig, NoopScheduler, SystemClock,
-    };
+    use mistralrs_server_core::{InMemoryModelManager, ManagerConfig, NoopScheduler, SystemClock};
 
     use super::*;
 
@@ -1196,10 +1204,10 @@ mod tests {
             .unwrap();
         let cfg_snapshot = config.get().await;
         let metrics = HttpMetrics::new().unwrap();
-        
+
         let factory_called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let factory_called_clone = factory_called.clone();
-        
+
         let factory: ManagerFactory = Arc::new(move |_, _, _| {
             factory_called_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let fut = async move {
@@ -1229,7 +1237,7 @@ mod tests {
             auth: AuthState::from_section(&cfg_snapshot.auth),
         };
         let app = build_router(state).await.unwrap();
-        
+
         let response = app
             .oneshot(
                 Request::builder()
@@ -1240,7 +1248,7 @@ mod tests {
             )
             .await
             .unwrap();
-            
+
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(factory_called.load(std::sync::atomic::Ordering::SeqCst), 1);
     }

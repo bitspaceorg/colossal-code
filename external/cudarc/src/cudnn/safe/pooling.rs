@@ -3,7 +3,7 @@ use crate::{
     driver::{DevicePtr, DevicePtrMut},
 };
 
-use crate::cudnn::{result, Cudnn, CudnnDataType, TensorDescriptor};
+use crate::cudnn::{Cudnn, CudnnDataType, TensorDescriptor, result};
 use std::{marker::PhantomData, sync::Arc};
 
 /// A descriptor of the window for pooling operation. Create with [`Cudnn::create_poolingnd()`]

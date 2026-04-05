@@ -241,13 +241,13 @@ trait LoadTensors {
             .to_str()
             .expect("Expected to convert")
         {
-            "safetensors" => Box::new(SafetensorBackend(unsafe {
-                MmapedSafetensors::new(path)?
-            })),
-            "pth" | "pt" | "bin" => Box::new(PickleBackend(
-                candle_core::pickle::PthTensors::new(path, None)?
-            )),
-            other => candle_core::bail!("Unexpected extension `{other}`, this should have been handled by `get_model_paths`."),
+            "safetensors" => Box::new(SafetensorBackend(unsafe { MmapedSafetensors::new(path)? })),
+            "pth" | "pt" | "bin" => Box::new(PickleBackend(candle_core::pickle::PthTensors::new(
+                path, None,
+            )?)),
+            other => candle_core::bail!(
+                "Unexpected extension `{other}`, this should have been handled by `get_model_paths`."
+            ),
         };
 
         // Extracts the tensor name and processes it, filtering tensors and deriving the key name:

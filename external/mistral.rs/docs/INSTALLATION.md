@@ -5,11 +5,13 @@
 The install script automatically detects your hardware (CUDA, Metal, MKL) and builds with optimal features.
 
 **Linux/macOS:**
+
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/EricLBuehler/mistral.rs/master/install.sh | sh
 ```
 
 **Windows (PowerShell):**
+
 ```powershell
 irm https://raw.githubusercontent.com/EricLBuehler/mistral.rs/master/install.ps1 | iex
 ```
@@ -17,30 +19,31 @@ irm https://raw.githubusercontent.com/EricLBuehler/mistral.rs/master/install.ps1
 ## Prerequisites
 
 1. Install required packages:
-   - OpenSSL: `sudo apt install libssl-dev` (Ubuntu)
-   - pkg-config (Linux only): `sudo apt install pkg-config`
+    - OpenSSL: `sudo apt install libssl-dev` (Ubuntu)
+    - pkg-config (Linux only): `sudo apt install pkg-config`
 
 2. Install Rust from https://rustup.rs/
-   ```bash
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   source $HOME/.cargo/env
-   ```
+
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    source $HOME/.cargo/env
+    ```
 
 3. (Optional) Set up HuggingFace authentication:
-   ```bash
-   mistralrs login
-   ```
-   Or use `huggingface-cli login` as documented [here](https://huggingface.co/docs/huggingface_hub/en/installation).
+    ```bash
+    mistralrs login
+    ```
+    Or use `huggingface-cli login` as documented [here](https://huggingface.co/docs/huggingface_hub/en/installation).
 
 ## Supported Accelerators
 
-| Accelerator              | Feature Flag  | Additional Flags       |
-|--------------------------|---------------|------------------------|
-| NVIDIA GPUs (CUDA)       | `cuda`        | `flash-attn`, `flash-attn-v3`, `cudnn`  |
-| Apple Silicon GPU (Metal)| `metal`       |                        |
-| CPU (Intel)              | `mkl`         |                        |
-| CPU (Apple Accelerate)   | `accelerate`  |                        |
-| Generic CPU (ARM/AVX)    | _none_        | ARM NEON / AVX enabled by default |
+| Accelerator               | Feature Flag | Additional Flags                       |
+| ------------------------- | ------------ | -------------------------------------- |
+| NVIDIA GPUs (CUDA)        | `cuda`       | `flash-attn`, `flash-attn-v3`, `cudnn` |
+| Apple Silicon GPU (Metal) | `metal`      |                                        |
+| CPU (Intel)               | `mkl`        |                                        |
+| CPU (Apple Accelerate)    | `accelerate` |                                        |
+| Generic CPU (ARM/AVX)     | _none_       | ARM NEON / AVX enabled by default      |
 
 > **Note for Linux users:** The `metal` feature is macOS-only. Use `--features "cuda flash-attn cudnn"` for NVIDIA GPUs or `--features mkl` for Intel CPUs instead of `--all-features`.
 
@@ -48,14 +51,14 @@ irm https://raw.githubusercontent.com/EricLBuehler/mistral.rs/master/install.ps1
 
 Determine which features to enable based on your hardware:
 
-| Hardware | Features |
-|----------|----------|
-| NVIDIA GPU (Ampere+, compute >=80) | `cuda cudnn flash-attn` |
-| NVIDIA GPU (Hopper, compute 90) | `cuda cudnn flash-attn flash-attn-v3` |
-| NVIDIA GPU (older) | `cuda cudnn` |
-| Apple Silicon (macOS) | `metal accelerate` |
-| Intel CPU with MKL | `mkl` |
-| CPU only | (no features needed) |
+| Hardware                           | Features                              |
+| ---------------------------------- | ------------------------------------- |
+| NVIDIA GPU (Ampere+, compute >=80) | `cuda cudnn flash-attn`               |
+| NVIDIA GPU (Hopper, compute 90)    | `cuda cudnn flash-attn flash-attn-v3` |
+| NVIDIA GPU (older)                 | `cuda cudnn`                          |
+| Apple Silicon (macOS)              | `metal accelerate`                    |
+| Intel CPU with MKL                 | `mkl`                                 |
+| CPU only                           | (no features needed)                  |
 
 ## Install from crates.io
 
@@ -64,6 +67,7 @@ cargo install mistralrs-cli --features "<your-features>"
 ```
 
 Example:
+
 ```bash
 cargo install mistralrs-cli --features "cuda flash-attn cudnn"
 ```
@@ -77,6 +81,7 @@ cargo install --path mistralrs-cli --features "<your-features>"
 ```
 
 Example:
+
 ```bash
 cargo build --release --features "cuda flash-attn cudnn"
 ```
@@ -135,6 +140,7 @@ mistralrs run -m meta-llama/Llama-3.2-3B-Instruct
 ```
 
 For gated models, authenticate first:
+
 ```bash
 mistralrs login
 # Or: mistralrs run --token-source env:HF_TOKEN -m <model>
@@ -155,6 +161,7 @@ mistralrs run --format gguf -m author/model-repo -f model-quant.gguf
 ```
 
 Specify tokenizer if needed:
+
 ```bash
 mistralrs run --format gguf -m author/model-repo -f file.gguf -t author/official-tokenizer
 ```

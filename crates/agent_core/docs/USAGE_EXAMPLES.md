@@ -207,6 +207,7 @@ vim ./.niterules
 ```
 
 ### Example Global .niterules
+
 Your general preferences:
 
 ```
@@ -228,6 +229,7 @@ The absolute path of the user's workspace is {workspace_path}.
 ```
 
 ### Example Local .niterules
+
 Project-specific instructions:
 
 ```
@@ -252,19 +254,25 @@ The absolute path of the user's workspace is {workspace_path}.
 ### Priority System
 
 The system checks in this order:
+
 1. `./.niterules` (current directory) - **highest priority**
 2. `~/.config/.nite/.niterules` (user home)
 3. Built-in default template - **fallback**
 
 You'll see which file is being used when you start:
+
 ```
 Using local .niterules from: ./.niterules
 ```
+
 or
+
 ```
 Using global .niterules from: /home/user/.config/.nite/.niterules
 ```
+
 or
+
 ```
 No .niterules file found, using default template
 ```
@@ -321,6 +329,7 @@ async fn main() -> Result<()> {
 ```
 
 Run with:
+
 ```bash
 # Read-only mode
 READONLY_MODE=1 cargo run --bin tool_agent
@@ -349,6 +358,7 @@ cat ~/.config/.nite/.niterules
 ## Troubleshooting
 
 ### .niterules Not Found
+
 If you get an error about .niterules not found, it means initialization failed:
 
 ```rust
@@ -360,6 +370,7 @@ if let Err(e) = config::initialize_config() {
 ```
 
 ### Tools Not Working
+
 Make sure you're passing the tools to both places:
 
 ```rust
@@ -374,6 +385,7 @@ let request_builder = RequestBuilder::new()
 ```
 
 ### Custom .niterules Not Loading
+
 Check file permissions and path:
 
 ```bash

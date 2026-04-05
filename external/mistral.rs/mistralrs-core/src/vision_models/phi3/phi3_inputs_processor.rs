@@ -259,8 +259,8 @@ impl InputsProcessor for Phi3InputsProcessor {
                 if unique_image_ids != (1u32..unique_image_ids.len() as u32 + 1).collect::<Vec<_>>()
                 {
                     return Err(anyhow::Error::msg(
-                    "`image_ids` must start from 1, and must be continuous, e.g. [1, 2, 3], cannot be [1, 4, 5].",
-                ));
+                        "`image_ids` must start from 1, and must be continuous, e.g. [1, 2, 3], cannot be [1, 4, 5].",
+                    ));
                 }
                 // Total images must be the same as the number of image tags
                 if unique_image_ids.len() != n_images {

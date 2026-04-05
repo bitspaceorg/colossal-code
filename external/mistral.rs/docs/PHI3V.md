@@ -3,6 +3,7 @@
 The Phi 3 Vision Model has support in the Rust, Python, and HTTP APIs. The Phi 3 Vision Model supports ISQ for increased performance.
 
 The Python and HTTP APIs support sending images as:
+
 - URL
 - Path to a local image
 - [Base64](https://en.wikipedia.org/wiki/Base64) encoded string
@@ -15,6 +16,7 @@ The Rust SDK takes an image from the [image](https://docs.rs/image/latest/image/
 > Aspect ratio is not preserved in that case.
 
 ## HTTP server
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/phi3v.py).
 
 We support an OpenAI compatible HTTP API for vision models. This example demonstrates sending a chat completion request with an image.
@@ -25,14 +27,17 @@ We support an OpenAI compatible HTTP API for vision models. This example demonst
 
 **Image:**
 <img src="https://www.nhmagazine.com/content/uploads/2019/05/mtwashingtonFranconia-2-19-18-108-Edit-Edit.jpg" alt="Mount Washington" width = "1000" height = "666">
+
 <h6><a href = "https://www.nhmagazine.com/mount-washington/">Credit</a></h6>
 
 **Prompt:**
+
 ```
 What is shown in this image? Write a detailed response analyzing the scene.
 ```
 
 **Output:**
+
 ```
 The image captures a breathtaking view of a mountain peak, bathed in the soft glow of sunlight. The peak, dusted with a layer of snow, stands tall against the backdrop of a clear blue sky. A trail, etched into the mountain's side by countless hikers before it, winds its way up to the summit. The trail's white color contrasts sharply with the surrounding landscape, drawing attention to its path and inviting exploration.
 
@@ -41,13 +46,13 @@ The perspective from which this photo is taken offers an expansive view of the m
 
 ---
 
-1) Start the server
+1. Start the server
 
 ```
 mistralrs serve vision -p 1234 -m microsoft/Phi-3.5-vision-instruct
 ```
 
-2) Send a request
+2. Send a request
 
 ```py
 from openai import OpenAI
@@ -89,6 +94,7 @@ print(resp)
 ---
 
 ## Rust
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/vision_models/main.rs).
 
 This is a minimal example of running the Phi 3 Vision model with a dummy image.
@@ -133,6 +139,7 @@ async fn main() -> Result<()> {
 ```
 
 ## Python
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/phi3v.py).
 
 This example demonstrates loading and sending a chat completion request with an image.

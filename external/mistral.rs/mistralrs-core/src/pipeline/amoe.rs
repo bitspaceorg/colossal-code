@@ -444,7 +444,7 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
                     let images = match images {
                         Some(Ok(x)) => Some(x),
                         Some(Err(e)) => {
-                            return anyhow::Result::Err(candle_core::Error::Msg(e.to_string()))
+                            return anyhow::Result::Err(candle_core::Error::Msg(e.to_string()));
                         }
                         None => None,
                     };

@@ -50,6 +50,7 @@ Matformer models are pre-trained with a special architecture that allows certain
 3. **Automatic Remapping**: Remaining layers are renumbered sequentially
 
 For example, the Gemma 3n E2.49B (block-level) slice:
+
 - Keeps all 35 layers (no layer skipping)
 - Uses mixed FFN dimensions: 8192 for layers 0-19, 16384 for layers 20-24, 8192 for layers 25-34
 - Cuts parameters from 3.98B to 2.49B (~37% reduction)
@@ -75,6 +76,7 @@ Config for E2.49B (block-level),35,2.49,54.50%,"[8192, 8192, ..., 16384, 16384, 
 ## Supported Models
 
 Currently supported:
+
 - **Gemma 3n** (`google/gemma-3n-E4B-it`) - Multimodal model with vision and audio
 
 See [`matformer_configs/`](https://github.com/EricLBuehler/mistral.rs/tree/master/matformer_configs/) for available configurations.
@@ -84,26 +86,30 @@ See [`matformer_configs/`](https://github.com/EricLBuehler/mistral.rs/tree/maste
 ### Memory Usage
 
 Memory scales approximately with parameter count:
+
 - Full model (3.98B): ~8GB VRAM
 - E2.49B slice: ~5GB VRAM
-- E2B slice (1.91B): ~4GB VRAM  
+- E2B slice (1.91B): ~4GB VRAM
 - Smaller slices: Proportionally less
 
 ### Inference Speed
 
 Speed improvement is roughly linear with layer count:
+
 - 30 layers vs 35 layers = ~14% faster
 - 20 layers vs 35 layers = ~43% faster
 
 ### Quality Trade-offs
 
 Example accuracy on MMLU benchmark:
+
 - Full model: 62.3%
 - E2.98B: 59.5% (-4.5%)
 - E2.49B: 54.5% (-12.5%)
 - E2B: 50.9% (-18.3%)
 
 Choose based on your requirements:
+
 - **Maximum quality**: Use full model (omit matformer args)
 - **Balanced**: E2.49B to E2.98B configurations (block-level configs recommended)
 - **Resource-constrained**: E2B configuration (1.91B params)
@@ -152,13 +158,14 @@ To create your own Matformer configuration:
 
 1. **Start with the full model** as baseline
 2. **Identify skippable layers**:
-   - Middle layers (10-30) are often good candidates
-   - Avoid early layers (feature extraction) and late layers (final representations)
-   - Never skip special layers (KV-sharing, attention patterns)
+    - Middle layers (10-30) are often good candidates
+    - Avoid early layers (feature extraction) and late layers (final representations)
+    - Never skip special layers (KV-sharing, attention patterns)
 3. **Test quality degradation** at each configuration
 4. **Create CSV file** with your configurations
 
 Example minimal configuration:
+
 ```csv
 name,# Layers,# Effective Params (B),FFN Hidden Dims,Layers Skipped
 Tiny,15,0.8,"[4096, 4096, ...]","[5,6,7,10,11,12,15,16,17,20,21,22,25,26,27,30,31,32,33,34]"
@@ -191,7 +198,7 @@ Which.VisionPlain(
 .with_matformer_slice_name(name: String)
 
 // For TextModelBuilder (when supported)
-.with_matformer_config_path(path: PathBuf)  
+.with_matformer_config_path(path: PathBuf)
 .with_matformer_slice_name(name: String)
 ```
 
@@ -200,14 +207,17 @@ Which.VisionPlain(
 ### Common Issues
 
 **"Matformer slice 'X' not found"**
+
 - Check slice name matches exactly (case-sensitive)
 - Verify CSV file path is correct
 
 **"Layers X and Y are reserved and cannot be skipped"**
+
 - Some models have special layers that must not be skipped
 - Try different layer combinations
 
 **Memory not reduced as expected**
+
 - Ensure you're using the slice (check logs)
 - Skipped layers still need to be loaded initially
 - Consider combining with quantization
@@ -215,13 +225,15 @@ Which.VisionPlain(
 ### Debugging
 
 Enable logging to see Matformer details:
+
 ```bash
 RUST_LOG=mistralrs_core=info mistralrs ...
 ```
 
 This shows:
+
 - Configuration file loaded
-- Selected slice details  
+- Selected slice details
 - Layers being skipped
 - Final layer count
 

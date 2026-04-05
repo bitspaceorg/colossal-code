@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
 
     let response = model.send_chat_request(messages).await?;
     println!("{}", response.choices[0].message.content.as_ref().unwrap());
-    
+
     Ok(())
 }
 ```
@@ -166,79 +166,85 @@ print(res.choices[0].message.content)
 1. Create `mcp-config.json`:
 
 **Process Example (Recommended for getting started):**
+
 ```json
 {
-  "servers": [{
-    "name": "Filesystem Tools",
-    "source": {
-      "type": "Process",
-      "command": "npx",
-      "args": ["@modelcontextprotocol/server-filesystem", "."]
-    }
-  }],
-  "auto_register_tools": true
+    "servers": [
+        {
+            "name": "Filesystem Tools",
+            "source": {
+                "type": "Process",
+                "command": "npx",
+                "args": ["@modelcontextprotocol/server-filesystem", "."]
+            }
+        }
+    ],
+    "auto_register_tools": true
 }
 ```
 
 > **Note:** To install the filesystem server, run: `npx @modelcontextprotocol/server-filesystem . -y`
 
 **HTTP Example (Hugging Face MCP Server):**
+
 ```json
 {
-  "servers": [
-    {
-      "name": "Hugging Face MCP",
-      "source": {
-        "type": "Http",
-        "url": "https://hf.co/mcp",
-        "timeout_secs": 30
-      },
-      "bearer_token": "hf_xxx",
-      "tool_prefix": "hf",
-      "enabled": false
-    },
-    {
-      "name": "Filesystem Tools",
-      "source": {
-        "type": "Process",
-        "command": "npx",
-        "args": ["@modelcontextprotocol/server-filesystem", "."]
-      }
-    }
-  ],
-  "auto_register_tools": true,
-  "tool_timeout_secs": 30,
-  "max_concurrent_calls": 5
+    "servers": [
+        {
+            "name": "Hugging Face MCP",
+            "source": {
+                "type": "Http",
+                "url": "https://hf.co/mcp",
+                "timeout_secs": 30
+            },
+            "bearer_token": "hf_xxx",
+            "tool_prefix": "hf",
+            "enabled": false
+        },
+        {
+            "name": "Filesystem Tools",
+            "source": {
+                "type": "Process",
+                "command": "npx",
+                "args": ["@modelcontextprotocol/server-filesystem", "."]
+            }
+        }
+    ],
+    "auto_register_tools": true,
+    "tool_timeout_secs": 30,
+    "max_concurrent_calls": 5
 }
 ```
 
 **WebSocket Example:**
+
 ```json
 {
-  "servers": [
-    {
-      "name": "WebSocket Example",
-      "source": {
-        "type": "WebSocket",
-        "url": "wss://api.example.com/mcp",
-        "timeout_secs": 30
-      },
-      "enabled": false
-    },
-    {
-      "name": "Filesystem Tools",
-      "source": {
-        "type": "Process",
-        "command": "npx",
-        "args": ["@modelcontextprotocol/server-filesystem", "."]
-      }
-    }
-  ],
-  "auto_register_tools": true
+    "servers": [
+        {
+            "name": "WebSocket Example",
+            "source": {
+                "type": "WebSocket",
+                "url": "wss://api.example.com/mcp",
+                "timeout_secs": 30
+            },
+            "enabled": false
+        },
+        {
+            "name": "Filesystem Tools",
+            "source": {
+                "type": "Process",
+                "command": "npx",
+                "args": ["@modelcontextprotocol/server-filesystem", "."]
+            }
+        }
+    ],
+    "auto_register_tools": true
 }
 ```
 
 2. Start server with MCP:
+
 ```bash
 mistralrs serve \
   -p 1234 \
@@ -247,6 +253,7 @@ mistralrs serve \
 ```
 
 3. Use the API:
+
 ```bash
 curl -X POST http://localhost:1234/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -284,6 +291,7 @@ curl -X POST http://localhost:1234/v1/chat/completions \
 - **Postgres**: `@modelcontextprotocol/server-postgres` - Database operations (Process)
 
 **Additional servers (install separately):**
+
 - [Brave Search](https://github.com/modelcontextprotocol/servers/tree/main/src/brave-search) - Web search capabilities
 - [GitHub](https://github.com/modelcontextprotocol/servers/tree/main/src/github) - GitHub API access
 
@@ -294,23 +302,28 @@ Replace placeholder tokens and URLs with actual values for your use case.
 ### Common Issues
 
 **"MCP server failed to start" or "npx command not found"**
+
 - Install Node.js and npm: `curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt-get install -y nodejs`
 - Install the filesystem server: `npx @modelcontextprotocol/server-filesystem . -y`
 
 **"No tools available" or "tools_available: false"**
+
 - Check server logs for MCP connection errors
 - Verify the MCP config file path is correct
 - Ensure the MCP server process is running: `ps aux | grep mcp`
 
 **"Tool call failed" or timeout errors**
+
 - Increase `tool_timeout_secs` in your config (default: 30)
 - Check `max_concurrent_calls` setting (start with 1-5)
 - Verify file permissions for filesystem operations
 
 **Authentication errors with HTTP servers**
+
 - Double-check `bearer_token` values (e.g., HF tokens start with `hf_`)
 - Verify API endpoints are accessible: `curl -H "Authorization: Bearer YOUR_TOKEN" https://hf.co/mcp`
 
 **Need help?**
+
 - [MCP Server Registry](https://github.com/modelcontextprotocol/servers) - Find more servers
 - [Discord Community](https://discord.gg/SZrecqK8qw) - Get support

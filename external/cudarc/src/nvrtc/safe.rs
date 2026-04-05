@@ -4,7 +4,7 @@
 
 use super::{result, sys};
 
-use core::ffi::{c_char, CStr};
+use core::ffi::{CStr, c_char};
 use std::ffi::CString;
 use std::{borrow::ToOwned, path::PathBuf, string::String, vec::Vec};
 
@@ -49,7 +49,9 @@ impl Ptx {
                 std::fs::read_to_string(path).expect("Unable to read ptx from file.")
             }
             PtxKind::Binary(_) => {
-                panic!("Cannot convert binary CUBIN data to string. Use from_src() or from_file() for PTX data.")
+                panic!(
+                    "Cannot convert binary CUBIN data to string. Use from_src() or from_file() for PTX data."
+                )
             }
         }
     }

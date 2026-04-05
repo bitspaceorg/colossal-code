@@ -36,7 +36,9 @@ fn detect_version_from_env() -> Option<(usize, usize)> {
                     return Some((major, minor));
                 }
             }
-            panic!("Unsupported cuda toolkit version: `$CUDARC_CUDA_VERSION={version}`. Please raise a github issue.")
+            panic!(
+                "Unsupported cuda toolkit version: `$CUDARC_CUDA_VERSION={version}`. Please raise a github issue."
+            )
         }
         _ => None,
     }
@@ -58,7 +60,9 @@ fn main() {
         not(feature = "dynamic-loading"),
         not(feature = "fallback-dynamic-loading")
     ))]
-    panic!("None between `dynamic-loading`, `fallback-dynamic-loading`, `dynamic-linking` and `static-linking` features are active, this is a bug");
+    panic!(
+        "None between `dynamic-loading`, `fallback-dynamic-loading`, `dynamic-linking` and `static-linking` features are active, this is a bug"
+    );
     #[cfg(all(feature = "dynamic-linking", feature = "static-linking"))]
     panic!("Both `dynamic-linking` and `static-linking` features are active, this is a bug");
     #[cfg(all(feature = "dynamic-loading", feature = "static-linking"))]
@@ -89,7 +93,9 @@ fn main() {
         (major, minor)
     } else {
         #[cfg(not(feature = "cuda-version-from-build-system"))]
-        panic!("Must specify one of the following features: [cuda-version-from-build-system, cuda-13010, cuda-13000, cuda-12090, cuda-12080, cuda-12060, cuda-12050, cuda-12040, cuda-12030, cuda-12020, cuda-12010, cuda-12000, cuda-11080, cuda-11070, cuda-11060, cuda-11050, cuda-11040]");
+        panic!(
+            "Must specify one of the following features: [cuda-version-from-build-system, cuda-13010, cuda-13000, cuda-12090, cuda-12080, cuda-12060, cuda-12050, cuda-12040, cuda-12030, cuda-12020, cuda-12010, cuda-12000, cuda-11080, cuda-11070, cuda-11060, cuda-11050, cuda-11040]"
+        );
 
         #[cfg(feature = "cuda-version-from-build-system")]
         {
@@ -117,7 +123,9 @@ fn cuda_version_from_build_system() -> (usize, usize) {
             #[cfg(feature = "fallback-latest")]
             {
                 let latest = SUPPORTED_CUDA_VERSIONS[0].0;
-                println!("cargo:warning=Failed to run `nvcc --version`. Following `-F fallback-latest`; using CUDA {latest:?}.");
+                println!(
+                    "cargo:warning=Failed to run `nvcc --version`. Following `-F fallback-latest`; using CUDA {latest:?}."
+                );
                 return latest;
             }
             #[cfg(not(feature = "fallback-latest"))]
@@ -252,7 +260,9 @@ fn link_searches(major: usize, minor: usize) -> Vec<PathBuf> {
     // occur. Print a warning with some guidance.
     #[cfg(feature = "dynamic-linking")]
     if env_vars.is_empty() && std::env::var("CONDA_PREFIX").is_ok() {
-        println!("cargo::warning=Detected $CONDA_PREFIX, but no CUDA path was set through one of: {TYPICAL_CUDA_PATH_ENV_VARS:?}. Linking to system CUDA libraries; linker errors may occur. To use CUDA installed via conda please ensure the environment contains all required dependencies (e.g. the \"cuda-driver-dev\") and retry building with CUDA_HOME=$CONDA_PREFIX.")
+        println!(
+            "cargo::warning=Detected $CONDA_PREFIX, but no CUDA path was set through one of: {TYPICAL_CUDA_PATH_ENV_VARS:?}. Linking to system CUDA libraries; linker errors may occur. To use CUDA installed via conda please ensure the environment contains all required dependencies (e.g. the \"cuda-driver-dev\") and retry building with CUDA_HOME=$CONDA_PREFIX."
+        )
     }
 
     let typical_locations = [

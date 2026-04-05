@@ -182,13 +182,18 @@ pub fn calculate_cache_config(
 
     let num_gpu_blocks = mb_to_blocks!(mem_gpu * SIZE_IN_MB, dtype_size, block_size, config);
     if num_gpu_blocks == 0 {
-        anyhow::bail!("Num GPU blocks is 0. This means there is not enough memory. Either reduce the memory amount/utilization/context size or disable PagedAttention.");
+        anyhow::bail!(
+            "Num GPU blocks is 0. This means there is not enough memory. Either reduce the memory amount/utilization/context size or disable PagedAttention."
+        );
     }
 
     if !silent {
         info!("Allocating {mem_gpu} MB for PagedAttention KV cache per GPU");
         info!("PagedAttention KV cache type is {dtype:?}");
-        info!("Using PagedAttention with block size {block_size} and {num_gpu_blocks} GPU blocks: available context length is {} tokens", num_gpu_blocks*block_size);
+        info!(
+            "Using PagedAttention with block size {block_size} and {num_gpu_blocks} GPU blocks: available context length is {} tokens",
+            num_gpu_blocks * block_size
+        );
     }
     Ok(CacheConfig {
         block_size,

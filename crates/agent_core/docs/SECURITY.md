@@ -12,25 +12,25 @@ Previously, the sandbox on Linux was **completely non-functional** - it was just
 
 1. **Thread-level enforcement**: When any session is created (PTY shell, semantic search, file watcher), `apply_sandbox_policy_to_current_thread()` is called
 2. **Landlock rules are applied**: The thread is restricted to only access:
-   - System directories (read-only): `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`
-   - Writable roots from policy (full access): Current working directory + `SANDBOX_EXTRA_ROOTS`
-   - Temporary directories (if not excluded): `/tmp`, `$TMPDIR`
+    - System directories (read-only): `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`
+    - Writable roots from policy (full access): Current working directory + `SANDBOX_EXTRA_ROOTS`
+    - Temporary directories (if not excluded): `/tmp`, `$TMPDIR`
 3. **All subsequent file operations** in that thread are restricted by the kernel
 
 ### Coverage
 
 Sandbox is applied in all these places:
 
-| Component | File | Line | Status |
-|-----------|------|------|--------|
-| PTY/Shell sessions | `session.rs` | 910 | ✅ Enforced |
-| Semantic search sessions | `session.rs` | 408 | ✅ Enforced |
-| Semantic search indexing task | `manager.rs` | 891 | ✅ Enforced (in spawned task) |
-| Code chunker | `semantic_search_lib.rs` | 465 | ✅ Enforced (sequential, not parallel) |
-| Exec command sessions | `session.rs` | 747 | ✅ Enforced |
-| File watcher | `session.rs` | N/A | ⚠️ Disabled (never processes events) |
-| General exec | `lib.rs` | 72 | ✅ Enforced |
-| Tools | `tools.rs` | 53 | ✅ Enforced |
+| Component                     | File                     | Line | Status                                 |
+| ----------------------------- | ------------------------ | ---- | -------------------------------------- |
+| PTY/Shell sessions            | `session.rs`             | 910  | ✅ Enforced                            |
+| Semantic search sessions      | `session.rs`             | 408  | ✅ Enforced                            |
+| Semantic search indexing task | `manager.rs`             | 891  | ✅ Enforced (in spawned task)          |
+| Code chunker                  | `semantic_search_lib.rs` | 465  | ✅ Enforced (sequential, not parallel) |
+| Exec command sessions         | `session.rs`             | 747  | ✅ Enforced                            |
+| File watcher                  | `session.rs`             | N/A  | ⚠️ Disabled (never processes events)   |
+| General exec                  | `lib.rs`                 | 72   | ✅ Enforced                            |
+| Tools                         | `tools.rs`               | 53   | ✅ Enforced                            |
 
 ### Testing
 
@@ -82,6 +82,7 @@ Using **ABI V3** for maximum compatibility and features.
 ### Critical Fixes Applied
 
 #### 1. Rayon Thread Pool Bypass (FIXED)
+
 **Problem:** The semantic search indexing used `par_iter()` which spawned Rayon worker threads that bypassed Landlock.
 
 **Solution:** Changed to sequential iteration (`.iter()` instead of `.par_iter()`). While slower, it ensures all file I/O operations are sandboxed.
@@ -89,6 +90,7 @@ Using **ABI V3** for maximum compatibility and features.
 **Location:** `semantic_search_lib.rs:465`
 
 #### 2. Semantic Search Spawned Task (FIXED)
+
 **Problem:** The indexing task was spawned with `tokio::spawn()` without applying Landlock to the new task.
 
 **Solution:** Added `apply_sandbox_policy_to_current_thread()` at the start of the spawned task.
@@ -96,6 +98,7 @@ Using **ABI V3** for maximum compatibility and features.
 **Location:** `manager.rs:891`
 
 #### 3. File Watcher (DOCUMENTED)
+
 **Problem:** File watcher is created but never actually processes events (dead code).
 
 **Solution:** Documented that it's intentionally disabled. If enabled in the future, the event processing task must also be sandboxed.
@@ -117,13 +120,13 @@ See [SANDBOX.md](./SANDBOX.md) for how to configure additional writable roots vi
 
 ### Comparison: Before vs After
 
-| Aspect | Before | After |
-|--------|--------|-------|
-| Linux enforcement | ❌ None (placeholder) | ✅ Landlock LSM |
-| macOS enforcement | ⚠️ Partial (Seatbelt) | ⚠️ Same |
-| Error handling | Silent failures | Propagated errors |
-| File access | Unrestricted | Restricted by policy |
-| Testing | No verification | Test script provided |
+| Aspect            | Before                | After                |
+| ----------------- | --------------------- | -------------------- |
+| Linux enforcement | ❌ None (placeholder) | ✅ Landlock LSM      |
+| macOS enforcement | ⚠️ Partial (Seatbelt) | ⚠️ Same              |
+| Error handling    | Silent failures       | Propagated errors    |
+| File access       | Unrestricted          | Restricted by policy |
+| Testing           | No verification       | Test script provided |
 
 ---
 

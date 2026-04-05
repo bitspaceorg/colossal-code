@@ -137,7 +137,7 @@ impl Sdpa {
                         return cpu::run_flash_attn_cpu::<f32>(&q, &k, &v, mask, sdpa_params);
                     }
                     DType::F16 => {
-                        return cpu::run_flash_attn_cpu::<half::f16>(&q, &k, &v, mask, sdpa_params)
+                        return cpu::run_flash_attn_cpu::<half::f16>(&q, &k, &v, mask, sdpa_params);
                     }
                     DType::BF16 => {
                         return cpu::run_flash_attn_cpu::<half::bf16>(

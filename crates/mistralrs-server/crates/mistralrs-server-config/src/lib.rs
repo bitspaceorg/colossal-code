@@ -1,23 +1,21 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs,
-    mem,
+    fs, mem,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use config::{Config, Environment, File, FileFormat};
 use mistralrs_core::{
-    AutoDeviceMapParams, McpClientConfig, ModelDType, ModelSelected,
-    TokenSource as UpTokenSource,
+    AutoDeviceMapParams, McpClientConfig, ModelDType, ModelSelected, TokenSource as UpTokenSource,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::info;
 use upstream_mistralrs_server_core::mistralrs_for_server_builder::{
-    ModelConfig as UpstreamModelConfig, MistralRsForServerBuilder,
+    MistralRsForServerBuilder, ModelConfig as UpstreamModelConfig,
 };
 use validator::Validate;
 
@@ -727,7 +725,8 @@ impl ModelBuilderParams {
     }
 
     pub fn to_upstream_model_config(&self) -> Result<UpstreamModelConfig> {
-        let mut config = UpstreamModelConfig::new(self.model_id.clone(), self.build_model_selected()?);
+        let mut config =
+            UpstreamModelConfig::new(self.model_id.clone(), self.build_model_selected()?);
         if let Some(template) = self.jinja_template.clone() {
             config = config.with_chat_template(template);
         }
@@ -801,7 +800,11 @@ pub trait BuilderShim {
     fn set_search_options(&mut self, enabled: Option<bool>, bert_model: Option<&str>);
     fn set_mcp_client(&mut self, config: Option<&McpClientConfig>);
     fn configure_paged_attention(&mut self, cfg: Option<&PagedAttentionConfig>);
-    fn configure_models(&mut self, default_model_id: &str, models: &[ModelBuilderParams]) -> Result<()>;
+    fn configure_models(
+        &mut self,
+        default_model_id: &str,
+        models: &[ModelBuilderParams],
+    ) -> Result<()>;
     fn build(self) -> Result<Self::Output>;
 }
 
@@ -858,12 +861,20 @@ impl BuilderShim for RealBuilderShim {
         if let Some(cfg) = cfg {
             self.update_builder(|builder| builder.set_paged_attn(Some(cfg.enabled)));
             self.update_builder(|builder| builder.with_paged_attn_gpu_mem_optional(cfg.gpu_mem));
-            self.update_builder(|builder| builder.with_paged_attn_gpu_mem_usage_optional(cfg.gpu_mem_usage));
-            self.update_builder(|builder| builder.with_paged_attn_block_size_optional(cfg.block_size));
+            self.update_builder(|builder| {
+                builder.with_paged_attn_gpu_mem_usage_optional(cfg.gpu_mem_usage)
+            });
+            self.update_builder(|builder| {
+                builder.with_paged_attn_block_size_optional(cfg.block_size)
+            });
         }
     }
 
-    fn configure_models(&mut self, default_model_id: &str, models: &[ModelBuilderParams]) -> Result<()> {
+    fn configure_models(
+        &mut self,
+        default_model_id: &str,
+        models: &[ModelBuilderParams],
+    ) -> Result<()> {
         if models.len() == 1 {
             self.configure_single_model(&models[0])
         } else {
@@ -908,19 +919,33 @@ impl RealBuilderShim {
     }
 
     fn apply_model_overrides(&mut self, params: &ModelBuilderParams) {
-        self.update_builder(|builder| builder.with_chat_template_optional(params.jinja_template.clone()));
-        self.update_builder(|builder| builder.with_jinja_explicit_optional(params.jinja_explicit.clone()));
-        self.update_builder(|builder| builder.with_num_device_layers_optional(params.num_device_layers.clone()));
-        self.update_builder(|builder| builder.with_in_situ_quant_optional(params.in_situ_quant.clone()));
+        self.update_builder(|builder| {
+            builder.with_chat_template_optional(params.jinja_template.clone())
+        });
+        self.update_builder(|builder| {
+            builder.with_jinja_explicit_optional(params.jinja_explicit.clone())
+        });
+        self.update_builder(|builder| {
+            builder.with_num_device_layers_optional(params.num_device_layers.clone())
+        });
+        self.update_builder(|builder| {
+            builder.with_in_situ_quant_optional(params.in_situ_quant.clone())
+        });
         if let Some(size) = params.prefix_cache_n {
             self.update_builder(|builder| builder.with_prefix_cache_n(size));
         }
         if let Some(flag) = params.paged_attn {
             self.update_builder(|builder| builder.set_paged_attn(Some(flag)));
         }
-        self.update_builder(|builder| builder.with_paged_attn_gpu_mem_optional(params.paged_gpu_mem));
-        self.update_builder(|builder| builder.with_paged_attn_gpu_mem_usage_optional(params.paged_gpu_mem_usage));
-        self.update_builder(|builder| builder.with_paged_attn_block_size_optional(params.paged_attn_block_size));
+        self.update_builder(|builder| {
+            builder.with_paged_attn_gpu_mem_optional(params.paged_gpu_mem)
+        });
+        self.update_builder(|builder| {
+            builder.with_paged_attn_gpu_mem_usage_optional(params.paged_gpu_mem_usage)
+        });
+        self.update_builder(|builder| {
+            builder.with_paged_attn_block_size_optional(params.paged_attn_block_size)
+        });
         self.update_builder(|builder| builder.with_paged_ctxt_len_optional(params.paged_ctxt_len));
     }
 }
@@ -1003,18 +1028,24 @@ impl TryFrom<&ServerConfig> for MistralBuilderConfig {
             None => None,
         };
         let backend = detect_paged_backend(&value.scheduler)?;
-        let paged_attention = value.scheduler.paged_attn.map(|enabled| PagedAttentionConfig {
-            enabled,
-            backend: backend.clone(),
-            gpu_mem: value.scheduler.paged_attn_gpu_mem,
-            gpu_mem_usage: value.scheduler.paged_attn_gpu_mem_usage,
-            block_size: value.scheduler.paged_attn_block_size,
-        });
+        let paged_attention = value
+            .scheduler
+            .paged_attn
+            .map(|enabled| PagedAttentionConfig {
+                enabled,
+                backend: backend.clone(),
+                gpu_mem: value.scheduler.paged_attn_gpu_mem,
+                gpu_mem_usage: value.scheduler.paged_attn_gpu_mem_usage,
+                block_size: value.scheduler.paged_attn_block_size,
+            });
         let mut models = Vec::with_capacity(value.models.len());
         let mut seen = HashSet::new();
         for (name, cfg) in value.models.iter() {
             if name != &cfg.model_id {
-                bail!("model entry key {name} must match model_id {}", cfg.model_id);
+                bail!(
+                    "model entry key {name} must match model_id {}",
+                    cfg.model_id
+                );
             }
             if !seen.insert(cfg.model_id.clone()) {
                 bail!("duplicate model id {}", cfg.model_id);
@@ -1109,9 +1140,7 @@ fn parse_mcp_client_config(spec: &str) -> Result<McpClientConfig> {
 fn parse_mcp_payload(body: &str) -> Result<McpClientConfig> {
     serde_json::from_str(body).or_else(|json_err| {
         toml::from_str(body).map_err(|toml_err| {
-            anyhow::anyhow!(
-                "failed to parse MCP config as JSON ({json_err}) or TOML ({toml_err})"
-            )
+            anyhow::anyhow!("failed to parse MCP config as JSON ({json_err}) or TOML ({toml_err})")
         })
     })
 }
@@ -1412,9 +1441,16 @@ mod tests {
         "#;
         let cfg: ServerConfig = toml::from_str(toml).unwrap();
         let builder = MistralBuilderConfig::try_from(&cfg).unwrap();
-        assert!(matches!(builder.token_source, Some(TokenSource::Environment(key)) if key == "TOKENS"));
+        assert!(
+            matches!(builder.token_source, Some(TokenSource::Environment(key)) if key == "TOKENS")
+        );
         assert_eq!(builder.models.len(), 2);
-        assert!(builder.models.iter().any(|m| m.pinned && m.model_id == "primary"));
+        assert!(
+            builder
+                .models
+                .iter()
+                .any(|m| m.pinned && m.model_id == "primary")
+        );
     }
 
     #[test]
@@ -1432,9 +1468,15 @@ mod tests {
 
     #[test]
     fn token_source_parsing_variants() {
-        assert!(matches!(TokenSource::parse("env:KEY").unwrap(), TokenSource::Environment(key) if key == "KEY"));
-        assert!(matches!(TokenSource::parse("file:/tmp/a").unwrap(), TokenSource::File(path) if path == PathBuf::from("/tmp/a")));
-        assert!(matches!(TokenSource::parse("literal:{}").unwrap(), TokenSource::Literal(body) if body == "{}"));
+        assert!(
+            matches!(TokenSource::parse("env:KEY").unwrap(), TokenSource::Environment(key) if key == "KEY")
+        );
+        assert!(
+            matches!(TokenSource::parse("file:/tmp/a").unwrap(), TokenSource::File(path) if path == PathBuf::from("/tmp/a"))
+        );
+        assert!(
+            matches!(TokenSource::parse("literal:{}").unwrap(), TokenSource::Literal(body) if body == "{}")
+        );
     }
 
     #[test]

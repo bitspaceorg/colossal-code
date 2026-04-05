@@ -5,32 +5,32 @@ This is the comprehensive CLI reference for `mistralrs`. The CLI provides comman
 ## Table of Contents
 
 - [Commands](#commands)
-  - [run](#run---interactive-mode): run model in interactive mode
-  - [serve](#serve---http-server): start HTTP/MCP server and (optionally) the UI
-  - [from-config](#from-config---toml-configuration): run from a [TOML configuration file](CLI_CONFIG.md)
-  - [quantize](#quantize---uqff-generation): generate UQFF quantized model file
-  - [tune](#tune---recommendations): recommend quantization + device mapping for a model
-  - [doctor](#doctor---system-diagnostics): run system diagnostics and environment checks
-  - [login](#login---huggingface-authentication): authenticate with HuggingFace Hub
-  - [cache](#cache---model-management): manage the HuggingFace model cache
-  - [bench](#bench---performance-benchmarking): run performance benchmarks
-  - [completions](#completions---shell-completions): generate shell completions
+    - [run](#run---interactive-mode): run model in interactive mode
+    - [serve](#serve---http-server): start HTTP/MCP server and (optionally) the UI
+    - [from-config](#from-config---toml-configuration): run from a [TOML configuration file](CLI_CONFIG.md)
+    - [quantize](#quantize---uqff-generation): generate UQFF quantized model file
+    - [tune](#tune---recommendations): recommend quantization + device mapping for a model
+    - [doctor](#doctor---system-diagnostics): run system diagnostics and environment checks
+    - [login](#login---huggingface-authentication): authenticate with HuggingFace Hub
+    - [cache](#cache---model-management): manage the HuggingFace model cache
+    - [bench](#bench---performance-benchmarking): run performance benchmarks
+    - [completions](#completions---shell-completions): generate shell completions
 - [Model Types](#model-types)
-  - [auto](#auto)
-  - [text](#text)
-  - [vision](#vision)
-  - [diffusion](#diffusion)
-  - [speech](#speech)
-  - [embedding](#embedding)
+    - [auto](#auto)
+    - [text](#text)
+    - [vision](#vision)
+    - [diffusion](#diffusion)
+    - [speech](#speech)
+    - [embedding](#embedding)
 - [Features](#features)
-  - [ISQ Quantization](#isq-quantization)
-  - [UQFF Files](#uqff-files)
-  - [PagedAttention](#pagedattention)
-  - [Device Mapping](#device-mapping)
-  - [LoRA and X-LoRA](#lora-and-x-lora)
-  - [Chat Templates](#chat-templates)
-  - [Web Search](#web-search)
-  - [Thinking Mode](#thinking-mode)
+    - [ISQ Quantization](#isq-quantization)
+    - [UQFF Files](#uqff-files)
+    - [PagedAttention](#pagedattention)
+    - [Device Mapping](#device-mapping)
+    - [LoRA and X-LoRA](#lora-and-x-lora)
+    - [Chat Templates](#chat-templates)
+    - [Web Search](#web-search)
+    - [Thinking Mode](#thinking-mode)
 - [Global Options](#global-options)
 - [Interactive Commands](#interactive-commands)
 
@@ -66,8 +66,8 @@ mistralrs run -m google/gemma-3-4b-it
 
 **Options:**
 
-| Option | Description |
-|--------|-------------|
+| Option              | Description                                     |
+| ------------------- | ----------------------------------------------- |
 | `--enable-thinking` | Enable thinking mode for models that support it |
 
 The `run` command also accepts all [runtime options](#runtime-options).
@@ -105,13 +105,13 @@ mistralrs serve -m Qwen/Qwen3-4B --mcp-port 8081
 
 **Server Options:**
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `-p, --port <PORT>` | `1234` | HTTP server port |
-| `--host <HOST>` | `0.0.0.0` | Bind address |
-| `--ui` | disabled | Serve built-in web UI at `/ui` |
-| `--mcp-port <PORT>` | none | MCP protocol server port |
-| `--mcp-config <PATH>` | none | MCP client configuration file |
+| Option                | Default   | Description                    |
+| --------------------- | --------- | ------------------------------ |
+| `-p, --port <PORT>`   | `1234`    | HTTP server port               |
+| `--host <HOST>`       | `0.0.0.0` | Bind address                   |
+| `--ui`                | disabled  | Serve built-in web UI at `/ui` |
+| `--mcp-port <PORT>`   | none      | MCP protocol server port       |
+| `--mcp-config <PATH>` | none      | MCP client configuration file  |
 
 The `serve` command also accepts all [runtime options](#runtime-options).
 
@@ -148,20 +148,21 @@ mistralrs quantize -m Qwen/Qwen3-4B --isq q4k --imatrix imatrix.dat -o qwen3-4b-
 ```
 
 When using directory output mode, the `quantize` command automatically:
+
 - Generates a `README.md` model card with Hugging Face frontmatter and example commands
 - Prints the `huggingface-cli upload` command to upload your UQFF to Hugging Face
 
 **Quantize Options:**
 
-| Option | Required | Description |
-|--------|----------|-------------|
-| `-m, --model-id <ID>` | Yes | Model ID or local path |
-| `--isq <LEVEL>` | Yes | Quantization level(s), comma-separated or repeated (see [ISQ Quantization](#isq-quantization)) |
-| `-o, --output <PATH>` | Yes | Output path: `.uqff` file (single ISQ) or directory (auto-named per ISQ type) |
-| `--isq-organization <TYPE>` | No | ISQ organization strategy: `default` or `moqe` |
-| `--imatrix <PATH>` | No | imatrix file for enhanced quantization |
-| `--calibration-file <PATH>` | No | Calibration file for imatrix generation |
-| `--no-readme` | No | Skip automatic README.md model card generation |
+| Option                      | Required | Description                                                                                    |
+| --------------------------- | -------- | ---------------------------------------------------------------------------------------------- |
+| `-m, --model-id <ID>`       | Yes      | Model ID or local path                                                                         |
+| `--isq <LEVEL>`             | Yes      | Quantization level(s), comma-separated or repeated (see [ISQ Quantization](#isq-quantization)) |
+| `-o, --output <PATH>`       | Yes      | Output path: `.uqff` file (single ISQ) or directory (auto-named per ISQ type)                  |
+| `--isq-organization <TYPE>` | No       | ISQ organization strategy: `default` or `moqe`                                                 |
+| `--imatrix <PATH>`          | No       | imatrix file for enhanced quantization                                                         |
+| `--calibration-file <PATH>` | No       | Calibration file for imatrix generation                                                        |
+| `--no-readme`               | No       | Skip automatic README.md model card generation                                                 |
 
 ---
 
@@ -246,6 +247,7 @@ Quantization Options
 ```
 
 **Status Legend:**
+
 - 🚀 **Recommended**: Best option for your profile and hardware
 - ✅ **Fits**: Model fits entirely in GPU memory
 - ⚠️ **Hybrid**: Model requires CPU offloading (slower due to PCIe bottleneck)
@@ -253,11 +255,11 @@ Quantization Options
 
 **Tune Options:**
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--profile <PROFILE>` | `balanced` | Tuning profile: `quality`, `balanced`, or `fast` |
-| `--json` | disabled | Output JSON instead of human-readable text |
-| `--emit-config <PATH>` | none | Emit a TOML config file with recommended settings |
+| Option                 | Default    | Description                                       |
+| ---------------------- | ---------- | ------------------------------------------------- |
+| `--profile <PROFILE>`  | `balanced` | Tuning profile: `quality`, `balanced`, or `fast`  |
+| `--json`               | disabled   | Output JSON instead of human-readable text        |
+| `--emit-config <PATH>` | none       | Emit a TOML config file with recommended settings |
 
 ---
 
@@ -280,6 +282,7 @@ mistralrs doctor --json
 ```
 
 **Checks Performed:**
+
 - **CPU Extensions**: AVX, AVX2, AVX-512, FMA support (x86 only; ARM shows NEON)
 - **Binary/Hardware Match**: Validates CUDA/Metal features match detected hardware
 - **GPU Compute Capability**: Reports compute version and Flash Attention v2/v3 compatibility
@@ -290,8 +293,8 @@ mistralrs doctor --json
 
 **Options:**
 
-| Option | Description |
-|--------|-------------|
+| Option   | Description                                |
+| -------- | ------------------------------------------ |
 | `--json` | Output JSON instead of human-readable text |
 
 ---
@@ -315,6 +318,7 @@ mistralrs login --token hf_xxxxxxxxxxxxx
 ```
 
 The token is saved to the standard HuggingFace cache location:
+
 - Linux/macOS: `~/.cache/huggingface/token`
 - Windows: `C:\Users\<user>\.cache\huggingface\token`
 
@@ -322,8 +326,8 @@ If the `HF_HOME` environment variable is set, the token is saved to `$HF_HOME/to
 
 **Options:**
 
-| Option | Description |
-|--------|-------------|
+| Option            | Description                              |
+| ----------------- | ---------------------------------------- |
 | `--token <TOKEN>` | Provide token directly (non-interactive) |
 
 ---
@@ -432,12 +436,12 @@ Iterations: 3
 
 **Options:**
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--prompt-len <N>` | `512` | Number of tokens in prompt (prefill test) |
-| `--gen-len <N>` | `128` | Number of tokens to generate (decode test) |
-| `--iterations <N>` | `3` | Number of benchmark iterations |
-| `--warmup <N>` | `1` | Number of warmup runs (discarded) |
+| Option             | Default | Description                                |
+| ------------------ | ------- | ------------------------------------------ |
+| `--prompt-len <N>` | `512`   | Number of tokens in prompt (prefill test)  |
+| `--gen-len <N>`    | `128`   | Number of tokens to generate (decode test) |
+| `--iterations <N>` | `3`     | Number of benchmark iterations             |
+| `--warmup <N>`     | `1`     | Number of warmup runs (discarded)          |
 
 The `bench` command also accepts all model loading options (ISQ, device mapping, etc.).
 
@@ -541,11 +545,11 @@ mistralrs serve vision -m google/gemma-3-4b-it
 
 **Vision Options:**
 
-| Option | Description |
-|--------|-------------|
-| `--max-edge <SIZE>` | Maximum edge length for image resizing (aspect ratio preserved) |
-| `--max-num-images <N>` | Maximum number of images per request |
-| `--max-image-length <SIZE>` | Maximum image dimension for device mapping |
+| Option                      | Description                                                     |
+| --------------------------- | --------------------------------------------------------------- |
+| `--max-edge <SIZE>`         | Maximum edge length for image resizing (aspect ratio preserved) |
+| `--max-num-images <N>`      | Maximum number of images per request                            |
+| `--max-image-length <SIZE>` | Maximum image dimension for device mapping                      |
 
 ### diffusion
 
@@ -664,9 +668,9 @@ mistralrs serve -m Qwen/Qwen3-4B --pa-memory-fraction 0.8
 
 **Additional options:**
 
-| Option | Description |
-|--------|-------------|
-| `--pa-block-size <SIZE>` | Tokens per block (default: 32 on CUDA) |
+| Option                   | Description                                |
+| ------------------------ | ------------------------------------------ |
+| `--pa-block-size <SIZE>` | Tokens per block (default: 32 on CUDA)     |
 | `--pa-cache-type <TYPE>` | KV cache quantization type (default: auto) |
 
 ---
@@ -712,14 +716,14 @@ mistralrs run -m Qwen/Qwen3-4B --hf-cache /path/to/cache
 
 **Device mapping options:**
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `-n, --device-layers <MAPPING>` | auto | Device layer mapping (format: `ORD:NUM;...`) |
-| `--topology <PATH>` | none | Topology YAML file for device mapping |
-| `--hf-cache <PATH>` | none | Custom HuggingFace cache directory |
-| `--cpu` | disabled | Force CPU-only execution |
-| `--max-seq-len <LEN>` | `4096` | Max sequence length for automatic device mapping |
-| `--max-batch-size <SIZE>` | `1` | Max batch size for automatic device mapping |
+| Option                          | Default  | Description                                      |
+| ------------------------------- | -------- | ------------------------------------------------ |
+| `-n, --device-layers <MAPPING>` | auto     | Device layer mapping (format: `ORD:NUM;...`)     |
+| `--topology <PATH>`             | none     | Topology YAML file for device mapping            |
+| `--hf-cache <PATH>`             | none     | Custom HuggingFace cache directory               |
+| `--cpu`                         | disabled | Force CPU-only execution                         |
+| `--max-seq-len <LEN>`           | `4096`   | Max sequence length for automatic device mapping |
+| `--max-batch-size <SIZE>`       | `1`      | Max batch size for automatic device mapping      |
 
 ---
 
@@ -801,13 +805,13 @@ In interactive mode, thinking content is displayed in gray text before the final
 
 These options apply to all commands.
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--seed <SEED>` | none | Random seed for reproducibility |
-| `-l, --log <PATH>` | none | Log all requests and responses to file |
-| `--token-source <SOURCE>` | `cache` | HuggingFace authentication token source |
-| `-V, --version` | N/A | Print version information and exit |
-| `-h, --help` | N/A | Print help message (use with any subcommand) |
+| Option                    | Default | Description                                  |
+| ------------------------- | ------- | -------------------------------------------- |
+| `--seed <SEED>`           | none    | Random seed for reproducibility              |
+| `-l, --log <PATH>`        | none    | Log all requests and responses to file       |
+| `--token-source <SOURCE>` | `cache` | HuggingFace authentication token source      |
+| `-V, --version`           | N/A     | Print version information and exit           |
+| `-h, --help`              | N/A     | Print help message (use with any subcommand) |
 
 **Token source formats:**
 
@@ -836,15 +840,15 @@ mistralrs run -m meta-llama/Llama-3.2-3B-Instruct --token-source env:HF_TOKEN
 
 These options are available for both `run` and `serve` commands.
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--max-seqs <N>` | `32` | Maximum concurrent sequences |
-| `--no-kv-cache` | disabled | Disable KV cache entirely |
-| `--prefix-cache-n <N>` | `16` | Number of prefix caches to hold (0 to disable) |
-| `-c, --chat-template <PATH>` | none | Custom chat template file (.json or .jinja) |
-| `-j, --jinja-explicit <PATH>` | none | Explicit JINJA template override |
-| `--enable-search` | disabled | Enable web search |
-| `--search-embedding-model <MODEL>` | none | Embedding model for search |
+| Option                             | Default  | Description                                    |
+| ---------------------------------- | -------- | ---------------------------------------------- |
+| `--max-seqs <N>`                   | `32`     | Maximum concurrent sequences                   |
+| `--no-kv-cache`                    | disabled | Disable KV cache entirely                      |
+| `--prefix-cache-n <N>`             | `16`     | Number of prefix caches to hold (0 to disable) |
+| `-c, --chat-template <PATH>`       | none     | Custom chat template file (.json or .jinja)    |
+| `-j, --jinja-explicit <PATH>`      | none     | Explicit JINJA template override               |
+| `--enable-search`                  | disabled | Enable web search                              |
+| `--search-embedding-model <MODEL>` | none     | Embedding model for search                     |
 
 ---
 
@@ -852,12 +856,12 @@ These options are available for both `run` and `serve` commands.
 
 These options are common across model types.
 
-| Option | Description |
-|--------|-------------|
-| `-m, --model-id <ID>` | HuggingFace model ID or local path (required) |
-| `-t, --tokenizer <PATH>` | Path to local tokenizer.json file |
-| `-a, --arch <ARCH>` | Model architecture (auto-detected if not specified) |
-| `--dtype <TYPE>` | Model data type (default: `auto`) |
+| Option                   | Description                                         |
+| ------------------------ | --------------------------------------------------- |
+| `-m, --model-id <ID>`    | HuggingFace model ID or local path (required)       |
+| `-t, --tokenizer <PATH>` | Path to local tokenizer.json file                   |
+| `-a, --arch <ARCH>`      | Model architecture (auto-detected if not specified) |
+| `--dtype <TYPE>`         | Model data type (default: `auto`)                   |
 
 ---
 
@@ -865,12 +869,12 @@ These options are common across model types.
 
 For loading quantized models.
 
-| Option | Description |
-|--------|-------------|
-| `--format <FORMAT>` | Model format: `plain`, `gguf`, or `ggml` (auto-detected) |
+| Option                        | Description                                                     |
+| ----------------------------- | --------------------------------------------------------------- |
+| `--format <FORMAT>`           | Model format: `plain`, `gguf`, or `ggml` (auto-detected)        |
 | `-f, --quantized-file <FILE>` | Quantized model filename(s) for GGUF/GGML (semicolon-separated) |
-| `--tok-model-id <ID>` | Model ID for tokenizer when using quantized format |
-| `--gqa <VALUE>` | GQA value for GGML models (default: 1) |
+| `--tok-model-id <ID>`         | Model ID for tokenizer when using quantized format              |
+| `--gqa <VALUE>`               | GQA value for GGML models (default: 1)                          |
 
 **Examples:**
 
@@ -888,15 +892,15 @@ mistralrs run -m Qwen/Qwen3-4B --format gguf -f "model-part1.gguf;model-part2.gg
 
 When running in interactive mode (`mistralrs run`), the following commands are available:
 
-| Command | Description |
-|---------|-------------|
-| `\help` | Display help message |
-| `\exit` | Quit interactive mode |
-| `\system <message>` | Add a system message without running the model |
-| `\clear` | Clear the chat history |
-| `\temperature <float>` | Set sampling temperature (0.0 to 2.0) |
-| `\topk <int>` | Set top-k sampling value (>0) |
-| `\topp <float>` | Set top-p sampling value (0.0 to 1.0) |
+| Command                | Description                                    |
+| ---------------------- | ---------------------------------------------- |
+| `\help`                | Display help message                           |
+| `\exit`                | Quit interactive mode                          |
+| `\system <message>`    | Add a system message without running the model |
+| `\clear`               | Clear the chat history                         |
+| `\temperature <float>` | Set sampling temperature (0.0 to 2.0)          |
+| `\topk <int>`          | Set top-k sampling value (>0)                  |
+| `\topp <float>`        | Set top-p sampling value (0.0 to 1.0)          |
 
 **Examples:**
 

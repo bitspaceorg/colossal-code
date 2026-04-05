@@ -12,12 +12,14 @@ The `mistralrs` CLI supports loading and serving multiple models simultaneously,
 ## Usage
 
 ### Single-Model Mode (Default)
+
 ```bash
 # Traditional usage - loads one model
 mistralrs serve -p 1234 -m meta-llama/Llama-3.2-3B-Instruct
 ```
 
 ### Multi-Model Mode
+
 ```bash
 # Load multiple models from configuration file
 mistralrs from-config --file config.toml
@@ -29,19 +31,19 @@ Create a JSON file with model configurations as object keys:
 
 ```json
 {
-  "llama3-3b": {
-    "alias": "llama3-3b",
-    "Plain": {
-      "model_id": "meta-llama/Llama-3.2-3B-Instruct"
-    }
-  },
-  "qwen3-4b": {
-    "alias": "qwen3-4b",
-    "Plain": {
-      "model_id": "Qwen/Qwen3-4B"
+    "llama3-3b": {
+        "alias": "llama3-3b",
+        "Plain": {
+            "model_id": "meta-llama/Llama-3.2-3B-Instruct"
+        }
     },
-    "in_situ_quant": "Q4K"
-  }
+    "qwen3-4b": {
+        "alias": "qwen3-4b",
+        "Plain": {
+            "model_id": "Qwen/Qwen3-4B"
+        },
+        "in_situ_quant": "Q4K"
+    }
 }
 ```
 
@@ -51,13 +53,14 @@ Create a JSON file with model configurations as object keys:
 - **API identifiers**: By default the pipeline name (usually the `model_id` inside the model spec). You can override this with `alias`.
 - **Model specification**: The model type and configuration (same format as CLI subcommands)
 - **Optional fields**:
-  - `alias`: Custom model ID (nickname) used in API requests
-  - `chat_template`: Custom chat template
-  - `jinja_explicit`: JINJA template file
-  - `num_device_layers`: Device layer configuration  
-  - `in_situ_quant`: In-situ quantization setting
+    - `alias`: Custom model ID (nickname) used in API requests
+    - `chat_template`: Custom chat template
+    - `jinja_explicit`: JINJA template file
+    - `num_device_layers`: Device layer configuration
+    - `in_situ_quant`: In-situ quantization setting
 
 **How API identifiers work:**
+
 - ✅ Object keys are **organizational only** (for config readability)
 - ✅ If `alias` is set, it becomes the API model ID
 - ✅ Otherwise, the pipeline name (usually the `model_id` field) is used
@@ -97,6 +100,7 @@ curl http://localhost:1234/v1/chat/completions \
 ```
 
 The default model is either:
+
 1. The model specified with `--default-model-id` when starting the server
 2. The first model loaded (if no default is explicitly set)
 
@@ -107,29 +111,30 @@ curl http://localhost:1234/v1/models
 ```
 
 Returns:
+
 ```json
 {
-  "object": "list",
-  "data": [
-    {
-      "id": "default",
-      "object": "model",
-      "created": 1234567890,
-      "owned_by": "local"
-    },
-    {
-      "id": "llama3-3b",
-      "object": "model",
-      "created": 1234567890,
-      "owned_by": "local"
-    },
-    {
-      "id": "qwen3-4b", 
-      "object": "model",
-      "created": 1234567890,
-      "owned_by": "local"
-    }
-  ]
+    "object": "list",
+    "data": [
+        {
+            "id": "default",
+            "object": "model",
+            "created": 1234567890,
+            "owned_by": "local"
+        },
+        {
+            "id": "llama3-3b",
+            "object": "model",
+            "created": 1234567890,
+            "owned_by": "local"
+        },
+        {
+            "id": "qwen3-4b",
+            "object": "model",
+            "created": 1234567890,
+            "owned_by": "local"
+        }
+    ]
 }
 ```
 
@@ -143,6 +148,7 @@ Use the `multi-model` subcommand with these options:
 - `--default-model-id <ID>` (optional): Default model ID for requests that don't specify a model (alias or pipeline name)
 
 **New syntax:**
+
 ```bash
 mistralrs from-config --file <CONFIG>
 ```
@@ -150,48 +156,51 @@ mistralrs from-config --file <CONFIG>
 ## Examples
 
 ### Example 1: Text Models
+
 ```json
 {
-  "llama3-3b": {
-    "Plain": {
-      "model_id": "meta-llama/Llama-3.2-3B-Instruct"
-    }
-  },
-  "qwen3-4b": {
-    "Plain": {
-      "model_id": "Qwen/Qwen3-4B"
+    "llama3-3b": {
+        "Plain": {
+            "model_id": "meta-llama/Llama-3.2-3B-Instruct"
+        }
     },
-    "in_situ_quant": "Q4K"
-  }
+    "qwen3-4b": {
+        "Plain": {
+            "model_id": "Qwen/Qwen3-4B"
+        },
+        "in_situ_quant": "Q4K"
+    }
 }
 ```
 
 ### Example 2: Mixed Model Types
+
 ```json
 {
-  "text-model": {
-    "Plain": {
-      "model_id": "meta-llama/Llama-3.2-3B-Instruct"
+    "text-model": {
+        "Plain": {
+            "model_id": "meta-llama/Llama-3.2-3B-Instruct"
+        }
+    },
+    "vision-model": {
+        "VisionPlain": {
+            "model_id": "google/gemma-3-4b-it"
+        }
     }
-  },
-  "vision-model": {
-    "VisionPlain": {
-      "model_id": "google/gemma-3-4b-it"
-    }
-  }
 }
 ```
 
 ### Example 3: GGUF Models
+
 ```json
 {
-  "llama-gguf": {
-    "GGUF": {
-      "tok_model_id": "meta-llama/Llama-3.2-3B-Instruct",
-      "quantized_model_id": "bartowski/Llama-3.2-3B-Instruct-GGUF",
-      "quantized_filename": "Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+    "llama-gguf": {
+        "GGUF": {
+            "tok_model_id": "meta-llama/Llama-3.2-3B-Instruct",
+            "quantized_model_id": "bartowski/Llama-3.2-3B-Instruct-GGUF",
+            "quantized_filename": "Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+        }
     }
-  }
 }
 ```
 
@@ -210,10 +219,11 @@ curl -X POST http://localhost:1234/v1/models/unload \
 ```
 
 Response:
+
 ```json
 {
-  "model_id": "meta-llama/Llama-3.2-3B-Instruct",
-  "status": "unloaded"
+    "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+    "status": "unloaded"
 }
 ```
 
@@ -228,10 +238,11 @@ curl -X POST http://localhost:1234/v1/models/reload \
 ```
 
 Response:
+
 ```json
 {
-  "model_id": "meta-llama/Llama-3.2-3B-Instruct",
-  "status": "loaded"
+    "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+    "status": "loaded"
 }
 ```
 
@@ -246,14 +257,16 @@ curl -X POST http://localhost:1234/v1/models/status \
 ```
 
 Response:
+
 ```json
 {
-  "model_id": "meta-llama/Llama-3.2-3B-Instruct",
-  "status": "loaded"
+    "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+    "status": "loaded"
 }
 ```
 
 Possible status values:
+
 - `loaded`: Model is loaded and ready
 - `unloaded`: Model is unloaded but can be reloaded
 - `reloading`: Model is currently being reloaded
@@ -274,31 +287,32 @@ curl http://localhost:1234/v1/models
 ```
 
 Response:
+
 ```json
 {
-  "object": "list",
-  "data": [
-    {
-      "id": "default",
-      "object": "model",
-      "created": 1234567890,
-      "owned_by": "local"
-    },
-    {
-      "id": "meta-llama/Llama-3.2-3B-Instruct",
-      "object": "model",
-      "created": 1234567890,
-      "owned_by": "local",
-      "status": "loaded"
-    },
-    {
-      "id": "Qwen/Qwen3-4B",
-      "object": "model",
-      "created": 1234567890,
-      "owned_by": "local",
-      "status": "unloaded"
-    }
-  ]
+    "object": "list",
+    "data": [
+        {
+            "id": "default",
+            "object": "model",
+            "created": 1234567890,
+            "owned_by": "local"
+        },
+        {
+            "id": "meta-llama/Llama-3.2-3B-Instruct",
+            "object": "model",
+            "created": 1234567890,
+            "owned_by": "local",
+            "status": "loaded"
+        },
+        {
+            "id": "Qwen/Qwen3-4B",
+            "object": "model",
+            "created": 1234567890,
+            "owned_by": "local",
+            "status": "unloaded"
+        }
+    ]
 }
 ```
 

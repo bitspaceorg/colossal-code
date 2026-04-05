@@ -3,11 +3,13 @@
 SmolLM3 is a 3B parameter long-context hybrid reasoning language model. It supports 6 languages, advanced reasoning and long context. SmolLM3 is a fully open model that offers strong performance at the 3B–4B scale.
 
 **Default, easiest:**
+
 ```bash
 mistralrs run --isq 8 -m HuggingFaceTB/SmolLM3-3B
 ```
 
 **UQFF prequantized:**
+
 ```bash
 mistralrs run -m EricB/SmolLM3-3B-UQFF --from-uqff smollm33b-q4k-0.uqff
 ```
@@ -17,9 +19,11 @@ mistralrs run -m EricB/SmolLM3-3B-UQFF --from-uqff smollm33b-q4k-0.uqff
 > Check out prequantized UQFF SmolLM3 here: https://huggingface.co/EricB/SmolLM3-3B-UQFF
 
 ## Enabling thinking
+
 The SmolLM3 models are hybrid reasoning models which can be controlled at inference-time. **By default, reasoning is enabled for these models.** To dynamically control this, it is recommended to either add `/no_think` or `/think` to your prompt. Alternatively, you can specify the `enable_thinking` flag as detailed by the API-specific examples.
 
 ## HTTP API
+
 You can find a more detailed example demonstrating enabling/disabling thinking [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/smollm3.py).
 
 ```bash
@@ -53,6 +57,7 @@ while True:
 ```
 
 ## Python SDK
+
 You can find a more detailed example demonstrating enabling/disabling thinking [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/smollm3.py).
 
 ```py
@@ -83,6 +88,7 @@ print(res.usage)
 ```
 
 ## Rust SDK
+
 You can find a more detailed example demonstrating enabling/disabling thinking [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/text_models/main.rs).
 
 ```rust

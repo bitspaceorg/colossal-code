@@ -13,10 +13,10 @@ mistral.rs supports the [OpenResponses API specification](https://www.openrespon
 
 The following parameters are accepted for API compatibility but will return errors if set to non-default values:
 
-| Parameter | Behavior |
-|-----------|----------|
+| Parameter             | Behavior                                                      |
+| --------------------- | ------------------------------------------------------------- |
 | `parallel_tool_calls` | Only `true` or omitted is supported; `false` returns an error |
-| `max_tool_calls` | Not supported; setting any value returns an error |
+| `max_tool_calls`      | Not supported; setting any value returns an error             |
 
 ## mistral.rs Extensions
 

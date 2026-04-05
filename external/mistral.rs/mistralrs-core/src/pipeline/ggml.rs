@@ -301,7 +301,9 @@ impl Loader for GGMLLoader {
                 serde_json::to_string_pretty(&tensors).expect("Serialization failed."),
             )?;
 
-            info!("Debug is enabled, wrote the names and information about each tensor to `mistralrs_ggml_tensors.txt`.");
+            info!(
+                "Debug is enabled, wrote the names and information about each tensor to `mistralrs_ggml_tensors.txt`."
+            );
         }
 
         let _ = if paged_attn_config.is_none() {

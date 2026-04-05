@@ -338,7 +338,9 @@ pub fn apply_chat_template_to(
             }
 
             let Some(template) = template else {
-                anyhow::bail!("Chat template does not contain a `tool_use` or `default` key. Please ensure it contains at least a `default` key, although `tool_use` should be specified for using tools.");
+                anyhow::bail!(
+                    "Chat template does not contain a `tool_use` or `default` key. Please ensure it contains at least a `default` key, although `tool_use` should be specified for using tools."
+                );
             };
             template
         }

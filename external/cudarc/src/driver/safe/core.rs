@@ -8,8 +8,8 @@ use std::{
     marker::PhantomData,
     ops::{Bound, RangeBounds},
     string::String,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     sync::Arc,
+    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     vec::Vec,
 };
 

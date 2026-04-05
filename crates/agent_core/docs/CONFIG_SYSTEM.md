@@ -90,6 +90,7 @@ let tools_section = tools::generate_tools_section(&tools);
 ### Use Cases
 
 #### 1. Full Mode (Default)
+
 All tools available for maximum capability:
 
 ```rust
@@ -100,6 +101,7 @@ let tools = tools::get_all_tools();
 ```
 
 #### 2. Read-Only Mode
+
 Safe, read-only tools for analysis (no exec, no delete):
 
 ```rust
@@ -109,6 +111,7 @@ let tools = tools::get_readonly_tools();
 ```
 
 #### 3. Custom Mode
+
 Build your own tool selection:
 
 ```rust
@@ -123,36 +126,40 @@ let tools = tools::build_tools(&[
 ### Initialization Flow
 
 1. **Config Initialization**
-   ```rust
-   config::initialize_config()?;
-   ```
-   - Checks if `~/.config/.nite` exists
-   - Creates directory if missing
-   - Creates `models/` subdirectory
-   - Creates `.niterules` with default template if missing
+
+    ```rust
+    config::initialize_config()?;
+    ```
+
+    - Checks if `~/.config/.nite` exists
+    - Creates directory if missing
+    - Creates `models/` subdirectory
+    - Creates `.niterules` with default template if missing
 
 2. **Tool Selection**
-   ```rust
-   let tools = tools::get_all_tools(); // or custom subset
-   ```
+
+    ```rust
+    let tools = tools::get_all_tools(); // or custom subset
+    ```
 
 3. **System Prompt Generation**
-   ```rust
-   let tools_section = tools::generate_tools_section(&tools);
-   let system_prompt_template = config::read_system_prompt()?;
-   let system_prompt = system_prompt_template
-       .replace("{tools_section}", &tools_section)
-       .replace("{os_version}", &os_version)
-       .replace("{workspace_path}", &workspace_path);
-   ```
+
+    ```rust
+    let tools_section = tools::generate_tools_section(&tools);
+    let system_prompt_template = config::read_system_prompt()?;
+    let system_prompt = system_prompt_template
+        .replace("{tools_section}", &tools_section)
+        .replace("{os_version}", &os_version)
+        .replace("{workspace_path}", &workspace_path);
+    ```
 
 4. **Model Execution**
-   ```rust
-   let request_builder = RequestBuilder::new()
-       .add_message(TextMessageRole::System, &system_prompt)
-       .set_tools(tools)
-       // ... rest of configuration
-   ```
+    ```rust
+    let request_builder = RequestBuilder::new()
+        .add_message(TextMessageRole::System, &system_prompt)
+        .set_tools(tools)
+        // ... rest of configuration
+    ```
 
 ## Customization
 
@@ -161,11 +168,13 @@ let tools = tools::build_tools(&[
 You can customize AI interaction at two levels:
 
 #### Global Configuration (affects all projects)
+
 ```bash
 vim ~/.config/.nite/.niterules
 ```
 
 #### Project-Specific Configuration (overrides global)
+
 ```bash
 # Create a local .niterules in your project directory
 vim ./.niterules

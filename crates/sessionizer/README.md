@@ -5,18 +5,21 @@ This project has been enhanced with semantic search capabilities that enable nat
 ## Features
 
 ### Semantic Search Sessions
+
 - **Real-time Indexing**: Files are automatically indexed when created or modified
 - **Debounced Processing**: Prevents excessive reindexing with configurable debounce delays
 - **File System Monitoring**: Automatic detection and processing of file system changes
 - **Qdrant Integration**: Uses Qdrant vector database for storing and searching embeddings
 
 ### Search Capabilities
+
 - **Natural Language Queries**: Users can search codebases using natural language
 - **Relevance Ranking**: Results are ranked by semantic similarity scores
 - **Formatted Results**: Search results are properly formatted for display
 - **Context-Aware**: Searches understand code structure and semantics
 
 ### Session Management
+
 - **Integrated Sessions**: Semantic search sessions work seamlessly with PTY shell sessions
 - **Lifecycle Management**: Proper creation, monitoring, and termination of sessions
 - **Status Tracking**: Real-time indexing status and progress monitoring
@@ -25,12 +28,14 @@ This project has been enhanced with semantic search capabilities that enable nat
 ## Implementation Details
 
 ### Core Components
+
 1. **SemanticSearchSession**: Manages indexing and searching of code files
 2. **SessionManager**: Coordinates between different session types
 3. **SearchResults**: Structures for organizing and formatting search results
 4. **File Monitoring**: Automatic detection of file system changes
 
 ### Key Technical Features
+
 - **Tree-sitter Parsing**: Accurate parsing of Python code into semantic chunks
 - **Embedding Generation**: Converts code chunks into vector representations
 - **Qdrant Vector Storage**: Efficient storage and retrieval of code embeddings
@@ -40,6 +45,7 @@ This project has been enhanced with semantic search capabilities that enable nat
 ## Usage
 
 ### Creating a Semantic Search Session
+
 ```rust
 let semantic_search_session_id = manager.create_semantic_search_session(
     cwd.clone(),
@@ -48,6 +54,7 @@ let semantic_search_session_id = manager.create_semantic_search_session(
 ```
 
 ### Performing a Search Query
+
 ```rust
 let search_results = manager.search_and_format_results(
     semantic_search_session_id,
@@ -57,6 +64,7 @@ let search_results = manager.search_and_format_results(
 ```
 
 ### Checking Indexing Status
+
 ```rust
 let status = manager.get_semantic_search_session_status(semantic_search_session_id)?;
 println!("Indexing Status: {}", status.state);
@@ -66,6 +74,7 @@ println!("Progress: {:.1}%", status.progress_percent);
 ## Testing
 
 Run the integration test to verify all functionality:
+
 ```bash
 cargo run --bin integration-test
 ```

@@ -12,13 +12,17 @@ attribute:
 
 ```json
 {
-  "message": { /* ... */ },
-  "specStep": {
-    "specId": "spec-123",
-    "index": "2",
-    "instructions": "Implement the parser"
-  },
-  "configuration": { /* optional overrides */ }
+    "message": {
+        /* ... */
+    },
+    "specStep": {
+        "specId": "spec-123",
+        "index": "2",
+        "instructions": "Implement the parser"
+    },
+    "configuration": {
+        /* optional overrides */
+    }
 }
 ```
 

@@ -288,9 +288,7 @@ impl<'de> Deserialize<'de> for QuantizedConfig {
                     .ok_or_else(|| serde::de::Error::missing_field("group_size"))?;
                 Ok(QuantizedConfig::Afq { bits, group_size })
             }
-            Some(m) if m == "mxfp4" => {
-                Ok(QuantizedConfig::MXFP4 {  })
-            }
+            Some(m) if m == "mxfp4" => Ok(QuantizedConfig::MXFP4 {}),
             None => {
                 let bits = raw
                     .bits
@@ -300,11 +298,9 @@ impl<'de> Deserialize<'de> for QuantizedConfig {
                     .ok_or_else(|| serde::de::Error::missing_field("group_size"))?;
                 Ok(QuantizedConfig::Afq { bits, group_size })
             }
-            Some(unknown_method) => {
-                Err(serde::de::Error::custom(format!(
-                    "Unknown quantization method: {unknown_method}. Expected one of: gptq, fp8, bitsandbytes, afq, or not specified"
-                )))
-            },
+            Some(unknown_method) => Err(serde::de::Error::custom(format!(
+                "Unknown quantization method: {unknown_method}. Expected one of: gptq, fp8, bitsandbytes, afq, or not specified"
+            ))),
         }
     }
 }
@@ -645,7 +641,9 @@ impl TryFrom<IsqType> for GgmlDType {
                     | GgmlDType::Q5K
                     | GgmlDType::Q6K
             ) {
-                candle_core::bail!("GGML ISQ type on CUDA must be one of `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q2K`, `Q3K`, `Q4K`, `Q5K`, `Q6K`, `HQQ8`, `HQQ4`")
+                candle_core::bail!(
+                    "GGML ISQ type on CUDA must be one of `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q2K`, `Q3K`, `Q4K`, `Q5K`, `Q6K`, `HQQ8`, `HQQ4`"
+                )
             }
         }
         Ok(tp)

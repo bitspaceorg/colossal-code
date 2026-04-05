@@ -7,7 +7,8 @@ use ratatui::{
 };
 
 use crate::app::orchestrator::session_manager;
-use crate::app::{App, MessageType, SubAgentContext};
+use crate::app::render::transcript::TranscriptEntry;
+use crate::app::{App, SubAgentContext};
 
 fn sub_agent_header(prefix: &str, step_title: &str) -> Line<'static> {
     Line::from(vec![
@@ -119,36 +120,15 @@ impl App {
                 Style::default().fg(Color::DarkGray),
             )));
         } else {
-            let message_types: Vec<MessageType> = context
+            let entries: Vec<TranscriptEntry<'_>> = context
                 .messages
                 .iter()
-                .map(|message| message.message_type.clone())
+                .map(|message| TranscriptEntry {
+                    content: &message.content,
+                    message_type: &message.message_type,
+                })
                 .collect();
-
-            for (idx, message) in context.messages.iter().enumerate() {
-                let is_agent = matches!(message.message_type, MessageType::Agent);
-                let connector = self.agent_connector_for_index(&message_types, idx);
-                let rendered = self.render_message_with_max_width(
-                    &message.content,
-                    max_width,
-                    None,
-                    is_agent,
-                    connector,
-                );
-                lines.extend(rendered.lines);
-                if is_agent
-                    && Self::should_insert_primary_agent_block_gap(
-                        &message.content,
-                        context
-                            .messages
-                            .get(idx + 1)
-                            .map(|next| next.content.as_str()),
-                    )
-                {
-                    // Keep spacing between complete primary assistant blocks, including artifacts.
-                    lines.push(Line::from(""));
-                }
-            }
+            lines.extend(self.render_transcript_lines(max_width, &entries));
 
             if let Some(stats) = context.generation_stats.clone() {
                 let stats_text = format!(

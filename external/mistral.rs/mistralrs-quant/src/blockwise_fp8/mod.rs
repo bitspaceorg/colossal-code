@@ -438,7 +438,9 @@ pub fn blockwise_fp8_linear_b(
 
     // Blockwise FP8 requires weight_block_size to be set
     let Some(weight_block_size) = weight_block_size else {
-        candle_core::bail!("Blockwise FP8 requires weight_block_size to be set. Use per-tensor FP8 for models without block sizes.")
+        candle_core::bail!(
+            "Blockwise FP8 requires weight_block_size to be set. Use per-tensor FP8 for models without block sizes."
+        )
     };
     if weight_block_size.len() != 2 {
         candle_core::bail!("Expected weight_block_size to have length 2, got {weight_block_size:?}")

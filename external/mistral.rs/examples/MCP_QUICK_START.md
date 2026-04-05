@@ -5,8 +5,9 @@
 **What is MCP?** The Model Context Protocol allows your AI models to access external tools like web search, file systems, databases, and APIs automatically during conversations.
 
 **Key Benefits:**
+
 - 🚀 **Zero setup** - Tools work automatically once configured
-- 🔧 **Multi-tool support** - Connect to multiple services simultaneously  
+- 🔧 **Multi-tool support** - Connect to multiple services simultaneously
 - 🌐 **Universal protocol** - Works with any MCP-compatible server
 - 🔒 **Secure** - Built-in authentication and timeout controls
 
@@ -20,17 +21,17 @@ Create `mcp-config.json` with a **working example** using the filesystem server:
 
 ```json
 {
-  "servers": [
-    {
-      "name": "Filesystem Tools",
-      "source": {
-        "type": "Process",
-        "command": "npx",
-        "args": ["@modelcontextprotocol/server-filesystem", "."]
-      }
-    }
-  ],
-  "auto_register_tools": true
+    "servers": [
+        {
+            "name": "Filesystem Tools",
+            "source": {
+                "type": "Process",
+                "command": "npx",
+                "args": ["@modelcontextprotocol/server-filesystem", "."]
+            }
+        }
+    ],
+    "auto_register_tools": true
 }
 ```
 
@@ -43,30 +44,31 @@ Create `mcp-config.json` with a **working example** using the filesystem server:
 
 ```json
 {
-  "servers": [
-    {
-      "name": "Hugging Face MCP",
-      "source": {
-        "type": "Http",
-        "url": "https://hf.co/mcp",
-        "timeout_secs": 30
-      },
-      "bearer_token": "hf_xxx",
-      "tool_prefix": "hf",
-      "enabled": false
-    },
-    {
-      "name": "Filesystem Tools",
-      "source": {
-        "type": "Process",
-        "command": "npx",
-        "args": ["@modelcontextprotocol/server-filesystem", "."]
-      }
-    }
-  ],
-  "auto_register_tools": true
+    "servers": [
+        {
+            "name": "Hugging Face MCP",
+            "source": {
+                "type": "Http",
+                "url": "https://hf.co/mcp",
+                "timeout_secs": 30
+            },
+            "bearer_token": "hf_xxx",
+            "tool_prefix": "hf",
+            "enabled": false
+        },
+        {
+            "name": "Filesystem Tools",
+            "source": {
+                "type": "Process",
+                "command": "npx",
+                "args": ["@modelcontextprotocol/server-filesystem", "."]
+            }
+        }
+    ],
+    "auto_register_tools": true
 }
 ```
+
 </details>
 
 <details>
@@ -74,28 +76,29 @@ Create `mcp-config.json` with a **working example** using the filesystem server:
 
 ```json
 {
-  "servers": [
-    {
-      "name": "WebSocket Example",
-      "source": {
-        "type": "WebSocket",
-        "url": "wss://api.example.com/mcp",
-        "timeout_secs": 30
-      },
-      "enabled": false
-    },
-    {
-      "name": "Filesystem Tools",
-      "source": {
-        "type": "Process",
-        "command": "npx",
-        "args": ["@modelcontextprotocol/server-filesystem", "."]
-      }
-    }
-  ],
-  "auto_register_tools": true
+    "servers": [
+        {
+            "name": "WebSocket Example",
+            "source": {
+                "type": "WebSocket",
+                "url": "wss://api.example.com/mcp",
+                "timeout_secs": 30
+            },
+            "enabled": false
+        },
+        {
+            "name": "Filesystem Tools",
+            "source": {
+                "type": "Process",
+                "command": "npx",
+                "args": ["@modelcontextprotocol/server-filesystem", "."]
+            }
+        }
+    ],
+    "auto_register_tools": true
 }
 ```
+
 </details>
 
 ### 2. Start Server with MCP Tools
@@ -136,16 +139,19 @@ curl http://localhost:1234/v1/models
 ```
 
 Look for MCP status in the response:
+
 ```json
 {
-  "object": "list",
-  "data": [{
-    "id": "Qwen/Qwen3-4B",
-    "object": "model", 
-    "tools_available": true,
-    "mcp_tools_count": 3,
-    "mcp_servers_connected": 1
-  }]
+    "object": "list",
+    "data": [
+        {
+            "id": "Qwen/Qwen3-4B",
+            "object": "model",
+            "tools_available": true,
+            "mcp_tools_count": 3,
+            "mcp_servers_connected": 1
+        }
+    ]
 }
 ```
 
@@ -154,6 +160,7 @@ Look for MCP status in the response:
 ## 🔧 Quick Verification
 
 **Test filesystem server is working:**
+
 ```bash
 # This should return "3" or more (filesystem tools available)
 curl http://localhost:1234/v1/models | jq '.data[0].mcp_tools_count'
@@ -164,97 +171,105 @@ ps aux | grep server-filesystem
 
 ## 🚀 Popular MCP Servers
 
-| Server | Description | Installation | Use Case |
-|--------|-------------|--------------|----------|
-| **Filesystem** | File operations | `npm i -g @modelcontextprotocol/server-filesystem` | Read/write files |
-| **Hugging Face** | HF API access | Web service at `https://hf.co/mcp` | Models, datasets, spaces |
-| **Postgres** | Database | `npm i -g @modelcontextprotocol/server-postgres` | SQL queries |
+| Server           | Description     | Installation                                       | Use Case                 |
+| ---------------- | --------------- | -------------------------------------------------- | ------------------------ |
+| **Filesystem**   | File operations | `npm i -g @modelcontextprotocol/server-filesystem` | Read/write files         |
+| **Hugging Face** | HF API access   | Web service at `https://hf.co/mcp`                 | Models, datasets, spaces |
+| **Postgres**     | Database        | `npm i -g @modelcontextprotocol/server-postgres`   | SQL queries              |
 
 > **Links to more servers:**
+>
 > - [Brave Search](https://github.com/modelcontextprotocol/servers/tree/main/src/brave-search) - Web search capabilities
 > - [GitHub](https://github.com/modelcontextprotocol/servers/tree/main/src/github) - Repository access
 
 ### Transport Types
-| Transport | When to Use | Examples |
-|-----------|-------------|----------|
-| **Process** | Local tools, npm packages | Most MCP servers |
-| **HTTP** | REST APIs, cloud services | Custom web services |
-| **WebSocket** | Real-time streaming | Live data feeds |
+
+| Transport     | When to Use               | Examples            |
+| ------------- | ------------------------- | ------------------- |
+| **Process**   | Local tools, npm packages | Most MCP servers    |
+| **HTTP**      | REST APIs, cloud services | Custom web services |
+| **WebSocket** | Real-time streaming       | Live data feeds     |
 
 ## 📋 Ready-to-Use Configurations
 
 ### Process Example (Default - Filesystem Server)
+
 ```json
 {
-  "servers": [{
-    "name": "File Operations",
-    "source": {
-      "type": "Process",
-      "command": "npx",
-      "args": ["@modelcontextprotocol/server-filesystem", "."]
-    }
-  }],
-  "auto_register_tools": true
+    "servers": [
+        {
+            "name": "File Operations",
+            "source": {
+                "type": "Process",
+                "command": "npx",
+                "args": ["@modelcontextprotocol/server-filesystem", "."]
+            }
+        }
+    ],
+    "auto_register_tools": true
 }
 ```
 
 ### HTTP Example (Hugging Face MCP Server)
+
 ```json
 {
-  "servers": [
-    {
-      "name": "Hugging Face MCP",
-      "source": {
-        "type": "Http",
-        "url": "https://hf.co/mcp",
-        "timeout_secs": 30
-      },
-      "bearer_token": "hf_xxx",
-      "tool_prefix": "hf",
-      "enabled": false
-    },
-    {
-      "name": "File Operations",
-      "source": {
-        "type": "Process",
-        "command": "npx",
-        "args": ["@modelcontextprotocol/server-filesystem", "."]
-      }
-    }
-  ],
-  "auto_register_tools": true
+    "servers": [
+        {
+            "name": "Hugging Face MCP",
+            "source": {
+                "type": "Http",
+                "url": "https://hf.co/mcp",
+                "timeout_secs": 30
+            },
+            "bearer_token": "hf_xxx",
+            "tool_prefix": "hf",
+            "enabled": false
+        },
+        {
+            "name": "File Operations",
+            "source": {
+                "type": "Process",
+                "command": "npx",
+                "args": ["@modelcontextprotocol/server-filesystem", "."]
+            }
+        }
+    ],
+    "auto_register_tools": true
 }
 ```
 
 ### WebSocket Example
+
 ```json
 {
-  "servers": [
-    {
-      "name": "WebSocket Example",
-      "source": {
-        "type": "WebSocket",
-        "url": "wss://api.example.com/mcp",
-        "timeout_secs": 30
-      },
-      "enabled": false
-    },
-    {
-      "name": "File Operations",
-      "source": {
-        "type": "Process",
-        "command": "npx",
-        "args": ["@modelcontextprotocol/server-filesystem", "."]
-      }
-    }
-  ],
-  "auto_register_tools": true
+    "servers": [
+        {
+            "name": "WebSocket Example",
+            "source": {
+                "type": "WebSocket",
+                "url": "wss://api.example.com/mcp",
+                "timeout_secs": 30
+            },
+            "enabled": false
+        },
+        {
+            "name": "File Operations",
+            "source": {
+                "type": "Process",
+                "command": "npx",
+                "args": ["@modelcontextprotocol/server-filesystem", "."]
+            }
+        }
+    ],
+    "auto_register_tools": true
 }
 ```
 
 ## Error Handling
 
 The system gracefully handles failures:
+
 - **Startup**: Invalid configurations are caught and reported with helpful messages
 - **Runtime**: Failed MCP connections are logged as warnings, server continues without MCP
 - **Tools**: Individual tool failures don't crash the server
@@ -262,12 +277,14 @@ The system gracefully handles failures:
 ## 📚 Next Steps
 
 **Ready for more?**
+
 - 🔧 [Configuration Reference](mcp-config-reference.json) - All available options
-- 📖 [Full MCP Documentation](../docs/MCP/README.md) - Complete guide  
+- 📖 [Full MCP Documentation](../docs/MCP/README.md) - Complete guide
 - 🛠️ [Server Examples](mcp-server-config.json) - Real-world configurations
 - 🚀 [Advanced Usage](../docs/MCP/advanced.md) - Multi-server setups
 
-**Need help?** 
+**Need help?**
+
 - [MCP Server Registry](https://github.com/modelcontextprotocol/servers) - Find more servers
 - [Troubleshooting](../docs/MCP/README.md#troubleshooting) - Common issues
 - [Discord Community](https://discord.gg/SZrecqK8qw) - Get support

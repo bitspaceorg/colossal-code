@@ -144,7 +144,11 @@ pub fn parse_isq_value(s: &str, device: Option<&Device>) -> Result<IsqType, Stri
         // "hqq3" => IsqType::HQQ3,
         // "hqq2" => IsqType::HQQ2,
         // "hqq1" => IsqType::HQQ1,
-        _ => return Err(format!("ISQ type {s} unknown, choose one of `2`, `3`, `4`, `6`, `8`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q8_1`, `Q2K`, `Q3K`, `Q4K`, `Q5K`, `Q6K`, `Q8K`, `HQQ8`, `HQQ4`, `FP8`, `AFQ8`, `AFQ6`, `AFQ4`, `AFQ3`, `AFQ2`, `F8Q8`.")),
+        _ => {
+            return Err(format!(
+                "ISQ type {s} unknown, choose one of `2`, `3`, `4`, `6`, `8`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q8_1`, `Q2K`, `Q3K`, `Q4K`, `Q5K`, `Q6K`, `Q8K`, `HQQ8`, `HQQ4`, `FP8`, `AFQ8`, `AFQ6`, `AFQ4`, `AFQ3`, `AFQ2`, `F8Q8`."
+            ));
+        }
     };
     #[cfg(feature = "cuda")]
     {
@@ -401,7 +405,9 @@ pub trait IsqModel {
                                 Some(data.0)
                             } else {
                                 if ext != "imatrix" {
-                                    warn!("Imatrix source file extension is {ext:?}, expected .imatrix/.cimatrix. Assuming GGUF specification");
+                                    warn!(
+                                        "Imatrix source file extension is {ext:?}, expected .imatrix/.cimatrix. Assuming GGUF specification"
+                                    );
                                 }
                                 info!(
                                     "Loading GGUF-format imatrix source file: `{}`",
@@ -494,7 +500,10 @@ pub trait IsqModel {
                             dtypes.insert(isq_dtype);
                         }
                     }
-                    info!("Applying in-situ quantization into {:?} to {total_tensors} tensors according to topology.", dtypes.into_iter().collect::<Vec<_>>());
+                    info!(
+                        "Applying in-situ quantization into {:?} to {total_tensors} tensors according to topology.",
+                        dtypes.into_iter().collect::<Vec<_>>()
+                    );
                 } else {
                     info!(
                         "Applying in-situ quantization into {dtype:?} to {total_tensors} tensors."
@@ -1182,7 +1191,9 @@ pub trait IsqModel {
         }
 
         let delta = Instant::now().duration_since(t_start).as_secs_f32();
-        info!("Loaded in-situ quantization artifacts into {total_tensors} total tensors. Took {delta:.2}s", );
+        info!(
+            "Loaded in-situ quantization artifacts into {total_tensors} total tensors. Took {delta:.2}s",
+        );
 
         Ok(())
     }

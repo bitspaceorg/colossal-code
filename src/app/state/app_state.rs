@@ -153,6 +153,8 @@ pub(crate) struct App {
     pub(crate) terminal_cursor_hidden: bool,
     // Flag to track if we need to position cursor on first nav render
     pub(crate) nav_needs_init: bool,
+    // Pending `z` viewport command in nav mode (`zz`, `zt`, `zb`)
+    pub(crate) nav_pending_z: bool,
     // Flash highlight for yank operations
     pub(crate) flash_highlight: Option<(edtui::state::selection::Selection, std::time::Instant)>,
     // Ctrl+C confirmation state
@@ -393,7 +395,10 @@ impl App {
                 ),
             ]),
             Mode::Search => Line::from(vec![
-                Span::styled(" > SEARCH MODE / ", Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    format!(" > SEARCH MODE {} ", self.editor.state.search_prompt_char()),
+                    Style::default().fg(Color::Cyan),
+                ),
                 Span::styled(
                     self.editor.search_query.clone(),
                     Style::default().fg(Color::Cyan),

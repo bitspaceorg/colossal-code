@@ -546,7 +546,12 @@ pub mod text_models_inputs_processor {
 
                 let block_pos = start_pos - seq.token_offset();
                 let block_number = if block_pos / paged_attn_metadata.block_size >= table.len() {
-                    panic!("Block table is too small (completion)! start_pos={} block_size={} table_len={}", block_pos, paged_attn_metadata.block_size, table.len());
+                    panic!(
+                        "Block table is too small (completion)! start_pos={} block_size={} table_len={}",
+                        block_pos,
+                        paged_attn_metadata.block_size,
+                        table.len()
+                    );
                 } else {
                     table
                         .get(block_pos / paged_attn_metadata.block_size)
