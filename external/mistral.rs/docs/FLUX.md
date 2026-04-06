@@ -10,10 +10,10 @@ We support both the `-schnell` and `-dev` versions of the model.
 
 The FLUX model itself is 12 billion parameters (~24GB), and the T5 XXL encoder model it uses requires ~9GB. We support loading the models fully onto the GPU, which allows much faster inference. If you do not have enough memory, try the offloaded (`-offloaded` or `-Offloaded`) model types. These will load the model on the CPU but perform computations on the GPU.
 
-|Type|Memory requirement|Generation Time (s), A100|
-| -- | -- | -- |
-|Normal| ~33GB | 9.4 |
-|Offloaded| ~4GB | 92.7 |
+| Type      | Memory requirement | Generation Time (s), A100 |
+| --------- | ------------------ | ------------------------- |
+| Normal    | ~33GB              | 9.4                       |
+| Offloaded | ~4GB               | 92.7                      |
 
 ## HTTP server
 
@@ -24,6 +24,7 @@ mistralrs serve diffusion -p 1234 -m black-forest-labs/FLUX.1-schnell -a flux
 ```
 
 After this, you can send requests via the HTTP server:
+
 ```py
 from openai import OpenAI
 
@@ -38,6 +39,7 @@ print(result.data[0].url)
 ```
 
 ## Rust example
+
 ```rust
 use std::time::Instant;
 use anyhow::Result;
@@ -77,6 +79,7 @@ async fn main() -> Result<()> {
 ```
 
 ## Python example
+
 ```py
 from mistralrs import (
     Runner,

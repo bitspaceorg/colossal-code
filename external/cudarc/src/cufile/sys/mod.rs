@@ -6,24 +6,6 @@
 extern crate alloc;
 #[cfg(feature = "no-std")]
 extern crate no_std_compat as std;
-pub use self::cudaError_enum as CUresult;
-#[cfg(any(
-    feature = "cuda-11060",
-    feature = "cuda-11070",
-    feature = "cuda-11080",
-    feature = "cuda-12000",
-    feature = "cuda-12010",
-    feature = "cuda-12020",
-    feature = "cuda-12030",
-    feature = "cuda-12040",
-    feature = "cuda-12050",
-    feature = "cuda-12060",
-    feature = "cuda-12080",
-    feature = "cuda-12090",
-    feature = "cuda-13000",
-    feature = "cuda-13010"
-))]
-pub use self::cufileBatchMode as CUfileBatchMode_t;
 #[cfg(any(
     feature = "cuda-11060",
     feature = "cuda-11070",
@@ -63,6 +45,24 @@ pub use self::CUfileFeatureFlags as CUfileFeatureFlags_t;
 pub use self::CUfileOpcode as CUfileOpcode_t;
 #[cfg(any(feature = "cuda-13010"))]
 pub use self::CUfileP2PFlags as CUfileP2PFlags_t;
+pub use self::cudaError_enum as CUresult;
+#[cfg(any(
+    feature = "cuda-11060",
+    feature = "cuda-11070",
+    feature = "cuda-11080",
+    feature = "cuda-12000",
+    feature = "cuda-12010",
+    feature = "cuda-12020",
+    feature = "cuda-12030",
+    feature = "cuda-12040",
+    feature = "cuda-12050",
+    feature = "cuda-12060",
+    feature = "cuda-12080",
+    feature = "cuda-12090",
+    feature = "cuda-13000",
+    feature = "cuda-13010"
+))]
+pub use self::cufileBatchMode as CUfileBatchMode_t;
 #[cfg(any(
     feature = "cuda-11060",
     feature = "cuda-11070",
@@ -2322,7 +2322,7 @@ extern "C" {
     pub fn cuFileDriverSetPollMode(poll: bool, poll_threshold_size: usize) -> CUfileError_t;
     #[cfg(any(feature = "cuda-13000", feature = "cuda-13010"))]
     pub fn cuFileGetBARSizeInKB(gpuIndex: ::core::ffi::c_int, barSize: *mut usize)
-        -> CUfileError_t;
+    -> CUfileError_t;
     #[cfg(any(feature = "cuda-12090", feature = "cuda-13000", feature = "cuda-13010"))]
     pub fn cuFileGetParameterBool(
         param: CUFileBoolConfigParameter_t,
@@ -2431,7 +2431,7 @@ extern "C" {
     ) -> CUfileError_t;
     #[cfg(any(feature = "cuda-12090", feature = "cuda-13000", feature = "cuda-13010"))]
     pub fn cuFileSetParameterBool(param: CUFileBoolConfigParameter_t, value: bool)
-        -> CUfileError_t;
+    -> CUfileError_t;
     #[cfg(any(feature = "cuda-13000", feature = "cuda-13010"))]
     pub fn cuFileSetParameterPosixPoolSlabArray(
         size_values: *const usize,

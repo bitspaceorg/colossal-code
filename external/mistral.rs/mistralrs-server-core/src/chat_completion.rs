@@ -355,9 +355,15 @@ pub async fn parse_request(
                                 Some(MessageInnerContent(Either::Left(x))) if x == "text" => {
                                     items.push(ContentPart::Text {
                                         text: image_message
-                                            .get("text").as_ref()
-                                            .context("Text sub-content must have `text` key.")?.as_ref()
-                                            .left().context("Text sub-content `text` key must be a string.")?.clone(),
+                                            .get("text")
+                                            .as_ref()
+                                            .context("Text sub-content must have `text` key.")?
+                                            .as_ref()
+                                            .left()
+                                            .context(
+                                                "Text sub-content `text` key must be a string.",
+                                            )?
+                                            .clone(),
                                     });
                                 }
                                 Some(MessageInnerContent(Either::Left(x))) if x == "image_url" => {
@@ -388,7 +394,9 @@ pub async fn parse_request(
                                             .clone(),
                                     });
                                 }
-                                _ => anyhow::bail!("Expected array content sub-content to be of format {{`type`: `text`, `text`: ...}} and {{`type`: `url`, `image_url`: {{`url`: ...}}}}")
+                                _ => anyhow::bail!(
+                                    "Expected array content sub-content to be of format {{`type`: `text`, `text`: ...}} and {{`type`: `url`, `image_url`: {{`url`: ...}}}}"
+                                ),
                             }
                         }
 
@@ -543,7 +551,9 @@ pub async fn parse_request(
     let is_streaming = oairequest.stream.unwrap_or(false);
 
     if oairequest.grammar.is_some() && oairequest.response_format.is_some() {
-        anyhow::bail!("Request `grammar` and `response_format` were both provided but are mutually exclusive.")
+        anyhow::bail!(
+            "Request `grammar` and `response_format` were both provided but are mutually exclusive."
+        )
     }
 
     let constraint = match oairequest.grammar {

@@ -16,7 +16,10 @@ struct GetWeatherInput {
 }
 
 fn get_weather(input: GetWeatherInput) -> String {
-    format!("Weather in {}: Temperature: 25C. Wind: calm. Dew point: 10C. Precipitiation: 5cm of rain expected.", input.place)
+    format!(
+        "Weather in {}: Temperature: 25C. Wind: calm. Dew point: 10C. Precipitiation: 5cm of rain expected.",
+        input.place
+    )
 }
 
 #[tokio::main]

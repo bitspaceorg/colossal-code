@@ -1,13 +1,15 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::Parser;
 use tokio::{net::TcpListener, runtime::Builder, signal, sync::RwLock};
 use tracing::info;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-use mistralrs_server_api::{build_router, AppState, AuthState, HttpMetrics, ManagerFactory, SchedulerFactory};
-use mistralrs_server_config::{load_from_path, ConfigManager, ConfigSource, ServerConfig};
+use mistralrs_server_api::{
+    AppState, AuthState, HttpMetrics, ManagerFactory, SchedulerFactory, build_router,
+};
+use mistralrs_server_config::{ConfigManager, ConfigSource, ServerConfig, load_from_path};
 use mistralrs_server_core::{
     DynModelManager, LoadModelRequest, MistralModelManager, RuntimeAdapters,
 };
@@ -42,9 +44,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     apply_overrides(&args);
     let initial_cfg = load_from_path(&args.config)?;
-    let worker_threads = args
-        .threads
-        .unwrap_or(initial_cfg.server.runtime_threads);
+    let worker_threads = args.threads.unwrap_or(initial_cfg.server.runtime_threads);
     let runtime = Builder::new_multi_thread()
         .worker_threads(worker_threads)
         .enable_all()
@@ -58,11 +58,10 @@ async fn run(args: Args) -> Result<()> {
     init_tracing(&config.logging.level);
 
     let metrics = HttpMetrics::new()?;
-    
-    let scheduler_factory: SchedulerFactory = Arc::new(|config| {
-        Arc::new(LruScheduler::new(config.scheduler.max_loaded_models))
-    });
-    
+
+    let scheduler_factory: SchedulerFactory =
+        Arc::new(|config| Arc::new(LruScheduler::new(config.scheduler.max_loaded_models)));
+
     let scheduler = (scheduler_factory)(&config);
     scheduler.register_metrics(metrics.registry())?;
 
@@ -175,7 +174,7 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut stream = signal(SignalKind::terminate()).expect("failed to install signal handler");
         stream.recv().await;
     };

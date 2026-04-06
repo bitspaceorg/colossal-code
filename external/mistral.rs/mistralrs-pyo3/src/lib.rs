@@ -575,9 +575,11 @@ fn build_constraint(grammar: Option<&str>, grammar_type: Option<&str>) -> PyApiR
             })?;
             Constraint::Llguidance(value)
         }
-        _ => return Err(PyApiErr::from(
-            "Grammar type is specified but is not `regex`, `lark`, `json_schema`, nor `llguidance`",
-        )),
+        _ => {
+            return Err(PyApiErr::from(
+                "Grammar type is specified but is not `regex`, `lark`, `json_schema`, nor `llguidance`",
+            ));
+        }
     };
 
     Ok(constraint)
@@ -1079,7 +1081,11 @@ impl Runner {
                                                     .clone(),
                                             });
                                         }
-                                        _ => return Err(PyApiErr::from("Expected array content sub-content to be of format {{`type`: `text`, `text`: ...}} and {{`type`: `url`, `image_url`: {{`url`: ...}}}}"))
+                                        _ => {
+                                            return Err(PyApiErr::from(
+                                                "Expected array content sub-content to be of format {{`type`: `text`, `text`: ...}} and {{`type`: `url`, `image_url`: {{`url`: ...}}}}",
+                                            ));
+                                        }
                                     }
                                 }
 
@@ -1383,14 +1389,14 @@ impl Runner {
                     match response {
                         Response::Embeddings { embeddings, .. } => all_embeddings.push(embeddings),
                         Response::ValidationError(e) | Response::InternalError(e) => {
-                            return Err(e.to_string())
+                            return Err(e.to_string());
                         }
                         Response::ModelError(msg, _) => return Err(msg.to_string()),
                         _ => {
                             return Err(
                                 "Received unexpected response type from embeddings request."
                                     .to_string(),
-                            )
+                            );
                         }
                     }
                 }
@@ -1886,7 +1892,11 @@ impl Runner {
                                                     .clone(),
                                             });
                                         }
-                                        _ => return Err(PyApiErr::from("Expected array content sub-content to be of format {{`type`: `text`, `text`: ...}} and {{`type`: `url`, `image_url`: {{`url`: ...}}}}"))
+                                        _ => {
+                                            return Err(PyApiErr::from(
+                                                "Expected array content sub-content to be of format {{`type`: `text`, `text`: ...}} and {{`type`: `url`, `image_url`: {{`url`: ...}}}}",
+                                            ));
+                                        }
                                     }
                                 }
 

@@ -6,14 +6,13 @@
 extern crate alloc;
 #[cfg(feature = "no-std")]
 extern crate no_std_compat as std;
-pub use self::cudaError_enum as CUresult;
 pub use self::CUDA_POINTER_ATTRIBUTE_ACCESS_FLAGS_enum as CUDA_POINTER_ATTRIBUTE_ACCESS_FLAGS;
 pub use self::CUGPUDirectRDMAWritesOrdering_enum as CUGPUDirectRDMAWritesOrdering;
 pub use self::CUaccessProperty_enum as CUaccessProperty;
 pub use self::CUaddress_mode_enum as CUaddress_mode;
-pub use self::CUarraySparseSubresourceType_enum as CUarraySparseSubresourceType;
 pub use self::CUarray_cubemap_face_enum as CUarray_cubemap_face;
 pub use self::CUarray_format_enum as CUarray_format;
+pub use self::CUarraySparseSubresourceType_enum as CUarraySparseSubresourceType;
 #[cfg(any(
     feature = "cuda-12040",
     feature = "cuda-12050",
@@ -25,9 +24,9 @@ pub use self::CUarray_format_enum as CUarray_format;
 ))]
 pub use self::CUasyncNotificationType_enum as CUasyncNotificationType;
 #[cfg(any(feature = "cuda-13000", feature = "cuda-13010"))]
-pub use self::CUatomicOperationCapability_enum as CUatomicOperationCapability;
-#[cfg(any(feature = "cuda-13000", feature = "cuda-13010"))]
 pub use self::CUatomicOperation_enum as CUatomicOperation;
+#[cfg(any(feature = "cuda-13000", feature = "cuda-13010"))]
+pub use self::CUatomicOperationCapability_enum as CUatomicOperationCapability;
 #[cfg(any(
     feature = "cuda-12050",
     feature = "cuda-12060",
@@ -67,6 +66,8 @@ pub use self::CUcomputemode_enum as CUcomputemode;
 ))]
 pub use self::CUcoredumpSettings_enum as CUcoredumpSettings;
 pub use self::CUctx_flags_enum as CUctx_flags;
+pub use self::CUdevice_P2PAttribute_enum as CUdevice_P2PAttribute;
+pub use self::CUdevice_attribute_enum as CUdevice_attribute;
 #[cfg(any(
     feature = "cuda-12020",
     feature = "cuda-12030",
@@ -79,8 +80,7 @@ pub use self::CUctx_flags_enum as CUctx_flags;
     feature = "cuda-13010"
 ))]
 pub use self::CUdeviceNumaConfig_enum as CUdeviceNumaConfig;
-pub use self::CUdevice_P2PAttribute_enum as CUdevice_P2PAttribute;
-pub use self::CUdevice_attribute_enum as CUdevice_attribute;
+pub use self::CUdriverProcAddress_flags_enum as CUdriverProcAddress_flags;
 #[cfg(any(
     feature = "cuda-12000",
     feature = "cuda-12010",
@@ -95,7 +95,6 @@ pub use self::CUdevice_attribute_enum as CUdevice_attribute;
     feature = "cuda-13010"
 ))]
 pub use self::CUdriverProcAddressQueryResult_enum as CUdriverProcAddressQueryResult;
-pub use self::CUdriverProcAddress_flags_enum as CUdriverProcAddress_flags;
 pub use self::CUevent_flags_enum as CUevent_flags;
 pub use self::CUevent_record_flags_enum as CUevent_record_flags;
 #[cfg(any(
@@ -122,6 +121,7 @@ pub use self::CUflushGPUDirectRDMAWritesOptions_enum as CUflushGPUDirectRDMAWrit
 pub use self::CUflushGPUDirectRDMAWritesScope_enum as CUflushGPUDirectRDMAWritesScope;
 pub use self::CUflushGPUDirectRDMAWritesTarget_enum as CUflushGPUDirectRDMAWritesTarget;
 pub use self::CUfunc_cache_enum as CUfunc_cache;
+pub use self::CUfunction_attribute_enum as CUfunction_attribute;
 #[cfg(any(
     feature = "cuda-12040",
     feature = "cuda-12050",
@@ -132,7 +132,6 @@ pub use self::CUfunc_cache_enum as CUfunc_cache;
     feature = "cuda-13010"
 ))]
 pub use self::CUfunctionLoadingState_enum as CUfunctionLoadingState;
-pub use self::CUfunction_attribute_enum as CUfunction_attribute;
 #[cfg(any(feature = "cuda-12090", feature = "cuda-13000", feature = "cuda-13010"))]
 pub use self::CUgraphChildGraphNodeOwnership_enum as CUgraphChildGraphNodeOwnership;
 #[cfg(any(
@@ -159,6 +158,7 @@ pub use self::CUgraphDebugDot_flags_enum as CUgraphDebugDot_flags;
 ))]
 pub use self::CUgraphDependencyType_enum as CUgraphDependencyType;
 pub use self::CUgraphExecUpdateResult_enum as CUgraphExecUpdateResult;
+pub use self::CUgraphInstantiate_flags_enum as CUgraphInstantiate_flags;
 #[cfg(any(
     feature = "cuda-12000",
     feature = "cuda-12010",
@@ -173,17 +173,16 @@ pub use self::CUgraphExecUpdateResult_enum as CUgraphExecUpdateResult;
     feature = "cuda-13010"
 ))]
 pub use self::CUgraphInstantiateResult_enum as CUgraphInstantiateResult;
-pub use self::CUgraphInstantiate_flags_enum as CUgraphInstantiate_flags;
 pub use self::CUgraphMem_attribute_enum as CUgraphMem_attribute;
 pub use self::CUgraphNodeType_enum as CUgraphNodeType;
 pub use self::CUgraphicsMapResourceFlags_enum as CUgraphicsMapResourceFlags;
 pub use self::CUgraphicsRegisterFlags_enum as CUgraphicsRegisterFlags;
 pub use self::CUipcMem_flags_enum as CUipcMem_flags;
-pub use self::CUjitInputType_enum as CUjitInputType;
 pub use self::CUjit_cacheMode_enum as CUjit_cacheMode;
 pub use self::CUjit_fallback_enum as CUjit_fallback;
 pub use self::CUjit_option_enum as CUjit_option;
 pub use self::CUjit_target_enum as CUjit_target;
+pub use self::CUjitInputType_enum as CUjitInputType;
 #[cfg(any(
     feature = "cuda-11040",
     feature = "cuda-11050",
@@ -267,6 +266,8 @@ pub use self::CUlibraryOption_enum as CUlibraryOption;
 pub use self::CUlimit_enum as CUlimit;
 #[cfg(any(feature = "cuda-12090", feature = "cuda-13000", feature = "cuda-13010"))]
 pub use self::CUlogLevel_enum as CUlogLevel;
+pub use self::CUmem_advise_enum as CUmem_advise;
+pub use self::CUmem_range_attribute_enum as CUmem_range_attribute;
 pub use self::CUmemAccess_flags_enum as CUmemAccess_flags;
 pub use self::CUmemAllocationCompType_enum as CUmemAllocationCompType;
 pub use self::CUmemAllocationGranularity_flags_enum as CUmemAllocationGranularity_flags;
@@ -307,8 +308,6 @@ pub use self::CUmemRangeFlags_enum as CUmemRangeFlags;
     feature = "cuda-13010"
 ))]
 pub use self::CUmemRangeHandleType_enum as CUmemRangeHandleType;
-pub use self::CUmem_advise_enum as CUmem_advise;
-pub use self::CUmem_range_attribute_enum as CUmem_range_attribute;
 #[cfg(any(
     feature = "cuda-12080",
     feature = "cuda-12090",
@@ -374,6 +373,7 @@ pub use self::CUresourceViewFormat_enum as CUresourceViewFormat;
 pub use self::CUresourcetype_enum as CUresourcetype;
 pub use self::CUshared_carveout_enum as CUshared_carveout;
 pub use self::CUsharedconfig_enum as CUsharedconfig;
+pub use self::CUstream_flags_enum as CUstream_flags;
 #[cfg(any(feature = "cuda-13010"))]
 pub use self::CUstreamAtomicReductionDataType_enum as CUstreamAtomicReductionDataType;
 #[cfg(any(feature = "cuda-13010"))]
@@ -407,7 +407,6 @@ pub use self::CUstreamMemoryBarrier_flags_enum as CUstreamMemoryBarrier_flags;
 pub use self::CUstreamUpdateCaptureDependencies_flags_enum as CUstreamUpdateCaptureDependencies_flags;
 pub use self::CUstreamWaitValue_flags_enum as CUstreamWaitValue_flags;
 pub use self::CUstreamWriteValue_flags_enum as CUstreamWriteValue_flags;
-pub use self::CUstream_flags_enum as CUstream_flags;
 pub use self::CUsynchronizationPolicy_enum as CUsynchronizationPolicy;
 #[cfg(any(
     feature = "cuda-12000",
@@ -486,8 +485,9 @@ pub use self::CUtensorMapL2promotion_enum as CUtensorMapL2promotion;
     feature = "cuda-13010"
 ))]
 pub use self::CUtensorMapSwizzle_enum as CUtensorMapSwizzle;
-pub use self::CUuserObjectRetain_flags_enum as CUuserObjectRetain_flags;
 pub use self::CUuserObject_flags_enum as CUuserObject_flags;
+pub use self::CUuserObjectRetain_flags_enum as CUuserObjectRetain_flags;
+pub use self::cudaError_enum as CUresult;
 pub const CUDA_ARRAY3D_2DARRAY: u32 = 1;
 pub const CUDA_ARRAY3D_COLOR_ATTACHMENT: u32 = 32;
 pub const CUDA_ARRAY3D_CUBEMAP: u32 = 4;
@@ -10312,7 +10312,7 @@ extern "C" {
     pub fn cuGraphExecGetFlags(hGraphExec: CUgraphExec, flags: *mut cuuint64_t) -> CUresult;
     #[cfg(any(feature = "cuda-13010"))]
     pub fn cuGraphExecGetId(hGraphExec: CUgraphExec, graphId: *mut ::core::ffi::c_uint)
-        -> CUresult;
+    -> CUresult;
     pub fn cuGraphExecHostNodeSetParams(
         hGraphExec: CUgraphExec,
         hNode: CUgraphNode,
@@ -10751,7 +10751,7 @@ extern "C" {
         feature = "cuda-13010"
     ))]
     pub fn cuGraphNodeSetParams(hNode: CUgraphNode, nodeParams: *mut CUgraphNodeParams)
-        -> CUresult;
+    -> CUresult;
     pub fn cuGraphReleaseUserObject(
         graph: CUgraph,
         object: CUuserObject,

@@ -9,6 +9,7 @@ mistral.rs is a blazing-fast LLM inference engine written in Rust. It supports t
 ## Essential Commands
 
 ### Building
+
 ```bash
 # Basic release build
 cargo build --release
@@ -24,6 +25,7 @@ cargo install --path mistralrs-cli --features <features>
 ```
 
 ### Testing & Quality
+
 ```bash
 # Run core tests
 cargo test -p mistralrs-core -p mistralrs-quant -p mistralrs-vision
@@ -39,6 +41,7 @@ cargo clippy --workspace --tests --examples -- -D warnings
 ```
 
 ### Running Models
+
 ```bash
 # Run interactive mode (model type auto-detected)
 mistralrs run -m <model_id>
@@ -58,13 +61,14 @@ mistralrs bench -m <model_id>
 
 ## Models
 
-When integrating a new model, make sure it respects all of the varbuilder `.pp` calls. In Candle, a VarBuilder maintains an internal path vector that acts like a “current working directory” for model weights; every call to pp("sub") (alias for push_prefix) clones the builder and appends sub, so successive calls accumulate a dotted prefix such as transformer.h.0 while leaving the original builder untouched . When you eventually call get(...), Candle joins that prefix with the tensor name (prefix + "." + name) and looks it up in the checkpoint backend, producing keys that exactly match the dot-separated names emitted by PyTorch’s state_dict/named_parameters, which means PyTorch-trained weights can be loaded without any renaming  ￼. This lets you recreate the PyTorch module tree in Rust by “walking” it: e.g. vb.pp("word_embeddings") grabs word_embeddings.*, while a chain like vb.pp("encoder").pp("layers").pp(i.to_string()) targets keys such as encoder.layers.0.*, exactly as shown in community tutorials porting Transformers models to Candle  ￼. As one maintainer put it, the prefix system lets you “cd” around the parameter hierarchy, giving a lightweight namespace mechanism that keeps Candle fully compatible with PyTorch naming conventions while remaining ergonomic to use.
+When integrating a new model, make sure it respects all of the varbuilder `.pp` calls. In Candle, a VarBuilder maintains an internal path vector that acts like a “current working directory” for model weights; every call to pp("sub") (alias for push*prefix) clones the builder and appends sub, so successive calls accumulate a dotted prefix such as transformer.h.0 while leaving the original builder untouched . When you eventually call get(...), Candle joins that prefix with the tensor name (prefix + "." + name) and looks it up in the checkpoint backend, producing keys that exactly match the dot-separated names emitted by PyTorch’s state_dict/named_parameters, which means PyTorch-trained weights can be loaded without any renaming ￼. This lets you recreate the PyTorch module tree in Rust by “walking” it: e.g. vb.pp("word_embeddings") grabs word_embeddings.*, while a chain like vb.pp("encoder").pp("layers").pp(i.to*string()) targets keys such as encoder.layers.0.*, exactly as shown in community tutorials porting Transformers models to Candle ￼. As one maintainer put it, the prefix system lets you “cd” around the parameter hierarchy, giving a lightweight namespace mechanism that keeps Candle fully compatible with PyTorch naming conventions while remaining ergonomic to use.
 
 You should also look for a model.safetensors.index.json file for the model at hand to verify correct structure.
 
 ## Architecture Overview
 
 ### Workspace Structure
+
 - `mistralrs-core/` - Core inference engine, model implementations, pipelines
 - `mistralrs-cli/` - Unified CLI binary (commands: run, serve, bench, from-config)
 - `mistralrs-server-core/` - HTTP server routing, OpenAI API implementation
@@ -90,6 +94,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 ### Adding New Features
 
 When adding new model architectures:
+
 1. Implement the model in `mistralrs-core/src/models/`
 2. Add pipeline support in `mistralrs-core/src/pipeline/`
 3. Update model detection in `mistralrs-core/src/pipeline/normal.rs`
@@ -97,6 +102,7 @@ When adding new model architectures:
 5. Update CLI args in `mistralrs-cli/src/main.rs`
 
 When adding new quantization methods:
+
 1. Implement in `mistralrs-quant/src/`
 2. Add to quantization loading logic in pipelines
 3. Update documentation in `docs/QUANTIZATION.md`
@@ -115,7 +121,7 @@ Never include a "Test plan" section in PR descriptions.
 
 ### Testing Approach
 
-You should *always* run `cargo check`/`cargo c` before returning to make sure code compiles. If code does not compile, only make edits.
+You should _always_ run `cargo check`/`cargo c` before returning to make sure code compiles. If code does not compile, only make edits.
 
 Avoid returning TODOs.
 
@@ -134,7 +140,7 @@ Avoid returning TODOs.
 
 ### Vision/Audio Model Pitfalls
 
-6. **Vision encoder attention must be bidirectional (non-causal)**:  `Sdpa.run_attention` with `flash_params: None` defaults to `causal = seq_len > 1` on the CUDA flash-attn path, which silently breaks vision/audio encoders. Always pass `FlashParams { causal: false, cumulative_seqlens_q: HashMap::new(), cumulative_seqlens_k: HashMap::new(), max_q: 0, max_k: 0 }` with `Some(&flash_params)` for any encoder that needs bidirectional attention. The empty `cumulative_seqlens` cause the flash backend to use the non-varlen kernel path, avoiding any tensor allocation in the forward pass.
+6. **Vision encoder attention must be bidirectional (non-causal)**: `Sdpa.run_attention` with `flash_params: None` defaults to `causal = seq_len > 1` on the CUDA flash-attn path, which silently breaks vision/audio encoders. Always pass `FlashParams { causal: false, cumulative_seqlens_q: HashMap::new(), cumulative_seqlens_k: HashMap::new(), max_q: 0, max_k: 0 }` with `Some(&flash_params)` for any encoder that needs bidirectional attention. The empty `cumulative_seqlens` cause the flash backend to use the non-varlen kernel path, avoiding any tensor allocation in the forward pass.
 
 7. **`torch.bucketize(right=True)` requires `Ok(i) => i + 1`**: Rust's `binary_search_by` returns `Ok(i)` at the found position (bisect_left semantics). For `right=True` (bisect_right), you must use `Ok(i) => i + 1` to insert after equal elements. `Err(i) => i` is correct for both.
 

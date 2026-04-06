@@ -143,7 +143,9 @@ fn verify_sanity_adapters(ordering: &Ordering, supported_layers: &[&str]) -> Res
     }
     for path in ordering.layers.as_ref().unwrap().keys() {
         if !supported_layers.iter().any(|layer| path.ends_with(layer)) {
-            candle_core::bail!("Got a layer name `{path}` in the ordering, expected it to end with one of {supported_layers:?}");
+            candle_core::bail!(
+                "Got a layer name `{path}` in the ordering, expected it to end with one of {supported_layers:?}"
+            );
         }
     }
     Ok(())

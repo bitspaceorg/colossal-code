@@ -1,13 +1,15 @@
-use std::{pin::Pin, sync::Arc, task::{Context, Poll}};
+use std::{
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
 use axum::response::sse::Event;
 
 use futures::Stream;
 use mistralrs_core::{
-    ChatCompletionResponse as EngineChatResponse,
-    CompletionResponse as EngineCompletionResponse,
-    Response as EngineResponse,
-    Usage as EngineUsage,
+    ChatCompletionResponse as EngineChatResponse, CompletionResponse as EngineCompletionResponse,
+    Response as EngineResponse, Usage as EngineUsage,
 };
 use serde_json::json;
 use tokio::sync::mpsc::Receiver;
@@ -130,7 +132,9 @@ impl Stream for CompletionStreamWrapper {
                     EngineResponse::CompletionChunk(chunk) => {
                         // Count streaming tokens from chunk content
                         if let Some(instr) = mut_self.instrumentation.as_ref() {
-                            let token_count: u32 = chunk.choices.iter()
+                            let token_count: u32 = chunk
+                                .choices
+                                .iter()
                                 .map(|choice| {
                                     // Rough estimate: 1 token per ~4 characters
                                     (choice.text.len() / 4).max(1) as u32
@@ -216,10 +220,15 @@ impl Stream for ChatStreamWrapper {
                     EngineResponse::Chunk(chunk) => {
                         // Count streaming tokens from chunk content
                         if let Some(instr) = mut_self.instrumentation.as_ref() {
-                            let token_count: u32 = chunk.choices.iter()
+                            let token_count: u32 = chunk
+                                .choices
+                                .iter()
                                 .map(|choice| {
                                     // Rough estimate: 1 token per ~4 characters
-                                    choice.delta.content.as_ref()
+                                    choice
+                                        .delta
+                                        .content
+                                        .as_ref()
                                         .map(|text| (text.len() / 4).max(1) as u32)
                                         .unwrap_or(0)
                                 })
@@ -308,9 +317,9 @@ fn clamp_tokens(value: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use mistralrs_core::{CompletionChunkChoice, CompletionChunkResponse};
     use tokio::sync::mpsc;
-    use futures::StreamExt;
 
     #[tokio::test]
     async fn completion_stream_wraps_chunks() {

@@ -4,7 +4,7 @@ Mistral.rs provides a lightweight OpenAI API compatible HTTP server based on [ax
 
 The API consists of the following endpoints. They can be viewed in your browser interactively by going to `http://localhost:<port>/docs`.
 
-> ℹ️  Besides the HTTP endpoints described below, `mistralrs serve` can also expose the same functionality via the **MCP protocol**.
+> ℹ️ Besides the HTTP endpoints described below, `mistralrs serve` can also expose the same functionality via the **MCP protocol**.
 > Enable it with `--mcp-port <port>` and see [MCP/server.md](MCP/server.md) for details.
 
 ## Additional object keys
@@ -37,15 +37,18 @@ For models using Harmony format (like GPT-OSS), responses may include additional
 When streaming, `reasoning_content` appears in the `delta` object alongside `content`.
 
 **Example response:**
+
 ```json
 {
-  "choices": [{
-    "message": {
-      "role": "assistant",
-      "content": "The answer is 42.",
-      "reasoning_content": "Let me analyze this step by step..."
-    }
-  }]
+    "choices": [
+        {
+            "message": {
+                "role": "assistant",
+                "content": "The answer is 42.",
+                "reasoning_content": "Let me analyze this step by step..."
+            }
+        }
+    ]
 }
 ```
 
@@ -54,11 +57,13 @@ When streaming, `reasoning_content` appears in the `delta` object alongside `con
 Mistral.rs validates that the `model` parameter in API requests matches the model that was actually loaded by the server. This ensures requests are processed by the correct model and prevents confusion.
 
 **Behavior:**
+
 - If the `model` parameter matches the loaded model name, the request proceeds normally
 - If the `model` parameter doesn't match, the request fails with an error message indicating the mismatch
 - The special model name `"default"` can be used to bypass this validation entirely
 
 **Examples:**
+
 - ✅ Request with `"model": "meta-llama/Llama-3.2-3B-Instruct"` when `meta-llama/Llama-3.2-3B-Instruct` is loaded -> **succeeds**
 - ❌ Request with `"model": "gpt-4"` when `mistral-7b-instruct` is loaded -> **fails**
 - ✅ Request with `"model": "default"` regardless of loaded model -> **always succeeds**
@@ -66,6 +71,7 @@ Mistral.rs validates that the `model` parameter in API requests matches the mode
 **Usage:** Use `"default"` in the model field when you need to satisfy API clients that require a model parameter but don't need to specify a particular model. This is demonstrated in all the examples below.
 
 ## `POST`: `/v1/chat/completions`
+
 Process an OpenAI compatible request, returning an OpenAI compatible response when finished. Please find the official OpenAI API documentation [here](https://platform.openai.com/docs/api-reference/chat). To control the interval keep-alive messages are sent, set the `KEEP_ALIVE_INTERVAL` environment variable to the desired time in ms.
 
 To send a request with the Python `openai` library:
@@ -90,6 +96,7 @@ print(completion.choices[0].message)
 ```
 
 Or with `curl`:
+
 ```bash
 curl http://localhost:1234/v1/chat/completions \
 -H "Content-Type: application/json" \
@@ -114,30 +121,37 @@ A streaming request can also be created by setting `"stream": true` in the reque
 > ℹ️ Requests whose prompt exceeds the model's maximum context length now fail unless you opt in to truncation. Set `"truncate_sequence": true` to drop the oldest prompt tokens while reserving room (equal to `max_tokens` when provided, otherwise one token) for generation. Specifically, tokens from the front of the prompt are dropped.
 
 ## `GET`: `/v1/models`
-Returns the running models. 
+
+Returns the running models.
 
 Example with `curl`:
+
 ```bash
 curl http://localhost:<port>/v1/models
 ```
 
 ## `GET`: `/` or `/health`
+
 Returns the server health.
 
 Example with `curl`:
+
 ```bash
 curl http://localhost:<port>/health
 ```
 
 ## `GET`: `/docs`
+
 Returns OpenAPI API docs via SwaggerUI.
 
 Example with `curl`:
+
 ```bash
 curl http://localhost:<port>/docs
 ```
 
 ## `POST`: `/v1/completions`
+
 Process an OpenAI compatible completions request, returning an OpenAI compatible response when finished. Please find the official OpenAI API documentation [here](https://platform.openai.com/docs/api-reference/completions).
 
 ### Completions-specific parameters
@@ -170,6 +184,7 @@ print(completion.choices[0].message)
 ```
 
 Or with `curl`:
+
 ```bash
 curl http://localhost:1234/v1/completions \
 -H "Content-Type: application/json" \
@@ -183,6 +198,7 @@ curl http://localhost:1234/v1/completions \
 > ℹ️ The `truncate_sequence` flag behaves the same way for the completions endpoint: keep it `false` (default) to receive a validation error, or set it to `true` to trim the prompt automatically.
 
 ## `POST`: `/v1/embeddings`
+
 Serve an embedding model (for example, EmbeddingGemma) to enable this endpoint:
 
 ```bash
@@ -240,6 +256,7 @@ curl http://localhost:1234/v1/embeddings \
 Responses follow the OpenAI schema: `object: "list"`, `data[*].embedding` containing either float arrays or Base64 strings depending on `encoding_format`, and a `usage` block (`prompt_tokens`, `total_tokens`). At present those counters report `0` because token accounting for embeddings is not yet implemented.
 
 ## `POST`: `/v1/images/generations`
+
 Generate images using diffusion models (like FLUX). First, serve a diffusion model:
 
 ```bash
@@ -247,6 +264,7 @@ mistralrs serve -m black-forest-labs/FLUX.1-schnell
 ```
 
 Supported request fields:
+
 - `model`: Model identifier (use `"default"` to bypass validation)
 - `prompt`: Text description of the image to generate
 - `n`: Number of images to generate (default: 1)
@@ -296,6 +314,7 @@ curl http://localhost:1234/v1/images/generations \
 ```
 
 ## `POST`: `/v1/audio/speech`
+
 Generate speech from text using speech models (like Dia). First, serve a speech model:
 
 ```bash
@@ -303,6 +322,7 @@ mistralrs serve -m nari-labs/Dia-1.6B
 ```
 
 Supported request fields:
+
 - `model`: Model identifier (use `"default"` to bypass validation)
 - `input`: Text to convert to speech. For Dia models, use speaker tags like `[S1]` and `[S2]` to control multiple voices
 - `response_format`: `"wav"` or `"pcm"` (only these formats are supported)
@@ -349,7 +369,8 @@ curl http://localhost:1234/v1/audio/speech \
 The response is raw audio data with the appropriate `Content-Type` header (`audio/wav` for WAV format, `audio/pcm` for PCM format).
 
 ## `POST`: `/v1/responses`
-Create a response using the OpenAI-compatible Responses API. Please find the official OpenAI API documentation [here](https://platform.openai.com/docs/api-reference/responses). 
+
+Create a response using the OpenAI-compatible Responses API. Please find the official OpenAI API documentation [here](https://platform.openai.com/docs/api-reference/responses).
 
 To send a request with the Python `openai` library:
 
@@ -378,6 +399,7 @@ print(resp2.output_text)
 ```
 
 Or with `curl`:
+
 ```bash
 curl http://localhost:1234/v1/responses \
 -H "Content-Type: application/json" \
@@ -403,27 +425,33 @@ The API also supports multimodal inputs (images, audio) and streaming responses 
 > ℹ️ The Responses API forwards `truncate_sequence` to underlying chat completions. Enable it if you want over-length conversations to be truncated rather than rejected.
 
 ## `GET`: `/v1/responses/{response_id}`
+
 Retrieve a previously created response by its ID.
 
 Example with `curl`:
+
 ```bash
 curl http://localhost:1234/v1/responses/resp_12345-uuid-here \
 -H "Authorization: Bearer EMPTY"
 ```
 
 ## `DELETE`: `/v1/responses/{response_id}`
+
 Delete a stored response and its associated conversation history.
 
 Example with `curl`:
+
 ```bash
 curl -X DELETE http://localhost:1234/v1/responses/resp_12345-uuid-here \
 -H "Authorization: Bearer EMPTY"
 ```
 
 ## `POST`: `/re_isq`
+
 Reapply ISQ to the model if possible. Pass the names as a JSON object with the key `ggml_type` to a string (the quantization level).
 
 Example with `curl`:
+
 ```bash
 curl http://localhost:<port>/re_isq -H "Content-Type: application/json" -H "Authorization: Bearer EMPTY" -d '{"ggml_type":"4"}'
 ```
@@ -437,21 +465,24 @@ These endpoints allow dynamic management of loaded models, enabling you to free 
 Unload a model from memory while preserving its configuration for later reload. The model can be reloaded manually or will auto-reload when a request is sent to it.
 
 **Request body:**
+
 ```json
 {
-  "model_id": "meta-llama/Llama-3.2-3B-Instruct"
+    "model_id": "meta-llama/Llama-3.2-3B-Instruct"
 }
 ```
 
 **Response:**
+
 ```json
 {
-  "model_id": "meta-llama/Llama-3.2-3B-Instruct",
-  "status": "unloaded"
+    "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+    "status": "unloaded"
 }
 ```
 
 Example with `curl`:
+
 ```bash
 curl -X POST http://localhost:1234/v1/models/unload \
   -H "Content-Type: application/json" \
@@ -463,21 +494,24 @@ curl -X POST http://localhost:1234/v1/models/unload \
 Manually reload a previously unloaded model. This is also triggered automatically when a request is sent to an unloaded model.
 
 **Request body:**
+
 ```json
 {
-  "model_id": "meta-llama/Llama-3.2-3B-Instruct"
+    "model_id": "meta-llama/Llama-3.2-3B-Instruct"
 }
 ```
 
 **Response:**
+
 ```json
 {
-  "model_id": "meta-llama/Llama-3.2-3B-Instruct",
-  "status": "loaded"
+    "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+    "status": "loaded"
 }
 ```
 
 Example with `curl`:
+
 ```bash
 curl -X POST http://localhost:1234/v1/models/reload \
   -H "Content-Type: application/json" \
@@ -489,21 +523,24 @@ curl -X POST http://localhost:1234/v1/models/reload \
 Get the current status of a specific model.
 
 **Request body:**
+
 ```json
 {
-  "model_id": "meta-llama/Llama-3.2-3B-Instruct"
+    "model_id": "meta-llama/Llama-3.2-3B-Instruct"
 }
 ```
 
 **Response:**
+
 ```json
 {
-  "model_id": "meta-llama/Llama-3.2-3B-Instruct",
-  "status": "loaded"
+    "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+    "status": "loaded"
 }
 ```
 
 Example with `curl`:
+
 ```bash
 curl -X POST http://localhost:1234/v1/models/status \
   -H "Content-Type: application/json" \
@@ -514,21 +551,22 @@ curl -X POST http://localhost:1234/v1/models/status \
 
 The `status` field in responses can be one of:
 
-| Status | Description |
-|--------|-------------|
-| `loaded` | Model is loaded and ready to serve requests |
-| `unloaded` | Model is unloaded but can be reloaded |
-| `reloading` | Model is currently being reloaded |
-| `not_found` | Model ID not recognized |
-| `no_loader_config` | Model cannot be reloaded (missing loader configuration) |
-| `internal_error` | An internal error occurred (check `error` field for details) |
+| Status             | Description                                                  |
+| ------------------ | ------------------------------------------------------------ |
+| `loaded`           | Model is loaded and ready to serve requests                  |
+| `unloaded`         | Model is unloaded but can be reloaded                        |
+| `reloading`        | Model is currently being reloaded                            |
+| `not_found`        | Model ID not recognized                                      |
+| `no_loader_config` | Model cannot be reloaded (missing loader configuration)      |
+| `internal_error`   | An internal error occurred (check `error` field for details) |
 
 When an error occurs, the response may include an `error` field with additional details:
+
 ```json
 {
-  "model_id": "unknown-model",
-  "status": "not_found",
-  "error": null
+    "model_id": "unknown-model",
+    "status": "not_found",
+    "error": null
 }
 ```
 
@@ -545,23 +583,24 @@ curl http://localhost:1234/v1/models
 ```
 
 Response:
+
 ```json
 {
-  "object": "list",
-  "data": [
-    {
-      "id": "default",
-      "object": "model",
-      "created": 1234567890,
-      "owned_by": "local"
-    },
-    {
-      "id": "meta-llama/Llama-3.2-3B-Instruct",
-      "object": "model",
-      "created": 1234567890,
-      "owned_by": "local",
-      "status": "loaded"
-    }
-  ]
+    "object": "list",
+    "data": [
+        {
+            "id": "default",
+            "object": "model",
+            "created": 1234567890,
+            "owned_by": "local"
+        },
+        {
+            "id": "meta-llama/Llama-3.2-3B-Instruct",
+            "object": "model",
+            "created": 1234567890,
+            "owned_by": "local",
+            "status": "loaded"
+        }
+    ]
 }
 ```

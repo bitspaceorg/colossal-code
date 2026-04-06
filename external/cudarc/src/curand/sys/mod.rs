@@ -252,7 +252,7 @@ extern "C" {
         value: *mut ::core::ffi::c_int,
     ) -> curandStatus_t;
     pub fn curandGetScrambleConstants32(constants: *mut *mut ::core::ffi::c_uint)
-        -> curandStatus_t;
+    -> curandStatus_t;
     pub fn curandGetScrambleConstants64(
         constants: *mut *mut ::core::ffi::c_ulonglong,
     ) -> curandStatus_t;

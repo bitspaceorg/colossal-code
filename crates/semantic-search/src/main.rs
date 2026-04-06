@@ -1,13 +1,13 @@
-use std::sync::{Arc, RwLock};
+use actix_web::middleware::Logger;
+use actix_web::{App, HttpServer, web};
+use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
     CreateCollectionBuilder, Distance, ScalarQuantizationBuilder, VectorParamsBuilder,
 };
-use qdrant_client::Qdrant;
 use rayon::prelude::*;
-use actix_web::{web, App, HttpServer};
-use actix_web::middleware::Logger;
+use std::sync::{Arc, RwLock};
 
-use semantic_search_lib::{index_codebase, semantic_search, IngestStatus};
+use semantic_search_lib::{IngestStatus, index_codebase, semantic_search};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,7 +45,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let status_clone = status.clone();
     let client_clone_for_spawn = client_clone.clone();
     tokio::spawn(async move {
-        if let Err(e) = index_codebase(root_path, &client_clone_for_spawn, collection_name, status_clone.clone()).await {
+        if let Err(e) = index_codebase(
+            root_path,
+            &client_clone_for_spawn,
+            collection_name,
+            status_clone.clone(),
+        )
+        .await
+        {
             let mut s = status_clone.write().unwrap();
             s.state = format!("error: {}", e);
             s.progress_percent = 0.0;

@@ -10,6 +10,31 @@ use crate::app::state::message::AgentConnector;
 use crate::app::{App, MESSAGE_BORDER_SET, SUMMARY_BANNER_PREFIX, UiMessageEvent};
 
 impl App {
+    pub(crate) fn is_primary_agent_block_message(message: &str) -> bool {
+        match UiMessageEvent::parse(message) {
+            Some(
+                UiMessageEvent::ToolCallStarted { .. } | UiMessageEvent::ToolCallCompleted { .. },
+            ) => true,
+            Some(UiMessageEvent::GenerationStats { .. } | UiMessageEvent::ThinkingAnimation) => {
+                false
+            }
+            Some(UiMessageEvent::Command(_)) => true,
+            None => {
+                !(message.starts_with('[')
+                    || message.starts_with(" ⎿ ")
+                    || message.trim() == "⎿ What should Nite do instead?")
+            }
+        }
+    }
+
+    pub(crate) fn should_insert_primary_agent_block_gap(
+        current_message: &str,
+        next_message: Option<&str>,
+    ) -> bool {
+        Self::is_primary_agent_block_message(current_message)
+            && next_message.is_some_and(Self::is_primary_agent_block_message)
+    }
+
     fn render_edit_file_result_spans(first_line: &str, result_color: Color) -> Vec<Span<'static>> {
         let mut spans = Vec::new();
 

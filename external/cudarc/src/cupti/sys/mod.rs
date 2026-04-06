@@ -36706,11 +36706,7 @@ where
             index % 8
         };
         let mask = 1 << bit_index;
-        if val {
-            byte | mask
-        } else {
-            byte & !mask
-        }
+        if val { byte | mask } else { byte & !mask }
     }
     #[inline]
     pub fn set_bit(&mut self, index: usize, val: bool) {
@@ -37078,7 +37074,7 @@ extern "C" {
     ) -> CUptiResult;
     pub fn cuptiActivityDisable(kind: CUpti_ActivityKind) -> CUptiResult;
     pub fn cuptiActivityDisableContext(context: CUcontext, kind: CUpti_ActivityKind)
-        -> CUptiResult;
+    -> CUptiResult;
     pub fn cuptiActivityEnable(kind: CUpti_ActivityKind) -> CUptiResult;
     #[cfg(any(
         feature = "cuda-12080",

@@ -5,6 +5,7 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 
 use crate::app::init::constructor_backend::BackendConfig;
+use crate::app::input::vim_context::VimKeyProcessor;
 use crate::app::persistence::auth_store::load_auth_store;
 use crate::app::{
     AgentState, App, Mode, PersistenceState, Phase, RichEditor, SafetyState, SessionManager,
@@ -70,8 +71,14 @@ impl App {
             .await
             .map_err(|e| color_eyre::eyre::eyre!("Failed to load backend: {}", e))?;
 
+        let backend_is_none = agent.backend_kind() == agent_core::BackendKind::None;
         let agent_arc = Arc::new(agent);
         Self::spawn_agent_runtime(Arc::clone(&agent_arc), input_rx, output_tx);
+
+        // If no backend is configured, auto-open the /connect modal
+        let auto_open_connect = backend_is_none
+            && auth_store.active_connection_id.is_none()
+            && auth_store.connections.is_empty();
 
         Ok(Self {
             input: String::new(),
@@ -105,6 +112,7 @@ impl App {
             visible_edit_file_artifacts: Vec::new(),
             terminal_cursor_hidden: false,
             nav_needs_init: false,
+            vim_processor: VimKeyProcessor::new(),
             flash_highlight: None,
             ctrl_c_pressed: None,
             survey: Survey::new(10, 0.33),
@@ -307,6 +315,7 @@ impl App {
             ui_state: UiState::default(),
             help_commands_selected: 0,
             connect: crate::app::connect::ConnectState {
+                show_connect_modal: auto_open_connect,
                 saved_connections: auth_store.connections.clone(),
                 active_connection_id: auth_store.active_connection_id.clone(),
                 ..Default::default()

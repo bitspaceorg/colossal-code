@@ -15,6 +15,6 @@ pub use self::core::{
 pub use self::external_memory::{ExternalMemory, MappedBuffer};
 pub use self::graph::CudaGraph;
 pub use self::launch::{LaunchArgs, LaunchConfig, PushKernelArg};
-pub use self::profile::{profiler_start, profiler_stop, Profiler};
+pub use self::profile::{Profiler, profiler_start, profiler_stop};
 pub use self::unified_memory::{UnifiedSlice, UnifiedView, UnifiedViewMut};
 pub use crate::driver::result::DriverError;

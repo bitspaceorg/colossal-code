@@ -527,7 +527,9 @@ impl PhiRotaryEmbedding {
         let dim = (cfg.head_dim as f64 * cfg.partial_rotary_factor.unwrap_or(1.)) as usize;
 
         if !matches!(scaling_type, ScaledRopeType::Su) {
-            candle_core::bail!("Scaled Phi3 RoPE (non-classic scaled, with mscales) must have type `su`/`longrope`.");
+            candle_core::bail!(
+                "Scaled Phi3 RoPE (non-classic scaled, with mscales) must have type `su`/`longrope`."
+            );
         }
 
         if short_factor.len() != dim / 2 {

@@ -1,7 +1,7 @@
 use crate::{
+    Lines,
     helper::{char_width, chars_width},
     view::line_wrapper::LineWrapper,
-    Lines,
 };
 use ratatui::layout::Rect;
 

@@ -12,16 +12,16 @@
 //!
 //! There are two files in this example: `main.rs` and `build.rs`. You can reference them and add to your project accordingly. The `cuda` folder in this example gives a simple example of defining structs in a separate header, including creating a `wrapper.h` header for `bindgen`
 
-use std::time::Instant;
 use cudarc::driver::*;
 use cudarc::nvrtc::Ptx;
+use std::time::Instant;
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 unsafe impl DeviceRepr for MyStruct {}
 impl Default for MyStruct {
-    fn default() -> Self{
-        Self{ data: [0.0; 4]}
+    fn default() -> Self {
+        Self { data: [0.0; 4] }
     }
 }
 

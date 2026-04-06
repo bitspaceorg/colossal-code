@@ -2,15 +2,15 @@
 
 ## Quick Links
 
-| I want to... | Go to... |
-|--------------|----------|
-| Install mistral.rs | [Installation Guide](INSTALLATION.md) |
-| Understand cargo features | [Cargo Features](CARGO_FEATURES.md) |
-| Run a model | [CLI Reference](CLI.md) |
-| Use the HTTP API | [HTTP Server](HTTP.md) |
-| Fix an error | [Troubleshooting](TROUBLESHOOTING.md) |
-| Configure environment | [Configuration](CONFIGURATION.md) |
-| Check model support | [Supported Models](SUPPORTED_MODELS.md) |
+| I want to...              | Go to...                                |
+| ------------------------- | --------------------------------------- |
+| Install mistral.rs        | [Installation Guide](INSTALLATION.md)   |
+| Understand cargo features | [Cargo Features](CARGO_FEATURES.md)     |
+| Run a model               | [CLI Reference](CLI.md)                 |
+| Use the HTTP API          | [HTTP Server](HTTP.md)                  |
+| Fix an error              | [Troubleshooting](TROUBLESHOOTING.md)   |
+| Configure environment     | [Configuration](CONFIGURATION.md)       |
+| Check model support       | [Supported Models](SUPPORTED_MODELS.md) |
 
 ## Getting Started
 
@@ -31,6 +31,7 @@
 ## Models
 
 ### By Category
+
 - [Supported Models](SUPPORTED_MODELS.md) - Complete model list and compatibility
 - [Vision Models](VISION_MODELS.md) - Vision model overview
 - [Image Generation](IMAGEGEN_MODELS.md) - Diffusion models
@@ -42,12 +43,14 @@
 <summary>Click to expand model guides</summary>
 
 **Text Models:**
+
 - [DeepSeek V2](DEEPSEEKV2.md) | [DeepSeek V3](DEEPSEEKV3.md)
 - [Gemma 2](GEMMA2.md) | [Gemma 3](GEMMA3.md) | [Gemma 3n](GEMMA3N.md)
 - [GLM4](GLM4.md) | [GLM-4.7-Flash](GLM4_MOE_LITE.md) | [GLM-4.7](GLM4_MOE.md)
 - [Qwen 3](QWEN3.md) | [SmolLM3](SMOLLM3.md) | [GPT-OSS](GPT_OSS.md)
 
 **Vision Models:**
+
 - [Idefics 2](IDEFICS2.md) | [Idefics 3](IDEFICS3.md)
 - [LLaVA](LLaVA.md) | [Llama 3.2 Vision](VLLAMA.md) | [Llama 4](LLAMA4.md)
 - [MiniCPM-O 2.6](MINICPMO_2_6.md) | [Mistral 3](MISTRAL3.md)
@@ -55,6 +58,7 @@
 - [Qwen 2-VL](QWEN2VL.md) | [Qwen 3 VL](QWEN3VL.md)
 
 **Other Models:**
+
 - [FLUX (Diffusion)](FLUX.md) | [Dia (Speech)](DIA.md)
 - [EmbeddingGemma](EMBEDDINGGEMMA.md) | [Qwen3 Embedding](QWEN3_EMBEDDING.md)
 
@@ -84,8 +88,8 @@
 - [Flash Attention](FLASH_ATTENTION.md) - Accelerated attention
 - [MLA](MLA.md) - Multi-head Latent Attention
 - [Distributed Inference](DISTRIBUTED/DISTRIBUTED.md)
-  - [NCCL Backend](DISTRIBUTED/NCCL.md)
-  - [Ring Backend](DISTRIBUTED/RING.md)
+    - [NCCL Backend](DISTRIBUTED/NCCL.md)
+    - [Ring Backend](DISTRIBUTED/RING.md)
 
 ## Features
 

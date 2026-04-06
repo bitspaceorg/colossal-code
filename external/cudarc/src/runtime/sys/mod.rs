@@ -6,6 +6,8 @@
 extern crate alloc;
 #[cfg(feature = "no-std")]
 extern crate no_std_compat as std;
+#[cfg(any(feature = "cuda-13000", feature = "cuda-13010"))]
+pub use self::CUDAlogLevel_enum as cudaLogLevel;
 #[cfg(any(
     feature = "cuda-12040",
     feature = "cuda-12050",
@@ -43,8 +45,6 @@ pub use self::cudaGraphDependencyType_enum as cudaGraphDependencyType;
     feature = "cuda-11080"
 ))]
 pub use self::cudaOutputMode as cudaOutputMode_t;
-#[cfg(any(feature = "cuda-13000", feature = "cuda-13010"))]
-pub use self::CUDAlogLevel_enum as cudaLogLevel;
 #[cfg(any(feature = "cuda-11040"))]
 pub const CUDART_VERSION: u32 = 11040;
 #[cfg(any(feature = "cuda-11050"))]
@@ -8252,7 +8252,7 @@ extern "C" {
         pGraph: *mut cudaGraph_t,
     ) -> cudaError_t;
     pub fn cudaGraphClone(pGraphClone: *mut cudaGraph_t, originalGraph: cudaGraph_t)
-        -> cudaError_t;
+    -> cudaError_t;
     #[cfg(any(
         feature = "cuda-12030",
         feature = "cuda-12040",
@@ -8298,7 +8298,7 @@ extern "C" {
         event_out: *mut cudaEvent_t,
     ) -> cudaError_t;
     pub fn cudaGraphEventWaitNodeSetEvent(node: cudaGraphNode_t, event: cudaEvent_t)
-        -> cudaError_t;
+    -> cudaError_t;
     pub fn cudaGraphExecChildGraphNodeSetParams(
         hGraphExec: cudaGraphExec_t,
         node: cudaGraphNode_t,
@@ -9918,7 +9918,7 @@ extern "C" {
         flags: ::core::ffi::c_uint,
     ) -> cudaError_t;
     pub fn cudaStreamBeginCapture(stream: cudaStream_t, mode: cudaStreamCaptureMode)
-        -> cudaError_t;
+    -> cudaError_t;
     #[cfg(any(
         feature = "cuda-12030",
         feature = "cuda-12040",

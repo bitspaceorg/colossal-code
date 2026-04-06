@@ -12,6 +12,7 @@
                     "docs/data.json"
                     "flake.lock"
                     "target"
+                    "external/**"
                 ];
                 package = pkgs.treefmt;
 

@@ -700,7 +700,9 @@ impl MistralRs {
                         "Failed to initialize MCP client with {} configured servers: {}",
                         total_servers, e
                     );
-                    warn!("Continuing without MCP functionality. Check your MCP configuration and server availability.");
+                    warn!(
+                        "Continuing without MCP functionality. Check your MCP configuration and server availability."
+                    );
                 }
             }
         }

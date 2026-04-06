@@ -7,6 +7,7 @@ Mistral.rs supports the Qwen 3 VL vision model family (including MoE variants), 
 UQFF quantizations are also available.
 
 The Python and HTTP APIs support sending images as:
+
 - URL
 - Path to a local image
 - [Base64](https://en.wikipedia.org/wiki/Base64) encoded string
@@ -16,12 +17,13 @@ The Rust SDK takes an image from the [image](https://docs.rs/image/latest/image/
 > Note: When using device mapping or model topology, only the text model and its layers will be managed. This is because it contains most of the model parameters.
 
 ## ToC
+
 - [Qwen 3 Vision Model: `Qwen3 VL Collection`](#qwen-3-vision-model-qwen3-vl-collection)
-  - [ToC](#toc)
-  - [Interactive mode](#interactive-mode)
-  - [HTTP server](#http-server)
-  - [Rust](#rust)
-  - [Python](#python)
+    - [ToC](#toc)
+    - [Interactive mode](#interactive-mode)
+    - [HTTP server](#http-server)
+    - [Rust](#rust)
+    - [Python](#python)
 
 ## Interactive mode
 
@@ -34,19 +36,20 @@ mistralrs run vision -m Qwen/Qwen3-VL-4B-Instruct
 ```
 
 ## HTTP server
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/qwen3_vl.py).
 
 We support an OpenAI compatible HTTP API for vision models. This example demonstrates sending a chat completion request with an image.
 
 > Note: The image_url may be either a path, URL, or a base64 encoded string.
 
-1) Start the server
+1. Start the server
 
 ```
 mistralrs serve vision -p 1234 -m Qwen/Qwen3-VL-4B-Instruct
 ```
 
-2) Send a request
+2. Send a request
 
 ```py
 from openai import OpenAI
@@ -88,6 +91,7 @@ print(resp)
 ---
 
 ## Rust
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/vision_models/main.rs).
 
 ```rust
@@ -131,6 +135,7 @@ async fn main() -> Result<()> {
 ---
 
 ## Python
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/qwen3_vl.py).
 
 This example demonstrates loading and sending a chat completion request with an image.

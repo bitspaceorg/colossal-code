@@ -129,7 +129,7 @@ impl MemoryUsage {
                     x => {
                         return Err(candle_core::Error::Msg(format!(
                             "Invalid system ram mb value {x}."
-                        )))
+                        )));
                     }
                 };
 

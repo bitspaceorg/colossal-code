@@ -3,6 +3,7 @@
 > **Deprecated:** The standalone `mistralrs-bench` package is deprecated. Use `mistralrs bench` instead for the same functionality.
 >
 > **Migration:**
+>
 > ```bash
 > # Old
 > cargo run --release --features cuda --package mistralrs-bench -- plain -m model-id

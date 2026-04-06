@@ -41,6 +41,41 @@ pub trait LLMBackend: Send + Sync {
     async fn reload_model(&self, model_filename: String) -> Result<()>;
 
     async fn get_model(&self) -> Result<Arc<Model>>;
+
+    /// Return the most recent usage stats observed from the streaming backend.
+    /// Called on cancellation to recover prompt/completion token counts that
+    /// the API already sent before the stream was dropped.
+    async fn get_latest_usage(&self) -> Option<Usage> {
+        None
+    }
+}
+
+/// Stub backend used when no model or provider is configured.
+/// Allows the TUI to start up and render the `/connect` modal.
+pub struct NoneBackend;
+
+#[async_trait]
+impl LLMBackend for NoneBackend {
+    async fn stream_chat_request(
+        &self,
+        _request: RequestBuilder,
+    ) -> Result<Box<dyn FuturesStream<Item = Response> + Unpin + Send>> {
+        anyhow::bail!(
+            "No model configured. Use /connect to add a provider or /model to select a local model."
+        )
+    }
+
+    async fn load_model(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn reload_model(&self, _model_filename: String) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_model(&self) -> Result<Arc<Model>> {
+        anyhow::bail!("No model configured")
+    }
 }
 
 pub struct LocalBackend {
@@ -143,6 +178,9 @@ pub struct HttpBackend {
     chatgpt_account_id: Option<String>,
     openai_auth: Option<OpenAiAuthState>,
     claude_auth: Option<ClaudeCodeAuthState>,
+    /// Most recent usage stats observed from SSE events during streaming.
+    /// Written by the streaming task, read by the agent on cancellation.
+    latest_usage: Arc<Mutex<Option<Usage>>>,
 }
 
 fn http_debug_enabled() -> bool {
@@ -228,6 +266,7 @@ impl HttpBackend {
             chatgpt_account_id,
             openai_auth,
             claude_auth,
+            latest_usage: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -538,12 +577,19 @@ impl HttpBackend {
         request_start: Instant,
     ) -> Result<Box<dyn FuturesStream<Item = Response> + Unpin + Send>> {
         let (tx, rx) = mpsc::unbounded_channel();
+        let shared_usage = self.latest_usage.clone();
 
         tokio::spawn(async move {
             let sender = tx;
             let helper_sender = sender.clone();
-            if let Err(err) =
-                process_sse_stream(response, fallback_model, helper_sender, request_start).await
+            if let Err(err) = process_sse_stream(
+                response,
+                fallback_model,
+                helper_sender,
+                request_start,
+                shared_usage,
+            )
+            .await
             {
                 let _ = sender.send(Response::InternalError(err.into()));
             }
@@ -559,6 +605,9 @@ impl LLMBackend for HttpBackend {
         &self,
         request: RequestBuilder,
     ) -> Result<Box<dyn FuturesStream<Item = Response> + Unpin + Send>> {
+        // Clear stale usage from any previous request
+        *self.latest_usage.lock().await = None;
+
         if self.is_responses_api() {
             return responses::stream_responses_request(self, request).await;
         }
@@ -580,6 +629,7 @@ impl LLMBackend for HttpBackend {
             "model": model_name.clone(),
             "messages": openai_messages,
             "stream": true,
+            "stream_options": { "include_usage": true },
         });
 
         if self.supports_thinking_param {
@@ -747,6 +797,10 @@ impl LLMBackend for HttpBackend {
         Err(anyhow::anyhow!(
             "Direct model access not supported in HttpBackend"
         ))
+    }
+
+    async fn get_latest_usage(&self) -> Option<Usage> {
+        self.latest_usage.lock().await.take()
     }
 }
 
@@ -1193,6 +1247,7 @@ async fn process_sse_stream(
     fallback_model: String,
     tx: mpsc::UnboundedSender<Response>,
     request_start: Instant,
+    shared_usage: Arc<Mutex<Option<Usage>>>,
 ) -> Result<()> {
     let mut body_stream = response.bytes_stream();
     let mut buffer = Vec::new();
@@ -1211,6 +1266,11 @@ async fn process_sse_stream(
     while let Some(item) = body_stream.next().await {
         if tx.is_closed() {
             http_debug_log("SSE downstream closed; aborting stream read");
+            // Propagate whatever usage we have before aborting
+            if let Some(ref usage) = latest_usage {
+                let converted = usage_from_openai(Some(usage.clone()), &accumulated_content);
+                *shared_usage.lock().await = Some(converted);
+            }
             return Ok(());
         }
 
@@ -1220,6 +1280,10 @@ async fn process_sse_stream(
         while let Some(event_bytes) = extract_sse_event(&mut buffer) {
             if tx.is_closed() {
                 http_debug_log("SSE downstream closed during event processing; aborting");
+                if let Some(ref usage) = latest_usage {
+                    let converted = usage_from_openai(Some(usage.clone()), &accumulated_content);
+                    *shared_usage.lock().await = Some(converted);
+                }
                 return Ok(());
             }
 
@@ -1292,6 +1356,11 @@ async fn process_sse_stream(
             }
             if parsed.usage.is_some() {
                 latest_usage = parsed.usage.clone();
+                // Eagerly propagate to shared state so cancellation can read it
+                if let Some(ref usage) = latest_usage {
+                    let converted = usage_from_openai(Some(usage.clone()), &accumulated_content);
+                    *shared_usage.lock().await = Some(converted);
+                }
             }
 
             let chunk_id = parsed

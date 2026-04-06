@@ -5,6 +5,7 @@ The `mistralrs` crate provides a high-level Rust API for running LLM inference w
 > **Full API reference:** [docs.rs/mistralrs](https://docs.rs/mistralrs)
 
 **Table of contents**
+
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Model Builders](#model-builders)
@@ -24,12 +25,14 @@ cargo add mistralrs
 ```
 
 Or in your `Cargo.toml`:
+
 ```toml
 [dependencies]
 mistralrs = "0.7"
 ```
 
 For GPU acceleration, enable the appropriate feature:
+
 ```toml
 mistralrs = { version = "0.7", features = ["metal"] }     # macOS
 mistralrs = { version = "0.7", features = ["cuda"] }       # NVIDIA
@@ -57,19 +60,19 @@ async fn main() -> mistralrs::error::Result<()> {
 
 All models are created through builder structs. Use `ModelBuilder` for auto-detection, or a specific builder for more control.
 
-| Builder | Use Case |
-|---|---|
-| `ModelBuilder` | Auto-detects model type (text, vision, embedding) |
-| `TextModelBuilder` | Text generation models |
-| `VisionModelBuilder` | Vision + text models (image/audio input) |
-| `GgufModelBuilder` | GGUF quantized model files |
-| `EmbeddingModelBuilder` | Text embedding models |
-| `DiffusionModelBuilder` | Image generation (e.g., FLUX) |
-| `SpeechModelBuilder` | Speech synthesis (e.g., Dia) |
-| `LoraModelBuilder` | Text model with LoRA adapters |
-| `XLoraModelBuilder` | Text model with X-LoRA adapters |
-| `AnyMoeModelBuilder` | AnyMoE Mixture of Experts |
-| `TextSpeculativeBuilder` | Speculative decoding (target + draft) |
+| Builder                  | Use Case                                          |
+| ------------------------ | ------------------------------------------------- |
+| `ModelBuilder`           | Auto-detects model type (text, vision, embedding) |
+| `TextModelBuilder`       | Text generation models                            |
+| `VisionModelBuilder`     | Vision + text models (image/audio input)          |
+| `GgufModelBuilder`       | GGUF quantized model files                        |
+| `EmbeddingModelBuilder`  | Text embedding models                             |
+| `DiffusionModelBuilder`  | Image generation (e.g., FLUX)                     |
+| `SpeechModelBuilder`     | Speech synthesis (e.g., Dia)                      |
+| `LoraModelBuilder`       | Text model with LoRA adapters                     |
+| `XLoraModelBuilder`      | Text model with X-LoRA adapters                   |
+| `AnyMoeModelBuilder`     | AnyMoE Mixture of Experts                         |
+| `TextSpeculativeBuilder` | Speculative decoding (target + draft)             |
 
 All builders share common configuration methods:
 
@@ -88,11 +91,11 @@ Key builder methods include `with_isq()`, `with_auto_isq()`, `with_dtype()`, `wi
 
 ## Request Types
 
-| Type | Use When | Sampling |
-|---|---|---|
-| `TextMessages` | Simple text-only chat | Deterministic |
-| `VisionMessages` | Prompt includes images or audio | Deterministic |
-| `RequestBuilder` | Tools, logprobs, custom sampling, constraints, or web search | Configurable |
+| Type             | Use When                                                     | Sampling      |
+| ---------------- | ------------------------------------------------------------ | ------------- |
+| `TextMessages`   | Simple text-only chat                                        | Deterministic |
+| `VisionMessages` | Prompt includes images or audio                              | Deterministic |
+| `RequestBuilder` | Tools, logprobs, custom sampling, constraints, or web search | Configurable  |
 
 `TextMessages` and `VisionMessages` convert into `RequestBuilder` via `Into<RequestBuilder>` if you start simple and later need more control.
 
@@ -230,15 +233,15 @@ fn main() -> mistralrs::error::Result<()> {
 
 ## Feature Flags
 
-| Flag | Effect |
-|---|---|
-| `cuda` | CUDA GPU support |
+| Flag         | Effect                                      |
+| ------------ | ------------------------------------------- |
+| `cuda`       | CUDA GPU support                            |
 | `flash-attn` | Flash Attention 2 kernels (requires `cuda`) |
-| `cudnn` | cuDNN acceleration (requires `cuda`) |
-| `nccl` | Multi-GPU via NCCL (requires `cuda`) |
-| `metal` | Apple Metal GPU support |
-| `accelerate` | Apple Accelerate framework |
-| `mkl` | Intel MKL acceleration |
+| `cudnn`      | cuDNN acceleration (requires `cuda`)        |
+| `nccl`       | Multi-GPU via NCCL (requires `cuda`)        |
+| `metal`      | Apple Metal GPU support                     |
+| `accelerate` | Apple Accelerate framework                  |
+| `mkl`        | Intel MKL acceleration                      |
 
 The default feature set (no flags) builds with pure Rust — no C compiler or system libraries required.
 
@@ -246,15 +249,16 @@ The default feature set (no flags) builds with pure Rust — no C compiler or sy
 
 The crate includes 48 runnable examples organized by topic:
 
-| Category | Examples |
-|---|---|
-| **Getting Started** | `text_generation`, `streaming`, `vision`, `gguf`, `gguf_locally`, `embedding` |
-| **Models** | `text_models`, `vision_models`, `audio`, `diffusion`, `speech`, `multimodal` |
-| **Quantization** | `isq`, `imatrix`, `uqff`, `topology`, `mixture_of_quant_experts` |
-| **Advanced** | `tools`, `agent`, `grammar`, `json_schema`, `web_search`, `mcp_client`, `batching`, `paged_attn`, `speculative`, `lora`, `error_handling`, and more |
-| **Cookbook** | `cookbook_rag`, `cookbook_structured`, `cookbook_multiturn`, `cookbook_agent` |
+| Category            | Examples                                                                                                                                            |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Getting Started** | `text_generation`, `streaming`, `vision`, `gguf`, `gguf_locally`, `embedding`                                                                       |
+| **Models**          | `text_models`, `vision_models`, `audio`, `diffusion`, `speech`, `multimodal`                                                                        |
+| **Quantization**    | `isq`, `imatrix`, `uqff`, `topology`, `mixture_of_quant_experts`                                                                                    |
+| **Advanced**        | `tools`, `agent`, `grammar`, `json_schema`, `web_search`, `mcp_client`, `batching`, `paged_attn`, `speculative`, `lora`, `error_handling`, and more |
+| **Cookbook**        | `cookbook_rag`, `cookbook_structured`, `cookbook_multiturn`, `cookbook_agent`                                                                       |
 
 Run any example with:
+
 ```bash
 cargo run --release --features <features> --example <name>
 ```

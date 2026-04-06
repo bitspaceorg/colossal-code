@@ -5,6 +5,7 @@ This binary tests the integration between the file watcher and Qdrant indexing f
 ## Purpose
 
 The file watcher integration test verifies that:
+
 1. File creation events are properly detected and trigger indexing
 2. File modification events are properly detected and trigger reindexing
 3. File deletion events are properly detected and trigger removal from index
@@ -32,6 +33,7 @@ cargo run --bin file-watcher-test
 ## Expected Output
 
 The test should complete successfully with output showing:
+
 - File creation detection and automatic indexing
 - File modification detection and automatic reindexing
 - File deletion detection and automatic removal from index
@@ -42,6 +44,7 @@ The test should complete successfully with output showing:
 ## Implementation Details
 
 The test uses the same file watching and indexing mechanisms as the main semantic search feature:
+
 - File system monitoring with debouncing to prevent excessive reindexing
 - Real-time indexing of Python files when created or modified
 - Automatic removal of files from the index when deleted

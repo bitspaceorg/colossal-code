@@ -11,9 +11,9 @@ use render_line::RenderLine;
 use syntax_higlighting::SyntaxHighlighter;
 
 use crate::{
-    helper::{max_col, rect_indent_y},
-    state::{selection::Selection, EditorState},
     EditorMode, Index2,
+    helper::{max_col, rect_indent_y},
+    state::{EditorState, selection::Selection},
 };
 
 use internal::into_spans_with_selections;
@@ -318,7 +318,7 @@ fn generate_spans_with_search<'a>(
     other_match_style: &Style,
     #[cfg(feature = "syntax-highlighting")] _syntax_highlighter: Option<&SyntaxHighlighter>,
 ) -> Vec<Span<'a>> {
-    use internal::{into_spans_with_styled_selections, StyledSelection};
+    use internal::{StyledSelection, into_spans_with_styled_selections};
 
     // Build styled selections with priority order:
     // 1. Visual selection (highest priority)

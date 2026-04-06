@@ -1,21 +1,21 @@
+use actix_web::{HttpResponse, Responder, post, web};
+use chunker::{self, Chunk, ChunkerFactory};
+use futures::stream::{self, StreamExt};
+use glob::glob;
+use indicatif::{ProgressBar, ProgressStyle};
+use log;
+use qdrant_client::qdrant::{
+    PointStruct, SearchParamsBuilder, SearchPointsBuilder, UpsertPointsBuilder,
+};
+use qdrant_client::{Payload, Qdrant};
 use rayon::prelude::*;
+use reqwest;
+use serde::{Deserialize, Serialize};
+use serde_json;
 use std::fs;
 use std::str;
 use std::sync::{Arc, RwLock};
 use walkdir::{DirEntry, WalkDir};
-use chunker::{self, Chunk, ChunkerFactory};
-use qdrant_client::qdrant::{
-    PointStruct, SearchParamsBuilder, SearchPointsBuilder, UpsertPointsBuilder,
-};
-use indicatif::{ProgressBar, ProgressStyle};
-use qdrant_client::{Payload, Qdrant};
-use reqwest;
-use serde_json;
-use actix_web::{post, web, HttpResponse, Responder};
-use serde::{Deserialize, Serialize};
-use futures::stream::{self, StreamExt};
-use log;
-use glob::glob;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct IngestStatus {
@@ -36,7 +36,9 @@ impl IngestStatus {
     }
 }
 
-async fn parse_response_to_vec(response: reqwest::Response) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+async fn parse_response_to_vec(
+    response: reqwest::Response,
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     let text = response.text().await?;
     if let Ok(vecvec) = serde_json::from_str::<Vec<Vec<f32>>>(&text) {
         if let Some(inner) = vecvec.into_iter().next() {
@@ -118,7 +120,6 @@ fn expand_globs(patterns: &[String]) -> Vec<String> {
     }
     files
 }
-
 
 pub async fn index_codebase(
     root_path: &str,
@@ -218,7 +219,10 @@ pub async fn index_codebase(
         client
             .upsert_points(UpsertPointsBuilder::new(collection_name, points))
             .await?;
-        log::info!("Indexed {} chunks into Qdrant.", pb_index.length().unwrap_or(0));
+        log::info!(
+            "Indexed {} chunks into Qdrant.",
+            pb_index.length().unwrap_or(0)
+        );
     } else {
         log::info!("No chunks to index.");
     }

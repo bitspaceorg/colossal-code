@@ -1,14 +1,14 @@
+use std::path::PathBuf;
 use std::{
     collections::{HashMap, VecDeque},
     fmt::Debug,
+    fs,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime},
-    fs,
 };
-use std::path::PathBuf;
 use walkdir::WalkDir;
 
 use candle_core::Device;
@@ -18,59 +18,44 @@ mod metrics;
 mod runtime;
 mod streams;
 mod translate;
+use dashmap::{DashMap, DashSet};
 pub use engine::{EngineHandle, SharedMistralRsState};
 pub use runtime::RuntimeAdapters;
-use dashmap::{DashMap, DashSet};
 
 use async_trait::async_trait;
 #[cfg(feature = "mock-manager")]
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use thiserror::Error;
-use tracing::warn;
 #[cfg(feature = "mock-manager")]
 use tokio::sync::Semaphore;
+use tokio::sync::mpsc;
 #[cfg(feature = "mock-manager")]
 use tokio::time::sleep;
 #[cfg(feature = "mock-manager")]
 use tracing::instrument;
-use uuid::Uuid;
-use tokio::sync::mpsc;
+use tracing::warn;
 use upstream_mistralrs_server_core::handler_core::DEFAULT_CHANNEL_BUFFER_SIZE;
+use uuid::Uuid;
 
 pub use metrics::ModelMetrics;
-pub use streams::{ChatStreamWrapper, CompletionStreamWrapper, StreamInstrumentation, StreamKind};
-use translate::{build_chat_request, build_embedding_request, build_generate_request};
-pub use mistralrs_server_config::ServerConfig;
-use mistralrs_server_config::{MistralBuilderConfig, ModelBuilderParams, TokenSource};
 pub use mistralrs_core::{
-    ChatCompletionChunkResponse,
-    ChatCompletionResponse as EngineChatResponse,
-    CompletionChunkResponse,
-    CompletionResponse as EngineCompletionResponse,
-    Response as EngineResponse,
-    Usage as EngineUsage,
-};
-use mistralrs_core::{
-    DeviceMapSetting,
-    LoaderBuilder,
-    EmbeddingResponse as EngineEmbeddingResponse,
-    Request as EngineRequest,
-    ResponseMessage as EngineResponseMessage,
-    ToolCallResponse,
-    TokenSource as UpTokenSource,
-    get_auto_device_map_params,
-    get_model_dtype,
+    ChatCompletionChunkResponse, ChatCompletionResponse as EngineChatResponse,
+    CompletionChunkResponse, CompletionResponse as EngineCompletionResponse,
+    Response as EngineResponse, Usage as EngineUsage,
 };
 #[cfg(feature = "mock-manager")]
+use mistralrs_core::{Choice, ChunkChoice, CompletionChoice, CompletionChunkChoice, Delta};
 use mistralrs_core::{
-    ChunkChoice,
-    CompletionChoice,
-    Choice,
-    CompletionChunkChoice,
-    Delta,
+    DeviceMapSetting, EmbeddingResponse as EngineEmbeddingResponse, LoaderBuilder,
+    Request as EngineRequest, ResponseMessage as EngineResponseMessage,
+    TokenSource as UpTokenSource, ToolCallResponse, get_auto_device_map_params, get_model_dtype,
 };
+pub use mistralrs_server_config::ServerConfig;
+use mistralrs_server_config::{MistralBuilderConfig, ModelBuilderParams, TokenSource};
+pub use streams::{ChatStreamWrapper, CompletionStreamWrapper, StreamInstrumentation, StreamKind};
+use translate::{build_chat_request, build_embedding_request, build_generate_request};
 
 /// Participant role attached to a chat message.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -487,12 +472,12 @@ pub trait ModelScheduler: Send + Sync {
     async fn on_model_unloaded(&self, model: &str);
     async fn advise_evict(&self) -> Vec<String>;
     async fn register_activity(&self, model: &str);
-    fn set_keep_alive_lookup(
+    fn set_keep_alive_lookup(&self, _lookup: Arc<dyn Fn(&str) -> Option<Instant> + Send + Sync>) {}
+    fn can_load_model(
         &self,
-        _lookup: Arc<dyn Fn(&str) -> Option<Instant> + Send + Sync>,
-    ) {
-    }
-    fn can_load_model(&self, model_name: &str, estimated_size_bytes: u64) -> Result<(), ModelManagerError>;
+        model_name: &str,
+        estimated_size_bytes: u64,
+    ) -> Result<(), ModelManagerError>;
     fn set_max_vram_bytes(&self, bytes: usize);
     fn register_metrics(&self, _registry: &prometheus::Registry) -> Result<(), anyhow::Error> {
         Ok(())
@@ -510,7 +495,11 @@ impl ModelScheduler for NoopScheduler {
         vec![]
     }
     async fn register_activity(&self, _model: &str) {}
-    fn can_load_model(&self, _model_name: &str, _estimated_size_bytes: u64) -> Result<(), ModelManagerError> {
+    fn can_load_model(
+        &self,
+        _model_name: &str,
+        _estimated_size_bytes: u64,
+    ) -> Result<(), ModelManagerError> {
         Ok(())
     }
     fn set_max_vram_bytes(&self, _bytes: usize) {}
@@ -582,7 +571,7 @@ impl ActiveRequestGuard {
                 }
             })
             .map_err(|_| ModelManagerError::MaxParallel(model.clone()))?;
-        
+
         let total_res = total.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
             if (current as usize) >= global_limit {
                 None
@@ -611,12 +600,13 @@ impl ActiveRequestGuard {
 
 impl Drop for ActiveRequestGuard {
     fn drop(&mut self) {
-        let remaining = self.counter.fetch_sub(1, Ordering::SeqCst).saturating_sub(1);
+        let remaining = self
+            .counter
+            .fetch_sub(1, Ordering::SeqCst)
+            .saturating_sub(1);
         let total_left = self.total.fetch_sub(1, Ordering::SeqCst).saturating_sub(1);
-        self.metrics
-            .track_active(&self.model, remaining as i64);
-        self.metrics
-            .set_total_active(total_left as i64);
+        self.metrics.track_active(&self.model, remaining as i64);
+        self.metrics.set_total_active(total_left as i64);
     }
 }
 
@@ -735,7 +725,9 @@ impl MistralModelManager {
         };
         manager.register_keep_alive_callback();
         manager.register_existing_models();
-        manager.scheduler.set_max_vram_bytes(manager.manager_cfg.paged_attn_gpu_mem.unwrap_or(0));
+        manager
+            .scheduler
+            .set_max_vram_bytes(manager.manager_cfg.paged_attn_gpu_mem.unwrap_or(0));
         Ok(manager)
     }
 
@@ -756,9 +748,7 @@ impl MistralModelManager {
     fn register_keep_alive_callback(&self) {
         let keep_alive = self.keep_alive.clone();
         self.scheduler.set_keep_alive_lookup(Arc::new(move |model| {
-            keep_alive
-                .get(model)
-                .map(|entry| *entry.value())
+            keep_alive.get(model).map(|entry| *entry.value())
         }));
     }
 
@@ -789,10 +779,7 @@ impl MistralModelManager {
         }
     }
 
-    fn effective_keep_alive(
-        params: &ModelBuilderParams,
-        manager_cfg: &ManagerConfig,
-    ) -> Duration {
+    fn effective_keep_alive(params: &ModelBuilderParams, manager_cfg: &ManagerConfig) -> Duration {
         params
             .keep_alive_override
             .or(params.keep_alive)
@@ -813,7 +800,7 @@ impl MistralModelManager {
             .get(model)
             .map(|entry| entry.clone())
             .ok_or_else(|| ModelManagerError::NotFound(model.to_string()))?;
-        
+
         let limit = self.parallel_limit(model);
         let global_limit = self.manager_cfg.max_total_concurrent_requests;
 
@@ -849,12 +836,9 @@ impl MistralModelManager {
         override_str: Option<&String>,
     ) -> Result<(), ModelManagerError> {
         let duration = if let Some(value) = override_str {
-            Some(
-                humantime::parse_duration(value)
-                    .map_err(|err| ModelManagerError::Other(format!(
-                        "invalid keep_alive override: {err}"
-                    )))?,
-            )
+            Some(humantime::parse_duration(value).map_err(|err| {
+                ModelManagerError::Other(format!("invalid keep_alive override: {err}"))
+            })?)
         } else {
             None
         };
@@ -945,8 +929,10 @@ impl MistralModelManager {
             entry.metadata.pinned = true;
             self.pinned.insert(req.model.clone());
         }
-        self.keep_alive
-            .insert(req.model.clone(), self.clock.now() + entry.metadata.keep_alive);
+        self.keep_alive.insert(
+            req.model.clone(),
+            self.clock.now() + entry.metadata.keep_alive,
+        );
         self.metrics.track_active(&req.model, 0);
         self.scheduler.on_model_loaded(&entry.metadata).await;
         Ok(entry.metadata.clone())
@@ -1061,15 +1047,14 @@ impl MistralModelManager {
     async fn ensure_engine_has_model(&self, model: &str) -> Result<(), ModelManagerError> {
         match self.engine.ensure_model_loaded(model).await {
             Ok(_) => Ok(()),
-            Err(ModelManagerError::NotFound(_)) => {
-                self.load_model(LoadModelRequest {
+            Err(ModelManagerError::NotFound(_)) => self
+                .load_model(LoadModelRequest {
                     model: model.to_string(),
                     keep_alive: None,
                     pinned: false,
                 })
                 .await
-                .map(|_| ())
-            }
+                .map(|_| ()),
             Err(err) => Err(err),
         }
     }
@@ -1100,10 +1085,7 @@ impl MistralModelManager {
         }
 
         let mut total_size = 0;
-        for entry in WalkDir::new(&model_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
+        for entry in WalkDir::new(&model_dir).into_iter().filter_map(|e| e.ok()) {
             if entry.file_type().is_file() {
                 total_size += entry.metadata().ok()?.len();
             }
@@ -1172,9 +1154,7 @@ impl MistralModelManager {
                             id,
                             status: JobStatusKind::Succeeded,
                             progress: 1.0,
-                            message: Some(format!(
-                                "cached {model} from {source} at {cache_hint}"
-                            )),
+                            message: Some(format!("cached {model} from {source} at {cache_hint}")),
                         },
                     );
                 }
@@ -1228,10 +1208,7 @@ impl MistralModelManager {
                     id,
                     status: JobStatusKind::Running,
                     progress: 0.6,
-                    message: Some(format!(
-                        "downloading artifacts into {}",
-                        cache_hint
-                    )),
+                    message: Some(format!("downloading artifacts into {}", cache_hint)),
                 },
             );
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1241,9 +1218,7 @@ impl MistralModelManager {
                     id,
                     status: JobStatusKind::Succeeded,
                     progress: 1.0,
-                    message: Some(format!(
-                        "cached {model} from {source} at {cache_hint}"
-                    )),
+                    message: Some(format!("cached {model} from {source} at {cache_hint}")),
                 },
             );
         });
@@ -1274,16 +1249,7 @@ impl MistralModelManager {
             .map_err(|err| ModelManagerError::Other(err.to_string()))?;
         let device = Device::Cpu;
         loader
-            .load_model_from_hf(
-                None,
-                token,
-                &dtype,
-                &device,
-                true,
-                mapper,
-                None,
-                None,
-            )
+            .load_model_from_hf(None, token, &dtype, &device, true, mapper, None, None)
             .map(|_| ())
             .map_err(|err| ModelManagerError::Other(err.to_string()))
     }
@@ -1417,10 +1383,7 @@ impl ModelManager for MistralModelManager {
         }
     }
 
-    async fn chat_stream(
-        &self,
-        req: ChatRequest,
-    ) -> Result<ChatStreamWrapper, ModelManagerError> {
+    async fn chat_stream(&self, req: ChatRequest) -> Result<ChatStreamWrapper, ModelManagerError> {
         let model = req.model.clone();
         self.apply_scheduler_advice().await;
         self.ensure_model_exists(&model)?;
@@ -1472,8 +1435,7 @@ impl ModelManager for MistralModelManager {
             EngineResponse::Embedding(resp) => {
                 let converted = convert_embedding_response(resp);
                 let usage = converted.usage.clone();
-                self.metrics
-                    .add_tokens(&model, usage.prompt_tokens, 0);
+                self.metrics.add_tokens(&model, usage.prompt_tokens, 0);
                 self.push_info_log(
                     &model,
                     "embeddings",
@@ -1484,12 +1446,8 @@ impl ModelManager for MistralModelManager {
                 );
                 Ok(converted)
             }
-            EngineResponse::ValidationError(err) => {
-                Err(ModelManagerError::Other(err.to_string()))
-            }
-            EngineResponse::InternalError(err) => {
-                Err(ModelManagerError::Other(err.to_string()))
-            }
+            EngineResponse::ValidationError(err) => Err(ModelManagerError::Other(err.to_string())),
+            EngineResponse::InternalError(err) => Err(ModelManagerError::Other(err.to_string())),
             _ => Err(ModelManagerError::Other(
                 "unexpected response for embeddings".to_string(),
             )),
@@ -1503,12 +1461,12 @@ impl ModelManager for MistralModelManager {
             .get(&req.model)
             .cloned()
             .ok_or_else(|| ModelManagerError::NotFound(req.model.clone()))?;
-        
+
         let estimated_size = Self::calculate_model_disk_size(&params).unwrap_or(0);
         self.scheduler
             .can_load_model(&req.model, estimated_size)
             .map_err(|e| e)?;
-        
+
         if self
             .models
             .get(&req.model)
@@ -1607,11 +1565,7 @@ impl ModelManager for MistralModelManager {
         Ok(buffer.iter().rev().take(limit).cloned().collect())
     }
 
-    async fn submit_pull_job(
-        &self,
-        model: &str,
-        source: &str,
-    ) -> Result<Uuid, ModelManagerError> {
+    async fn submit_pull_job(&self, model: &str, source: &str) -> Result<Uuid, ModelManagerError> {
         self.ensure_model_exists(model)?;
         let id = Self::pull_job_id(model, source);
         let mut spawn = true;
@@ -1653,9 +1607,7 @@ fn convert_completion_response(response: EngineCompletionResponse) -> GenerateRe
     }
 }
 
-fn convert_chat_response(
-    response: EngineChatResponse,
-) -> Result<ChatResponse, ModelManagerError> {
+fn convert_chat_response(response: EngineChatResponse) -> Result<ChatResponse, ModelManagerError> {
     let usage = convert_usage(&response.usage);
     let mut finish_reason = String::from("stop");
     let message = if let Some(choice) = response.choices.into_iter().next() {
@@ -1878,19 +1830,18 @@ mod tests {
                     last_accessed: SystemTime::now(),
                 },
             );
-            logs.insert(param.model_id.clone(), MistralModelManager::new_log_buffer());
-            keep_alive.insert(
+            logs.insert(
                 param.model_id.clone(),
-                Instant::now() + metadata.keep_alive,
+                MistralModelManager::new_log_buffer(),
             );
+            keep_alive.insert(param.model_id.clone(), Instant::now() + metadata.keep_alive);
             if metadata.pinned {
                 pinned.insert(param.model_id.clone());
             }
             active_requests.insert(param.model_id.clone(), Arc::new(AtomicU32::new(0)));
         }
-        let metrics = Arc::new(
-            ModelMetrics::register(&prometheus::Registry::new()).expect("metrics"),
-        );
+        let metrics =
+            Arc::new(ModelMetrics::register(&prometheus::Registry::new()).expect("metrics"));
         MistralModelManager {
             engine: Arc::new(TestEngine) as Arc<dyn EngineHandle>,
             engine_state: None,
@@ -2093,10 +2044,7 @@ mod tests {
             .submit_pull_job("test", "hf://repo")
             .await
             .expect("job id");
-        assert_eq!(
-            id,
-            Uuid::new_v5(&Uuid::NAMESPACE_OID, b"test:hf://repo")
-        );
+        assert_eq!(id, Uuid::new_v5(&Uuid::NAMESPACE_OID, b"test:hf://repo"));
         let mut attempts = 0;
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2199,7 +2147,12 @@ impl<C: Clock> InMemoryModelManager<C> {
         }
     }
 
-    fn add_log(entry: &mut ModelEntry, message: &str, fields: serde_json::Value, timestamp: SystemTime) {
+    fn add_log(
+        entry: &mut ModelEntry,
+        message: &str,
+        fields: serde_json::Value,
+        timestamp: SystemTime,
+    ) {
         if entry.logs.len() >= 200 {
             entry.logs.pop_front();
         }
@@ -2212,7 +2165,10 @@ impl<C: Clock> InMemoryModelManager<C> {
     }
 
     fn record_usage(entry: &mut ModelEntry, usage: &Usage) {
-        entry.usage.prompt_tokens = entry.usage.prompt_tokens.saturating_add(usage.prompt_tokens);
+        entry.usage.prompt_tokens = entry
+            .usage
+            .prompt_tokens
+            .saturating_add(usage.prompt_tokens);
         entry.usage.completion_tokens = entry
             .usage
             .completion_tokens
@@ -2226,10 +2182,10 @@ impl<C: Clock> InMemoryModelManager<C> {
             "usage_completion_tokens".into(),
             json!(entry.usage.completion_tokens),
         );
-        entry.metadata.parameters.insert(
-            "usage_total_tokens".into(),
-            json!(entry.usage.total_tokens),
-        );
+        entry
+            .metadata
+            .parameters
+            .insert("usage_total_tokens".into(), json!(entry.usage.total_tokens));
     }
 }
 
@@ -2323,9 +2279,7 @@ where
         let _ = tx
             .send(mock_completion_chunk(&model, &response.output))
             .await;
-        let _ = tx
-            .send(mock_completion_done(&model, &response))
-            .await;
+        let _ = tx.send(mock_completion_done(&model, &response)).await;
         Ok(CompletionStreamWrapper::new(
             Uuid::new_v4().to_string(),
             rx,
@@ -2594,10 +2548,7 @@ where
     }
 
     async fn submit_pull_job(&self, model: &str, source: &str) -> Result<Uuid, ModelManagerError> {
-        let id = Uuid::new_v5(
-            &Uuid::NAMESPACE_OID,
-            format!("{model}:{source}").as_bytes(),
-        );
+        let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{model}:{source}").as_bytes());
         {
             let mut state = self.state.write();
             state.jobs.insert(
@@ -2915,10 +2866,12 @@ mod tests {
             .into_iter()
             .next()
             .unwrap();
-        assert!(record
-            .metadata
-            .parameters
-            .contains_key("usage_total_tokens"));
+        assert!(
+            record
+                .metadata
+                .parameters
+                .contains_key("usage_total_tokens")
+        );
     }
 
     #[tokio::test]
@@ -2935,12 +2888,7 @@ mod tests {
             .unwrap();
         let permit = {
             let state = manager.state.read();
-            state
-                .models
-                .get("demo")
-                .unwrap()
-                .semaphore
-                .clone()
+            state.models.get("demo").unwrap().semaphore.clone()
         };
         let _held = permit.try_acquire_owned().unwrap();
         let err = manager
@@ -2998,11 +2946,11 @@ mod tests {
     async fn pull_job_transitions_through_states() {
         let clock = TestClock::new();
         let manager = manager(clock);
-        let id = manager.submit_pull_job("demo", "s3://bucket").await.unwrap();
-        assert_eq!(
-            id,
-            Uuid::new_v5(&Uuid::NAMESPACE_OID, b"demo:s3://bucket")
-        );
+        let id = manager
+            .submit_pull_job("demo", "s3://bucket")
+            .await
+            .unwrap();
+        assert_eq!(id, Uuid::new_v5(&Uuid::NAMESPACE_OID, b"demo:s3://bucket"));
         sleep(Duration::from_millis(60)).await;
         let status = manager.job_status(id).await.unwrap();
         assert_eq!(status.status, JobStatusKind::Succeeded);

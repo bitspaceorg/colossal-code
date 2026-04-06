@@ -1,4 +1,5 @@
 <a name="top"></a>
+
 <!--
 <h1 align="center">
   mistral.rs
@@ -38,11 +39,13 @@ Fast, flexible LLM inference.
 ### Install
 
 **Linux/macOS:**
+
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/EricLBuehler/mistral.rs/master/install.sh | sh
 ```
 
 **Windows (PowerShell):**
+
 ```powershell
 irm https://raw.githubusercontent.com/EricLBuehler/mistral.rs/master/install.ps1 | iex
 ```
@@ -92,22 +95,26 @@ mistralrs doctor
 ## What Makes It Fast
 
 **Performance**
+
 - Continuous batching support by default on all devices.
 - CUDA with [FlashAttention](docs/FLASH_ATTENTION.md) V2/V3, Metal, [multi-GPU tensor parallelism](docs/DISTRIBUTED/DISTRIBUTED.md)
 - [PagedAttention](docs/PAGED_ATTENTION.md) for high throughput continuous batching on CUDA or Apple Silicon, prefix caching (including multimodal)
 
 **Quantization** ([full docs](docs/QUANTS.md))
+
 - [In-situ quantization (ISQ)](docs/ISQ.md) of any Hugging Face model
 - GGUF (2-8 bit), GPTQ, AWQ, HQQ, FP8, BNB support
 - ⭐ [Per-layer topology](docs/TOPOLOGY.md): Fine-tune quantization per layer for optimal quality/speed
 - ⭐ Auto-select fastest quant method for your hardware
 
 **Flexibility**
+
 - [LoRA & X-LoRA](docs/ADAPTER_MODELS.md) with weight merging
 - [AnyMoE](docs/ANYMOE.md): Create mixture-of-experts on any base model
 - [Multiple models](docs/multi_model/README.md): Load/unload at runtime
 
 **Agentic Features**
+
 - Integrated [tool calling](docs/TOOL_CALLING.md) with Python/Rust callbacks
 - ⭐ [Web search integration](docs/WEB_SEARCH.md)
 - ⭐ [MCP client](docs/MCP/client.md): Connect to external tools automatically
@@ -140,7 +147,7 @@ mistralrs doctor
 - Gemma
 - Llama
 - Mistral
-</details>
+  </details>
 
 <details>
 <summary><b>Vision Models</b></summary>
@@ -161,27 +168,27 @@ mistralrs doctor
 - LLaVA Next
 - LLaVA
 - Phi 3V
-</details>
+  </details>
 
 <details>
 <summary><b>Speech Models</b></summary>
 
 - Voxtral (ASR/speech-to-text)
 - Dia
-</details>
+  </details>
 
 <details>
 <summary><b>Image Generation Models</b></summary>
 
 - FLUX
-</details>
+  </details>
 
 <details>
 <summary><b>Embedding Models</b></summary>
 
 - Embedding Gemma
 - Qwen 3 Embedding
-</details>
+  </details>
 
 [Request a new model](https://github.com/EricLBuehler/mistral.rs/issues/156) | [Full compatibility tables](docs/SUPPORTED_MODELS.md)
 
@@ -263,6 +270,7 @@ docker run --gpus all -p 1234:1234 ghcr.io/ericlbuehler/mistral.rs:latest \
 For complete documentation, see the **[Documentation](https://ericlbuehler.github.io/mistral.rs/)**.
 
 **Quick Links:**
+
 - [CLI Reference](docs/CLI.md) - All commands and options
 - [HTTP API](docs/HTTP.md) - OpenAI-compatible endpoints
 - [Quantization](docs/QUANTS.md) - ISQ, GGUF, GPTQ, and more

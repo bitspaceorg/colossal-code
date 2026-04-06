@@ -8,9 +8,10 @@ The Phi 3.5 MoE model is a 16x3.8B parameter decoder-only text-to-text mixture o
 - Expect inference performance of a 7B model
 
 ## About the MoE mechanism
-1) Compute router gating logits
-2) From the router gating logits, select the top-2 selected experts and the associated weights
-3) The hidden states for each token in the sequence is computed by (if selected) applying the expert output to that token, and then weighting it. 
+
+1. Compute router gating logits
+2. From the router gating logits, select the top-2 selected experts and the associated weights
+3. The hidden states for each token in the sequence is computed by (if selected) applying the expert output to that token, and then weighting it.
     - If multiple experts are selected for the token, then this becomes a weighted sum
     - The design is flexible: 2 or 1 experts can be selected, enabling dense or sparse gating
 
@@ -57,6 +58,7 @@ while True:
 ```
 
 ## Python SDK
+
 ```py
 from mistralrs import Runner, Which, ChatCompletionRequest, Architecture
 
@@ -84,6 +86,7 @@ print(res.usage)
 ```
 
 ## Rust SDK
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/text_models/main.rs).
 
 ```rust

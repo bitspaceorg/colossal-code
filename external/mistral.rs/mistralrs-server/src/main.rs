@@ -191,7 +191,9 @@ fn load_mcp_config(mcp_config_path: Option<&str>) -> Result<Option<McpClientConf
                     }
                     Err(e) => {
                         error!("Failed to parse MCP configuration: {}", e);
-                        error!("Please check your JSON syntax and ensure it matches the MCP configuration schema");
+                        error!(
+                            "Please check your JSON syntax and ensure it matches the MCP configuration schema"
+                        );
                         anyhow::bail!("Invalid MCP configuration format: {}", e);
                     }
                 }
@@ -240,7 +242,10 @@ fn validate_mcp_config(config: &McpClientConfig) -> Result<()> {
                     && !url.starts_with("ws://")
                     && !url.starts_with("wss://")
                 {
-                    anyhow::bail!("Invalid URL for server '{}': must start with http://, https://, ws://, or wss://", server.id);
+                    anyhow::bail!(
+                        "Invalid URL for server '{}': must start with http://, https://, ws://, or wss://",
+                        server.id
+                    );
                 }
                 if url.len() < 10 {
                     anyhow::bail!("Invalid URL for server '{}': URL too short", server.id);
@@ -427,7 +432,9 @@ async fn main() -> Result<()> {
     }
 
     if !args.interactive_mode && args.port.is_none() && args.mcp_port.is_none() {
-        anyhow::bail!("Interactive mode was not specified, so expected port to be specified. Perhaps you forgot `-i` or `--port` or `--mcp-port`?")
+        anyhow::bail!(
+            "Interactive mode was not specified, so expected port to be specified. Perhaps you forgot `-i` or `--port` or `--mcp-port`?"
+        )
     }
 
     let mcp_port = if let Some(port) = args.mcp_port {

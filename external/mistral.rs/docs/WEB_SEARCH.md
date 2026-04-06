@@ -31,6 +31,7 @@ By default, mistral.rs uses a DuckDuckGo-based search callback. To override this
 - Python: pass the `search_callback` keyword argument to `Runner`, which should be a function `def search_callback(query: str) -> List[Dict[str, str]]` returning a list of results with keys `"title"`, `"description"`, `"url"`, and `"content"`.
 
 Example in Python:
+
 ```py
 def search_callback(query: str) -> list[dict[str, str]]:
     # Implement your custom search logic here, returning a list of result dicts
@@ -53,6 +54,7 @@ runner = Runner(
 ```
 
 ## HTTP server
+
 **Be sure to add `--enable-search`!**
 
 Here are some examples using various models. Note that this works for both streaming and completion requests, so interactive mode is featured here!
@@ -98,8 +100,8 @@ if completion.choices[0].message.tool_calls is not None:
     print(tool_called)
 ```
 
-
 ## Python SDK
+
 ```py
 from mistralrs import (
     Runner,
@@ -153,6 +155,7 @@ print(res.usage)
 ```
 
 ## Rust SDK
+
 ```rust
 use anyhow::Result;
 use mistralrs::{

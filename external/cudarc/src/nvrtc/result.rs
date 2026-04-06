@@ -2,7 +2,7 @@
 
 use super::sys::{self};
 use core::{
-    ffi::{c_char, c_int, CStr},
+    ffi::{CStr, c_char, c_int},
     mem::MaybeUninit,
 };
 use std::{ffi::CString, vec::Vec};

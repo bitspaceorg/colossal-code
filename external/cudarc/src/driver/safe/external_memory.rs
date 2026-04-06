@@ -4,7 +4,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::{CudaContext, CudaEvent, CudaStream, DevicePtr, DeviceSlice, SyncOnDrop};
-use crate::driver::{result, sys, DriverError};
+use crate::driver::{DriverError, result, sys};
 
 /// An abstraction for imported external memory.
 ///

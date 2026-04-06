@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, atomic::{AtomicUsize, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -11,7 +14,7 @@ use parking_lot::RwLock;
 use prometheus::{IntCounter, IntGauge, Opts, Registry};
 use tracing::info;
 
-use mistralrs_server_core::{ModelMetadata, ModelScheduler, ModelManagerError};
+use mistralrs_server_core::{ModelManagerError, ModelMetadata, ModelScheduler};
 
 #[derive(Clone)]
 struct SchedulerMetrics {
@@ -127,9 +130,7 @@ impl LruScheduler {
         let mut inner = self.inner.write();
         inner.order.retain(|name| name != model);
         inner.order.push_back(model.to_string());
-        inner
-            .last_access
-            .insert(model.to_string(), Instant::now());
+        inner.last_access.insert(model.to_string(), Instant::now());
     }
 }
 
@@ -143,9 +144,12 @@ impl ModelScheduler for LruScheduler {
             inner
                 .last_access
                 .insert(metadata.name.clone(), Instant::now());
-            
+
             // Update size tracking
-            if let Some(old_size) = inner.model_sizes.insert(metadata.name.clone(), metadata.size_bytes) {
+            if let Some(old_size) = inner
+                .model_sizes
+                .insert(metadata.name.clone(), metadata.size_bytes)
+            {
                 inner.total_size = inner.total_size.saturating_sub(old_size);
             }
             inner.total_size = inner.total_size.saturating_add(metadata.size_bytes);
@@ -167,16 +171,14 @@ impl ModelScheduler for LruScheduler {
         let mut inner = self.inner.write();
         inner.order.retain(|name| name != model);
         inner.last_access.remove(model);
-        
+
         if let Some(size) = inner.model_sizes.remove(model) {
             inner.total_size = inner.total_size.saturating_sub(size);
             self.metrics.vram_usage_bytes.set(inner.total_size as i64);
         }
 
         self.pinned.remove(model);
-        self.metrics
-            .active_models
-            .set(inner.order.len() as i64);
+        self.metrics.active_models.set(inner.order.len() as i64);
     }
 
     async fn advise_evict(&self) -> Vec<String> {
@@ -227,10 +229,7 @@ impl ModelScheduler for LruScheduler {
         self.touch(model);
     }
 
-    fn set_keep_alive_lookup(
-        &self,
-        lookup: Arc<dyn Fn(&str) -> Option<Instant> + Send + Sync>,
-    ) {
+    fn set_keep_alive_lookup(&self, lookup: Arc<dyn Fn(&str) -> Option<Instant> + Send + Sync>) {
         *self.keep_alive_fn.write() = lookup;
     }
 
@@ -238,7 +237,11 @@ impl ModelScheduler for LruScheduler {
         self.max_vram_bytes.store(bytes, Ordering::SeqCst);
     }
 
-    fn can_load_model(&self, model_name: &str, estimated_size_bytes: u64) -> Result<(), ModelManagerError> {
+    fn can_load_model(
+        &self,
+        model_name: &str,
+        estimated_size_bytes: u64,
+    ) -> Result<(), ModelManagerError> {
         let max_vram = self.max_vram_bytes.load(Ordering::SeqCst);
         if max_vram == 0 {
             // No VRAM limit configured, allow.

@@ -74,10 +74,10 @@ An advanced anti-repetition technique that detects and penalizes repeated sequen
 
 ```json
 {
-  "dry_multiplier": 0.8,
-  "dry_base": 1.75,
-  "dry_allowed_length": 2,
-  "dry_sequence_breakers": ["\n", ".", "!", "?", ";"]
+    "dry_multiplier": 0.8,
+    "dry_base": 1.75,
+    "dry_allowed_length": 2,
+    "dry_sequence_breakers": ["\n", ".", "!", "?", ";"]
 }
 ```
 
@@ -86,6 +86,7 @@ An advanced anti-repetition technique that detects and penalizes repeated sequen
 All sampling parameters can be set in API requests:
 
 ### HTTP API
+
 ```json
 {
   "model": "default",
@@ -106,6 +107,7 @@ All sampling parameters can be set in API requests:
 ```
 
 ### Python SDK
+
 ```python
 response = runner.send_chat_completion_request(
     ChatCompletionRequest(

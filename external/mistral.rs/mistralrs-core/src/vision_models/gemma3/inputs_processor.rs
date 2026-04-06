@@ -158,7 +158,8 @@ impl InputsProcessor for Gemma3ImageProcessor {
                 for (num, idx) in num_crops.into_iter().zip(image_indexes).rev() {
                     if num != 0 {
                         let formatted_image_text = format!(
-                            "Here is the original image {BOI_TOKEN} and here are some crops to help you see better {}", vec![BOI_TOKEN.to_string(); num].join(" ")
+                            "Here is the original image {BOI_TOKEN} and here are some crops to help you see better {}",
+                            vec![BOI_TOKEN.to_string(); num].join(" ")
                         );
                         prompt = format!(
                             "{}{formatted_image_text}{}",

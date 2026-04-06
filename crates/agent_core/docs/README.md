@@ -27,6 +27,7 @@ SANDBOX_EXTRA_ROOTS="/path/to/workspace:/another/path" ./target/release/tool_age
 ### Default Behavior
 
 By default, the agent can only access:
+
 - Current working directory (full read/write)
 - System directories (read-only): `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`
 - Temporary directories: `/tmp`, `$TMPDIR`
@@ -47,6 +48,7 @@ SANDBOX_EXTRA_ROOTS="/path/to/code" cargo run
 ```
 
 **Security Notes:**
+
 - All paths in `SANDBOX_EXTRA_ROOTS` are granted **recursive** read/write access
 - Invalid paths will cause runtime errors when accessed
 - Empty paths in the list are ignored
@@ -72,6 +74,7 @@ SANDBOX_EXTRA_ROOTS="/tmp" ./target/release/tool_agent
 ### Current Behavior (Lazy Indexing)
 
 Semantic search indexing happens **on-demand** when the model first uses the `semantic_search` tool:
+
 1. Model calls semantic_search tool
 2. System creates Qdrant collection
 3. Indexes all Python files in current directory (background task)
@@ -79,10 +82,12 @@ Semantic search indexing happens **on-demand** when the model first uses the `se
 5. Executes the search query
 
 **Pros:**
+
 - No wasted resources if semantic search not needed
 - Simple implementation
 
 **Cons:**
+
 - First search has significant delay (waiting for indexing)
 - User experience is poor on first query
 
@@ -91,12 +96,14 @@ Semantic search indexing happens **on-demand** when the model first uses the `se
 Planned improvement: Start indexing automatically on first tool call.
 
 **When we implement this:**
+
 - Indexing starts in background during first agent action
 - By the time model wants to search, index likely ready
 - Better user experience
 - Slightly higher resource usage
 
 **To enable in future:**
+
 ```rust
 // In get_or_create_shell_session(), after creating shell:
 let _ = state.manager.create_semantic_search_session(
@@ -109,6 +116,7 @@ let _ = state.manager.create_semantic_search_session(
 ### Semantic Search Configuration
 
 Currently hardcoded:
+
 - **File types**: Only Python files (`.py`)
 - **Concurrency**: 64 concurrent embedding requests
 - **Collection**: One per directory (hash-based ID)
@@ -153,41 +161,41 @@ You can also set the `NITE_WORKSPACE_ROOT` environment variable before launching
 
 ### Slash Commands
 
-| Command | Description |
-|---------|-------------|
-| `/spec` | Show current spec status |
-| `/spec <path\|goal>` | Load spec from file or create from goal |
-| `/spec split <index>` | Split a step into sub-steps |
-| `/spec status` | Show detailed JSON snapshot |
-| `/spec abort` | Abort the current orchestration run |
+| Command               | Description                             |
+| --------------------- | --------------------------------------- |
+| `/spec`               | Show current spec status                |
+| `/spec <path\|goal>`  | Load spec from file or create from goal |
+| `/spec split <index>` | Split a step into sub-steps             |
+| `/spec status`        | Show detailed JSON snapshot             |
+| `/spec abort`         | Abort the current orchestration run     |
 
 ### SpecSheet Structure
 
 ```json
 {
-  "id": "spec-1234567890",
-  "title": "Implement Feature X",
-  "description": "Detailed description of the feature",
-  "steps": [
-    {
-      "index": "1",
-      "title": "Setup project structure",
-      "instructions": "Create necessary directories and files",
-      "acceptance_criteria": ["Directory exists", "Files created"],
-      "status": "Completed",
-      "dependencies": []
-    },
-    {
-      "index": "2",
-      "title": "Implement core logic",
-      "instructions": "Write the main functionality",
-      "status": "InProgress",
-      "dependencies": ["1"]
-    }
-  ],
-  "created_by": "cli",
-  "created_at": "2024-01-01T00:00:00Z",
-  "metadata": {}
+    "id": "spec-1234567890",
+    "title": "Implement Feature X",
+    "description": "Detailed description of the feature",
+    "steps": [
+        {
+            "index": "1",
+            "title": "Setup project structure",
+            "instructions": "Create necessary directories and files",
+            "acceptance_criteria": ["Directory exists", "Files created"],
+            "status": "Completed",
+            "dependencies": []
+        },
+        {
+            "index": "2",
+            "title": "Implement core logic",
+            "instructions": "Write the main functionality",
+            "status": "InProgress",
+            "dependencies": ["1"]
+        }
+    ],
+    "created_by": "cli",
+    "created_at": "2024-01-01T00:00:00Z",
+    "metadata": {}
 }
 ```
 
@@ -195,17 +203,15 @@ You can also set the `NITE_WORKSPACE_ROOT` environment variable before launching
 
 ```json
 {
-  "task_id": "task-abc123",
-  "step_index": "1",
-  "summary_text": "Completed step 1: Setup project structure",
-  "artifacts_touched": ["src/main.rs", "Cargo.toml"],
-  "tests_run": [
-    {"name": "build", "passed": true}
-  ],
-  "verification": {
-    "status": "Passed",
-    "feedback": []
-  }
+    "task_id": "task-abc123",
+    "step_index": "1",
+    "summary_text": "Completed step 1: Setup project structure",
+    "artifacts_touched": ["src/main.rs", "Cargo.toml"],
+    "tests_run": [{ "name": "build", "passed": true }],
+    "verification": {
+        "status": "Passed",
+        "feedback": []
+    }
 }
 ```
 
@@ -238,23 +244,24 @@ control.inject_split("1".to_string(), child_spec)?;  // Inject sub-spec
 
 The orchestrator emits events for TUI updates:
 
-| Event | Description |
-|-------|-------------|
-| `StepStatusChanged` | Step transitioned to new status |
-| `SummaryUpdated` | Task summary updated |
-| `VerifierFailed` | Verifier rejected step, retry pending |
-| `ChildSpecPushed` | Sub-spec added to execution stack |
-| `Paused` | Orchestrator paused |
-| `Resumed` | Orchestrator resumed |
-| `Aborted` | Orchestrator aborted |
-| `Completed` | All steps completed |
-| `ChannelClosed` | close_task_channel finished, SSE subscribers should drop |
+| Event               | Description                                              |
+| ------------------- | -------------------------------------------------------- |
+| `StepStatusChanged` | Step transitioned to new status                          |
+| `SummaryUpdated`    | Task summary updated                                     |
+| `VerifierFailed`    | Verifier rejected step, retry pending                    |
+| `ChildSpecPushed`   | Sub-spec added to execution stack                        |
+| `Paused`            | Orchestrator paused                                      |
+| `Resumed`           | Orchestrator resumed                                     |
+| `Aborted`           | Orchestrator aborted                                     |
+| `Completed`         | All steps completed                                      |
+| `ChannelClosed`     | close_task_channel finished, SSE subscribers should drop |
 
 ### Manual Verification Checklist
 
 Before landing orchestration changes, run the same workflow we expect operators to validate in the TUI:
 
 #### Build & Test Validation
+
 ```bash
 # All must pass before merging
 cargo fmt --check
@@ -263,40 +270,45 @@ cargo test --workspace
 ```
 
 #### TUI Spec Commands (Interactive Validation)
+
 1. Launch the TUI and load a spec:
-   ```bash
-   nite --spec /path/to/spec.json
-   # or create from goal:
-   nite
-   > /spec "Implement feature X with tests"
-   ```
+
+    ```bash
+    nite --spec /path/to/spec.json
+    # or create from goal:
+    nite
+    > /spec "Implement feature X with tests"
+    ```
 
 2. Exercise all slash commands against a live run:
-   - `/spec` - view current spec status
-   - `/spec pause` - pause execution after current step
-   - `/spec resume` - resume paused execution
-   - `/spec rerun` - re-run verifiers on last step
-   - `/spec history` - show task history summaries
-   - `/spec split <index>` - split step into sub-steps
-   - `/spec abort` - abort current run
+    - `/spec` - view current spec status
+    - `/spec pause` - pause execution after current step
+    - `/spec resume` - resume paused execution
+    - `/spec rerun` - re-run verifiers on last step
+    - `/spec history` - show task history summaries
+    - `/spec split <index>` - split step into sub-steps
+    - `/spec abort` - abort current run
 
 #### Spec Pane Keybindings (inside spec pane when visible)
-| Key | Action |
-|-----|--------|
-| `P` | Toggle pause/resume orchestrator |
-| `R` | Rerun verifiers on last step |
-| `A` | Abort current orchestrator run |
-| `H` | Toggle history view in spec pane |
-| `Enter` | Toggle step drawer (summary, diff, feedback) |
-| `↑/↓` or `k/j` | Navigate steps |
+
+| Key            | Action                                       |
+| -------------- | -------------------------------------------- |
+| `P`            | Toggle pause/resume orchestrator             |
+| `R`            | Rerun verifiers on last step                 |
+| `A`            | Abort current orchestrator run               |
+| `H`            | Toggle history view in spec pane             |
+| `Enter`        | Toggle step drawer (summary, diff, feedback) |
+| `↑/↓` or `k/j` | Navigate steps                               |
 
 #### Session Window & View Toggles
+
 - Toggle spec pane: `Shift+S` (capital S)
 - Toggle condensed tool-call view: `Ctrl+W`
 - Toggle dedicated history panel: `Ctrl+Shift+H`
 - Toggle session window (Alt+W): Shows agent tree + embedded live UI
 
 #### SSE / Channel Cleanup Verification
+
 - After a spec run completes or aborts, capture logs
 - Confirm `ChannelClosed` event emitted after `close_task_channel`
 - Verify SSE subscribers receive the event and unsubscribe cleanly
@@ -304,11 +316,13 @@ cargo test --workspace
 ### Coding Standards & Async Conventions
 
 #### Rust 2024 Edition
+
 - Use Rust 2024 edition lints (set in `Cargo.toml`: `edition = "2024"`)
 - Enable workspace-wide clippy lints
 - Format with `rustfmt` before committing
 
 #### Async Best Practices
+
 ```rust
 // BAD: Blocking inside async context
 async fn process_file(path: &Path) -> Result<String> {
@@ -325,8 +339,9 @@ async fn process_file(path: &Path) -> Result<String> {
 ```
 
 #### Synchronization Guidelines
+
 - **Prefer channels over mutexes**: Use `tokio::sync::mpsc` for cross-task communication
-- **Arc<Mutex<_>> exceptions**: Only when a mutable aggregate genuinely requires shared ownership
+- **Arc<Mutex<\_>> exceptions**: Only when a mutable aggregate genuinely requires shared ownership
 - **Event-driven updates**: TUI state updated via `OrchestratorEvent` channel, not shared state
 
 ```rust
@@ -344,7 +359,9 @@ while let Ok(event) = event_rx.try_recv() {
 ```
 
 #### Sub-Agent Factory Pattern
+
 Sub-agents are created via a factory closure for flexible nesting:
+
 ```rust
 let sub_agent_factory = Arc::new(|step: &SpecStep| -> Arc<dyn OrchestratorAgent> {
     // Create lightweight sub-agent based on step requirements
@@ -359,7 +376,9 @@ let sub_agent_factory = Arc::new(|step: &SpecStep| -> Arc<dyn OrchestratorAgent>
 ### Extending Verifiers, CLI, and TUI Controls
 
 #### Registering New Verifiers
+
 Register new verifiers by pushing boxed implementations into the `VerifierChain`:
+
 ```rust
 let chain = VerifierChain::new(vec![
     Box::new(CommandVerifier::new(vec!["cargo", "check"])),
@@ -369,6 +388,7 @@ let chain = VerifierChain::new(vec![
 ```
 
 Emit rich `FeedbackEntry` messages so `/spec history` and the spec pane drawer can surface them:
+
 ```rust
 Err(FeedbackEntry {
     author: "my-verifier".to_string(),
@@ -378,7 +398,9 @@ Err(FeedbackEntry {
 ```
 
 #### Adding CLI Commands
+
 CLI handlers are centralized in `SpecCliHandler`. To add a new command:
+
 1. Add command matching in `SpecCliHandler::execute()`
 2. Implement handler method (keep mutations synchronous for testability)
 3. Add unit test in `spec_cli.rs` tests module
@@ -395,7 +417,9 @@ pub async fn execute(&mut self, agent: Option<&dyn SpecAgentBridge>, command: &s
 ```
 
 #### Adding TUI Panel Sections
+
 When adding new panels or commands, ensure consistency across views:
+
 1. Update `SessionManager` tree for Alt+W session window
 2. Update condensed breadcrumb log for Ctrl+W view
 3. Handle orchestrator events appropriately
@@ -435,6 +459,7 @@ Format: [status] agent_path › tool_name [inline error if failed]
 ```
 
 The condensed view:
+
 - Shows only tool calls with status indicators
 - Preserves agent path breadcrumbs (e.g., `main › 1.2` for nested sub-agent)
 - Includes inline errors for failed calls
@@ -464,6 +489,7 @@ Status icons:
 ```
 
 Navigation:
+
 - `↑/↓` - Navigate the session tree
 - `Enter` - Select session
 - `d` - Detach session
@@ -495,6 +521,7 @@ The spec pane shows current spec status with interactive controls:
 ```
 
 When drawer is open after failure, shows:
+
 - Latest summary text
 - Test results
 - Artifacts touched
@@ -563,6 +590,7 @@ let chain = VerifierChain::new(vec![
 The sandbox is applied at the thread level and inherited by child processes. All file operations are restricted by the kernel.
 
 **Critical Implementation Details:**
+
 - Sequential code chunking (not parallel) to avoid Rayon thread pool bypass
 - Spawned async tasks explicitly apply Landlock
 - File watcher is disabled (events never processed)
@@ -578,6 +606,7 @@ See `SECURITY.md` for detailed security documentation.
 ### Tool Execution
 
 All tools execute through the sandboxed system:
+
 - `exec_command`: Run shell commands in persistent session
 - `delete_path`: Delete a single file or directory
 - `delete_many`: Delete multiple files/directories at once

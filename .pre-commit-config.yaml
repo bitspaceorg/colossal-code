@@ -1,0 +1,26 @@
+# Pre-commit hooks for Colossal Code
+# This file is managed by nix/utils/precommit.nix
+# Any changes should be made there, not here
+---
+default_stages:
+  - pre-commit
+repos:
+  - repo: local
+    hooks:
+      - id: treefmt
+        name: treefmt
+        entry: nix develop --accept-flake-config -c treefmt --fail-on-change
+        pass_filenames: true
+        files: ''
+        language: system
+        types:
+          - file
+
+      - id: docs-build
+        name: docs-build
+        entry: nix develop --accept-flake-config -c bash -c 'python utils/docs/validate.py && python utils/docs/build_index.py && git add docs/data.json'
+        pass_filenames: false
+        always_run: true
+        language: system
+        types:
+          - file

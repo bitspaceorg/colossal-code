@@ -287,9 +287,6 @@ impl App {
 
     pub(crate) fn handle_input_char_key(&mut self, key: KeyEvent, to_insert: char) {
         if self.vim_mode_enabled {
-            if to_insert == '/' && self.vim_input_editor.get_mode() == edtui::EditorMode::Normal {
-                return;
-            }
             self.vim_input_editor.handle_event(Event::Key(key));
             self.sync_vim_input();
             return;

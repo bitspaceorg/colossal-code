@@ -1,6 +1,7 @@
 # PagedAttention in mistral.rs
 
 Mistral.rs supports PagedAttention ([paper here](https://arxiv.org/abs/2309.06180)) to accelerate both normal inference and batched inference on:
+
 - CUDA (Unix-like platforms such as WSL, Linux)
 - Metal
 
@@ -11,6 +12,7 @@ Our PagedAttention implementation has 2 inputs: GPU KV cache memory size, and bl
 PagedAttention now supports KV cache quantization to reduce memory usage and potentially improve performance. The KV cache can be quantized to FP8 (F8E4M3 format) instead of using the model's native dtype, significantly reducing memory requirements while maintaining model quality.
 
 **Available cache types:**
+
 - `auto` (default): Uses the model's native dtype for KV cache
 - `f8e4m3`: Quantizes KV cache to 8-bit floating point (E4M3 format)
 
@@ -25,6 +27,7 @@ When using FP8 quantization, the memory usage for KV cache is approximately halv
 > Note: In the CLI and Python SDK, Paged Attention is disabled by default for Metal. It can be enabled with the `--paged-attn`/`paged_attn` flags.
 
 **There are more features being added to this:**
+
 - GGML model support
 - Adapter model support
 - Speculative decoding
@@ -38,10 +41,12 @@ Prefix caching is a technique to reuse computed KV cache blocks across requests 
 ### How It Works
 
 1. **Block Hashing**: Each block of tokens is assigned a unique hash based on its contents and the hash of its parent block:
-   ```
-   hash(block) = hash(parent_hash, block_tokens)
-   ```
-   This creates a hash chain that uniquely identifies any prefix sequence.
+
+    ```
+    hash(block) = hash(parent_hash, block_tokens)
+    ```
+
+    This creates a hash chain that uniquely identifies any prefix sequence.
 
 2. **Cache Lookup**: When allocating blocks for a new request, the scheduler checks if any full blocks match existing cached blocks by comparing hashes.
 
@@ -64,10 +69,12 @@ Prefix caching is **enabled by default** when using PagedAttention and controlle
 - **Rust SDK**: `.with_prefix_cache_n(Some(N))` (default 16). Pass `None` to disable.
 
 **Important:** The two prefix caching systems are mutually exclusive:
+
 - **PagedAttention** uses block-level prefix caching (handled by `PrefixCacher` in `BlockEngine`)
 - **Non-PagedAttention** uses sequence-level prefix caching (handled by `PrefixCacheManagerV2`)
 
 The `prefix_cache_n` setting controls both systems, but only one is active depending on whether PagedAttention is enabled. You'll see one of these log messages at startup indicating which system is active:
+
 - `Prefix caching enabled (block-level, PagedAttention).`
 - `Prefix caching enabled (sequence-level, non-paged attention).`
 
@@ -90,11 +97,13 @@ The prefix cache operates at the block level (not token level) for efficiency:
 - Memory overhead is minimal (just hash-to-block mappings)
 
 **Supported models:**
+
 - Normal models
 - GGUF models
 - Vision models
 
 > Note: Prefix caching is supported when using PagedAttention. Configure the number of sequences to cache on the device with:
+>
 > - CLI: `--prefix-cache-n <N>` (default 16)
 > - Python SDK: `prefix_cache_n=<N>` (default 16)
 > - Rust SDK: `.with_prefix_cache_n(Some(N))` (default 16)
@@ -127,11 +136,13 @@ mistralrs run --pa-memory-fraction 0.95 --pa-block-size 32 --format gguf -t mist
 ```
 
 Example with FP8 KV cache quantization:
+
 ```
 mistralrs run --paged-attn on --pa-memory-mb 4096 --pa-block-size 32 --pa-cache-type f8e4m3 -m microsoft/Phi-3-mini-128k-instruct
 ```
 
 ## Using the Rust SDK
+
 You can find this example [here](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/paged_attn/main.rs).
 
 ```rust
@@ -178,10 +189,11 @@ async fn main() -> Result<()> {
 ```
 
 Example with FP8 KV cache quantization:
+
 ```rust
 use anyhow::Result;
 use mistralrs::{
-    IsqType, MemoryGpuConfig, PagedAttentionMetaBuilder, PagedCacheType, 
+    IsqType, MemoryGpuConfig, PagedAttentionMetaBuilder, PagedCacheType,
     TextMessageRole, TextMessages, TextModelBuilder,
 };
 
@@ -205,6 +217,7 @@ async fn main() -> Result<()> {
 ```
 
 ## Using the Python SDK
+
 ```py
 from mistralrs import Runner, Which, ChatCompletionRequest, Architecture
 
@@ -234,6 +247,7 @@ print(res.usage)
 ```
 
 Example with FP8 KV cache quantization:
+
 ```py
 from mistralrs import Runner, Which, ChatCompletionRequest, Architecture, PagedCacheType
 

@@ -115,7 +115,7 @@ pub mod version {
     //!
     //! See [CUDA Runtime API](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__VERSION.html)
 
-    use super::{sys, RuntimeError};
+    use super::{RuntimeError, sys};
 
     /// Returns the CUDA Runtime version.
     ///
@@ -149,7 +149,7 @@ pub mod device {
     //!
     //! See [cudart docs](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__DEVICE.html#group__CUDA__DEVICE)
 
-    use super::{sys, RuntimeError};
+    use super::{RuntimeError, sys};
     use core::ffi::{c_int, c_void};
     use std::mem::MaybeUninit;
 
@@ -283,7 +283,7 @@ pub mod device {
 }
 
 pub mod function {
-    use super::{sys, RuntimeError};
+    use super::{RuntimeError, sys};
     use std::mem::MaybeUninit;
     use std::os::raw::c_void;
 
@@ -351,14 +351,14 @@ pub mod occupancy {
     use core::ffi::{c_int, c_uint, c_void};
     use std::mem::MaybeUninit;
 
-    use super::{sys, RuntimeError};
+    use super::{RuntimeError, sys};
 
     // Use the functions from the driver module
     use crate::driver::result::occupancy::{
         max_potential_block_size as driver_max_potential_block_size,
         max_potential_block_size_with_flags as driver_max_potential_block_size_with_flags,
     };
-    use crate::driver::{sys as driver_sys, DriverError};
+    use crate::driver::{DriverError, sys as driver_sys};
 
     /// Returns dynamic shared memory available per block when launching numBlocks blocks on SM.
     ///
@@ -489,7 +489,7 @@ pub mod stream {
     //!
     //! See [CUDA Runtime API](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__STREAM.html).
 
-    use super::{sys, RuntimeError};
+    use super::{RuntimeError, sys};
     use std::mem::MaybeUninit;
 
     /// The kind of stream to initialize.
@@ -821,7 +821,7 @@ pub fn mem_get_info() -> Result<(usize, usize), RuntimeError> {
 }
 
 pub mod event {
-    use super::{sys, RuntimeError};
+    use super::{RuntimeError, sys};
     use std::mem::MaybeUninit;
 
     /// Creates an event.
@@ -924,7 +924,7 @@ pub mod external_memory {
     use core::ffi::c_void;
     use std::mem::MaybeUninit;
 
-    use super::{sys, RuntimeError};
+    use super::{RuntimeError, sys};
 
     /// Imports an external memory object, in this case an OpaqueFd.
     ///

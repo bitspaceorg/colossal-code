@@ -180,7 +180,9 @@ impl CublasLTBatchMatmulF8Scalar {
 
         for case in cases {
             if case % 16 != 0 {
-                candle_core::bail!("F8 cuBLASlt matmul must match all cases described here: https://docs.nvidia.com/cuda/cublas/#tensor-core-usage");
+                candle_core::bail!(
+                    "F8 cuBLASlt matmul must match all cases described here: https://docs.nvidia.com/cuda/cublas/#tensor-core-usage"
+                );
             }
         }
 

@@ -3,6 +3,7 @@
 ## Two Main Modes
 
 ### 1. Full Mode (Default)
+
 **All tools enabled** - AI can read AND modify files
 
 ```rust
@@ -10,6 +11,7 @@ let tools = tools::get_all_tools();
 ```
 
 **Tools included (11 total):**
+
 - ✅ `exec_command` - Execute shell commands
 - ✅ `delete_path` - Delete a file or directory
 - ✅ `delete_many` - Delete multiple paths
@@ -23,6 +25,7 @@ let tools = tools::get_all_tools();
 - ✅ `html_to_text` - Extract text from web URLs
 
 **Use when:**
+
 - You want full AI capabilities
 - You trust the AI to make changes
 - You're actively developing and want assistance
@@ -30,6 +33,7 @@ let tools = tools::get_all_tools();
 ---
 
 ### 2. Read-Only Mode
+
 **Safe tools only** - AI can analyze but NOT modify files
 
 ```rust
@@ -37,6 +41,7 @@ let tools = tools::get_readonly_tools();
 ```
 
 **Tools included (5 total):**
+
 - ✅ `get_files` - List files in directory
 - ✅ `get_files_recursive` - Recursively list files
 - ✅ `search_files_with_regex` - Search with regex
@@ -44,11 +49,13 @@ let tools = tools::get_readonly_tools();
 - ✅ `semantic_search` - Semantic code search
 
 **Excluded (for safety):**
+
 - ❌ `exec_command` - Cannot execute commands
 - ❌ `delete_path` - Cannot delete files
 - ❌ `delete_many` - Cannot delete multiple files
 
 **Use when:**
+
 - You want code analysis only
 - You're reviewing or understanding code
 - You want a safe mode with no modifications
@@ -58,17 +65,17 @@ let tools = tools::get_readonly_tools();
 
 ## Quick Comparison
 
-| Feature | Full Mode | Read-Only Mode |
-|---------|-----------|----------------|
-| **Function** | `get_all_tools()` | `get_readonly_tools()` |
-| **Tool Count** | 11 | 5 |
-| **Can Read Files** | ✅ Yes | ✅ Yes |
-| **Can Search Code** | ✅ Yes | ✅ Yes |
-| **Can Execute Commands** | ✅ Yes | ❌ No |
-| **Can Delete Files** | ✅ Yes | ❌ No |
-| **Can Modify Files** | ✅ Yes (edit_file/exec) | ❌ No |
-| **Can Search Web** | ✅ Yes | ❌ No |
-| **Safe for Review** | ⚠️ Caution | ✅ Yes |
+| Feature                  | Full Mode               | Read-Only Mode         |
+| ------------------------ | ----------------------- | ---------------------- |
+| **Function**             | `get_all_tools()`       | `get_readonly_tools()` |
+| **Tool Count**           | 11                      | 5                      |
+| **Can Read Files**       | ✅ Yes                  | ✅ Yes                 |
+| **Can Search Code**      | ✅ Yes                  | ✅ Yes                 |
+| **Can Execute Commands** | ✅ Yes                  | ❌ No                  |
+| **Can Delete Files**     | ✅ Yes                  | ❌ No                  |
+| **Can Modify Files**     | ✅ Yes (edit_file/exec) | ❌ No                  |
+| **Can Search Web**       | ✅ Yes                  | ❌ No                  |
+| **Safe for Review**      | ⚠️ Caution              | ✅ Yes                 |
 
 ---
 
@@ -103,6 +110,7 @@ let tools = if std::env::var("READONLY_MODE").is_ok() {
 ```
 
 **Usage:**
+
 ```bash
 # Read-only mode
 READONLY_MODE=1 cargo run --bin tool_agent
@@ -140,6 +148,7 @@ fn main() {
 ```
 
 **Usage:**
+
 ```bash
 # Read-only mode
 cargo run --bin tool_agent -- --readonly
@@ -203,48 +212,51 @@ let tools = tools::build_tools(&[
 ### Full Mode Tools
 
 #### Writing/Modifying Tools (excluded in read-only)
+
 1. **exec_command**
-   - Execute shell commands in persistent session
-   - Can modify files via shell commands (sed, echo, etc.)
-   - Examples: `sed -i`, `echo >> file.txt`, `rm`
+    - Execute shell commands in persistent session
+    - Can modify files via shell commands (sed, echo, etc.)
+    - Examples: `sed -i`, `echo >> file.txt`, `rm`
 
 2. **delete_path**
-   - Delete a single file or directory
-   - Permanent operation
+    - Delete a single file or directory
+    - Permanent operation
 
 3. **delete_many**
-   - Delete multiple files or directories
-   - Batch deletion
+    - Delete multiple files or directories
+    - Batch deletion
 
 4. **edit_file**
-   - Find and replace text in files
-   - Create new files (use empty old_string)
-   - Append to existing files (use empty old_string)
-   - Replaces first occurrence when old_string is provided
-   - Automatically creates parent directories for new files
+    - Find and replace text in files
+    - Create new files (use empty old_string)
+    - Append to existing files (use empty old_string)
+    - Replaces first occurrence when old_string is provided
+    - Automatically creates parent directories for new files
 
 #### Reading/Analysis Tools (included in both modes)
+
 5. **get_files**
-   - List files in a directory
-   - Non-recursive
+    - List files in a directory
+    - Non-recursive
 
 6. **get_files_recursive**
-   - List all files in directory tree
-   - Supports glob patterns for include/exclude
+    - List all files in directory tree
+    - Supports glob patterns for include/exclude
 
 7. **search_files_with_regex**
-   - Search file contents with regex
-   - Returns matching lines with byte offsets
+    - Search file contents with regex
+    - Returns matching lines with byte offsets
 
 8. **read_file**
-   - Read complete file or byte range
-   - Can handle large files efficiently
+    - Read complete file or byte range
+    - Can handle large files efficiently
 
 9. **semantic_search**
-   - AI-powered code search
-   - Finds semantically relevant code using embeddings
+    - AI-powered code search
+    - Finds semantically relevant code using embeddings
 
 #### Web Tools (excluded in read-only)
+
 10. **web_search**
     - Search the web using DuckDuckGo
     - Returns titles, descriptions, URLs, and content previews
@@ -260,12 +272,14 @@ let tools = tools::build_tools(&[
 ## Best Practices
 
 ### ✅ Use Full Mode When:
+
 - Actively developing features
 - You need the AI to make changes
 - Working in a local development environment
 - You're comfortable reviewing AI changes
 
 ### ✅ Use Read-Only Mode When:
+
 - Reviewing code
 - Understanding a new codebase
 - Analyzing code for bugs or issues
@@ -274,6 +288,7 @@ let tools = tools::build_tools(&[
 - Teaching or demonstrating code
 
 ### ⚠️ Safety Tips:
+
 1. Always review AI-suggested commands before executing
 2. Use read-only mode when in doubt
 3. Keep backups or use version control
@@ -293,12 +308,14 @@ Need AI to make changes?
 ```
 
 **Read-only mode gives you:**
+
 - All analysis capabilities
 - Zero modification risk
 - Safe for any environment
 - Perfect for code review and understanding
 
 **Full mode gives you:**
+
 - Everything in read-only mode
 - Plus ability to execute commands
 - Plus ability to delete files

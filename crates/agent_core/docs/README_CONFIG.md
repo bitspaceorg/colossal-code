@@ -11,11 +11,13 @@
 ## What Changed?
 
 ### Before
+
 - System prompt hardcoded in `main.rs` (~300 lines)
 - All tools always enabled
 - No user customization without recompiling
 
 ### After
+
 - System prompt in `.niterules` files (user-editable)
 - Tools are modular and selectable
 - Two-level config: global + project-local
@@ -24,7 +26,9 @@
 ## Quick Start
 
 ### 1. First Run
+
 The system auto-creates everything you need:
+
 ```
 ~/.config/.nite/
 ├── .niterules    # Your global config (auto-created)
@@ -32,28 +36,36 @@ The system auto-creates everything you need:
 ```
 
 ### 2. Customize Globally (Optional)
+
 ```bash
 vim ~/.config/.nite/.niterules
 ```
+
 This affects all projects.
 
 ### 3. Override for a Project (Optional)
+
 ```bash
 cd /path/to/your/project
 vim ./.niterules
 ```
+
 This only affects this project.
 
 ### 4. Run the Agent
+
 ```bash
 cargo run --bin tool_agent
 ```
 
 You'll see:
+
 ```
 Using local .niterules from: ./.niterules
 ```
+
 or
+
 ```
 Using global .niterules from: /home/user/.config/.nite/.niterules
 ```
@@ -134,34 +146,37 @@ let system_prompt = template.replace("{tools_section}", &tools_section);
 
 ### Tool Modes
 
-| Mode | Function | Tools Count | Can Modify Files? |
-|------|----------|-------------|-------------------|
-| **Full** | `get_all_tools()` | 8 | ✅ Yes (exec, delete) |
-| **Read-Only** | `get_readonly_tools()` | 5 | ❌ No (safe analysis) |
-| **Custom** | `build_tools(&[...])` | Your choice | Depends on selection |
+| Mode          | Function               | Tools Count | Can Modify Files?     |
+| ------------- | ---------------------- | ----------- | --------------------- |
+| **Full**      | `get_all_tools()`      | 8           | ✅ Yes (exec, delete) |
+| **Read-Only** | `get_readonly_tools()` | 5           | ❌ No (safe analysis) |
+| **Custom**    | `build_tools(&[...])`  | Your choice | Depends on selection  |
 
 ### Available Tools
 
-| Tool | What It Does |
-|------|--------------|
-| `ExecCommand` | Run shell commands |
-| `DeletePath` | Delete a file/directory |
-| `DeleteMany` | Delete multiple paths |
-| `GetFiles` | List files in a directory |
-| `GetFilesRecursive` | Recursively list files |
-| `SearchFilesWithRegex` | Search with regex |
-| `ReadFile` | Read file contents |
-| `SemanticSearch` | Semantic code search |
+| Tool                   | What It Does              |
+| ---------------------- | ------------------------- |
+| `ExecCommand`          | Run shell commands        |
+| `DeletePath`           | Delete a file/directory   |
+| `DeleteMany`           | Delete multiple paths     |
+| `GetFiles`             | List files in a directory |
+| `GetFilesRecursive`    | Recursively list files    |
+| `SearchFilesWithRegex` | Search with regex         |
+| `ReadFile`             | Read file contents        |
+| `SemanticSearch`       | Semantic code search      |
 
 ## Use Cases
 
 ### Global Config (`~/.config/.nite/.niterules`)
+
 **Use for:**
+
 - Your general coding style preferences
 - Default behavior across all projects
 - Personal AI interaction preferences
 
 **Example:**
+
 ```
 You are a coding assistant. Always:
 - Prefer functional programming
@@ -171,12 +186,15 @@ You are a coding assistant. Always:
 ```
 
 ### Local Config (`./.niterules`)
+
 **Use for:**
+
 - Project-specific requirements
 - Special coding conventions for this repo
 - Team-shared AI instructions (commit to repo)
 
 **Example:**
+
 ```
 You are working on a Rust TUI application.
 - Use ratatui for all UI
@@ -188,17 +206,20 @@ You are working on a Rust TUI application.
 ## Common Workflows
 
 ### Scenario 1: New User
+
 1. Run agent → auto-creates `~/.config/.nite/.niterules`
 2. Edit global config if desired
 3. Done!
 
 ### Scenario 2: Project-Specific Needs
+
 1. `cd /path/to/special/project`
 2. `vim ./.niterules` → customize for this project
 3. Run agent → uses local config
 4. `cd /other/project` → uses global config again
 
 ### Scenario 3: Sharing with Team
+
 1. Create `.niterules` in project root
 2. Commit it to git
 3. Team members get consistent AI behavior
@@ -207,12 +228,15 @@ You are working on a Rust TUI application.
 ## Debugging
 
 ### Check Which Config Is Active
+
 Run your agent and look for output:
+
 ```
 Using local .niterules from: ./.niterules
 ```
 
 ### View Current Config
+
 ```bash
 # Local
 cat ./.niterules
@@ -222,6 +246,7 @@ cat ~/.config/.nite/.niterules
 ```
 
 ### Test Priority
+
 ```bash
 # Create local to test override
 echo "Local config test" > ./.niterules
@@ -235,6 +260,7 @@ rm ./.niterules
 ```
 
 ### Compare Configs
+
 ```bash
 diff ./.niterules ~/.config/.nite/.niterules
 ```
@@ -244,11 +270,13 @@ diff ./.niterules ~/.config/.nite/.niterules
 If you're migrating from the old hardcoded system:
 
 ✅ **No action required!**
+
 - Default template matches old hardcoded prompt
 - All tools available by default
 - Backward compatible
 
 But now you can:
+
 - Edit `.niterules` instead of recompiling
 - Use different tool sets for different modes
 - Have project-specific AI configurations
@@ -272,6 +300,7 @@ let tools = if std::env::var("READONLY_MODE").is_ok() {
 ```
 
 Then:
+
 ```bash
 # Run in read-only mode
 READONLY_MODE=1 cargo run --bin tool_agent
@@ -308,6 +337,7 @@ A: Yes! It's just a file, so it can be branch-specific.
 ## Summary
 
 This system gives you:
+
 1. **Flexibility** - Configure AI per-project or globally
 2. **Modularity** - Choose which tools to enable
 3. **Convenience** - No recompiling to change behavior

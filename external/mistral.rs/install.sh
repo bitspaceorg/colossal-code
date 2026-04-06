@@ -30,16 +30,19 @@ NC='\033[0m' # No Color
 info() { printf "${BLUE}info:${NC} %s\n" "$1" >&2; }
 success() { printf "${GREEN}success:${NC} %s\n" "$1" >&2; }
 warn() { printf "${YELLOW}warning:${NC} %s\n" "$1" >&2; }
-error() { printf "${RED}error:${NC} %s\n" "$1" >&2; exit 1; }
+error() {
+    printf "${RED}error:${NC} %s\n" "$1" >&2
+    exit 1
+}
 
 # Banner
 print_banner() {
     printf "${BOLD}"
     echo "  __  __ _     _             _              "
-    echo " |  \\/  (_)___| |_ _ __ __ _| |  _ __ ___   "
+    echo ' |  \/  (_)___| |_ _ __ __ _| |  _ __ ___   '
     echo " | |\\/| | / __| __| '__/ _\` | | | '__/ __|  "
-    echo " | |  | | \\__ \\ |_| | | (_| | |_| |  \\__ \\  "
-    echo " |_|  |_|_|___/\\__|_|  \\__,_|_(_)_|  |___/  "
+    echo ' | |  | | \__ \ |_| | | (_| | |_| |  \__ \  '
+    echo ' |_|  |_|_|___/\__|_|  \__,_|_(_)_|  |___/  '
     echo ""
     printf "${NC}${BLUE}Fast, flexible LLM inference.${NC}\n"
     echo ""
@@ -48,15 +51,15 @@ print_banner() {
 # Detect operating system
 detect_os() {
     case "$(uname -s)" in
-        Darwin*)
-            echo "macos"
-            ;;
-        Linux*)
-            echo "linux"
-            ;;
-        *)
-            error "Unsupported operating system: $(uname -s)"
-            ;;
+    Darwin*)
+        echo "macos"
+        ;;
+    Linux*)
+        echo "linux"
+        ;;
+    *)
+        error "Unsupported operating system: $(uname -s)"
+        ;;
     esac
 }
 
@@ -153,9 +156,9 @@ check_xcode_cli_tools() {
         printf "Would you like to install them now? [Y/n] "
         read_input
         case "$REPLY" in
-            [Nn]*)
-                error "Xcode Command Line Tools are required for Metal support"
-                ;;
+        [Nn]*)
+            error "Xcode Command Line Tools are required for Metal support"
+            ;;
         esac
         info "Installing Xcode Command Line Tools..."
         xcode-select --install
@@ -173,9 +176,9 @@ check_metal_toolchain() {
         printf "Would you like to install it now? [Y/n] "
         read_input
         case "$REPLY" in
-            [Nn]*)
-                error "Metal Toolchain is required for Metal support"
-                ;;
+        [Nn]*)
+            error "Metal Toolchain is required for Metal support"
+            ;;
         esac
         info "Installing Metal Toolchain..."
         xcodebuild -downloadComponent MetalToolchain
@@ -278,9 +281,9 @@ main() {
             printf "Would you like to update Rust now? [Y/n] "
             read_input
             case "$REPLY" in
-                [Nn]*)
-                    error "Rust $REQUIRED_RUST_VERSION or newer is required to install mistral.rs"
-                    ;;
+            [Nn]*)
+                error "Rust $REQUIRED_RUST_VERSION or newer is required to install mistral.rs"
+                ;;
             esac
             update_rust
             # Re-check version after update
@@ -295,9 +298,9 @@ main() {
         printf "Would you like to install Rust now? [Y/n] "
         read_input
         case "$REPLY" in
-            [Nn]*)
-                error "Rust is required to install mistral.rs"
-                ;;
+        [Nn]*)
+            error "Rust is required to install mistral.rs"
+            ;;
         esac
         install_rust
     fi
@@ -322,10 +325,10 @@ main() {
     printf "Proceed with installation? [Y/n] "
     read_input
     case "$REPLY" in
-        [Nn]*)
-            info "Installation cancelled"
-            exit 0
-            ;;
+    [Nn]*)
+        info "Installation cancelled"
+        exit 0
+        ;;
     esac
 
     echo ""

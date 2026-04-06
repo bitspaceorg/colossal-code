@@ -12,7 +12,13 @@ impl App {
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.close_connect_modal();
-            self.push_connect_status(" ⎿ connect dialog dismissed".to_string());
+            if self.connect.active_connection_id.is_none() && self.current_model.is_none() {
+                self.push_connect_status(
+                    " ⎿ No model configured. Use /connect to set up a provider or /model to select a local model.".to_string()
+                );
+            } else {
+                self.push_connect_status(" ⎿ connect dialog dismissed".to_string());
+            }
             return true;
         }
 
@@ -20,7 +26,13 @@ impl App {
             ConnectModalMode::Providers => match key.code {
                 KeyCode::Esc => {
                     self.close_connect_modal();
-                    self.push_connect_status(" ⎿ connect dialog dismissed".to_string());
+                    if self.connect.active_connection_id.is_none() && self.current_model.is_none() {
+                        self.push_connect_status(
+                            " ⎿ No model configured. Use /connect to set up a provider or /model to select a local model.".to_string()
+                        );
+                    } else {
+                        self.push_connect_status(" ⎿ connect dialog dismissed".to_string());
+                    }
                 }
                 KeyCode::Up => {
                     if self.connect.selected_index > 0 {

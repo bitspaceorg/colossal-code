@@ -2,8 +2,8 @@ use jagged::index::RowIndex;
 
 use super::{Execute, SwitchMode};
 use crate::{
-    helper::{insert_char, line_break},
     EditorMode, EditorState,
+    helper::{insert_char, line_break},
 };
 
 /// Inserts a single character at the current cursor position

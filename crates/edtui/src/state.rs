@@ -5,6 +5,8 @@ pub mod selection;
 mod undo;
 mod view;
 
+pub use self::search::SearchDirection;
+
 use self::search::SearchState;
 use self::view::ViewState;
 use self::{mode::EditorMode, selection::Selection, undo::Stack};
@@ -90,10 +92,43 @@ impl EditorState {
         self.search.pattern.clone()
     }
 
+    /// Returns the active search direction.
+    #[must_use]
+    pub fn search_direction(&self) -> SearchDirection {
+        self.search.direction
+    }
+
+    /// Returns the prompt prefix for the active search direction.
+    #[must_use]
+    pub fn search_prompt_char(&self) -> char {
+        match self.search.direction {
+            SearchDirection::Forward => '/',
+            SearchDirection::Backward => '?',
+        }
+    }
+
     /// Sets the number of visible rows in the viewport.
     /// This is used for page up/down navigation (Ctrl+u/Ctrl+d).
     pub fn set_viewport_rows(&mut self, num_rows: usize) {
         self.view.num_rows = num_rows;
+    }
+
+    /// Returns the number of visible viewport rows.
+    #[must_use]
+    pub fn viewport_rows(&self) -> usize {
+        self.view.num_rows
+    }
+
+    /// Sets the current vertical viewport offset.
+    /// This lets external renderers keep screen-relative motions in sync.
+    pub fn set_viewport_offset_y(&mut self, offset_y: usize) {
+        self.view.viewport.y = offset_y;
+    }
+
+    /// Returns the current vertical viewport offset.
+    #[must_use]
+    pub fn viewport_offset_y(&self) -> usize {
+        self.view.viewport.y
     }
 
     /// Returns the search matches.
