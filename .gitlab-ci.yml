@@ -1,6 +1,5 @@
 stages:
-  - fmt
-  - build
+  - lint
   - test
   - package
 
@@ -8,6 +7,7 @@ variables:
   GIT_DEPTH: 1
   CARGO_TERM_COLOR: always
   NIX_CONFIG: "experimental-features = nix-command flakes"
+  CARGO_HOME: ${CI_PROJECT_DIR}/.cargo
 
 .nix_rust_template: &nix_rust_template
   image: nixos/nix:2.24.11
@@ -15,6 +15,14 @@ variables:
     - nix --version
     - nix flake metadata
     - nix develop --accept-flake-config -c treefmt --version
+  cache:
+    key: cargo-${CI_COMMIT_REF_SLUG}
+    paths:
+      - .cargo/registry/cache
+      - .cargo/registry/index
+      - .cargo/git/db
+      - target/
+    policy: pull-push
 
 .rules_first_party:
   rules: &rules_first_party
@@ -33,26 +41,27 @@ variables:
         - .gitlab-ci.yml
     - when: never
 
+# ── lint stage (fmt + clippy run in parallel) ──────────────────────────
+
 fmt:rust:
   <<: *nix_rust_template
-  stage: fmt
+  stage: lint
   rules: *rules_first_party
+  cache:
+    policy: pull  # fmt doesn't produce useful build artifacts
   script:
     - nix develop --accept-flake-config -c cargo fmt --all --check
 
-build:check:
+# clippy is a strict superset of `cargo check`, so a separate check job
+# is redundant. --all-targets already covers lib, bins, tests, examples.
+lint:clippy:
   <<: *nix_rust_template
-  stage: build
-  rules: *rules_first_party
-  script:
-    - nix develop --accept-flake-config -c cargo check --all-targets
-
-build:clippy:
-  <<: *nix_rust_template
-  stage: build
+  stage: lint
   rules: *rules_first_party
   script:
     - nix develop --accept-flake-config -c cargo clippy --all-targets --no-deps
+
+# ── test stage (runs in parallel with nothing blocking it after lint) ──
 
 test:all-targets:
   <<: *nix_rust_template
@@ -60,6 +69,8 @@ test:all-targets:
   rules: *rules_first_party
   script:
     - nix develop --accept-flake-config -c cargo test --all-targets
+
+# ── package stage ──────────────────────────────────────────────────────
 
 package:nix:
   <<: *nix_rust_template
