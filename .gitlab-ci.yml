@@ -19,7 +19,6 @@ variables:
     key: cargo-${CI_COMMIT_REF_SLUG}
     paths:
       - .cargo/registry/cache
-      - .cargo/registry/index
       - .cargo/git/db
       - target/
     policy: pull-push
