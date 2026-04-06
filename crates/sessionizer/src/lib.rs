@@ -137,7 +137,60 @@ pub async fn spawn_sandboxed_command(
 
         cmd.spawn().map_err(|e| ColossalErr::Io(e))
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        use tokio::process::Command;
+
+        let request = sandboxing::SandboxManager::new().prepare_spawn(
+            sandboxing::SandboxCommand {
+                program: PathBuf::from(command.get(0).ok_or_else(|| {
+                    ColossalErr::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Empty command",
+                    ))
+                })?),
+                args: command[1..].to_vec(),
+                cwd: cwd.clone(),
+                env,
+            },
+            sandbox_policy,
+        )?;
+
+        // On Windows, use inline sandboxing via windows_sandbox::spawn_sandboxed_command
+        if request.sandbox == sandboxing::SandboxType::WindowsRestrictedToken {
+            if let Some(profile) = request.windows_profile {
+                return tokio::task::spawn_blocking(move || {
+                    crate::windows_sandbox::spawn_sandboxed_command(
+                        &request.program,
+                        &request.args,
+                        &request.cwd,
+                        &request.env,
+                        &profile,
+                    )
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e))
+                })
+                .await
+                .map_err(|e| {
+                    ColossalErr::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e.to_string(),
+                    ))
+                })?
+                .map_err(|e| ColossalErr::Io(e));
+            }
+        }
+
+        // Fallback: spawn normally (shouldn't happen, but handle it)
+        let mut cmd = Command::new(&request.program);
+        cmd.args(&request.args)
+            .current_dir(&request.cwd)
+            .envs(&request.env)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::piped());
+        cmd.spawn().map_err(|e| ColossalErr::Io(e))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let request = sandboxing::SandboxManager::new().prepare_spawn(
             sandboxing::SandboxCommand {

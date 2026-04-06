@@ -104,6 +104,63 @@ pub fn build_windows_sandbox_profile(
     }
 }
 
+/// Spawn a command with Windows sandbox restrictions applied in-process.
+/// This replaces the external helper binary approach.
+#[cfg(target_os = "windows")]
+pub fn spawn_sandboxed_command(
+    program: &Path,
+    args: &[String],
+    cwd: &Path,
+    env: &std::collections::HashMap<String, String>,
+    profile: &WindowsSandboxProfile,
+) -> Result<std::process::Child, String> {
+    use std::collections::HashMap;
+
+    let canonical_cwd = path_normalization::canonicalize_path(cwd);
+    let mut env_map: HashMap<String, String> = env.clone();
+    env_map.remove("COLOSSAL_WINDOWS_SANDBOX_PROFILE");
+    normalize_null_device_env(&mut env_map);
+    ensure_non_interactive_pager(&mut env_map);
+    if !profile.allow_network {
+        apply_no_network_to_env(&mut env_map).map_err(|err| err.to_string())?;
+    }
+
+    let primary_sid = profile
+        .primary_capability_sid
+        .as_deref()
+        .and_then(LocalSid::from_string);
+    let workspace_sid = profile
+        .workspace_capability_sid
+        .as_deref()
+        .and_then(LocalSid::from_string);
+
+    let token = create_profile_token(profile, primary_sid.as_ref(), workspace_sid.as_ref())?;
+    let _guards = apply_profile_acl_policy(
+        profile,
+        &canonical_cwd,
+        primary_sid.as_ref(),
+        workspace_sid.as_ref(),
+    )?;
+
+    let command: Vec<std::ffi::OsString> = std::iter::once(program)
+        .chain(args.iter().map(|s| std::ffi::OsString::from(s)))
+        .collect();
+
+    create_process_as_user(token.raw(), &command, cwd, &env_map)
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+pub fn spawn_sandboxed_command(
+    _program: &Path,
+    _args: &[String],
+    _cwd: &Path,
+    _env: &std::collections::HashMap<String, String>,
+    _profile: &WindowsSandboxProfile,
+) -> Result<std::process::Child, String> {
+    Err("Windows sandbox not available on this platform".to_string())
+}
+
 fn build_windows_writable_roots(sandbox_policy: &SandboxPolicy, cwd: &Path) -> Vec<WritableRoot> {
     match sandbox_policy {
         SandboxPolicy::WorkspaceWrite {

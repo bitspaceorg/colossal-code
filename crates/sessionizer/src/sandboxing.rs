@@ -34,6 +34,8 @@ pub struct SandboxExecRequest {
     pub env: HashMap<String, String>,
     pub sandbox: SandboxType,
     pub sandbox_policy: Option<SandboxPolicy>,
+    #[cfg(target_os = "windows")]
+    pub windows_profile: Option<windows_sandbox::WindowsSandboxProfile>,
 }
 
 #[derive(Default)]
@@ -57,6 +59,8 @@ impl SandboxManager {
                 env: command.env,
                 sandbox: SandboxType::None,
                 sandbox_policy: None,
+                #[cfg(target_os = "windows")]
+                windows_profile: None,
             });
         }
 
@@ -82,6 +86,8 @@ impl SandboxManager {
                 env: command.env,
                 sandbox: SandboxType::None,
                 sandbox_policy: None,
+                #[cfg(target_os = "windows")]
+                windows_profile: None,
             })
         }
     }
@@ -106,6 +112,8 @@ impl SandboxManager {
                 env: command.env,
                 sandbox: SandboxType::LinuxBubblewrap,
                 sandbox_policy: None,
+                #[cfg(target_os = "windows")]
+                windows_profile: None,
             });
         }
 
@@ -117,6 +125,8 @@ impl SandboxManager {
             env: command.env,
             sandbox: SandboxType::LinuxLandlock,
             sandbox_policy: Some(sandbox_policy.clone()),
+            #[cfg(target_os = "windows")]
+            windows_profile: None,
         })
     }
 
@@ -135,6 +145,8 @@ impl SandboxManager {
             env: command.env,
             sandbox: SandboxType::MacosSeatbelt,
             sandbox_policy: None,
+            #[cfg(target_os = "windows")]
+            windows_profile: None,
         })
     }
 
@@ -145,28 +157,15 @@ impl SandboxManager {
         sandbox_policy: &SandboxPolicy,
     ) -> Result<SandboxExecRequest, ColossalErr> {
         let profile = windows_sandbox::build_windows_sandbox_profile(sandbox_policy, &command.cwd);
-        let mut env = command.env;
-        env.insert(
-            "COLOSSAL_WINDOWS_SANDBOX_PROFILE".to_string(),
-            profile.serialized_policy(),
-        );
-        let helper = resolve_sandbox_helper_path()?;
-        let mut args = vec![
-            "--cwd".to_string(),
-            command.cwd.to_string_lossy().to_string(),
-            "--windows-sandbox-profile".to_string(),
-            profile.serialized_policy(),
-            "--".to_string(),
-            command.program.to_string_lossy().to_string(),
-        ];
-        args.extend(command.args);
+
         Ok(SandboxExecRequest {
-            program: helper,
-            args,
+            program: command.program,
+            args: command.args,
             cwd: command.cwd,
-            env,
+            env: command.env,
             sandbox: SandboxType::WindowsRestrictedToken,
-            sandbox_policy: None,
+            sandbox_policy: Some(sandbox_policy.clone()),
+            windows_profile: Some(profile),
         })
     }
 }
