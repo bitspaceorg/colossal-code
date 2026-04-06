@@ -3,7 +3,6 @@ use qdrant_client::qdrant::{
     PointStruct, SearchParamsBuilder, SearchPointsBuilder, UpsertPointsBuilder,
 };
 use qdrant_client::{Payload, Qdrant};
-use reqwest;
 use serde::Serialize;
 use serde_json;
 use std::fs;
@@ -60,7 +59,7 @@ pub async fn call(
 ) -> Result<reqwest::Response, Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::new();
     let json_payload = serde_json::json!({ "inputs": message });
-    let res = client
+    let res: reqwest::Response = client
         .post("http://127.0.0.1:9090/embed")
         .json(&json_payload)
         .send()

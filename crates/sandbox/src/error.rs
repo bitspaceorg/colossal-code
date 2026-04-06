@@ -1,5 +1,7 @@
 use reqwest::StatusCode;
+#[cfg(target_os = "linux")]
 use seccompiler::BackendError as SeccompilerBackendError;
+#[cfg(target_os = "linux")]
 use seccompiler::Error as SeccompilerError;
 use serde_json;
 use std::io;

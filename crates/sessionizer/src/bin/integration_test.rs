@@ -91,6 +91,8 @@ async fn main() -> Result<()> {
         timeout_ms: Some(10000),
         max_output_tokens: 1000,
         sandbox_policy: sandbox_policy.clone(),
+        is_background: false,
+        ask_for_approval: None,
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;
@@ -155,6 +157,8 @@ async fn main() -> Result<()> {
         timeout_ms: Some(10000),
         max_output_tokens: 1000,
         sandbox_policy: sandbox_policy.clone(),
+        is_background: false,
+        ask_for_approval: None,
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;
@@ -232,6 +236,8 @@ async fn main() -> Result<()> {
         timeout_ms: Some(15000),
         max_output_tokens: 1000,
         sandbox_policy: sandbox_policy.clone(),
+        is_background: false,
+        ask_for_approval: None,
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;
@@ -302,6 +308,8 @@ async fn main() -> Result<()> {
         timeout_ms: Some(10000),
         max_output_tokens: 1000,
         sandbox_policy: sandbox_policy.clone(),
+        is_background: false,
+        ask_for_approval: None,
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;
@@ -363,6 +371,8 @@ async fn main() -> Result<()> {
         timeout_ms: Some(10000),
         max_output_tokens: 1000,
         sandbox_policy: sandbox_policy.clone(),
+        is_background: false,
+        ask_for_approval: None,
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;
@@ -474,6 +484,8 @@ async fn main() -> Result<()> {
         timeout_ms: Some(10000),
         max_output_tokens: 1000,
         sandbox_policy: sandbox_policy.clone(),
+        is_background: false,
+        ask_for_approval: None,
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;
@@ -535,6 +547,8 @@ async fn main() -> Result<()> {
         timeout_ms: Some(10000),
         max_output_tokens: 1000,
         sandbox_policy: sandbox_policy.clone(),
+        is_background: false,
+        ask_for_approval: None,
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;
@@ -596,6 +610,8 @@ async fn main() -> Result<()> {
         timeout_ms: Some(10000),
         max_output_tokens: 1000,
         sandbox_policy: sandbox_policy.clone(),
+        is_background: false,
+        ask_for_approval: None,
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;
@@ -694,6 +710,8 @@ async fn main() -> Result<()> {
         timeout_ms: Some(10000),
         max_output_tokens: 1000,
         sandbox_policy: sandbox_policy.clone(),
+        is_background: false,
+        ask_for_approval: None,
     };
 
     let (_session_id, stream) = manager.stream_exec_command_enhanced(params).await?;

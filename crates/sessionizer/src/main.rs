@@ -2,7 +2,7 @@ use anyhow::Result;
 use colossal_linux_sandbox::manager::SessionManager;
 use colossal_linux_sandbox::protocol::{NetworkAccess, SandboxPolicy, WritableRoot};
 use colossal_linux_sandbox::shell::default_user_shell;
-use colossal_linux_sandbox::types::{ExitStatus, StreamEvent};
+use colossal_linux_sandbox::types::StreamEvent;
 use std::io::Write;
 
 #[tokio::main]
@@ -55,6 +55,7 @@ async fn main() -> Result<()> {
             "echo 'Hello from persistent shell!'".to_string(),
             Some(5000), // 5 second timeout
             1000,       // max output tokens
+            None,
         )
         .await?;
 
@@ -81,6 +82,7 @@ async fn main() -> Result<()> {
                 cmd.to_string(),
                 Some(5000),
                 1000,
+                None,
             )
             .await?;
 
@@ -107,6 +109,7 @@ async fn main() -> Result<()> {
             "echo $MY_VAR".to_string(),
             Some(5000),
             1000,
+            None,
         )
         .await?;
 
@@ -123,6 +126,7 @@ async fn main() -> Result<()> {
             "mkdir -p /tmp/test_shell_session && cd /tmp/test_shell_session && pwd".to_string(),
             Some(5000),
             1000,
+            None,
         )
         .await?;
 
@@ -174,7 +178,7 @@ async fn main() -> Result<()> {
                 println!("\n   🏁 Stream completed with exit code: {}", code);
                 break;
             }
-            StreamEvent::Error(error) => {
+            StreamEvent::Error(_error) => {
                 // eprintln!("\n   ❌ Stream error: {}", error);
                 break;
             }
@@ -208,6 +212,7 @@ async fn main() -> Result<()> {
             "rm -rf /tmp/test_shell_session".to_string(),
             Some(5000),
             1000,
+            None,
         )
         .await?;
     println!(
@@ -224,6 +229,7 @@ async fn main() -> Result<()> {
             "ls /nonexistent_directory".to_string(),
             Some(5000),
             1000,
+            None,
         )
         .await?;
 

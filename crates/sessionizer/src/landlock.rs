@@ -8,7 +8,7 @@ pub fn apply_sandbox_policy_to_current_thread(
 ) -> Result<(), ColossalErr> {
     #[cfg(target_os = "linux")]
     {
-        apply_linux_landlock_policy(sandbox_policy, cwd)
+        apply_linux_runtime_sandbox_policy(sandbox_policy, cwd, true)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -25,10 +25,155 @@ pub fn apply_sandbox_policy_to_current_thread(
 }
 
 #[cfg(target_os = "linux")]
+pub fn apply_runtime_sandbox_policy_to_current_thread(
+    sandbox_policy: &SandboxPolicy,
+    cwd: &Path,
+) -> Result<(), ColossalErr> {
+    apply_linux_runtime_sandbox_policy(sandbox_policy, cwd, false)
+}
+
+#[cfg(target_os = "linux")]
 fn landlock_bypass_enabled() -> bool {
     cfg!(debug_assertions)
         && std::env::var("DISABLE_LANDLOCK").unwrap_or_default() == "1"
         && std::env::var("ALLOW_UNSAFE_SANDBOX_BYPASS").unwrap_or_default() == "1"
+}
+
+#[cfg(target_os = "linux")]
+fn apply_linux_runtime_sandbox_policy(
+    sandbox_policy: &SandboxPolicy,
+    cwd: &Path,
+    apply_landlock_fs: bool,
+) -> Result<(), ColossalErr> {
+    if requires_no_new_privs(sandbox_policy, apply_landlock_fs) {
+        set_no_new_privs()?;
+    }
+
+    if requires_network_seccomp(sandbox_policy) {
+        install_network_seccomp_filter_on_current_thread()?;
+    }
+
+    if apply_landlock_fs {
+        apply_linux_landlock_policy(sandbox_policy, cwd)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn requires_no_new_privs(sandbox_policy: &SandboxPolicy, apply_landlock_fs: bool) -> bool {
+    apply_landlock_fs || requires_network_seccomp(sandbox_policy)
+}
+
+#[cfg(target_os = "linux")]
+fn requires_network_seccomp(sandbox_policy: &SandboxPolicy) -> bool {
+    !sandbox_policy.has_full_network_access()
+}
+
+#[cfg(target_os = "linux")]
+fn set_no_new_privs() -> Result<(), ColossalErr> {
+    let result = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if result != 0 {
+        return Err(ColossalErr::Io(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn install_network_seccomp_filter_on_current_thread() -> Result<(), ColossalErr> {
+    use seccompiler::BpfProgram;
+    use seccompiler::SeccompAction;
+    use seccompiler::SeccompCmpArgLen;
+    use seccompiler::SeccompCmpOp;
+    use seccompiler::SeccompCondition;
+    use seccompiler::SeccompFilter;
+    use seccompiler::SeccompRule;
+    use seccompiler::TargetArch;
+    use seccompiler::apply_filter;
+    use std::collections::BTreeMap;
+
+    fn deny_syscall(rules: &mut BTreeMap<i64, Vec<SeccompRule>>, nr: i64) {
+        rules.insert(nr, vec![]);
+    }
+
+    let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
+    deny_syscall(&mut rules, libc::SYS_ptrace);
+    deny_syscall(&mut rules, libc::SYS_io_uring_setup);
+    deny_syscall(&mut rules, libc::SYS_io_uring_enter);
+    deny_syscall(&mut rules, libc::SYS_io_uring_register);
+    deny_syscall(&mut rules, libc::SYS_connect);
+    deny_syscall(&mut rules, libc::SYS_accept);
+    deny_syscall(&mut rules, libc::SYS_accept4);
+    deny_syscall(&mut rules, libc::SYS_bind);
+    deny_syscall(&mut rules, libc::SYS_listen);
+    deny_syscall(&mut rules, libc::SYS_getpeername);
+    deny_syscall(&mut rules, libc::SYS_getsockname);
+    deny_syscall(&mut rules, libc::SYS_shutdown);
+    deny_syscall(&mut rules, libc::SYS_sendto);
+    deny_syscall(&mut rules, libc::SYS_sendmmsg);
+    deny_syscall(&mut rules, libc::SYS_recvmmsg);
+    deny_syscall(&mut rules, libc::SYS_getsockopt);
+    deny_syscall(&mut rules, libc::SYS_setsockopt);
+
+    let unix_only_rule = SeccompRule::new(vec![
+        SeccompCondition::new(
+            0,
+            SeccompCmpArgLen::Dword,
+            SeccompCmpOp::Ne,
+            libc::AF_UNIX as u64,
+        )
+        .map_err(|err| {
+            ColossalErr::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("Failed to build seccomp socket rule: {err}"),
+            ))
+        })?,
+    ])
+    .map_err(|err| {
+        ColossalErr::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("Failed to finalize seccomp socket rule: {err}"),
+        ))
+    })?;
+    rules.insert(libc::SYS_socket, vec![unix_only_rule.clone()]);
+    rules.insert(libc::SYS_socketpair, vec![unix_only_rule]);
+
+    let filter = SeccompFilter::new(
+        rules,
+        SeccompAction::Allow,
+        SeccompAction::Errno(libc::EPERM as u32),
+        if cfg!(target_arch = "x86_64") {
+            TargetArch::x86_64
+        } else if cfg!(target_arch = "aarch64") {
+            TargetArch::aarch64
+        } else {
+            return Err(ColossalErr::Io(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Unsupported architecture for seccomp filter",
+            )));
+        },
+    )
+    .map_err(|err| {
+        ColossalErr::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("Failed to build seccomp filter: {err}"),
+        ))
+    })?;
+
+    let program: BpfProgram = filter.try_into().map_err(|err| {
+        ColossalErr::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("Failed to compile seccomp filter: {err}"),
+        ))
+    })?;
+    apply_filter(&program).map_err(|err| {
+        ColossalErr::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("Failed to apply seccomp filter: {err}"),
+        ))
+    })?;
+
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

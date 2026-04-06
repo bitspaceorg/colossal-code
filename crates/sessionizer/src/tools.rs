@@ -1,6 +1,7 @@
 use crate::error::ColossalErr;
 use crate::manager::SessionManager;
 use crate::protocol::SandboxPolicy;
+use crate::sandboxing::{SandboxCommand, SandboxManager};
 use crate::shell::Shell;
 use crate::types::ExecCommandParams;
 use std::collections::HashSet;
@@ -63,139 +64,30 @@ pub async fn execute_tools_with_sandbox(
     sandbox_policy: &SandboxPolicy,
     cwd: PathBuf,
 ) -> Result<std::process::Output, ColossalErr> {
-    // Get the path to the tools binary
     let tools_path = get_tools_path()?;
+    let mut env = std::collections::HashMap::new();
+    env.insert(
+        "NITE_WORKSPACE_ROOT".to_string(),
+        cwd.to_string_lossy().to_string(),
+    );
+    let request = SandboxManager::new().prepare_spawn(
+        SandboxCommand {
+            program: tools_path,
+            args,
+            cwd: cwd.clone(),
+            env,
+        },
+        sandbox_policy,
+    )?;
 
-    // Execute the tools binary with the provided arguments using the sandboxing mechanism
-    #[cfg(target_os = "linux")]
-    {
-        use std::process::{Command, Stdio};
-
-        // Clone the sandbox policy for the blocking task
-        let sandbox_policy = sandbox_policy.clone();
-        let cwd_clone = cwd.clone();
-
-        // Use spawn_blocking to run the sandboxed command in a blocking thread
-        // This ensures the sandbox is applied to the thread that spawns the child process
-        let output = tokio::task::spawn_blocking(move || {
-            // Apply the sandbox policy to this thread before spawning the process
-            crate::landlock::apply_sandbox_policy_to_current_thread(&sandbox_policy, &cwd_clone)?;
-
-            let mut cmd = Command::new(tools_path);
-            cmd.args(args)
-                .current_dir(&cwd_clone)
-                .env(
-                    "NITE_WORKSPACE_ROOT",
-                    cwd_clone.to_string_lossy().to_string(),
-                )
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .stdin(Stdio::piped());
-
-            cmd.output().map_err(|e| ColossalErr::Io(e))
-        })
-        .await
-        .map_err(|e| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
-
-        Ok(output)
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        // For macOS, we need to run the tools binary through the sandbox-exec mechanism
-        let mut seatbelt_args = vec![
-            "-p".to_string(),
-            crate::seatbelt::MACOS_SEATBELT_BASE_POLICY.to_string(),
-        ];
-
-        // Add the appropriate rules based on the sandbox_policy
-        seatbelt_args.extend_from_slice(&create_seatbelt_args_for_policy(sandbox_policy, &cwd));
-        seatbelt_args.push("--".to_string());
-        seatbelt_args.push(tools_path.to_string_lossy().to_string());
-        seatbelt_args.extend(args);
-
-        let output = Command::new(crate::seatbelt::MACOS_PATH_TO_SEATBELT_EXECUTABLE)
-            .args(seatbelt_args)
-            .current_dir(cwd)
-            .env("NITE_WORKSPACE_ROOT", cwd.to_string_lossy().to_string())
-            .output()
-            .await
-            .map_err(|e| ColossalErr::Io(e))?;
-
-        Ok(output)
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        // For other platforms, execute directly without additional sandboxing
-        let mut cmd = Command::new(tools_path);
-        cmd.args(args)
-            .current_dir(cwd.clone())
-            .env("NITE_WORKSPACE_ROOT", cwd.to_string_lossy().to_string());
-
-        let output = cmd.output().await.map_err(|e| ColossalErr::Io(e))?;
-
-        Ok(output)
-    }
-}
-
-/// Create seatbelt arguments for a given sandbox policy (macOS only)
-#[cfg(target_os = "macos")]
-fn create_seatbelt_args_for_policy(sandbox_policy: &SandboxPolicy, cwd: &Path) -> Vec<String> {
-    // This would use similar logic to the create_seatbelt_command_args function in seatbelt.rs
-    // but adapted to generate the proper arguments for running a program with sandbox-exec
-
-    // For now, we'll return an empty vector, but in a full implementation,
-    // this would generate the proper seatbelt arguments based on the policy
-    let mut args = Vec::new();
-
-    match sandbox_policy {
-        crate::protocol::SandboxPolicy::WorkspaceWrite {
-            writable_roots,
-            network_access,
-            exclude_tmpdir_env_var,
-            exclude_slash_tmp,
-        } => {
-            // Add parameters for writable roots
-            for (index, wr) in writable_roots.iter().enumerate() {
-                let canonical_root = wr.root.canonicalize().unwrap_or_else(|_| wr.root.clone());
-                let root_param = format!("WRITABLE_ROOT_{}", index);
-                args.push(format!(
-                    "-D{}={}",
-                    root_param,
-                    canonical_root.to_string_lossy()
-                ));
-            }
-
-            // Handle /tmp access
-            if !exclude_slash_tmp {
-                args.push(format!(
-                    "-DWRITABLE_ROOT_TMP={}",
-                    std::path::Path::new("/tmp").to_string_lossy()
-                ));
-            }
-
-            // Handle TMPDIR access
-            if !exclude_tmpdir_env_var {
-                if let Ok(tmpdir) = std::env::var("TMPDIR") {
-                    args.push(format!("-DWRITABLE_ROOT_TMPEXTRA={}", tmpdir));
-                }
-            }
-
-            // Handle working directory
-            let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-            args.push(format!(
-                "-DWRITABLE_ROOT_CWD={}",
-                canonical_cwd.to_string_lossy()
-            ));
-        }
-        crate::protocol::SandboxPolicy::DangerFullAccess => {
-            // For DangerFullAccess, we might not need specific arguments,
-            // or we could add arguments to allow everything
-        }
-    }
-
-    args
+    let mut cmd = tokio::process::Command::new(&request.program);
+    cmd.args(&request.args)
+        .current_dir(&request.cwd)
+        .envs(&request.env)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::piped());
+    cmd.output().await.map_err(ColossalErr::Io)
 }
 
 /// Get the path to the tools binary
