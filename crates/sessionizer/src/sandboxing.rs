@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 pub enum SandboxType {
     None,
     MacosSeatbelt,
-    LinuxHelper,
+    LinuxBubblewrap,
+    LinuxLandlock,
     WindowsRestrictedToken,
 }
 
@@ -32,6 +33,7 @@ pub struct SandboxExecRequest {
     pub cwd: PathBuf,
     pub env: HashMap<String, String>,
     pub sandbox: SandboxType,
+    pub sandbox_policy: Option<SandboxPolicy>,
 }
 
 #[derive(Default)]
@@ -42,75 +44,35 @@ impl SandboxManager {
         Self
     }
 
-    pub fn get_platform_sandbox() -> Option<SandboxType> {
-        if cfg!(target_os = "linux") {
-            Some(SandboxType::LinuxHelper)
-        } else if cfg!(target_os = "macos") {
-            Some(SandboxType::MacosSeatbelt)
-        } else if cfg!(target_os = "windows") {
-            Some(SandboxType::WindowsRestrictedToken)
-        } else {
-            None
-        }
-    }
-
     pub fn prepare_spawn(
         &self,
         command: SandboxCommand,
         sandbox_policy: &SandboxPolicy,
     ) -> Result<SandboxExecRequest, ColossalErr> {
-        let sandbox = if matches!(sandbox_policy, SandboxPolicy::DangerFullAccess) {
-            SandboxType::None
-        } else {
-            Self::get_platform_sandbox().unwrap_or(SandboxType::None)
-        };
-
-        match sandbox {
-            SandboxType::None => Ok(SandboxExecRequest {
+        if matches!(sandbox_policy, SandboxPolicy::DangerFullAccess) {
+            return Ok(SandboxExecRequest {
                 program: command.program,
                 args: command.args,
                 cwd: command.cwd,
                 env: command.env,
-                sandbox,
-            }),
-            SandboxType::WindowsRestrictedToken => {
-                self.prepare_windows_restricted_token(command, sandbox_policy)
-            }
-            SandboxType::LinuxHelper => self.prepare_linux_helper(command, sandbox_policy),
-            SandboxType::MacosSeatbelt => self.prepare_macos_seatbelt(command, sandbox_policy),
+                sandbox: SandboxType::None,
+                sandbox_policy: None,
+            });
         }
-    }
 
-    fn prepare_linux_helper(
-        &self,
-        command: SandboxCommand,
-        sandbox_policy: &SandboxPolicy,
-    ) -> Result<SandboxExecRequest, ColossalErr> {
+        #[cfg(target_os = "macos")]
+        {
+            self.prepare_macos_seatbelt(command, sandbox_policy)
+        }
         #[cfg(target_os = "linux")]
         {
-            let helper = resolve_sandbox_helper_path()?;
-            let policy = serde_json::to_string(sandbox_policy).map_err(|err| {
-                ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, err))
-            })?;
-
-            let mut args = vec![
-                "--cwd".to_string(),
-                command.cwd.to_string_lossy().to_string(),
-                "--sandbox-policy".to_string(),
-                policy,
-                "--".to_string(),
-                command.program.to_string_lossy().to_string(),
-            ];
-            args.extend(command.args);
-            Ok(SandboxExecRequest {
-                program: helper,
-                args,
-                cwd: command.cwd,
-                env: command.env,
-                sandbox: SandboxType::LinuxHelper,
-            })
+            self.prepare_linux_sandbox(command, sandbox_policy)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        {
+            self.prepare_windows_restricted_token(command, sandbox_policy)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             let _ = sandbox_policy;
             Ok(SandboxExecRequest {
@@ -119,87 +81,107 @@ impl SandboxManager {
                 cwd: command.cwd,
                 env: command.env,
                 sandbox: SandboxType::None,
+                sandbox_policy: None,
             })
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn prepare_linux_sandbox(
+        &self,
+        command: SandboxCommand,
+        sandbox_policy: &SandboxPolicy,
+    ) -> Result<SandboxExecRequest, ColossalErr> {
+        use crate::linux_sandbox::{create_bwrap_command_args, preferred_bwrap_launcher};
+
+        // Prefer bubblewrap if available - it provides mount namespace isolation
+        if let Some(bwrap) = preferred_bwrap_launcher(None) {
+            let mut cmd_vec = vec![command.program.to_string_lossy().to_string()];
+            cmd_vec.extend(command.args.iter().cloned());
+            let bwrap_args = create_bwrap_command_args(sandbox_policy, &command.cwd, &cmd_vec);
+            return Ok(SandboxExecRequest {
+                program: bwrap.program().to_path_buf(),
+                args: bwrap_args,
+                cwd: command.cwd,
+                env: command.env,
+                sandbox: SandboxType::LinuxBubblewrap,
+                sandbox_policy: None,
+            });
+        }
+
+        // Fallback: return original command, caller applies landlock via pre_exec
+        Ok(SandboxExecRequest {
+            program: command.program,
+            args: command.args,
+            cwd: command.cwd,
+            env: command.env,
+            sandbox: SandboxType::LinuxLandlock,
+            sandbox_policy: Some(sandbox_policy.clone()),
+        })
+    }
+
+    #[cfg(target_os = "macos")]
     fn prepare_macos_seatbelt(
         &self,
         command: SandboxCommand,
         sandbox_policy: &SandboxPolicy,
     ) -> Result<SandboxExecRequest, ColossalErr> {
-        #[cfg(target_os = "macos")]
-        {
-            let mut argv = vec![command.program.to_string_lossy().to_string()];
-            argv.extend(command.args);
-            Ok(SandboxExecRequest {
-                program: PathBuf::from(seatbelt::MACOS_PATH_TO_SEATBELT_EXECUTABLE),
-                args: seatbelt::create_seatbelt_command_args(argv, sandbox_policy, &command.cwd),
-                cwd: command.cwd,
-                env: command.env,
-                sandbox: SandboxType::MacosSeatbelt,
-            })
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = sandbox_policy;
-            Ok(SandboxExecRequest {
-                program: command.program,
-                args: command.args,
-                cwd: command.cwd,
-                env: command.env,
-                sandbox: SandboxType::None,
-            })
-        }
+        let mut argv = vec![command.program.to_string_lossy().to_string()];
+        argv.extend(command.args);
+        Ok(SandboxExecRequest {
+            program: PathBuf::from(seatbelt::MACOS_PATH_TO_SEATBELT_EXECUTABLE),
+            args: seatbelt::create_seatbelt_command_args(argv, sandbox_policy, &command.cwd),
+            cwd: command.cwd,
+            env: command.env,
+            sandbox: SandboxType::MacosSeatbelt,
+            sandbox_policy: None,
+        })
     }
 
+    #[cfg(target_os = "windows")]
     fn prepare_windows_restricted_token(
         &self,
         command: SandboxCommand,
         sandbox_policy: &SandboxPolicy,
     ) -> Result<SandboxExecRequest, ColossalErr> {
-        #[cfg(target_os = "windows")]
-        {
-            let profile =
-                windows_sandbox::build_windows_sandbox_profile(sandbox_policy, &command.cwd);
-            let mut env = command.env;
-            env.insert(
-                "COLOSSAL_WINDOWS_SANDBOX_PROFILE".to_string(),
-                profile.serialized_policy(),
-            );
-            let helper = resolve_sandbox_helper_path()?;
-            let mut args = vec![
-                "--cwd".to_string(),
-                command.cwd.to_string_lossy().to_string(),
-                "--windows-sandbox-profile".to_string(),
-                profile.serialized_policy(),
-                "--".to_string(),
-                command.program.to_string_lossy().to_string(),
-            ];
-            args.extend(command.args);
-            Ok(SandboxExecRequest {
-                program: helper,
-                args,
-                cwd: command.cwd,
-                env,
-                sandbox: SandboxType::WindowsRestrictedToken,
-            })
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = sandbox_policy;
-            Ok(SandboxExecRequest {
-                program: command.program,
-                args: command.args,
-                cwd: command.cwd,
-                env: command.env,
-                sandbox: SandboxType::WindowsRestrictedToken,
-            })
-        }
+        let profile = windows_sandbox::build_windows_sandbox_profile(sandbox_policy, &command.cwd);
+        let mut env = command.env;
+        env.insert(
+            "COLOSSAL_WINDOWS_SANDBOX_PROFILE".to_string(),
+            profile.serialized_policy(),
+        );
+        let helper = resolve_sandbox_helper_path()?;
+        let mut args = vec![
+            "--cwd".to_string(),
+            command.cwd.to_string_lossy().to_string(),
+            "--windows-sandbox-profile".to_string(),
+            profile.serialized_policy(),
+            "--".to_string(),
+            command.program.to_string_lossy().to_string(),
+        ];
+        args.extend(command.args);
+        Ok(SandboxExecRequest {
+            program: helper,
+            args,
+            cwd: command.cwd,
+            env,
+            sandbox: SandboxType::WindowsRestrictedToken,
+            sandbox_policy: None,
+        })
     }
 }
 
+/// Resolve the sandbox helper binary path.
+/// Only needed on Windows where in-process sandboxing is not yet supported.
 pub fn resolve_sandbox_helper_path() -> Result<PathBuf, ColossalErr> {
+    // Check environment variable first
+    if let Ok(path) = std::env::var("COLOSSAL_SANDBOX_HELPER") {
+        let candidate = PathBuf::from(&path);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
     let current_exe = std::env::current_exe().map_err(ColossalErr::Io)?;
     let Some(bin_dir) = current_exe.parent() else {
         return Err(ColossalErr::MissingSandboxHelper);
@@ -229,16 +211,6 @@ fn sandbox_helper_candidates(bin_dir: &Path) -> Vec<PathBuf> {
     {
         vec![bin_dir.join("colossal-sandbox-helper")]
     }
-}
-
-#[cfg(target_os = "linux")]
-pub fn resolve_linux_helper_path() -> Result<PathBuf, ColossalErr> {
-    resolve_sandbox_helper_path()
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn resolve_linux_helper_path() -> Result<PathBuf, ColossalErr> {
-    Err(ColossalErr::MissingSandboxHelper)
 }
 
 pub fn command_isolation_required(sandbox_policy: &SandboxPolicy) -> bool {

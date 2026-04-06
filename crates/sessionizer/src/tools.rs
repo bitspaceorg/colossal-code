@@ -87,6 +87,28 @@ pub async fn execute_tools_with_sandbox(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::piped());
+
+    // On Linux without bubblewrap, apply landlock/seccomp in the forked child
+    #[cfg(target_os = "linux")]
+    {
+        if request.sandbox == crate::sandboxing::SandboxType::LinuxLandlock {
+            if let Some(policy) = request.sandbox_policy {
+                let cwd_for_sandbox = request.cwd.clone();
+                unsafe {
+                    cmd.pre_exec(move || {
+                        crate::landlock::apply_sandbox_policy_to_current_thread(
+                            &policy,
+                            &cwd_for_sandbox,
+                        )
+                        .map_err(|e| {
+                            std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string())
+                        })
+                    });
+                }
+            }
+        }
+    }
+
     cmd.output().await.map_err(ColossalErr::Io)
 }
 

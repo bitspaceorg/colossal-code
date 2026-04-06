@@ -942,6 +942,17 @@ pub async fn create_sandboxed_exec_session(
         &sandbox_policy,
     )?;
 
+    // PTY sessions cannot use pre_exec-based sandboxing (portable_pty doesn't support it).
+    // LinuxLandlock requires bubblewrap for PTY sessions.
+    #[cfg(target_os = "linux")]
+    if request.sandbox == crate::sandboxing::SandboxType::LinuxLandlock {
+        return Err(ColossalErr::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "PTY sandbox requires bubblewrap (bwrap). Install it with your package manager \
+             (e.g. `apt install bubblewrap` or `dnf install bubblewrap`).",
+        )));
+    }
+
     let mut child;
     let mut attempts = 0;
     loop {
@@ -1124,6 +1135,17 @@ pub async fn create_persistent_shell_session(
         },
         &sandbox_policy,
     )?;
+
+    // PTY sessions cannot use pre_exec-based sandboxing (portable_pty doesn't support it).
+    // LinuxLandlock requires bubblewrap for PTY sessions.
+    #[cfg(target_os = "linux")]
+    if request.sandbox == crate::sandboxing::SandboxType::LinuxLandlock {
+        return Err(ColossalErr::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "PTY sandbox requires bubblewrap (bwrap). Install it with your package manager \
+             (e.g. `apt install bubblewrap` or `dnf install bubblewrap`).",
+        )));
+    }
 
     let mut child;
     let mut attempts = 0;

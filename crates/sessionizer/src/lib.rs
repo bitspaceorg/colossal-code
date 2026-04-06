@@ -115,6 +115,26 @@ pub async fn spawn_sandboxed_command(
             .stderr(std::process::Stdio::piped())
             .stdin(std::process::Stdio::piped());
 
+        // If bubblewrap is not available, apply landlock/seccomp in the forked
+        // child process before exec.  pre_exec runs after fork() but before
+        // exec(), which is exactly the right place for per-process sandboxing.
+        if request.sandbox == sandboxing::SandboxType::LinuxLandlock {
+            if let Some(policy) = request.sandbox_policy {
+                let cwd_for_sandbox = request.cwd.clone();
+                unsafe {
+                    cmd.pre_exec(move || {
+                        crate::landlock::apply_sandbox_policy_to_current_thread(
+                            &policy,
+                            &cwd_for_sandbox,
+                        )
+                        .map_err(|e| {
+                            std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string())
+                        })
+                    });
+                }
+            }
+        }
+
         cmd.spawn().map_err(|e| ColossalErr::Io(e))
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
