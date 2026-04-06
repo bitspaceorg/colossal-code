@@ -58,8 +58,9 @@ fmt:rust:
   <<: *nix_rust_template
   stage: lint
   rules: *rules_first_party
-  cache:
-    policy: pull  # fmt doesn't produce useful build artifacts
+  before_script:
+    - nix --version
+  cache: {}  # fmt only needs rustfmt from nix, no cargo artifacts
   script:
     - nix develop --accept-flake-config -c cargo fmt --all --check
 
