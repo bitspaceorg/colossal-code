@@ -1143,16 +1143,44 @@ impl Agent {
 
     fn render_system_prompt(
         template: &str,
-        tools_section: &str,
         os_version: &str,
         workspace_path: &str,
         model_label: &str,
+        safety_mode: Option<safety_config::SafetyMode>,
     ) -> String {
-        template
-            .replace("{tools_section}", tools_section)
+        let mut result = template
             .replace("{os_version}", os_version)
             .replace("{workspace_path}", workspace_path)
-            .replace("{model_name}", model_label)
+            .replace("{model_name}", model_label);
+
+        if let Some(mode) = safety_mode {
+            if mode == safety_config::SafetyMode::ReadOnly {
+                result = Self::filter_readonly_sections(&result);
+            }
+        }
+
+        result
+    }
+
+    fn filter_readonly_sections(template: &str) -> String {
+        let mut result = template.to_string();
+
+        // Best-effort filtering: remove sections that reference tools not available in ReadOnly
+        // If tags aren't present (user edited them out), silently skip
+
+        // Remove <making_code_changes> section entirely - it references edit_file and shell commands
+        if let Some(start) = result.find("<making_code_changes>") {
+            if let Some(end) = result.find("</making_code_changes>") {
+                // Also capture the trailing newline if present
+                let end = result[end..]
+                    .find('\n')
+                    .map(|i| end + i + 1)
+                    .unwrap_or(end + "</making_code_changes>".len());
+                result.drain(start..end);
+            }
+        }
+
+        result.trim().to_string()
     }
 
     fn label_from_filename(model_filename: &str) -> String {
@@ -1184,20 +1212,20 @@ impl Agent {
     }
 
     async fn regenerate_system_prompt(&self, suffix: Option<String>) -> Result<()> {
-        let tools_section = {
-            let tools_guard = self.tools.lock().await;
-            generate_tools_section(&tools_guard)
-        };
         let (os_version, workspace_path) = Self::prompt_context();
         let system_prompt_template =
             read_system_prompt().unwrap_or_else(|_e| get_default_niterules());
         let model_label = { self.model_name.lock().await.clone() };
+        let safety_mode = {
+            let safety_guard = self.safety_config.lock().await;
+            safety_guard.mode
+        };
         let mut prompt = Self::render_system_prompt(
             &system_prompt_template,
-            &tools_section,
             &os_version,
             &workspace_path,
             &model_label,
+            Some(safety_mode),
         );
         if let Some(s) = suffix {
             prompt.push_str(&s);
@@ -1453,7 +1481,6 @@ impl Agent {
         } else {
             tools::get_all_tools()
         };
-        let tools_section = generate_tools_section(&tools);
 
         let system_prompt_template = read_system_prompt().unwrap_or_else(|_e| {
             // eprintln!("Warning: Failed to read .niterules, using default: {}", e);
@@ -1520,10 +1547,10 @@ impl Agent {
         let model_label = Self::model_label_from_backend(&backend_config);
         let mut system_prompt = Self::render_system_prompt(
             &system_prompt_template,
-            &tools_section,
             &os_version,
             &workspace_path,
             &model_label,
+            Some(safety_config.mode),
         );
 
         if let Some(suffix) = safety_config.get_system_prompt_suffix() {

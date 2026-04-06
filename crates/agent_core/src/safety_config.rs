@@ -156,11 +156,12 @@ impl SafetyConfig {
                 - Read files (read_file)\n\
                 - Search and list files (get_files, get_files_recursive, search_files_with_regex, semantic_search)\n\
                 - Search the web (web_search, html_to_text)\n\
-                - Track tasks or request spec splitting (todo_write, request_split)\n\n\
-                You CANNOT:\n\
-                - Write or edit files\n\
-                - Execute bash commands\n\
-                - Make any filesystem modifications\n\n\
+                - Track tasks or request spec splitting (todo_write, request_split)\n\
+                - Execute read-only bash commands\n\n\
+                Filesystem modifications are blocked by the sandbox:\n\
+                - Cannot write or edit files\n\
+                - Cannot delete files or directories\n\
+                - Cannot execute commands that modify the filesystem\n\n\
                 If the user requests modifications, politely explain that you're in read-only mode \
                 and they need to switch to regular or yolo mode first."
                     .to_string(),
