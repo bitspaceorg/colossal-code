@@ -35,7 +35,7 @@ use uuid::Uuid;
 ///
 /// ```
 /// use std::path::PathBuf;
-/// use sessionizer::hash_id::generate_hash_id_from_path;
+/// use colossal_linux_sandbox::hash_id::generate_hash_id_from_path;
 ///
 /// let path = PathBuf::from("/home/user/project");
 /// let hash_id = generate_hash_id_from_path(&path);
