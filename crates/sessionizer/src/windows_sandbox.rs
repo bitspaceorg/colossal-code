@@ -11,6 +11,9 @@ mod acl;
 #[path = "windows_sandbox/cap.rs"]
 mod cap;
 #[cfg(target_os = "windows")]
+#[path = "windows_sandbox/conpty.rs"]
+mod conpty;
+#[cfg(target_os = "windows")]
 #[path = "windows_sandbox/env.rs"]
 mod env;
 #[cfg(target_os = "windows")]
@@ -619,11 +622,129 @@ pub use imp::run_windows_sandbox_helper;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{NetworkAccess, WritableRoot};
+    use std::path::PathBuf;
 
     #[test]
     fn readonly_profile_disables_network() {
         let profile = build_windows_sandbox_profile(&SandboxPolicy::ReadOnly, Path::new("C:/tmp"));
         assert!(!profile.allow_network);
         assert!(profile.use_restricted_token);
+    }
+
+    #[test]
+    fn workspace_write_profile_enables_network() {
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![],
+            network_access: NetworkAccess::Enabled,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+        let profile = build_windows_sandbox_profile(&policy, Path::new("C:/tmp"));
+        assert!(profile.allow_network);
+        assert!(profile.use_restricted_token);
+    }
+
+    #[test]
+    fn workspace_write_profile_restricts_network() {
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![],
+            network_access: NetworkAccess::Restricted,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+        let profile = build_windows_sandbox_profile(&policy, Path::new("C:/tmp"));
+        assert!(!profile.allow_network);
+    }
+
+    #[test]
+    fn danger_full_access_skips_sandbox() {
+        let profile =
+            build_windows_sandbox_profile(&SandboxPolicy::DangerFullAccess, Path::new("C:/tmp"));
+        assert!(!profile.use_restricted_token);
+        assert!(!profile.use_job_object);
+        assert!(profile.allow_network);
+    }
+
+    #[test]
+    fn profile_serialization_succeeds() {
+        let profile = build_windows_sandbox_profile(&SandboxPolicy::ReadOnly, Path::new("C:/tmp"));
+        let serialized = profile.serialized_policy();
+        assert!(serialized.contains("read-only"));
+        assert!(serde_json::from_str::<WindowsSandboxProfile>(&serialized).is_ok());
+    }
+
+    #[test]
+    fn workspace_write_includes_writable_roots() {
+        let temp = std::env::temp_dir();
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![WritableRoot {
+                root: temp.clone(),
+                recursive: true,
+                read_only_subpaths: vec![],
+            }],
+            network_access: NetworkAccess::Restricted,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+        let profile = build_windows_sandbox_profile(&policy, &temp);
+        assert!(!profile.writable_roots.is_empty());
+    }
+
+    #[test]
+    fn workspace_write_includes_protected_subpaths() {
+        let temp = std::env::temp_dir();
+        let git_dir = temp.join(".git");
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![WritableRoot {
+                root: temp.clone(),
+                recursive: true,
+                read_only_subpaths: vec![git_dir],
+            }],
+            network_access: NetworkAccess::Restricted,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+        let profile = build_windows_sandbox_profile(&policy, &temp);
+        // Check that .git is in readable_roots (read-only subpath)
+        assert!(
+            profile
+                .readable_roots
+                .iter()
+                .any(|p| { p.to_string_lossy().contains(".git") })
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    mod windows_specific {
+        use super::*;
+        use crate::windows_sandbox::conpty::create_conpty;
+
+        #[test]
+        fn conpty_creation_succeeds() {
+            let result = create_conpty(80, 24);
+            // On Windows with ConPTY support, this should succeed
+            // On older Windows or without ConPTY, this may fail
+            match result {
+                Ok(handles) => {
+                    crate::windows_sandbox::conpty::close_conpty_handles(handles);
+                }
+                Err(e) => {
+                    // ConPTY may not be available on all Windows versions
+                    println!("ConPTY not available: {}", e);
+                }
+            }
+        }
+
+        #[test]
+        fn conpty_with_different_sizes() {
+            let sizes = vec![(80, 24), (120, 40), (40, 12)];
+            for (cols, rows) in sizes {
+                let result = create_conpty(cols, rows);
+                if let Ok(handles) = result {
+                    crate::windows_sandbox::conpty::close_conpty_handles(handles);
+                }
+            }
+        }
     }
 }

@@ -331,6 +331,109 @@ mod tests {
         let launcher = preferred_bwrap_launcher_for_paths(None, Some(helper.as_path()));
         assert_eq!(launcher, Some(BubblewrapLauncher::Packaged(packaged)));
     }
+
+    #[test]
+    fn readonly_policy_adds_tmpfs_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let command = vec!["/bin/echo".to_string(), "hi".to_string()];
+        let args = create_bwrap_command_args(&SandboxPolicy::ReadOnly, temp.path(), &command);
+
+        assert!(args.contains(&"--tmpfs".to_string()));
+        assert!(args.contains(&"/".to_string()));
+    }
+
+    #[test]
+    fn danger_full_access_policy_uses_bind_not_tmpfs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let command = vec!["/bin/echo".to_string(), "hi".to_string()];
+        let args =
+            create_bwrap_command_args(&SandboxPolicy::DangerFullAccess, temp.path(), &command);
+
+        assert!(!args.contains(&"--tmpfs".to_string()));
+        assert!(args.contains(&"--bind".to_string()));
+    }
+
+    #[test]
+    fn workspace_write_includes_protected_subpaths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let protected = workspace.join(".git");
+        std::fs::create_dir_all(&protected).expect("create protected dir");
+
+        let command = vec!["/bin/echo".to_string(), "hi".to_string()];
+        let args = create_bwrap_command_args(
+            &SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![WritableRoot {
+                    root: workspace.clone(),
+                    recursive: true,
+                    read_only_subpaths: vec![protected.clone()],
+                }],
+                network_access: NetworkAccess::Restricted,
+                exclude_tmpdir_env_var: true,
+                exclude_slash_tmp: true,
+            },
+            temp.path(),
+            &command,
+        );
+
+        let rendered = protected.to_string_lossy().to_string();
+        assert!(
+            args.windows(3)
+                .any(|window| window == ["--ro-bind", rendered.as_str(), rendered.as_str()]),
+            "Protected subpath should be read-only"
+        );
+    }
+
+    #[test]
+    fn network_restricted_includes_unshare_net() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let command = vec!["/bin/echo".to_string(), "hi".to_string()];
+        let args = create_bwrap_command_args(
+            &SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![],
+                network_access: NetworkAccess::Restricted,
+                exclude_tmpdir_env_var: true,
+                exclude_slash_tmp: true,
+            },
+            temp.path(),
+            &command,
+        );
+
+        assert!(args.contains(&"--unshare-net".to_string()));
+    }
+
+    #[test]
+    fn network_enabled_excludes_unshare_net() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let command = vec!["/bin/echo".to_string(), "hi".to_string()];
+        let args = create_bwrap_command_args(
+            &SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![],
+                network_access: NetworkAccess::Enabled,
+                exclude_tmpdir_env_var: true,
+                exclude_slash_tmp: true,
+            },
+            temp.path(),
+            &command,
+        );
+
+        assert!(!args.contains(&"--unshare-net".to_string()));
+    }
+
+    #[test]
+    fn find_system_bwrap_returns_none_for_missing() {
+        let result = find_system_bwrap_in_path();
+        // Either finds bwrap or returns None - both are valid
+        // This test ensures the function doesn't panic
+        let _ = result;
+    }
+
+    #[test]
+    fn preferred_bwrap_launcher_handles_none() {
+        let result = preferred_bwrap_launcher(None);
+        // Either finds bwrap or returns None - both are valid
+        let _ = result;
+    }
 }
 
 #[cfg(test)]

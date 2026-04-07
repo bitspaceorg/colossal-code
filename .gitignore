@@ -34,3 +34,38 @@ result-*
 
 # Generated pre-commit config
 # NOTE: .pre-commit-config.yaml is now committed to git for deterministic CI builds
+
+# Vendored dependencies - track only essential sources
+/vendor/bubblewrap/*.c
+/vendor/bubblewrap/*.h
+!/vendor/bubblewrap/bubblewrap.c
+!/vendor/bubblewrap/bind-mount.c
+!/vendor/bubblewrap/bind-mount.h
+!/vendor/bubblewrap/network.c
+!/vendor/bubblewrap/network.h
+!/vendor/bubblewrap/utils.c
+!/vendor/bubblewrap/utils.h
+/vendor/bubblewrap/tests/
+/vendor/bubblewrap/demos/
+/vendor/bubblewrap/completions/
+/vendor/bubblewrap/ci/
+/vendor/bubblewrap/packaging/
+/vendor/bubblewrap/.github/
+/vendor/bubblewrap/.editorconfig
+/vendor/bubblewrap/*.md
+/vendor/bubblewrap/*.xml
+/vendor/bubblewrap/*.jpg
+/vendor/bubblewrap/*.el
+/vendor/bubblewrap/meson.build
+/vendor/bubblewrap/meson_options.txt
+/vendor/bubblewrap/*.cfg
+/vendor/bubblewrap/*.sh
+/vendor/bubblewrap/COPYING
+/vendor/bubblewrap/LICENSE
+/vendor/bubblewrap/README.md
+/vendor/bubblewrap/NEWS.md
+/vendor/bubblewrap/SECURITY.md
+/vendor/bubblewrap/CODE-OF-CONDUCT.md
+/vendor/bubblewrap/bwrap.xml
+/vendor/bubblewrap/release-checklist.md
+/vendor/bubblewrap/uncrustify.sh

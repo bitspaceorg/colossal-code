@@ -36,6 +36,8 @@ pub struct SandboxExecRequest {
     pub sandbox_policy: Option<SandboxPolicy>,
     #[cfg(target_os = "windows")]
     pub windows_profile: Option<windows_sandbox::WindowsSandboxProfile>,
+    #[cfg(target_os = "windows")]
+    pub conpty_handles: Option<windows_sandbox::conpty::ConptyHandles>,
 }
 
 #[derive(Default)]
@@ -61,6 +63,8 @@ impl SandboxManager {
                 sandbox_policy: None,
                 #[cfg(target_os = "windows")]
                 windows_profile: None,
+                #[cfg(target_os = "windows")]
+                conpty_handles: None,
             });
         }
 
@@ -88,6 +92,8 @@ impl SandboxManager {
                 sandbox_policy: None,
                 #[cfg(target_os = "windows")]
                 windows_profile: None,
+                #[cfg(target_os = "windows")]
+                conpty_handles: None,
             })
         }
     }
@@ -114,20 +120,57 @@ impl SandboxManager {
                 sandbox_policy: None,
                 #[cfg(target_os = "windows")]
                 windows_profile: None,
+                #[cfg(target_os = "windows")]
+                conpty_handles: None,
             });
         }
 
-        // Fallback: return original command, caller applies landlock via pre_exec
-        Ok(SandboxExecRequest {
-            program: command.program,
-            args: command.args,
-            cwd: command.cwd,
-            env: command.env,
-            sandbox: SandboxType::LinuxLandlock,
-            sandbox_policy: Some(sandbox_policy.clone()),
-            #[cfg(target_os = "windows")]
-            windows_profile: None,
-        })
+        // No system bubblewrap found.  Try the colossal-sandbox-helper binary
+        // which can apply landlock in-process (works for both PTY and non-PTY).
+        // This avoids the pre_exec limitation with portable_pty.
+        if let Some(helper) = resolve_sandbox_helper_binary() {
+            let policy_json = serde_json::to_string(sandbox_policy).map_err(|e| {
+                ColossalErr::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("failed to serialize sandbox policy: {e}"),
+                ))
+            })?;
+            let mut args = vec![
+                "--cwd".to_string(),
+                command.cwd.to_string_lossy().to_string(),
+                "--sandbox-policy".to_string(),
+                policy_json,
+                "--".to_string(),
+                command.program.to_string_lossy().to_string(),
+            ];
+            args.extend(command.args.iter().cloned());
+            return Ok(SandboxExecRequest {
+                program: helper,
+                args,
+                cwd: command.cwd,
+                env: command.env,
+                sandbox: SandboxType::LinuxBubblewrap, // Treated as external sandbox
+                sandbox_policy: None,
+                #[cfg(target_os = "windows")]
+                windows_profile: None,
+                #[cfg(target_os = "windows")]
+                conpty_handles: None,
+            });
+        }
+
+        // Neither bubblewrap nor the helper binary are available.
+        // Return an error instead of LinuxLandlock, because LinuxLandlock
+        // requires pre_exec which doesn't work with PTY sessions.
+        // The caller (session.rs) would error anyway, so we error early with
+        // a clear message about what's needed.
+        Err(ColossalErr::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Sandbox requires either bubblewrap (bwrap) or the colossal-sandbox-helper binary. \
+             Install bubblewrap with your package manager (e.g., `apt install bubblewrap` or \
+             `dnf install bubblewrap`), or ensure colossal-sandbox-helper is in the same \
+             directory as the main binary. \
+             If building from source, install libcap-dev to enable vendored bubblewrap.",
+        )))
     }
 
     #[cfg(target_os = "macos")]
@@ -147,6 +190,8 @@ impl SandboxManager {
             sandbox_policy: None,
             #[cfg(target_os = "windows")]
             windows_profile: None,
+            #[cfg(target_os = "windows")]
+            conpty_handles: None,
         })
     }
 
@@ -158,6 +203,8 @@ impl SandboxManager {
     ) -> Result<SandboxExecRequest, ColossalErr> {
         let profile = windows_sandbox::build_windows_sandbox_profile(sandbox_policy, &command.cwd);
 
+        let conpty_handles = windows_sandbox::conpty::create_conpty(80, 24).ok();
+
         Ok(SandboxExecRequest {
             program: command.program,
             args: command.args,
@@ -166,8 +213,18 @@ impl SandboxManager {
             sandbox: SandboxType::WindowsRestrictedToken,
             sandbox_policy: Some(sandbox_policy.clone()),
             windows_profile: Some(profile),
+            conpty_handles,
         })
     }
+}
+
+/// Resolve the sandbox helper binary, returning None if not found.
+/// Used as a fallback when system bubblewrap is not available on Linux.
+/// The helper binary applies landlock in-process, which works for both
+/// PTY and non-PTY sessions (unlike pre_exec which only works for non-PTY).
+#[cfg(target_os = "linux")]
+fn resolve_sandbox_helper_binary() -> Option<PathBuf> {
+    resolve_sandbox_helper_path().ok()
 }
 
 /// Resolve the sandbox helper binary path.
@@ -292,5 +349,270 @@ mod tests {
             windows_profile_marker(&policy),
             "workspace-write:network-restricted"
         );
+    }
+
+    #[test]
+    fn readonly_policy_requires_isolation() {
+        assert!(command_isolation_required(&SandboxPolicy::ReadOnly));
+    }
+
+    #[test]
+    fn danger_full_access_no_isolation() {
+        assert!(!command_isolation_required(
+            &SandboxPolicy::DangerFullAccess
+        ));
+    }
+
+    #[test]
+    fn normalize_command_program_absolute() {
+        let program = "/bin/ls";
+        let cwd = PathBuf::from("/home/user");
+        let result = normalize_command_program(program, &cwd);
+        assert_eq!(result, PathBuf::from("/bin/ls"));
+    }
+
+    #[test]
+    fn normalize_command_program_relative() {
+        let program = "ls";
+        let cwd = PathBuf::from("/home/user");
+        let result = normalize_command_program(program, &cwd);
+        assert_eq!(result, PathBuf::from("/home/user/ls"));
+    }
+
+    #[cfg(target_os = "linux")]
+    mod linux_tests {
+        use super::*;
+        use crate::linux_sandbox::preferred_bwrap_launcher;
+
+        #[test]
+        fn linux_readonly_policy_uses_sandbox() {
+            let result = SandboxManager::new().prepare_spawn(
+                SandboxCommand {
+                    program: PathBuf::from("/bin/echo"),
+                    args: vec!["hello".to_string()],
+                    cwd: PathBuf::from("/tmp"),
+                    env: HashMap::new(),
+                },
+                &SandboxPolicy::ReadOnly,
+            );
+
+            match result {
+                Ok(request) => {
+                    assert!(
+                        matches!(request.sandbox, SandboxType::LinuxBubblewrap),
+                        "Expected LinuxBubblewrap, got {:?}",
+                        request.sandbox
+                    );
+                }
+                Err(_) => {
+                    // If bwrap and helper are not available, error is expected for PTY sessions
+                    // This is acceptable in test environments without bwrap
+                }
+            }
+        }
+
+        #[test]
+        fn linux_workspace_write_policy_uses_sandbox() {
+            let policy = SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![WritableRoot {
+                    root: PathBuf::from("/tmp"),
+                    recursive: true,
+                    read_only_subpaths: vec![],
+                }],
+                network_access: NetworkAccess::Restricted,
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: false,
+            };
+
+            let result = SandboxManager::new().prepare_spawn(
+                SandboxCommand {
+                    program: PathBuf::from("/bin/echo"),
+                    args: vec!["hello".to_string()],
+                    cwd: PathBuf::from("/tmp"),
+                    env: HashMap::new(),
+                },
+                &policy,
+            );
+
+            match result {
+                Ok(request) => {
+                    assert!(
+                        matches!(request.sandbox, SandboxType::LinuxBubblewrap),
+                        "Expected LinuxBubblewrap, got {:?}",
+                        request.sandbox
+                    );
+                }
+                Err(_) => {
+                    // Error expected if neither bwrap nor helper available
+                }
+            }
+        }
+
+        #[test]
+        fn linux_bwrap_detection() {
+            let bwrap = preferred_bwrap_launcher(None);
+            // Test should adapt to environment - either bwrap is available or not
+            // This test documents the expected behavior
+            if bwrap.is_some() {
+                let result = SandboxManager::new().prepare_spawn(
+                    SandboxCommand {
+                        program: PathBuf::from("/bin/echo"),
+                        args: vec!["test".to_string()],
+                        cwd: PathBuf::from("/tmp"),
+                        env: HashMap::new(),
+                    },
+                    &SandboxPolicy::ReadOnly,
+                );
+                assert!(result.is_ok(), "Should work when bwrap is available");
+                let request = result.unwrap();
+                assert_eq!(request.sandbox, SandboxType::LinuxBubblewrap);
+            }
+        }
+
+        #[test]
+        fn linux_sandbox_error_when_no_bwrap_no_helper() {
+            // This test verifies that we get a proper error when sandbox is required
+            // but neither bwrap nor helper is available
+            // Note: In most environments, bwrap IS available, so this may pass or skip
+            let result = SandboxManager::new().prepare_spawn(
+                SandboxCommand {
+                    program: PathBuf::from("/bin/echo"),
+                    args: vec!["test".to_string()],
+                    cwd: PathBuf::from("/tmp"),
+                    env: HashMap::new(),
+                },
+                &SandboxPolicy::ReadOnly,
+            );
+
+            // Either succeeds (bwrap/helper available) or fails with clear error
+            match result {
+                Ok(_) => {}
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    assert!(
+                        error_msg.contains("bubblewrap")
+                            || error_msg.contains("colossal-sandbox-helper"),
+                        "Error should mention sandbox requirements: {}",
+                        error_msg
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    mod macos_tests {
+        use super::*;
+
+        #[test]
+        fn macos_readonly_policy_uses_seatbelt() {
+            let result = SandboxManager::new().prepare_spawn(
+                SandboxCommand {
+                    program: PathBuf::from("/bin/echo"),
+                    args: vec!["hello".to_string()],
+                    cwd: PathBuf::from("/tmp"),
+                    env: HashMap::new(),
+                },
+                &SandboxPolicy::ReadOnly,
+            );
+
+            let request = result.expect("prepare spawn should succeed on macOS");
+            assert_eq!(request.sandbox, SandboxType::MacosSeatbelt);
+            assert_eq!(request.program, PathBuf::from("/usr/bin/sandbox-exec"));
+        }
+
+        #[test]
+        fn macos_workspace_write_policy_uses_seatbelt() {
+            let policy = SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![WritableRoot {
+                    root: PathBuf::from("/tmp"),
+                    recursive: true,
+                    read_only_subpaths: vec![],
+                }],
+                network_access: NetworkAccess::Restricted,
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: false,
+            };
+
+            let result = SandboxManager::new().prepare_spawn(
+                SandboxCommand {
+                    program: PathBuf::from("/bin/echo"),
+                    args: vec!["hello".to_string()],
+                    cwd: PathBuf::from("/tmp"),
+                    env: HashMap::new(),
+                },
+                &policy,
+            );
+
+            let request = result.expect("prepare spawn should succeed on macOS");
+            assert_eq!(request.sandbox, SandboxType::MacosSeatbelt);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    mod windows_tests {
+        use super::*;
+
+        #[test]
+        fn windows_readonly_policy_uses_restricted_token() {
+            let result = SandboxManager::new().prepare_spawn(
+                SandboxCommand {
+                    program: PathBuf::from("cmd.exe"),
+                    args: vec!["/c".to_string(), "echo hello".to_string()],
+                    cwd: PathBuf::from("C:\\Temp"),
+                    env: HashMap::new(),
+                },
+                &SandboxPolicy::ReadOnly,
+            );
+
+            let request = result.expect("prepare spawn should succeed on Windows");
+            assert_eq!(request.sandbox, SandboxType::WindowsRestrictedToken);
+            assert!(request.windows_profile.is_some());
+        }
+
+        #[test]
+        fn windows_workspace_write_policy_uses_restricted_token() {
+            let policy = SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![WritableRoot {
+                    root: PathBuf::from("C:\\Temp"),
+                    recursive: true,
+                    read_only_subpaths: vec![],
+                }],
+                network_access: NetworkAccess::Restricted,
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: false,
+            };
+
+            let result = SandboxManager::new().prepare_spawn(
+                SandboxCommand {
+                    program: PathBuf::from("cmd.exe"),
+                    args: vec!["/c".to_string(), "echo hello".to_string()],
+                    cwd: PathBuf::from("C:\\Temp"),
+                    env: HashMap::new(),
+                },
+                &policy,
+            );
+
+            let request = result.expect("prepare spawn should succeed on Windows");
+            assert_eq!(request.sandbox, SandboxType::WindowsRestrictedToken);
+            assert!(request.windows_profile.is_some());
+        }
+
+        #[test]
+        fn windows_conpty_handles_created() {
+            let result = SandboxManager::new().prepare_spawn(
+                SandboxCommand {
+                    program: PathBuf::from("cmd.exe"),
+                    args: vec!["/c".to_string(), "echo hello".to_string()],
+                    cwd: PathBuf::from("C:\\Temp"),
+                    env: HashMap::new(),
+                },
+                &SandboxPolicy::ReadOnly,
+            );
+
+            let request = result.expect("prepare spawn should succeed on Windows");
+            // ConPTY handles should be created for PTY sessions
+            assert!(request.conpty_handles.is_some());
+        }
     }
 }

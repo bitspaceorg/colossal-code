@@ -237,3 +237,157 @@ fn spawn_test_http_server() -> (String, std::thread::JoinHandle<()>) {
     });
     (format!("http://127.0.0.1:{}/", addr.port()), handle)
 }
+
+#[test]
+fn readonly_allows_read() {
+    let _guard = semantic_test_lock();
+    cleanup_windows_firewall_rules();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source.txt");
+    std::fs::write(&source, "hello").expect("write source");
+
+    let output = run_probe_under_policy(
+        &SandboxPolicy::ReadOnly,
+        temp.path(),
+        vec![
+            "read-file".to_string(),
+            source.to_string_lossy().to_string(),
+        ],
+    );
+
+    assert!(output.status.success(), "read failed: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("hello"),
+        "unexpected read content: {stdout}"
+    );
+}
+
+#[test]
+fn workspace_write_allows_read() {
+    let _guard = semantic_test_lock();
+    cleanup_windows_firewall_rules();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source.txt");
+    std::fs::write(&source, "hello").expect("write source");
+
+    let output = run_probe_under_policy(
+        &workspace_write_policy(temp.path()),
+        temp.path(),
+        vec![
+            "read-file".to_string(),
+            source.to_string_lossy().to_string(),
+        ],
+    );
+
+    assert!(output.status.success(), "read failed: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("hello"),
+        "unexpected read content: {stdout}"
+    );
+}
+
+#[test]
+fn workspace_write_network_enabled_allows_http() {
+    let _guard = semantic_test_lock();
+    cleanup_windows_firewall_rules();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let policy = SandboxPolicy::WorkspaceWrite {
+        writable_roots: vec![WritableRoot {
+            root: temp.path().to_path_buf(),
+            recursive: true,
+            read_only_subpaths: vec![],
+        }],
+        network_access: NetworkAccess::Enabled,
+        exclude_tmpdir_env_var: true,
+        exclude_slash_tmp: true,
+    };
+
+    let (url, server) = spawn_test_http_server();
+    let output = run_probe_under_policy(&policy, temp.path(), vec!["http-get".to_string(), url]);
+    let _ = server.join();
+
+    assert!(
+        output.status.success(),
+        "workspace write with network unexpectedly failed: {output:?}"
+    );
+}
+
+#[test]
+fn readonly_blocks_http() {
+    let _guard = semantic_test_lock();
+    cleanup_windows_firewall_rules();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (url, server) = spawn_test_http_server();
+
+    let output = run_probe_under_policy(
+        &SandboxPolicy::ReadOnly,
+        temp.path(),
+        vec!["http-get".to_string(), url],
+    );
+
+    let _ = server.join();
+    assert!(
+        !output.status.success(),
+        "readonly policy unexpectedly allowed HTTP"
+    );
+}
+
+#[test]
+fn danger_full_access_allows_write_to_anywhere() {
+    let _guard = semantic_test_lock();
+    cleanup_windows_firewall_rules();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let target = PathBuf::from("/tmp/colossal_test_write_anywhere.txt");
+
+    let output = run_probe_under_policy(
+        &SandboxPolicy::DangerFullAccess,
+        temp.path(),
+        vec![
+            "write-file".to_string(),
+            target.to_string_lossy().to_string(),
+            "hello".to_string(),
+        ],
+    );
+
+    let _ = std::fs::remove_file(&target);
+    assert!(
+        output.status.success(),
+        "danger full access write failed: {output:?}"
+    );
+}
+
+#[test]
+fn workspace_write_excludes_tmpdir_env_var() {
+    let _guard = semantic_test_lock();
+    cleanup_windows_firewall_rules();
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".git")).expect("create git dir");
+    let policy = SandboxPolicy::WorkspaceWrite {
+        writable_roots: vec![WritableRoot {
+            root: temp.path().to_path_buf(),
+            recursive: true,
+            read_only_subpaths: vec![],
+        }],
+        network_access: NetworkAccess::Restricted,
+        exclude_tmpdir_env_var: true,
+        exclude_slash_tmp: false,
+    };
+
+    let output = run_probe_under_policy(
+        &policy,
+        temp.path(),
+        vec![
+            "write-file".to_string(),
+            "/tmp/test.txt".to_string(),
+            "hello".to_string(),
+        ],
+    );
+
+    let _ = std::fs::remove_file("/tmp/test.txt");
+    assert!(
+        output.status.success(),
+        "workspace write with tmpdir failed: {output:?}"
+    );
+}
