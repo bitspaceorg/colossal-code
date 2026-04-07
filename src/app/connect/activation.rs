@@ -18,7 +18,9 @@ impl App {
             )
         })?;
 
-        self.activate_backend_environment(env, connection.model.clone())
+        self.activate_backend_environment(env, connection.model.clone())?;
+        let _ = self.load_models();
+        Ok(())
     }
 
     pub(crate) fn activate_local_model(&mut self, model_filename: String) -> Result<()> {
