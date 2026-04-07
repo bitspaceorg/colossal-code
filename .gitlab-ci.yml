@@ -71,7 +71,22 @@ lint:clippy:
   stage: lint
   rules: *rules_first_party
   script:
-    - nix develop --accept-flake-config -c cargo clippy --all-targets --no-deps
+    - nix develop --accept-flake-config -c cargo clippy --all-targets --no-deps -- -D warnings
+
+# validates mdx links and builds docs data.json - runs on MRs to catch broken links
+docs:validate:
+  <<: *nix_rust_template
+  stage: lint
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+      changes:
+        - docs/**/*
+        - utils/docs/**/*
+    - when: never
+  before_script: []
+  cache: {}  # no cargo cache needed
+  script:
+    - nix develop --accept-flake-config -c python utils/docs/validate.py
 
 # ── test stage (runs in parallel with nothing blocking it after lint) ──
 
