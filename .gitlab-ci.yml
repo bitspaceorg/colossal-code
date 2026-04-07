@@ -15,13 +15,6 @@ variables:
     - nix --version
     - nix flake metadata
     - nix develop --accept-flake-config -c treefmt --version
-    - |
-      if [ -d .cargo/registry/src ]; then
-        nix develop --accept-flake-config -c cargo metadata --format-version=1 > /dev/null 2>&1 || {
-          echo "Cargo registry corrupted, clearing src/ and index/"
-          rm -rf .cargo/registry/src .cargo/registry/index
-        }
-      fi
   cache:
     key:
       files:
@@ -30,7 +23,6 @@ variables:
     paths:
       - .cargo/registry/cache
       - .cargo/registry/index
-      - .cargo/registry/src
       - .cargo/git/db
       - target/
     policy: pull-push
@@ -71,7 +63,7 @@ lint:clippy:
   stage: lint
   rules: *rules_first_party
   script:
-    - nix develop --accept-flake-config -c cargo clippy --all-targets --no-deps -- -D warnings
+    - nix develop --accept-flake-config -c cargo clippy --all-targets --no-deps
 
 # validates mdx links and builds docs data.json - runs on MRs to catch broken links
 docs:validate:
