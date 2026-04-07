@@ -336,25 +336,32 @@ fn test_readonly_danger_full_access_compare() {
 fn test_multiple_policy_changes() {
     let temp = tempfile::tempdir().expect("tempdir");
 
+    // Use /etc/hosts which exists on both Linux and macOS
+    let test_file = if std::path::Path::new("/etc/hostname").exists() {
+        "/etc/hostname"
+    } else {
+        "/etc/hosts"
+    };
+
     let output1 = spawn_with_policy(
         &SandboxPolicy::ReadOnly,
         temp.path(),
-        &["read-file".to_string(), "/etc/hostname".to_string()],
+        &["read-file".to_string(), test_file.to_string()],
     );
 
     let output2 = spawn_with_policy(
         &SandboxPolicy::DangerFullAccess,
         temp.path(),
-        &["read-file".to_string(), "/etc/hostname".to_string()],
+        &["read-file".to_string(), test_file.to_string()],
     );
 
     assert!(
         output1.status.success() || !output1.status.success(),
-        "readonly read may succeed or fail depending on /etc/hostname"
+        "readonly read may succeed or fail depending on sandbox restrictions"
     );
     assert!(
         output2.status.success(),
-        "danger full access should allow reading /etc/hostname"
+        "danger full access should allow reading {test_file}"
     );
 }
 
