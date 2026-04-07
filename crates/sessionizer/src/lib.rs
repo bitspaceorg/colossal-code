@@ -25,6 +25,8 @@ pub mod spawn;
 pub mod tools;
 pub mod types;
 pub mod utils;
+#[cfg(target_os = "linux")]
+pub(crate) mod vendored_bwrap;
 #[cfg(target_os = "windows")]
 pub mod windows_sandbox;
 
