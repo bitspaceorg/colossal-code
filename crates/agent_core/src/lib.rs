@@ -43,7 +43,8 @@ struct GlobalState {
     manager: Arc<colossal_linux_sandbox::manager::SessionManager>,
     shell_session_id: tokio::sync::Mutex<Option<colossal_linux_sandbox::types::SessionId>>,
     shell: colossal_linux_sandbox::shell::Shell,
-    sandbox_policy: tokio::sync::Mutex<SandboxPolicy>,
+    pending_sandbox_policy: tokio::sync::Mutex<SandboxPolicy>,
+    effective_sandbox_policy: tokio::sync::Mutex<SandboxPolicy>,
     // Track if current session has a background process running
     session_has_background_process: tokio::sync::Mutex<bool>,
     // Pending approval channel
@@ -367,7 +368,8 @@ async fn ensure_global_state_initialized() {
             manager: Arc::new(colossal_linux_sandbox::manager::SessionManager::default()),
             shell_session_id: tokio::sync::Mutex::new(None),
             shell,
-            sandbox_policy: tokio::sync::Mutex::new(sandbox_policy),
+            pending_sandbox_policy: tokio::sync::Mutex::new(sandbox_policy.clone()),
+            effective_sandbox_policy: tokio::sync::Mutex::new(sandbox_policy),
             session_has_background_process: tokio::sync::Mutex::new(false),
             pending_approval: tokio::sync::Mutex::new(None),
         });
@@ -382,7 +384,7 @@ pub async fn add_writable_root(path: std::path::PathBuf) -> Result<()> {
         .get()
         .ok_or_else(|| anyhow::anyhow!("Global state not initialized"))?;
 
-    let mut policy_lock = state.sandbox_policy.lock().await;
+    let mut policy_lock = state.pending_sandbox_policy.lock().await;
 
     match &mut *policy_lock {
         SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
@@ -430,45 +432,89 @@ pub(crate) async fn get_or_create_shell_session() -> Result<(
         }
     }
 
-    let has_background = state.session_has_background_process.lock().await;
+    let has_background = *state.session_has_background_process.lock().await;
+    let pending_policy = state.pending_sandbox_policy.lock().await.clone();
+
+    if let Some(existing) = session_id_lock.clone() {
+        let effective_policy = state.effective_sandbox_policy.lock().await.clone();
+        if !has_background && effective_policy != pending_policy {
+            let snapshot = state
+                .manager
+                .snapshot_shell_session(existing.clone())
+                .await?;
+            state.manager.terminate_session(existing).await?;
+            *session_id_lock = None;
+
+            let new_session_id =
+                spawn_shell_session_with_snapshot(state, &pending_policy, &snapshot).await?;
+            *session_id_lock = Some(new_session_id.clone());
+            *state.effective_sandbox_policy.lock().await = pending_policy.clone();
+            return Ok((state.manager.clone(), new_session_id));
+        }
+    }
 
     // Create new session if:
     // 1. No session exists yet, OR
     // 2. Current session has a background process running
-    if session_id_lock.is_none() || *has_background {
-        let workspace_path = resolve_workspace_root();
+    if session_id_lock.is_none() || has_background {
+        let snapshot = colossal_linux_sandbox::manager::PersistentSessionState {
+            session_id: SessionId::new("pending-shell-state".to_string()),
+            shell_path: state.shell.path().to_string_lossy().to_string(),
+            initial_cwd: resolve_workspace_root(),
+            env_vars: std::collections::HashMap::new(),
+            current_cwd: resolve_workspace_root(),
+            created_at: std::time::SystemTime::now(),
+        };
+        let session_id =
+            spawn_shell_session_with_snapshot(state, &pending_policy, &snapshot).await?;
+        *session_id_lock = Some(session_id.clone());
+        *state.effective_sandbox_policy.lock().await = pending_policy;
+    }
 
-        let shared_state = Arc::new(colossal_linux_sandbox::session::SharedSessionState::new(
-            workspace_path.clone(),
-        ));
+    Ok((state.manager.clone(), session_id_lock.clone().unwrap()))
+}
 
-        let sandbox_policy = state.sandbox_policy.lock().await.clone();
-        let session_id = state
-            .manager
-            .create_persistent_shell_session(
-                state.shell.path().to_string_lossy().to_string(),
-                false,
-                sandbox_policy,
-                shared_state,
-                None,
-            )
-            .await?;
+async fn spawn_shell_session_with_snapshot(
+    state: &GlobalState,
+    sandbox_policy: &SandboxPolicy,
+    snapshot: &colossal_linux_sandbox::manager::PersistentSessionState,
+) -> Result<SessionId> {
+    let shared_state = Arc::new(colossal_linux_sandbox::session::SharedSessionState::new(
+        snapshot.current_cwd.clone(),
+    ));
 
+    let session_id = state
+        .manager
+        .create_persistent_shell_session(
+            state.shell.path().to_string_lossy().to_string(),
+            false,
+            sandbox_policy.clone(),
+            shared_state,
+            None,
+        )
+        .await?;
+
+    if snapshot.current_cwd != resolve_workspace_root() {
         let _ = state
             .manager
             .exec_command_in_shell_session(
                 session_id.clone(),
-                format!("cd {}", escape(workspace_path.to_string_lossy())),
+                format!("cd {}", escape(snapshot.current_cwd.to_string_lossy())),
                 Some(5000),
                 1000,
-                None, // No approval needed for initial cd
+                None,
             )
             .await;
-
-        *session_id_lock = Some(session_id.clone());
     }
 
-    Ok((state.manager.clone(), session_id_lock.clone().unwrap()))
+    for (key, value) in &snapshot.env_vars {
+        let _ = state
+            .manager
+            .set_env_in_shell_session(session_id.clone(), key.clone(), value.clone())
+            .await;
+    }
+
+    Ok(session_id)
 }
 
 async fn execute_tool_call(
@@ -483,7 +529,7 @@ async fn execute_tool_call(
         let workspace_path = agent.effective_cwd();
         let refreshed_policy =
             sandbox_policy_from_config_with_workspace(&safety_cfg, workspace_path);
-        let mut policy_guard = state.sandbox_policy.lock().await;
+        let mut policy_guard = state.pending_sandbox_policy.lock().await;
         *policy_guard = refreshed_policy;
     }
 
@@ -944,7 +990,7 @@ async fn execute_tool_call(
                 _ => {}
             }
 
-            let sandbox_policy = state.sandbox_policy.lock().await.clone();
+            let sandbox_policy = state.pending_sandbox_policy.lock().await.clone();
             let output = execute_tool_binary(args, &sandbox_policy, agent.effective_cwd()).await?;
 
             // Tools binary outputs YAML, just return it directly
@@ -1781,7 +1827,7 @@ impl Agent {
         }
 
         if let Some(state) = GLOBAL_STATE.get() {
-            let mut policy_guard = state.sandbox_policy.lock().await;
+            let mut policy_guard = state.pending_sandbox_policy.lock().await;
             *policy_guard =
                 sandbox_policy_from_config_with_workspace(&new_safety_config, self.effective_cwd());
         }
@@ -3771,6 +3817,11 @@ mod exec_command_tests {
             }
             *state.shell_session_id.lock().await = None;
             *state.session_has_background_process.lock().await = false;
+            let safety = safety_config::SafetyConfig::from_mode(safety_config::SafetyMode::Yolo);
+            let policy =
+                sandbox_policy_from_config_with_workspace(&safety, resolve_workspace_root());
+            *state.pending_sandbox_policy.lock().await = policy.clone();
+            *state.effective_sandbox_policy.lock().await = policy;
         }
     }
 
@@ -3828,7 +3879,7 @@ mod exec_command_tests {
         .expect("exec command succeeds");
 
         let parsed: serde_yaml::Value = serde_yaml::from_str(&result).expect("yaml result");
-        assert_eq!(parsed["status"].as_str(), Some("Success"));
+        assert_eq!(parsed["status"].as_str(), Some("Success"), "{result}");
         assert_eq!(parsed["cmd_out"].as_str(), Some("hello"));
     }
 
@@ -3852,7 +3903,7 @@ mod exec_command_tests {
         .expect("exec command succeeds");
 
         let parsed: serde_yaml::Value = serde_yaml::from_str(&result).expect("yaml result");
-        assert_eq!(parsed["status"].as_str(), Some("Success"));
+        assert_eq!(parsed["status"].as_str(), Some("Success"), "{result}");
         assert_eq!(
             parsed["cmd_out"].as_str(),
             Some(nested.to_string_lossy().as_ref())
@@ -3885,6 +3936,86 @@ mod exec_command_tests {
         assert!(parsed["log_file"].as_str().is_some());
 
         reset_global_shell_state().await;
+    }
+
+    #[tokio::test]
+    async fn policy_change_rotates_shell_and_replays_continuity() {
+        let _guard = exec_test_lock();
+        let temp = make_test_dir("policy-rotation");
+        let nested = temp.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+        set_workspace_root_override(&temp);
+        reset_global_shell_state().await;
+
+        let agent = build_test_agent(temp.clone());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let (manager, session_id) = get_or_create_shell_session()
+            .await
+            .expect("create initial shell session");
+        manager
+            .exec_command_in_shell_session(
+                session_id.clone(),
+                "cd nested".to_string(),
+                Some(5_000),
+                1_000,
+                None,
+            )
+            .await
+            .expect("seed shell state");
+        manager
+            .set_env_in_shell_session(
+                session_id.clone(),
+                "TEST_VALUE".to_string(),
+                "persisted".to_string(),
+            )
+            .await
+            .expect("seed shell env");
+
+        let first_session_id = session_id;
+
+        agent
+            .update_safety_config(safety_config::SafetyConfig::from_mode(
+                safety_config::SafetyMode::ReadOnly,
+            ))
+            .await
+            .expect("switch to readonly");
+
+        let result = execute_tool_call(
+            &agent,
+            &tool_call(
+                "exec_command",
+                json!({ "command": "printf '%s|%s' \"$PWD\" \"$TEST_VALUE\"" }),
+            ),
+            tx,
+        )
+        .await
+        .expect("continuity command succeeds");
+
+        let second_session_id = GLOBAL_STATE
+            .get()
+            .unwrap()
+            .shell_session_id
+            .lock()
+            .await
+            .clone()
+            .expect("rotated shell session");
+
+        assert_ne!(first_session_id, second_session_id);
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&result).expect("yaml result");
+        assert_eq!(parsed["status"].as_str(), Some("Success"));
+        let expected = format!("{}|persisted", temp.display());
+        assert_eq!(parsed["cmd_out"].as_str(), Some(expected.as_str()));
+        assert_eq!(
+            GLOBAL_STATE
+                .get()
+                .unwrap()
+                .manager
+                .get_session_info(second_session_id)
+                .and_then(|(_, _, _, cwd)| cwd),
+            Some(nested)
+        );
     }
 
     #[tokio::test]

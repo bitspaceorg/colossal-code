@@ -133,6 +133,27 @@ fn clean_shell_output(output: &str, command: &str) -> String {
 
 const CONTROL_PREFIX: &str = "__NITE_CTL__";
 
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn parse_shell_runtime_snapshot(output: &str) -> Result<std::path::PathBuf, ColossalErr> {
+    let (_, rest) = output.split_once("__NITE_CWD_BEGIN__").ok_or_else(|| {
+        ColossalErr::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "shell snapshot missing cwd start marker",
+        ))
+    })?;
+    let (cwd, _) = rest.split_once("__NITE_CWD_END__").ok_or_else(|| {
+        ColossalErr::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "shell snapshot missing cwd end marker",
+        ))
+    })?;
+
+    Ok(std::path::PathBuf::from(cwd.trim()))
+}
+
 fn build_control_wrapped_command(command: &str, control_id: &str) -> String {
     format!(
         "{{ printf '{prefix}{control_id}__START__0\\n'; {command} ; __nite_code=$?; printf '{prefix}{control_id}__DONE__%s\\n' \"$__nite_code\"; }}",
@@ -259,14 +280,14 @@ fn extract_visible_output(
 }
 
 // Data structure for persisting session state
-#[derive(Debug, Serialize, Deserialize)]
-struct PersistentSessionState {
-    session_id: SessionId,
-    shell_path: String,
-    initial_cwd: std::path::PathBuf,
-    env_vars: std::collections::HashMap<String, String>,
-    current_cwd: std::path::PathBuf,
-    created_at: std::time::SystemTime,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistentSessionState {
+    pub session_id: SessionId,
+    pub shell_path: String,
+    pub initial_cwd: std::path::PathBuf,
+    pub env_vars: std::collections::HashMap<String, String>,
+    pub current_cwd: std::path::PathBuf,
+    pub created_at: std::time::SystemTime,
 }
 
 // Metadata for session lifecycle management
@@ -1476,7 +1497,7 @@ impl SessionManager {
         }
 
         // Also send the export command to the shell
-        let export_command = format!("export {}='{}'", key, value);
+        let export_command = format!("export {}={}", key, shell_single_quote(&value));
         let _ = self
             .exec_command_in_shell_session(
                 session_id,
@@ -1488,6 +1509,59 @@ impl SessionManager {
             .await;
 
         Ok(())
+    }
+
+    /// Capture continuity state from a persistent shell session so it can be
+    /// replayed into a newly spawned shell under a different sandbox policy.
+    pub async fn snapshot_shell_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<PersistentSessionState, ColossalErr> {
+        let (shell_path, initial_cwd, env_vars, created_at) = {
+            let metadata_map = self.session_metadata.lock().unwrap();
+            let sessions = self.persistent_shell_sessions.lock().unwrap();
+            let (_, session) = sessions
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .ok_or_else(|| {
+                    ColossalErr::Sandbox(SandboxErr::Denied(
+                        -1,
+                        format!("unknown session id {}", session_id.as_str()),
+                        (),
+                    ))
+                })?;
+
+            (
+                session.shell_path().to_string(),
+                session.initial_cwd(),
+                session.get_all_env(),
+                metadata_map
+                    .get(&session_id)
+                    .map(|metadata| metadata.created_at_system_time)
+                    .unwrap_or_else(std::time::SystemTime::now),
+            )
+        };
+
+        let runtime_state = self
+            .exec_command_in_shell_session(
+                session_id.clone(),
+                "printf '__NITE_CWD_BEGIN__\n'; pwd; printf '__NITE_CWD_END__\n'".to_string(),
+                Some(5_000),
+                10_000,
+                None,
+            )
+            .await?;
+
+        let current_cwd = parse_shell_runtime_snapshot(&runtime_state.stdout)?;
+
+        Ok(PersistentSessionState {
+            session_id,
+            shell_path,
+            initial_cwd,
+            env_vars,
+            current_cwd,
+            created_at,
+        })
     }
 
     /// Get an environment variable from a persistent shell session
