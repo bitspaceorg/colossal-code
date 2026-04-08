@@ -33,6 +33,10 @@ impl VimKeyContext for NavModeContext<'_> {
     fn supports_viewport_scroll(&self) -> bool {
         true
     }
+
+    fn supports_search(&self) -> bool {
+        true // Nav mode supports vim `/` search
+    }
 }
 
 // ---------------------------------------------------------------------------

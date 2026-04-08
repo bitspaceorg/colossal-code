@@ -393,6 +393,13 @@ impl App {
         let is_claude = self.connect.selected_auth_method
             == Some(crate::app::connect::ConnectAuthMethod::ClaudeCode);
 
+        let has_saved_tokens = if is_claude {
+            self.connect.oauth_state.access_token.is_some()
+        } else {
+            self.connect.subscription_state.access_token.is_some()
+                && self.connect.subscription_state.refresh_token.is_some()
+        };
+
         let (title, description) = if is_claude {
             (
                 " Claude Code Authorization ",
@@ -405,13 +412,19 @@ impl App {
             )
         };
 
+        let bottom_hint = if has_saved_tokens {
+            " Up/Down move · Enter select · Esc back "
+        } else {
+            " Enter continue · Esc back "
+        };
+
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Cyan))
             .style(Style::default().bg(CONNECT_BG))
             .title(title)
-            .title_bottom(Line::from(" Enter continue · Esc back ").centered());
+            .title_bottom(Line::from(bottom_hint).centered());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -420,8 +433,37 @@ impl App {
             Style::default().fg(Color::White),
         ))];
 
-        if is_claude {
-            // Claude Code auth flow
+        if has_saved_tokens {
+            // Show selectable options: Continue or Re-authorize
+            lines.push(Line::from(Span::styled(
+                "A saved connection already exists for this provider.",
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::from(""));
+
+            let options = ["Continue with saved connection", "Re-authorize"];
+            let selected_index = self.connect.selected_index.min(1);
+            for (idx, label) in options.iter().enumerate() {
+                let is_selected = idx == selected_index;
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        if is_selected { ">  " } else { "   " },
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(
+                        *label,
+                        if is_selected {
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::White)
+                        },
+                    ),
+                ]));
+            }
+        } else if is_claude {
+            // Claude Code auth flow (no saved tokens)
             if let Some(status) = self.connect.oauth_state.status.as_deref() {
                 lines.push(Line::from(Span::styled(
                     status,
@@ -445,7 +487,7 @@ impl App {
                 Style::default().fg(Color::DarkGray),
             )));
         } else {
-            // OpenAI subscription flow
+            // OpenAI subscription flow (no saved tokens)
             if let Some(url) = self.connect.subscription_state.verification_url.as_deref() {
                 lines.push(Line::from(vec![
                     Span::styled("Open", Style::default().fg(Color::Yellow)),

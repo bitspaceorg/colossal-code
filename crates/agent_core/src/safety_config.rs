@@ -15,6 +15,13 @@ pub enum SafetyMode {
     ReadOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectiveSandboxKind {
+    ReadOnly,
+    WorkspaceWrite,
+    FullAccess,
+}
+
 impl Default for SafetyMode {
     fn default() -> Self {
         SafetyMode::Regular
@@ -147,6 +154,24 @@ impl SafetyConfig {
         )
     }
 
+    pub fn effective_sandbox_kind(&self) -> EffectiveSandboxKind {
+        match self.mode {
+            SafetyMode::ReadOnly => EffectiveSandboxKind::ReadOnly,
+            SafetyMode::Regular if self.sandbox_enabled || std::env::var("SAFE_MODE").is_ok() => {
+                EffectiveSandboxKind::WorkspaceWrite
+            }
+            SafetyMode::Regular | SafetyMode::Yolo => EffectiveSandboxKind::FullAccess,
+        }
+    }
+
+    pub fn effective_sandbox_label(&self) -> &'static str {
+        match self.effective_sandbox_kind() {
+            EffectiveSandboxKind::ReadOnly => "read-only sandbox",
+            EffectiveSandboxKind::WorkspaceWrite => "workspace sandbox",
+            EffectiveSandboxKind::FullAccess => "full access",
+        }
+    }
+
     /// Get the system prompt suffix based on current mode
     pub fn get_system_prompt_suffix(&self) -> Option<String> {
         match self.mode {
@@ -219,7 +244,8 @@ mod tests {
     fn test_tool_permissions() {
         let readonly = SafetyConfig::from_mode(SafetyMode::ReadOnly);
         assert!(readonly.is_tool_allowed("read_file"));
-        assert!(readonly.is_tool_allowed("grep"));
+        assert!(readonly.is_tool_allowed("search_files_with_regex"));
+        assert!(!readonly.is_tool_allowed("grep"));
         assert!(!readonly.is_tool_allowed("write_file"));
         assert!(!readonly.is_tool_allowed("bash"));
 
@@ -281,5 +307,33 @@ mod tests {
         config.toggle_sandbox();
         assert!(config.sandbox_enabled);
         assert_eq!(config.mode, SafetyMode::Regular);
+    }
+
+    #[test]
+    fn test_effective_sandbox_kind_tracks_real_behavior() {
+        let readonly = SafetyConfig::from_mode(SafetyMode::ReadOnly);
+        assert_eq!(
+            readonly.effective_sandbox_kind(),
+            EffectiveSandboxKind::ReadOnly
+        );
+
+        let regular = SafetyConfig::from_mode(SafetyMode::Regular);
+        assert_eq!(
+            regular.effective_sandbox_kind(),
+            EffectiveSandboxKind::WorkspaceWrite
+        );
+
+        let mut regular_no_sandbox = SafetyConfig::from_mode(SafetyMode::Regular);
+        regular_no_sandbox.sandbox_enabled = false;
+        assert_eq!(
+            regular_no_sandbox.effective_sandbox_kind(),
+            EffectiveSandboxKind::FullAccess
+        );
+
+        let yolo = SafetyConfig::from_mode(SafetyMode::Yolo);
+        assert_eq!(
+            yolo.effective_sandbox_kind(),
+            EffectiveSandboxKind::FullAccess
+        );
     }
 }

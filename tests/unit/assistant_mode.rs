@@ -1,7 +1,7 @@
 use super::{
     AgentState, App, AssistantMode, Color, HelpTab, PersistenceState, SafetyState, UiState,
 };
-use agent_core::safety_config::SafetyMode;
+use agent_core::safety_config::{EffectiveSandboxKind, SafetyConfig, SafetyMode};
 
 #[test]
 fn grouped_ui_state_defaults_match_previous_behavior() {
@@ -80,6 +80,44 @@ fn assistant_mode_to_safety_mode_preserves_expected_policy() {
 }
 
 #[test]
+fn assistant_mode_from_safety_mode_round_trips_startup_modes() {
+    assert!(matches!(
+        AssistantMode::from_safety_mode(SafetyMode::Regular),
+        AssistantMode::None
+    ));
+    assert!(matches!(
+        AssistantMode::from_safety_mode(SafetyMode::Yolo),
+        AssistantMode::Yolo
+    ));
+    assert!(matches!(
+        AssistantMode::from_safety_mode(SafetyMode::ReadOnly),
+        AssistantMode::ReadOnly
+    ));
+}
+
+#[test]
+fn effective_sandbox_kind_matches_execution_behavior() {
+    let readonly = SafetyConfig::from_mode(SafetyMode::ReadOnly);
+    assert_eq!(
+        readonly.effective_sandbox_kind(),
+        EffectiveSandboxKind::ReadOnly
+    );
+
+    let regular = SafetyConfig::from_mode(SafetyMode::Regular);
+    assert_eq!(
+        regular.effective_sandbox_kind(),
+        EffectiveSandboxKind::WorkspaceWrite
+    );
+
+    let mut regular_no_sandbox = SafetyConfig::from_mode(SafetyMode::Regular);
+    regular_no_sandbox.sandbox_enabled = false;
+    assert_eq!(
+        regular_no_sandbox.effective_sandbox_kind(),
+        EffectiveSandboxKind::FullAccess
+    );
+}
+
+#[test]
 fn assistant_mode_to_display_matches_expected_labels() {
     assert_eq!(AssistantMode::None.to_display(), None);
     assert_eq!(
@@ -98,6 +136,21 @@ fn assistant_mode_to_display_matches_expected_labels() {
         AssistantMode::ReadOnly.to_display(),
         Some(("read-only".to_string(), Color::Yellow))
     );
+}
+
+#[test]
+fn assistant_mode_transition_reminder_matches_build_and_readonly_flows() {
+    let build_reminder =
+        AssistantMode::transition_reminder(AssistantMode::Plan, AssistantMode::None)
+            .expect("plan to build reminder");
+    assert!(build_reminder.contains("changed from plan to build"));
+    assert!(build_reminder.contains("You are no longer in read-only mode."));
+
+    let readonly_reminder =
+        AssistantMode::transition_reminder(AssistantMode::Yolo, AssistantMode::ReadOnly)
+            .expect("yolo to readonly reminder");
+    assert!(readonly_reminder.contains("changed from yolo to read-only"));
+    assert!(readonly_reminder.contains("You are now in read-only mode."));
 }
 
 #[test]

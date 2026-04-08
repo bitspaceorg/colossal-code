@@ -16,6 +16,31 @@ fn context_status_color_for_percent(percent_left: f32) -> Color {
 }
 
 impl App {
+    fn effective_sandbox_status(&self) -> (String, Color) {
+        let safety_mode = self
+            .safety_state
+            .assistant_mode
+            .to_safety_mode()
+            .unwrap_or(agent_core::safety_config::SafetyMode::Regular);
+        let config = agent_core::safety_config::SafetyConfig {
+            mode: safety_mode,
+            ask_permission: false,
+            sandbox_enabled: self.safety_state.sandbox_enabled,
+        };
+
+        match config.effective_sandbox_kind() {
+            agent_core::safety_config::EffectiveSandboxKind::ReadOnly => {
+                (config.effective_sandbox_label().to_string(), Color::Yellow)
+            }
+            agent_core::safety_config::EffectiveSandboxKind::WorkspaceWrite => {
+                (config.effective_sandbox_label().to_string(), Color::Green)
+            }
+            agent_core::safety_config::EffectiveSandboxKind::FullAccess => {
+                (config.effective_sandbox_label().to_string(), Color::Red)
+            }
+        }
+    }
+
     fn truncate_middle(value: &str, max_chars: usize) -> String {
         let chars: Vec<char> = value.chars().collect();
         if chars.len() <= max_chars {
@@ -272,17 +297,11 @@ impl App {
                 ]
             }
             Mode::Normal => {
-                if self.safety_state.sandbox_enabled {
-                    vec![
-                        Span::styled("sandbox ", Style::default().fg(Color::Green)),
-                        Span::styled("(ctrl + s to cycle)", Style::default().fg(Color::DarkGray)),
-                    ]
-                } else {
-                    vec![
-                        Span::styled("no sandbox ", Style::default().fg(Color::Red)),
-                        Span::styled("(ctrl + s to cycle)", Style::default().fg(Color::DarkGray)),
-                    ]
-                }
+                let (label, color) = self.effective_sandbox_status();
+                vec![Span::styled(
+                    format!("{label} "),
+                    Style::default().fg(color),
+                )]
             }
         };
         let center_line = Line::from(center_text);

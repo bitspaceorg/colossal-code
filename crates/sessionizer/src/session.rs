@@ -27,7 +27,7 @@
 
 use crate::error::ColossalErr;
 use crate::protocol::SandboxPolicy;
-use crate::sandboxing::{SandboxCommand, SandboxManager};
+use crate::sandboxing::{SandboxCommand, SandboxExecRequest, SandboxManager};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use qdrant_client::Payload;
@@ -42,6 +42,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
+
+fn shell_program_name(shell: &str) -> String {
+    PathBuf::from(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(shell)
+        .to_ascii_lowercase()
+}
+
+fn maybe_remove_bwrap_new_session(request: &mut SandboxExecRequest) {
+    if request.sandbox != crate::sandboxing::SandboxType::LinuxBubblewrap {
+        return;
+    }
+
+    request.args.retain(|arg| arg != "--new-session");
+}
 
 /// Shared session state that can be accessed by both PTY and semantic search sessions
 #[derive(Debug)]
@@ -932,7 +948,7 @@ pub async fn create_sandboxed_exec_session(
     env.insert("HISTSIZE".to_string(), "0".to_string());
     env.insert("SAVEHIST".to_string(), "0".to_string());
     env.insert("HISTCONTROL".to_string(), "ignoreboth".to_string());
-    let request = SandboxManager::new().prepare_spawn(
+    let mut request = SandboxManager::new().prepare_spawn(
         SandboxCommand {
             program: PathBuf::from(program),
             args: args[1..].to_vec(),
@@ -941,6 +957,7 @@ pub async fn create_sandboxed_exec_session(
         },
         &sandbox_policy,
     )?;
+    maybe_remove_bwrap_new_session(&mut request);
 
     // Windows: If WindowsRestrictedToken sandbox is requested with ConPTY handles,
     // use our own spawn function that applies both sandbox AND PTY.
@@ -1282,11 +1299,25 @@ pub async fn create_persistent_shell_session(
     env.insert("HISTSIZE".to_string(), "0".to_string());
     env.insert("SAVEHIST".to_string(), "0".to_string());
     env.insert("HISTCONTROL".to_string(), "ignoreboth".to_string());
+    env.insert("TERM".to_string(), "dumb".to_string());
+    env.insert("PS1".to_string(), "".to_string());
+    env.insert("PROMPT".to_string(), "".to_string());
+    env.insert("RPROMPT".to_string(), "".to_string());
+    env.insert("RPS1".to_string(), "".to_string());
+    env.insert("NO_COLOR".to_string(), "1".to_string());
     let mut shell_args = Vec::new();
+    let shell_name = shell_program_name(&shell);
     if login {
         shell_args.push("-l".to_string());
     }
-    let request = SandboxManager::new().prepare_spawn(
+    shell_args.push("-s".to_string());
+    if shell_name.contains("bash") {
+        shell_args.push("--noprofile".to_string());
+        shell_args.push("--norc".to_string());
+    } else if shell_name.contains("zsh") {
+        shell_args.push("-f".to_string());
+    }
+    let mut request = SandboxManager::new().prepare_spawn(
         SandboxCommand {
             program: PathBuf::from(&shell),
             args: shell_args,
@@ -1295,6 +1326,7 @@ pub async fn create_persistent_shell_session(
         },
         &sandbox_policy,
     )?;
+    maybe_remove_bwrap_new_session(&mut request);
 
     // Windows: If WindowsRestrictedToken sandbox is requested with ConPTY handles,
     // use our own spawn function that applies both sandbox AND PTY.
@@ -1612,7 +1644,7 @@ pub async fn create_persistent_shell_session(
 
         // Send a simple echo command to test if shell is ready
         let test_marker = "__SHELL_READY__";
-        let test_cmd = format!("echo '{}'\n", test_marker);
+        let test_cmd = format!("stty -echo -echoctl 2>/dev/null; echo '{}'\r", test_marker);
 
         if test_writer_tx.send(test_cmd.into_bytes()).await.is_err() {
             // Failed to send, mark as ready anyway to avoid blocking

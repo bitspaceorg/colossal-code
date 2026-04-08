@@ -69,6 +69,10 @@ pub(crate) trait VimKeyContext {
 
     /// Whether `zz`/`zt`/`zb` viewport scroll commands are supported.
     fn supports_viewport_scroll(&self) -> bool;
+
+    /// Whether `/` search mode is supported. Nav mode supports it; the input
+    /// bar does not, so `/` in Normal mode should be swallowed there.
+    fn supports_search(&self) -> bool;
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +178,14 @@ impl VimKeyProcessor {
             KeyCode::Enter if !is_search => return VimKeyResult::Unhandled,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return VimKeyResult::Unhandled;
+            }
+            // Block `/` in Normal mode when the context doesn't support search
+            // (e.g. the input bar). Without this, edtui enters Search mode
+            // which the input bar can't render or exit properly.
+            KeyCode::Char('/')
+                if !ctx.supports_search() && matches!(editor_mode, edtui::EditorMode::Normal) =>
+            {
+                return VimKeyResult::Handled;
             }
             _ => {}
         }

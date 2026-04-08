@@ -30,6 +30,7 @@ impl App {
         let auto_summarize_threshold = Self::load_auto_summarize_threshold_setting();
         let scroll_messages_enabled = Self::load_scroll_setting();
         let auth_store = load_auth_store().unwrap_or_default();
+        let safety_config = agent_core::safety_config::SafetyConfig::load().unwrap_or_default();
 
         let mut backend_env = BackendConfig::read().into_environment();
         if let Some(active_id) = auth_store.active_connection_id.as_deref()
@@ -116,7 +117,11 @@ impl App {
             flash_highlight: None,
             ctrl_c_pressed: None,
             survey: Survey::new(10, 0.33),
-            safety_state: SafetyState::default(),
+            safety_state: SafetyState {
+                assistant_mode: crate::app::AssistantMode::from_safety_mode(safety_config.mode),
+                sandbox_enabled: safety_config.sandbox_enabled,
+                ..SafetyState::default()
+            },
             agent: Some(agent_arc),
             agent_tx: Some(input_tx),
             agent_rx: Some(output_rx),

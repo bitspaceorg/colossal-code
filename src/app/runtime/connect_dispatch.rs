@@ -163,144 +163,32 @@ impl App {
                 KeyCode::Esc => {
                     self.connect.mode = ConnectModalMode::AuthMethod;
                 }
+                KeyCode::Up => {
+                    if self.connect.selected_index > 0 {
+                        self.connect.selected_index -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    // Only allow Down if there's a saved connection (2 options shown)
+                    let has_saved = self.subscription_has_saved_tokens();
+                    if has_saved && self.connect.selected_index < 1 {
+                        self.connect.selected_index += 1;
+                    }
+                }
                 KeyCode::Enter => {
+                    let has_saved = self.subscription_has_saved_tokens();
+
+                    // If saved tokens exist and user selected "Re-authorize" (index 1),
+                    // reset the state and start a fresh auth flow.
+                    if has_saved && self.connect.selected_index == 1 {
+                        self.reset_subscription_tokens_for_reauth();
+                        // Now fall through to start fresh auth
+                    }
+
                     if self.connect.selected_auth_method == Some(ConnectAuthMethod::ClaudeCode) {
-                        // Claude Code auth
-                        if self.connect.oauth_state.access_token.is_some() {
-                            match self.save_connect_selection() {
-                                Ok(connection) => match self.activate_connection(&connection) {
-                                    Ok(()) => {
-                                        self.close_connect_modal();
-                                        self.push_connect_status(format!(
-                                            " ⎿ connected {} · use /model to select a model",
-                                            connection.provider_name
-                                        ));
-                                    }
-                                    Err(error) => {
-                                        self.close_connect_modal();
-                                        self.push_connect_status(format!(
-                                            " ⎿ connection saved, but activation failed: {}",
-                                            error
-                                        ));
-                                    }
-                                },
-                                Err(error) => {
-                                    self.push_connect_status(format!(
-                                        " ⎿ failed to save connection: {}",
-                                        error
-                                    ));
-                                }
-                            }
-                        } else if !self.connect.oauth_state.started {
-                            if let Err(error) = self.start_selected_oauth_auth() {
-                                self.push_connect_status(format!(
-                                    " ⎿ failed to start auth: {}",
-                                    error
-                                ));
-                            }
-                        } else {
-                            match self.poll_selected_oauth_auth() {
-                                Ok(true) => match self.save_connect_selection() {
-                                    Ok(connection) => match self.activate_connection(&connection) {
-                                        Ok(()) => {
-                                            self.close_connect_modal();
-                                            self.push_connect_status(format!(
-                                                " ⎿ connected {} · use /model to select a model",
-                                                connection.provider_name
-                                            ));
-                                        }
-                                        Err(error) => {
-                                            self.close_connect_modal();
-                                            self.push_connect_status(format!(
-                                                " ⎿ connection saved, but activation failed: {}",
-                                                error
-                                            ));
-                                        }
-                                    },
-                                    Err(error) => {
-                                        self.push_connect_status(format!(
-                                            " ⎿ failed to save connection: {}",
-                                            error
-                                        ));
-                                    }
-                                },
-                                Ok(false) => {}
-                                Err(error) => {
-                                    self.push_connect_status(format!(" ⎿ auth failed: {}", error));
-                                }
-                            }
-                        }
+                        self.handle_claude_code_subscription_enter();
                     } else {
-                        // OpenAI subscription auth
-                        if self.connect.subscription_state.access_token.is_some()
-                            && self.connect.subscription_state.refresh_token.is_some()
-                        {
-                            match self.save_connect_selection() {
-                                Ok(connection) => match self.activate_connection(&connection) {
-                                    Ok(()) => {
-                                        self.close_connect_modal();
-                                        self.push_connect_status(format!(
-                                            " ⎿ connected {} · use /model to select a model",
-                                            connection.provider_name
-                                        ));
-                                    }
-                                    Err(error) => {
-                                        self.close_connect_modal();
-                                        self.push_connect_status(format!(
-                                            " ⎿ connection saved, but activation failed: {}",
-                                            error
-                                        ));
-                                    }
-                                },
-                                Err(error) => {
-                                    self.push_connect_status(format!(
-                                        " ⎿ failed to save connection: {}",
-                                        error
-                                    ));
-                                }
-                            }
-                        } else if !self.connect.subscription_state.started {
-                            if let Err(error) = self.start_openai_subscription_auth() {
-                                self.push_connect_status(format!(
-                                    " ⎿ failed to start OpenAI subscription auth: {}",
-                                    error
-                                ));
-                            }
-                        } else {
-                            match self.poll_openai_subscription_auth() {
-                                Ok(true) => match self.save_connect_selection() {
-                                    Ok(connection) => match self.activate_connection(&connection) {
-                                        Ok(()) => {
-                                            self.close_connect_modal();
-                                            self.push_connect_status(format!(
-                                                " ⎿ connected {} · use /model to select a model",
-                                                connection.provider_name
-                                            ));
-                                        }
-                                        Err(error) => {
-                                            self.close_connect_modal();
-                                            self.push_connect_status(format!(
-                                                " ⎿ connection saved, but activation failed: {}",
-                                                error
-                                            ));
-                                        }
-                                    },
-                                    Err(error) => {
-                                        self.push_connect_status(format!(
-                                            " ⎿ failed to save connection: {}",
-                                            error
-                                        ));
-                                    }
-                                },
-                                Ok(false) => {}
-                                Err(error) => {
-                                    self.push_connect_status(format!(
-                                        " ⎿ OpenAI subscription auth failed: {}",
-                                        error
-                                    ));
-                                }
-                            }
-                        }
+                        self.handle_openai_subscription_enter();
                     }
                 }
                 _ => {}
@@ -315,6 +203,155 @@ impl App {
 
         true
     }
+    /// Whether the current subscription/oauth flow has pre-loaded saved tokens.
+    fn subscription_has_saved_tokens(&self) -> bool {
+        if self.connect.selected_auth_method == Some(ConnectAuthMethod::ClaudeCode) {
+            self.connect.oauth_state.access_token.is_some()
+        } else {
+            self.connect.subscription_state.access_token.is_some()
+                && self.connect.subscription_state.refresh_token.is_some()
+        }
+    }
+
+    /// Clear pre-loaded tokens so a fresh auth flow can begin.
+    fn reset_subscription_tokens_for_reauth(&mut self) {
+        if self.connect.selected_auth_method == Some(ConnectAuthMethod::ClaudeCode) {
+            self.connect.oauth_state = Default::default();
+        } else {
+            self.connect.subscription_state = Default::default();
+        }
+    }
+
+    fn handle_claude_code_subscription_enter(&mut self) {
+        if self.connect.oauth_state.access_token.is_some() {
+            match self.save_connect_selection() {
+                Ok(connection) => match self.activate_connection(&connection) {
+                    Ok(()) => {
+                        self.close_connect_modal();
+                        self.push_connect_status(format!(
+                            " ⎿ connected {} · use /model to select a model",
+                            connection.provider_name
+                        ));
+                    }
+                    Err(error) => {
+                        self.close_connect_modal();
+                        self.push_connect_status(format!(
+                            " ⎿ connection saved, but activation failed: {}",
+                            error
+                        ));
+                    }
+                },
+                Err(error) => {
+                    self.push_connect_status(format!(" ⎿ failed to save connection: {}", error));
+                }
+            }
+        } else if !self.connect.oauth_state.started {
+            if let Err(error) = self.start_selected_oauth_auth() {
+                self.push_connect_status(format!(" ⎿ failed to start auth: {}", error));
+            }
+        } else {
+            match self.poll_selected_oauth_auth() {
+                Ok(true) => match self.save_connect_selection() {
+                    Ok(connection) => match self.activate_connection(&connection) {
+                        Ok(()) => {
+                            self.close_connect_modal();
+                            self.push_connect_status(format!(
+                                " ⎿ connected {} · use /model to select a model",
+                                connection.provider_name
+                            ));
+                        }
+                        Err(error) => {
+                            self.close_connect_modal();
+                            self.push_connect_status(format!(
+                                " ⎿ connection saved, but activation failed: {}",
+                                error
+                            ));
+                        }
+                    },
+                    Err(error) => {
+                        self.push_connect_status(format!(
+                            " ⎿ failed to save connection: {}",
+                            error
+                        ));
+                    }
+                },
+                Ok(false) => {}
+                Err(error) => {
+                    self.push_connect_status(format!(" ⎿ auth failed: {}", error));
+                }
+            }
+        }
+    }
+
+    fn handle_openai_subscription_enter(&mut self) {
+        if self.connect.subscription_state.access_token.is_some()
+            && self.connect.subscription_state.refresh_token.is_some()
+        {
+            match self.save_connect_selection() {
+                Ok(connection) => match self.activate_connection(&connection) {
+                    Ok(()) => {
+                        self.close_connect_modal();
+                        self.push_connect_status(format!(
+                            " ⎿ connected {} · use /model to select a model",
+                            connection.provider_name
+                        ));
+                    }
+                    Err(error) => {
+                        self.close_connect_modal();
+                        self.push_connect_status(format!(
+                            " ⎿ connection saved, but activation failed: {}",
+                            error
+                        ));
+                    }
+                },
+                Err(error) => {
+                    self.push_connect_status(format!(" ⎿ failed to save connection: {}", error));
+                }
+            }
+        } else if !self.connect.subscription_state.started {
+            if let Err(error) = self.start_openai_subscription_auth() {
+                self.push_connect_status(format!(
+                    " ⎿ failed to start OpenAI subscription auth: {}",
+                    error
+                ));
+            }
+        } else {
+            match self.poll_openai_subscription_auth() {
+                Ok(true) => match self.save_connect_selection() {
+                    Ok(connection) => match self.activate_connection(&connection) {
+                        Ok(()) => {
+                            self.close_connect_modal();
+                            self.push_connect_status(format!(
+                                " ⎿ connected {} · use /model to select a model",
+                                connection.provider_name
+                            ));
+                        }
+                        Err(error) => {
+                            self.close_connect_modal();
+                            self.push_connect_status(format!(
+                                " ⎿ connection saved, but activation failed: {}",
+                                error
+                            ));
+                        }
+                    },
+                    Err(error) => {
+                        self.push_connect_status(format!(
+                            " ⎿ failed to save connection: {}",
+                            error
+                        ));
+                    }
+                },
+                Ok(false) => {}
+                Err(error) => {
+                    self.push_connect_status(format!(
+                        " ⎿ OpenAI subscription auth failed: {}",
+                        error
+                    ));
+                }
+            }
+        }
+    }
+
     fn push_connect_status(&mut self, message: String) {
         self.messages.push(message);
         self.message_types.push(MessageType::Agent);

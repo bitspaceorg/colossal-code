@@ -35,6 +35,10 @@ impl VimKeyContext for InputBarContext<'_> {
     fn supports_viewport_scroll(&self) -> bool {
         false // Input bar has no message viewport to scroll
     }
+
+    fn supports_search(&self) -> bool {
+        false // Input bar doesn't support vim search mode
+    }
 }
 
 pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {

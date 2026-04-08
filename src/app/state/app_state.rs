@@ -83,6 +83,16 @@ pub(crate) enum AssistantMode {
 }
 
 impl AssistantMode {
+    pub(crate) fn reminder_name(self) -> &'static str {
+        match self {
+            AssistantMode::None => "build",
+            AssistantMode::Yolo => "yolo",
+            AssistantMode::Plan => "plan",
+            AssistantMode::AutoAccept => "auto-accept",
+            AssistantMode::ReadOnly => "read-only",
+        }
+    }
+
     pub(crate) fn next(&self) -> Self {
         match self {
             AssistantMode::None => AssistantMode::Yolo,
@@ -112,6 +122,53 @@ impl AssistantMode {
                 Some(agent_core::safety_config::SafetyMode::Regular)
             }
         }
+    }
+
+    pub(crate) fn from_safety_mode(mode: agent_core::safety_config::SafetyMode) -> Self {
+        match mode {
+            agent_core::safety_config::SafetyMode::Yolo => AssistantMode::Yolo,
+            agent_core::safety_config::SafetyMode::ReadOnly => AssistantMode::ReadOnly,
+            agent_core::safety_config::SafetyMode::Regular => AssistantMode::None,
+        }
+    }
+
+    pub(crate) fn transition_reminder(from: Self, to: Self) -> Option<String> {
+        if from == to {
+            return None;
+        }
+
+        let mut lines = vec![format!(
+            "Your operational mode has changed from {} to {}.",
+            from.reminder_name(),
+            to.reminder_name()
+        )];
+
+        match to {
+            AssistantMode::Plan => {
+                lines.push(
+                    "Plan mode is active. You must not make file changes, run non-read-only shell commands, or otherwise modify the system except for maintaining the plan file."
+                        .to_string(),
+                );
+            }
+            AssistantMode::ReadOnly => {
+                lines.push(
+                    "You are now in read-only mode. You must not make file changes, run write-capable shell commands, or otherwise modify the system."
+                        .to_string(),
+                );
+            }
+            AssistantMode::None | AssistantMode::Yolo | AssistantMode::AutoAccept => {
+                lines.push("You are no longer in read-only mode.".to_string());
+                lines.push(
+                    "You are permitted to make file changes, run shell commands, and utilize your arsenal of tools as needed."
+                        .to_string(),
+                );
+            }
+        }
+
+        Some(format!(
+            "<system-reminder>\n{}\n</system-reminder>",
+            lines.join("\n")
+        ))
     }
 }
 

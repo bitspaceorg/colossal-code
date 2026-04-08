@@ -11,8 +11,8 @@ use colossal_linux_sandbox::types::{ExitStatus, SessionId};
 use futures::StreamExt;
 use indexmap::IndexMap;
 use mistralrs::{
-    ChatCompletionChunkResponse, Delta, Model, RequestBuilder, RequestLike, Response,
-    TextMessageRole, Tool, ToolCallResponse, ToolChoice,
+    CalledFunction, ChatCompletionChunkResponse, Delta, Model, RequestBuilder, RequestLike,
+    Response, TextMessageRole, Tool, ToolCallResponse, ToolCallType, ToolChoice,
 };
 use once_cell::sync::OnceCell;
 use serde::Serialize;
@@ -193,6 +193,109 @@ pub(crate) fn resolve_workspace_root() -> PathBuf {
 
 pub fn resolve_tools_binary_path_for_runtime() -> Result<PathBuf> {
     colossal_linux_sandbox::resolve_tools_binary_path().map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+fn role_from_str(role: &str) -> TextMessageRole {
+    match role {
+        "system" => TextMessageRole::System,
+        "user" => TextMessageRole::User,
+        "assistant" => TextMessageRole::Assistant,
+        "tool" => TextMessageRole::Tool,
+        other => TextMessageRole::Custom(other.to_string()),
+    }
+}
+
+fn value_left_str(value: &serde_json::Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.get("Left").and_then(|inner| inner.as_str()))
+}
+
+fn message_left_str<'a>(message: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    message.get(key).and_then(value_left_str)
+}
+
+fn message_right<'a>(message: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    message
+        .get(key)
+        .and_then(|value| value.get("Right").or(Some(value)))
+}
+
+fn parse_tool_calls(value: &serde_json::Value) -> Vec<ToolCallResponse> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let id = entry.get("id")?.as_str()?.to_string();
+            let function = entry.get("function")?;
+            let name = function.get("name")?.as_str()?.to_string();
+            let arguments = function.get("arguments")?.as_str()?.to_string();
+            Some(ToolCallResponse {
+                index,
+                id,
+                tp: ToolCallType::Function,
+                function: CalledFunction { name, arguments },
+            })
+        })
+        .collect()
+}
+
+fn rebuild_request_builder(
+    existing: &RequestBuilder,
+    system_prompt: &str,
+    tools: Vec<Tool>,
+    reminder: Option<&str>,
+) -> Result<RequestBuilder> {
+    let serialized = serde_json::to_value(existing.messages_ref())?;
+    let mut builder = RequestBuilder::new()
+        .add_message(TextMessageRole::System, system_prompt)
+        .set_tools(tools)
+        .set_tool_choice(ToolChoice::Auto)
+        .enable_thinking(true);
+
+    if let Some(messages) = serialized.as_array() {
+        for message in messages {
+            let Some(role) = message_left_str(message, "role") else {
+                continue;
+            };
+            if role == "system" {
+                continue;
+            }
+
+            if role == "tool"
+                && let (Some(content), Some(tool_call_id)) = (
+                    message_left_str(message, "content"),
+                    message_left_str(message, "tool_call_id"),
+                )
+            {
+                builder = builder.add_tool_message(content, tool_call_id);
+                continue;
+            }
+
+            let role = role_from_str(role);
+            let content_text = message_left_str(message, "content").unwrap_or_default();
+
+            if let Some(functions) = message_right(message, "function") {
+                let tool_calls = parse_tool_calls(functions);
+                if !tool_calls.is_empty() {
+                    builder = builder.add_message_with_tool_call(role, content_text, tool_calls);
+                    continue;
+                }
+            }
+
+            if !content_text.is_empty() {
+                builder = builder.add_message(role, content_text);
+            }
+        }
+    }
+
+    if let Some(reminder) = reminder {
+        builder = builder.add_message(TextMessageRole::System, reminder);
+    }
+
+    Ok(builder)
 }
 
 #[derive(Serialize)]
@@ -1664,7 +1767,6 @@ impl Agent {
     ) -> Result<()> {
         // Clone the safety config to use in multiple places
         let safety_config_for_update = new_safety_config.clone();
-
         // Update the tools based on the new safety mode
         let new_tools = if new_safety_config.mode == safety_config::SafetyMode::ReadOnly {
             tools::get_readonly_tools()
@@ -1693,15 +1795,51 @@ impl Agent {
         let suffix = new_safety_config.get_system_prompt_suffix();
         self.regenerate_system_prompt(suffix).await?;
 
-        // If there's an active conversation, update the tools in the request builder
+        let system_prompt_content = {
+            let system_prompt_guard = self.system_prompt.lock().await;
+            system_prompt_guard.clone()
+        };
+
+        // Preserve conversation history while rebuilding it with the fresh system prompt.
+        // This removes stale read-only/build instructions without making the model forget
+        // the current task context on mode changes.
         {
             let mut conversation_guard = self.conversation.lock().await;
-            if let Some(ref mut conversation) = *conversation_guard {
-                // Create a new request builder with updated tools
-                *conversation_guard = Some(conversation.clone().set_tools(new_tools));
+            if let Some(ref conversation) = *conversation_guard {
+                *conversation_guard = Some(rebuild_request_builder(
+                    conversation,
+                    &system_prompt_content,
+                    new_tools.clone(),
+                    None,
+                )?);
             }
         }
 
+        Ok(())
+    }
+
+    pub async fn inject_system_reminder(&self, reminder: &str) -> Result<()> {
+        let tools = {
+            let tools_guard = self.tools.lock().await;
+            tools_guard.clone()
+        };
+        let system_prompt_content = {
+            let system_prompt_guard = self.system_prompt.lock().await;
+            system_prompt_guard.clone()
+        };
+
+        let mut conversation_guard = self.conversation.lock().await;
+        let rebuilt = if let Some(ref conversation) = *conversation_guard {
+            rebuild_request_builder(conversation, &system_prompt_content, tools, Some(reminder))?
+        } else {
+            RequestBuilder::new()
+                .add_message(TextMessageRole::System, &system_prompt_content)
+                .add_message(TextMessageRole::System, reminder)
+                .set_tools(tools)
+                .set_tool_choice(ToolChoice::Auto)
+                .enable_thinking(true)
+        };
+        *conversation_guard = Some(rebuilt);
         Ok(())
     }
 
@@ -3608,6 +3746,233 @@ mod summary_tests {
         assert!(summary.summary_text.contains("cargo test"));
         assert_eq!(summary.artifacts_touched, vec!["src/lib.rs".to_string()]);
         serde_json::to_string(&summary).expect("summary serializes");
+    }
+}
+
+#[cfg(test)]
+mod exec_command_tests {
+    use super::*;
+    use mistralrs::CalledFunction;
+    use mistralrs::ToolCallType;
+    use std::sync::{Mutex as StdMutex, OnceLock};
+
+    fn exec_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(()))
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
+    async fn reset_global_shell_state() {
+        ensure_global_state_initialized().await;
+        if let Some(state) = GLOBAL_STATE.get() {
+            if let Some(existing) = state.shell_session_id.lock().await.clone() {
+                let _ = state.manager.terminate_session(existing).await;
+            }
+            *state.shell_session_id.lock().await = None;
+            *state.session_has_background_process.lock().await = false;
+        }
+    }
+
+    fn build_test_agent(cwd: PathBuf) -> Agent {
+        let safety = safety_config::SafetyConfig::from_mode(safety_config::SafetyMode::Yolo);
+        Agent::new_with_backend(
+            BackendConfig::None,
+            String::new(),
+            vec![],
+            safety,
+            "test".to_string(),
+        )
+        .with_working_directory(cwd)
+    }
+
+    fn make_test_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agent-core-{label}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    fn tool_call(name: &str, arguments: serde_json::Value) -> ToolCallResponse {
+        ToolCallResponse {
+            index: 0,
+            id: "call-1".to_string(),
+            tp: ToolCallType::Function,
+            function: CalledFunction {
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_command_reports_success_for_foreground_command() {
+        let _guard = exec_test_lock();
+        let temp = make_test_dir("success");
+        set_workspace_root_override(&temp);
+        reset_global_shell_state().await;
+        let agent = build_test_agent(temp.clone());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let result = execute_tool_call(
+            &agent,
+            &tool_call("exec_command", json!({ "command": "printf 'hello'" })),
+            tx,
+        )
+        .await
+        .expect("exec command succeeds");
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&result).expect("yaml result");
+        assert_eq!(parsed["status"].as_str(), Some("Success"));
+        assert_eq!(parsed["cmd_out"].as_str(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn exec_command_uses_agent_working_directory() {
+        let _guard = exec_test_lock();
+        let temp = make_test_dir("working-directory");
+        let nested = temp.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+        set_workspace_root_override(&temp);
+        reset_global_shell_state().await;
+        let agent = build_test_agent(nested.clone());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let result = execute_tool_call(
+            &agent,
+            &tool_call("exec_command", json!({ "command": "pwd" })),
+            tx,
+        )
+        .await
+        .expect("exec command succeeds");
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&result).expect("yaml result");
+        assert_eq!(parsed["status"].as_str(), Some("Success"));
+        assert_eq!(
+            parsed["cmd_out"].as_str(),
+            Some(nested.to_string_lossy().as_ref())
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_command_reports_background_metadata() {
+        let _guard = exec_test_lock();
+        let temp = make_test_dir("background");
+        set_workspace_root_override(&temp);
+        reset_global_shell_state().await;
+        let agent = build_test_agent(temp.clone());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let result = execute_tool_call(
+            &agent,
+            &tool_call(
+                "exec_command",
+                json!({ "command": "sleep 1", "is_background": true }),
+            ),
+            tx,
+        )
+        .await
+        .expect("background command result returned");
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&result).expect("yaml result");
+        assert_eq!(parsed["status"].as_str(), Some("Background"));
+        assert!(parsed["session_id"].as_str().is_some());
+        assert!(parsed["log_file"].as_str().is_some());
+
+        reset_global_shell_state().await;
+    }
+
+    #[tokio::test]
+    async fn update_safety_config_preserves_context_and_replaces_system_prompt() {
+        let _guard = exec_test_lock();
+        let temp = make_test_dir("mode-change");
+        set_workspace_root_override(&temp);
+        reset_global_shell_state().await;
+        let agent = build_test_agent(temp.clone());
+
+        agent
+            .restore_conversation(
+                r#"[
+                    {"role":"system","content":"**READ-ONLY MODE ACTIVE**"},
+                    {"role":"user","content":"previous message"},
+                    {"role":"assistant","content":"previous reply"}
+                ]"#,
+            )
+            .await
+            .expect("restore conversation");
+
+        agent
+            .update_safety_config(safety_config::SafetyConfig::from_mode(
+                safety_config::SafetyMode::Regular,
+            ))
+            .await
+            .expect("update safety config");
+
+        let exported = agent
+            .export_conversation()
+            .await
+            .expect("conversation preserved");
+        let messages: serde_json::Value = serde_json::from_str(&exported).expect("json messages");
+        let entries = messages.as_array().expect("message array");
+
+        assert_eq!(message_left_str(&entries[0], "role"), Some("system"));
+        assert!(
+            !message_left_str(&entries[0], "content")
+                .unwrap_or_default()
+                .contains("READ-ONLY MODE ACTIVE")
+        );
+        assert_eq!(
+            message_left_str(&entries[1], "content"),
+            Some("previous message")
+        );
+        assert_eq!(
+            message_left_str(&entries[2], "content"),
+            Some("previous reply")
+        );
+    }
+
+    #[tokio::test]
+    async fn inject_system_reminder_preserves_context_and_appends_reminder() {
+        let _guard = exec_test_lock();
+        let temp = make_test_dir("reminder");
+        set_workspace_root_override(&temp);
+        reset_global_shell_state().await;
+        let agent = build_test_agent(temp.clone());
+
+        agent
+            .restore_conversation(
+                r#"[
+                    {"role":"system","content":"base system"},
+                    {"role":"user","content":"keep this context"}
+                ]"#,
+            )
+            .await
+            .expect("restore conversation");
+
+        let reminder = "<system-reminder>\nYour operational mode has changed from plan to build.\nYou are no longer in read-only mode.\nYou are permitted to make file changes, run shell commands, and utilize your arsenal of tools as needed.\n</system-reminder>";
+        agent
+            .inject_system_reminder(reminder)
+            .await
+            .expect("inject reminder");
+
+        let exported = agent
+            .export_conversation()
+            .await
+            .expect("conversation preserved");
+        let messages: serde_json::Value = serde_json::from_str(&exported).expect("json messages");
+        let entries = messages.as_array().expect("message array");
+
+        assert_eq!(
+            message_left_str(&entries[1], "content"),
+            Some("keep this context")
+        );
+        assert_eq!(message_left_str(&entries[2], "role"), Some("system"));
+        assert_eq!(message_left_str(&entries[2], "content"), Some(reminder));
     }
 }
 

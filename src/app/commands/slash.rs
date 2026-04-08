@@ -204,6 +204,7 @@ impl App {
                     }
                 } else {
                     let mut config_changed = false;
+                    let previous_mode = self.safety_state.assistant_mode;
                     // Handle subcommands (silently update, sync with assistant_mode)
                     match args[0].as_str() {
                         "yolo" => {
@@ -252,8 +253,15 @@ impl App {
                         if let Ok(config) = agent_core::safety_config::SafetyConfig::load() {
                             if let Some(agent_arc) = &self.agent {
                                 let agent_clone = Arc::clone(agent_arc);
+                                let reminder = AssistantMode::transition_reminder(
+                                    previous_mode,
+                                    self.safety_state.assistant_mode,
+                                );
                                 task::spawn(async move {
                                     let _ = agent_clone.update_safety_config(config).await;
+                                    if let Some(reminder) = reminder {
+                                        let _ = agent_clone.inject_system_reminder(&reminder).await;
+                                    }
                                 });
                             }
                         }

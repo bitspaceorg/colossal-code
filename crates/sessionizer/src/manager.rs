@@ -48,8 +48,13 @@ fn clean_shell_output(output: &str, command: &str) -> String {
     let lines: Vec<&str> = without_markers.lines().collect();
     let mut cleaned_lines = Vec::new();
     let mut skip_next = false;
+    let mut skipped_command_echo = false;
+    let normalized_command: String = command
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '\'' && *ch != '"')
+        .collect();
 
-    for (i, line) in lines.iter().enumerate() {
+    for line in &lines {
         if skip_next {
             skip_next = false;
             continue;
@@ -63,16 +68,16 @@ fn clean_shell_output(output: &str, command: &str) -> String {
         }
 
         // Skip shell prompts (various patterns)
-        if trimmed.ends_with('$')
-            || trimmed.ends_with('#')
-            || trimmed.ends_with('>')
-            || trimmed.ends_with('%')
-        {
+        if trimmed == "$" || trimmed == "#" || trimmed == ">" || trimmed == "%" {
             continue;
         }
 
         // Skip lines that look like shell prompts
-        if (trimmed.contains('@') || trimmed.contains('~'))
+        let looks_like_prompt_prefix = trimmed.contains('@')
+            || trimmed.contains('~')
+            || trimmed.starts_with('/')
+            || trimmed.starts_with("~/");
+        if looks_like_prompt_prefix
             && (trimmed.ends_with('$') || trimmed.ends_with('#') || trimmed.ends_with('%'))
         {
             continue;
@@ -83,14 +88,41 @@ fn clean_shell_output(output: &str, command: &str) -> String {
             continue;
         }
 
-        // Skip internal command wrapper echoes.
-        if trimmed.contains("__nite_cmd") {
+        // Skip internal command wrapper echoes and fragmented control-wrapper redraws.
+        if trimmed.contains("__nite_cmd")
+            || trimmed.contains("__nite_code")
+            || trimmed.contains("__SHELL_READY__")
+            || trimmed.contains("stty -echo -echoctl")
+            || trimmed.contains("__START__")
+            || trimmed.contains("__DONE__")
+            || trimmed.contains("__NITE_CTL__")
+            || trimmed.contains("CMD_DONE_")
+            || (trimmed.contains("printf") && trimmed.contains("__CMD_DONE_"))
+            || (trimmed.starts_with('<')
+                && (trimmed.contains("printf")
+                    || trimmed.contains("__nite")
+                    || trimmed.contains("__START__")
+                    || trimmed.contains("__DONE__")))
+        {
             continue;
         }
 
         // Skip lines that match the exact command (first line is often the echo)
-        if i == 0 && trimmed == command.trim() {
+        if !skipped_command_echo && trimmed == command.trim() {
+            skipped_command_echo = true;
             continue;
+        }
+
+        if trimmed.starts_with('<') {
+            let normalized_fragment: String = trimmed
+                .trim_start_matches('<')
+                .chars()
+                .filter(|ch| !ch.is_whitespace() && *ch != '\'' && *ch != '"')
+                .collect();
+            if !normalized_fragment.is_empty() && normalized_command.contains(&normalized_fragment)
+            {
+                continue;
+            }
         }
 
         cleaned_lines.push(trimmed);
@@ -101,40 +133,90 @@ fn clean_shell_output(output: &str, command: &str) -> String {
 
 const CONTROL_PREFIX: &str = "__NITE_CTL__";
 
-#[derive(Debug, Clone, Copy)]
-enum ControlEvent {
-    Start,
-    Heartbeat,
-    Done(i32),
-}
-
 fn build_control_wrapped_command(command: &str, control_id: &str) -> String {
     format!(
-        "{{ __nite_cmd() {{ {command} ; }}; __nite_cmd & __nite_pid=$!; printf '{prefix}{control_id}__START__%s\\n' \"$__nite_pid\"; ( while kill -0 \"$__nite_pid\" 2>/dev/null; do sleep 2; kill -0 \"$__nite_pid\" 2>/dev/null || break; printf '{prefix}{control_id}__HEARTBEAT__\\n'; done ) & __nite_hb=$!; wait \"$__nite_pid\"; __nite_code=$?; kill \"$__nite_hb\" 2>/dev/null; wait \"$__nite_hb\" 2>/dev/null; printf '{prefix}{control_id}__DONE__%s\\n' \"$__nite_code\"; }}",
+        "{{ printf '{prefix}{control_id}__START__0\\n'; {command} ; __nite_code=$?; printf '{prefix}{control_id}__DONE__%s\\n' \"$__nite_code\"; }}",
         prefix = CONTROL_PREFIX,
     )
 }
 
-fn parse_control_line(line: &str, control_id: &str) -> Option<ControlEvent> {
+fn consume_numeric_prefix(value: &str, allow_negative: bool) -> Option<(usize, i32)> {
+    let mut end = 0;
+
+    for (idx, ch) in value.char_indices() {
+        let is_sign = allow_negative && idx == 0 && ch == '-';
+        if is_sign || ch.is_ascii_digit() {
+            end = idx + ch.len_utf8();
+            continue;
+        }
+        break;
+    }
+
+    if end == 0 || (allow_negative && end == 1 && value.starts_with('-')) {
+        return None;
+    }
+
+    let parsed = value[..end].parse::<i32>().ok()?;
+    Some((end, parsed))
+}
+
+fn strip_control_markers(
+    line: &str,
+    control_id: &str,
+    command_completed: &mut bool,
+    done_exit_code: &mut Option<i32>,
+) -> String {
     let start_prefix = format!("{CONTROL_PREFIX}{control_id}__START__");
-    if let Some(pid_part) = line.strip_prefix(&start_prefix) {
-        let _ = pid_part.trim().parse::<i32>().ok()?;
-        return Some(ControlEvent::Start);
-    }
-
-    let heartbeat_line = format!("{CONTROL_PREFIX}{control_id}__HEARTBEAT__");
-    if line.trim() == heartbeat_line {
-        return Some(ControlEvent::Heartbeat);
-    }
-
+    let heartbeat_marker = format!("{CONTROL_PREFIX}{control_id}__HEARTBEAT__");
     let done_prefix = format!("{CONTROL_PREFIX}{control_id}__DONE__");
-    if let Some(code_part) = line.strip_prefix(&done_prefix)
-        && let Ok(code) = code_part.trim().parse::<i32>()
-    {
-        return Some(ControlEvent::Done(code));
-    }
+    let mut remaining = line;
+    let mut visible = String::new();
 
-    None
+    loop {
+        let next_marker = [
+            remaining.find(&start_prefix).map(|idx| (idx, 0_u8)),
+            remaining.find(&heartbeat_marker).map(|idx| (idx, 1_u8)),
+            remaining.find(&done_prefix).map(|idx| (idx, 2_u8)),
+        ]
+        .into_iter()
+        .flatten()
+        .min_by_key(|(idx, _)| *idx);
+
+        let Some((marker_start, marker_kind)) = next_marker else {
+            visible.push_str(remaining);
+            return visible;
+        };
+
+        visible.push_str(&remaining[..marker_start]);
+        remaining = &remaining[marker_start..];
+
+        match marker_kind {
+            0 => {
+                let suffix = &remaining[start_prefix.len()..];
+                if let Some((consumed, _pid)) = consume_numeric_prefix(suffix, false) {
+                    remaining = &suffix[consumed..];
+                } else {
+                    visible.push_str(CONTROL_PREFIX);
+                    remaining = &remaining[CONTROL_PREFIX.len()..];
+                }
+            }
+            1 => {
+                remaining = &remaining[heartbeat_marker.len()..];
+            }
+            2 => {
+                let suffix = &remaining[done_prefix.len()..];
+                if let Some((consumed, code)) = consume_numeric_prefix(suffix, true) {
+                    *command_completed = true;
+                    *done_exit_code = Some(code);
+                    remaining = &suffix[consumed..];
+                } else {
+                    visible.push_str(CONTROL_PREFIX);
+                    remaining = &remaining[CONTROL_PREFIX.len()..];
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 fn extract_visible_output(
@@ -155,23 +237,21 @@ fn extract_visible_output(
         }
         pending.drain(..=pos);
 
-        if let Some(event) = parse_control_line(line.trim(), control_id) {
-            if let ControlEvent::Done(code) = event {
-                *command_completed = true;
-                *done_exit_code = Some(code);
-            }
+        let stripped = strip_control_markers(&line, control_id, command_completed, done_exit_code);
+        if stripped.trim().is_empty() {
             continue;
         }
 
-        visible.push_str(&line);
+        visible.push_str(&stripped);
         visible.push('\n');
     }
 
     if flush_partial && !pending.is_empty() {
         let line = pending.trim_end_matches('\r').to_string();
         pending.clear();
-        if parse_control_line(line.trim(), control_id).is_none() {
-            visible.push_str(&line);
+        let stripped = strip_control_markers(&line, control_id, command_completed, done_exit_code);
+        if !stripped.trim().is_empty() {
+            visible.push_str(&stripped);
         }
     }
 
@@ -936,6 +1016,23 @@ impl SessionManager {
         session_id: SessionId,
         command: String,
     ) -> Result<Receiver<StreamEvent>, ColossalErr> {
+        {
+            let sessions = self.persistent_shell_sessions.lock().unwrap();
+            let session = sessions
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, session)| session)
+                .ok_or_else(|| {
+                    ColossalErr::Sandbox(SandboxErr::Denied(
+                        -1,
+                        format!("unknown session id {}", session_id.as_str()),
+                        (),
+                    ))
+                })?;
+
+            session.wait_until_ready(Duration::from_secs(10)).await?;
+        }
+
         // Add command to history
         {
             let sessions = self.persistent_shell_sessions.lock().unwrap();
@@ -944,8 +1041,84 @@ impl SessionManager {
             }
         }
 
-        self.send_input_to_shell_session(session_id, format!("{}\n", command), None)
-            .await
+        let control_id = format!(
+            "__CMD_DONE_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        );
+        let wrapped_command = build_control_wrapped_command(&command, &control_id);
+        let user_command = command.clone();
+        let raw_stream = self
+            .send_input_to_shell_session(session_id, wrapped_command, None)
+            .await?;
+        let (tx, rx) = unbounded::<StreamEvent>();
+
+        tokio::spawn(async move {
+            let raw_stream = raw_stream;
+            let mut pending = String::new();
+            let mut command_completed = false;
+            let mut done_exit_code = None;
+
+            loop {
+                match raw_stream.recv().await {
+                    Ok(StreamEvent::Stdout(output)) | Ok(StreamEvent::Stderr(output)) => {
+                        let visible = extract_visible_output(
+                            &output,
+                            &mut pending,
+                            &control_id,
+                            &mut command_completed,
+                            &mut done_exit_code,
+                            false,
+                        );
+                        let mut cleaned = clean_shell_output(&visible, &user_command);
+                        if !cleaned.is_empty() && visible.contains('\n') && !cleaned.ends_with('\n')
+                        {
+                            cleaned.push('\n');
+                        }
+                        if !cleaned.trim().is_empty()
+                            && tx.send(StreamEvent::Stdout(cleaned)).await.is_err()
+                        {
+                            break;
+                        }
+                        if command_completed {
+                            break;
+                        }
+                    }
+                    Ok(StreamEvent::Exit(code)) => {
+                        let _ = tx.send(StreamEvent::Exit(code)).await;
+                        return;
+                    }
+                    Ok(StreamEvent::Error(error)) => {
+                        let _ = tx.send(StreamEvent::Error(error)).await;
+                        return;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            let flushed = extract_visible_output(
+                "",
+                &mut pending,
+                &control_id,
+                &mut command_completed,
+                &mut done_exit_code,
+                true,
+            );
+            let mut cleaned = clean_shell_output(&flushed, &user_command);
+            if !cleaned.is_empty() && flushed.contains('\n') && !cleaned.ends_with('\n') {
+                cleaned.push('\n');
+            }
+            if !cleaned.trim().is_empty() {
+                let _ = tx.send(StreamEvent::Stdout(cleaned)).await;
+            }
+
+            let code = done_exit_code.unwrap_or(if command_completed { 0 } else { -1 });
+            let _ = tx.send(StreamEvent::Exit(code)).await;
+        });
+
+        Ok(rx)
     }
 
     /// Execute a command in a persistent shell session and return aggregated output (non-streaming)
@@ -1035,8 +1208,16 @@ impl SessionManager {
 
         // Wrap the command with internal START/HEARTBEAT/DONE control markers.
         let command_with_marker = build_control_wrapped_command(&command, &control_id);
+
+        {
+            let sessions = self.persistent_shell_sessions.lock().unwrap();
+            if let Some((_, session)) = sessions.iter().find(|(id, _)| *id == session_id) {
+                session.add_to_history(command.clone());
+            }
+        }
+
         let stream_rx = self
-            .send_command_to_shell_session(session_id, command_with_marker)
+            .send_input_to_shell_session(session_id, command_with_marker, None)
             .await?;
 
         let mut stdout_parts = Vec::new();
@@ -1213,7 +1394,7 @@ impl SessionManager {
         self.update_session_activity(session_id);
 
         // Send the input with newline to execute it
-        let input_with_newline = format!("{}\n", input);
+        let input_with_newline = format!("{}\r", input);
         writer_tx
             .send(input_with_newline.into_bytes())
             .await
@@ -1991,5 +2172,170 @@ impl SessionManager {
             // eprintln!("Enhanced streaming task for session {} terminated", session_id.as_str());
         });
         Ok((session_id, rx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clean_shell_output, extract_visible_output};
+
+    #[test]
+    fn extract_visible_output_detects_embedded_done_marker() {
+        let control_id = "abc123";
+        let mut pending = String::new();
+        let mut command_completed = false;
+        let mut done_exit_code = None;
+
+        let visible = extract_visible_output(
+            &format!("prompt __NITE_CTL__{control_id}__DONE__0 next-prompt\nreal output\n"),
+            &mut pending,
+            control_id,
+            &mut command_completed,
+            &mut done_exit_code,
+            false,
+        );
+
+        assert!(command_completed);
+        assert_eq!(done_exit_code, Some(0));
+        assert_eq!(visible, "prompt  next-prompt\nreal output\n");
+    }
+
+    #[test]
+    fn extract_visible_output_handles_partial_done_marker_on_flush() {
+        let control_id = "flush123";
+        let mut pending = String::new();
+        let mut command_completed = false;
+        let mut done_exit_code = None;
+
+        let visible = extract_visible_output(
+            &format!("before __NITE_CTL__{control_id}__DONE__17"),
+            &mut pending,
+            control_id,
+            &mut command_completed,
+            &mut done_exit_code,
+            true,
+        );
+
+        assert!(command_completed);
+        assert_eq!(done_exit_code, Some(17));
+        assert_eq!(visible, "before ");
+    }
+
+    #[test]
+    fn extract_visible_output_handles_marker_split_across_chunks() {
+        let control_id = "split123";
+        let mut pending = String::new();
+        let mut command_completed = false;
+        let mut done_exit_code = None;
+
+        let visible = extract_visible_output(
+            &format!("hello __NITE_CTL__{control_id}__DO"),
+            &mut pending,
+            control_id,
+            &mut command_completed,
+            &mut done_exit_code,
+            false,
+        );
+        assert_eq!(visible, "");
+        assert!(!command_completed);
+
+        let visible = extract_visible_output(
+            "NE__5 world\n",
+            &mut pending,
+            control_id,
+            &mut command_completed,
+            &mut done_exit_code,
+            false,
+        );
+
+        assert!(command_completed);
+        assert_eq!(done_exit_code, Some(5));
+        assert_eq!(visible, "hello  world\n");
+    }
+
+    #[test]
+    fn extract_visible_output_strips_start_and_heartbeat_markers() {
+        let control_id = "markers123";
+        let mut pending = String::new();
+        let mut command_completed = false;
+        let mut done_exit_code = None;
+
+        let visible = extract_visible_output(
+            &format!(
+                "before __NITE_CTL__{control_id}__START__123 after\n__NITE_CTL__{control_id}__HEARTBEAT__\n"
+            ),
+            &mut pending,
+            control_id,
+            &mut command_completed,
+            &mut done_exit_code,
+            false,
+        );
+
+        assert!(!command_completed);
+        assert_eq!(done_exit_code, None);
+        assert_eq!(visible, "before  after\n");
+    }
+
+    #[test]
+    fn extract_visible_output_ignores_malformed_done_marker() {
+        let control_id = "bad123";
+        let mut pending = String::new();
+        let mut command_completed = false;
+        let mut done_exit_code = None;
+
+        let visible = extract_visible_output(
+            &format!("__NITE_CTL__{control_id}__DONE__oops\n"),
+            &mut pending,
+            control_id,
+            &mut command_completed,
+            &mut done_exit_code,
+            false,
+        );
+
+        assert!(!command_completed);
+        assert_eq!(done_exit_code, None);
+        assert_eq!(visible, format!("__NITE_CTL__{control_id}__DONE__oops\n"));
+    }
+
+    #[test]
+    fn clean_shell_output_removes_prompts_markers_and_wrapper_echoes() {
+        let command = "(cd /tmp && echo hi)";
+        let raw = [
+            "user@host ~/repo $",
+            command,
+            "{ __nite_cmd() { (cd /tmp && echo hi) ; }; __nite_cmd &",
+            "__NITE_CTL____CMD_DONE_1____START__1234",
+            "hi",
+            "__NITE_CTL____CMD_DONE_1____DONE__0",
+            "user@host ~/repo $",
+        ]
+        .join("\n");
+
+        assert_eq!(clean_shell_output(&raw, command), "hi");
+    }
+
+    #[test]
+    fn clean_shell_output_preserves_real_output_that_looks_shellish() {
+        let command = "printf 'keep this$\\n100%\\n'";
+        let raw = "keep this$\n100%\n";
+
+        assert_eq!(clean_shell_output(raw, command), "keep this$\n100%");
+    }
+
+    #[test]
+    fn clean_shell_output_drops_fragmented_wrapper_redraw_noise() {
+        let command = "echo 'Hello from persistent shell!'";
+        let raw = [
+            "<123__START__0\\n'; { printf '__",
+            "<__START__0\\n'; echo 'Hello from persis",
+            "<__DONE__%s\\n' \"$__nite_code\";}",
+            "Hello from persistent shell!",
+        ]
+        .join("\n");
+
+        assert_eq!(
+            clean_shell_output(&raw, command),
+            "Hello from persistent shell!"
+        );
     }
 }

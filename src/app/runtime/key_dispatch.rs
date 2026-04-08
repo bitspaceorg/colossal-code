@@ -23,7 +23,12 @@ impl App {
 
     pub(crate) fn handle_normal_mode_global_toggles(&mut self, key: &KeyEvent) -> bool {
         if Self::is_shift_tab(key) {
+            let previous_mode = self.safety_state.assistant_mode;
             self.safety_state.assistant_mode = self.safety_state.assistant_mode.next();
+            let reminder = crate::app::AssistantMode::transition_reminder(
+                previous_mode,
+                self.safety_state.assistant_mode,
+            );
 
             if let Some(safety_mode) = self.safety_state.assistant_mode.to_safety_mode() {
                 let mut config =
@@ -34,8 +39,12 @@ impl App {
                 if let Some(agent_arc) = &self.agent {
                     let agent_clone = Arc::clone(agent_arc);
                     let config_clone = config.clone();
+                    let reminder_clone = reminder.clone();
                     task::spawn(async move {
                         let _ = agent_clone.update_safety_config(config_clone).await;
+                        if let Some(reminder) = reminder_clone {
+                            let _ = agent_clone.inject_system_reminder(&reminder).await;
+                        }
                     });
                 }
             }
