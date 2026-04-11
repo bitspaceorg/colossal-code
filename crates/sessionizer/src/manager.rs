@@ -1947,6 +1947,64 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Restore a shell session from a captured continuity snapshot.
+    ///
+    /// Managed Nu is restored structurally through the embedded runtime.
+    /// POSIX shells are restored by replaying cwd, env vars, and any tracked
+    /// replay commands into the target session.
+    pub async fn restore_shell_session_from_snapshot(
+        &self,
+        session_id: SessionId,
+        snapshot: &PersistentSessionState,
+    ) -> Result<(), ColossalErr> {
+        let managed_runtime = {
+            self.managed_nu_sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, runtime)| runtime.clone())
+        };
+        if let Some(runtime) = managed_runtime {
+            let mut runtime = runtime.lock().unwrap();
+            runtime.restore(snapshot)?;
+            self.update_session_activity(session_id);
+            return Ok(());
+        }
+
+        if snapshot.current_cwd != snapshot.initial_cwd {
+            self.exec_command_in_shell_session(
+                session_id.clone(),
+                format!(
+                    "cd {}",
+                    shell_escape::escape(snapshot.current_cwd.to_string_lossy())
+                ),
+                Some(5_000),
+                1_000,
+                None,
+            )
+            .await?;
+        }
+
+        for (key, value) in &snapshot.env_vars {
+            self.set_env_in_shell_session(session_id.clone(), key.clone(), value.clone())
+                .await?;
+        }
+
+        for replay_command in &snapshot.replay_commands {
+            self.exec_command_in_shell_session(
+                session_id.clone(),
+                replay_command.clone(),
+                Some(30_000),
+                10_000,
+                None,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
     /// Capture continuity state from a persistent shell session so it can be
     /// replayed into a newly spawned shell under a different sandbox policy.
     pub async fn snapshot_shell_session(
