@@ -255,10 +255,23 @@ mod tests {
 ///
 /// # What does NOT survive rotation
 ///
-/// - `overlay` mutations are rejected in managed mode.
-/// - `module`, `use`, `source`, `source-env`, `export use`, `export module`,
-///   `export extern`, `export const` — rejected in managed mode (depend on
-///   external files or namespace semantics that cannot be snapshot/restored).
+/// - All `overlay` subcommands are rejected in managed mode: `overlay use`,
+///   `overlay hide`, `overlay new`, `overlay list`.  Overlay state lives in
+///   `EngineState`'s active overlay stack and cannot be snapshot/restored
+///   without re-executing file-backed module sources, which is outside the
+///   managed runtime's scope.
+/// - The full module/use/source family is **explicitly rejected** in managed
+///   mode.  Rejected forms and reasons:
+///   - `module` / `export module`: module definitions are loaded into
+///     `EngineState` overlays; there is no structural API to extract exactly
+///     what was imported separately from the overlay stack.
+///   - `use` / `export use`: imports go into the active overlay; overlay state
+///     is itself rejected (see above).
+///   - `source` / `source-env`: execute external files whose content can
+///     change between snapshot and restore — replay is non-deterministic.
+///   - `export extern` / `export const`: file-backed module namespace
+///     semantics; same structural ownership problem as `module`.
+///   Use `def` / `alias` directly for custom commands and aliases.
 /// - Block-local or def-local `let`/`mut` bindings are not persisted; only
 ///   top-level session variables are captured structurally.
 /// - Config mutations (`$env.config.X = ...`) — not intercepted.
@@ -397,11 +410,22 @@ impl ManagedNuRuntime {
         Some((name_part.trim(), expansion.trim()))
     }
 
-    /// Returns `true` if the command is a module/use/source/export form that
-    /// cannot be reliably captured and restored in managed mode.
+    /// Returns `true` if the segment is one of the eight explicitly-rejected
+    /// module/use/source forms.
+    ///
+    /// Rejected forms (all for structural reasons — not laziness):
+    /// - `module` / `export module`: loaded into EngineState overlays; no API
+    ///   to extract imported symbols outside the overlay stack.
+    /// - `use` / `export use`: imports go into the active overlay, which is
+    ///   itself rejected.
+    /// - `source` / `source-env`: execute external files; replay is
+    ///   non-deterministic if files change between snapshot and restore.
+    /// - `export extern` / `export const`: file-backed module namespace
+    ///   semantics; same structural ownership problem as `module`.
+    ///
+    /// `export def` and `export alias` are NOT in this list — they are treated
+    /// identically to `def` / `alias` and are fully supported.
     fn is_unsupported_module_command(source: &str) -> bool {
-        // Reject module system commands that depend on external files or
-        // namespace semantics we cannot snapshot/restore.
         source.starts_with("module ")
             || source.starts_with("use ")
             || source.starts_with("source ")
@@ -667,7 +691,9 @@ impl ManagedNuRuntime {
 
         if trimmed.starts_with("overlay ") {
             return Err(ColossalErr::Io(std::io::Error::other(
-                "Managed Nushell does not support overlay commands",
+                "Managed Nushell does not support overlay commands \
+                 (overlay use, overlay hide, overlay new, overlay list); \
+                 define commands and aliases directly with def/alias instead",
             )));
         }
 
@@ -851,12 +877,15 @@ impl ManagedNuRuntime {
                 }
                 if trimmed.starts_with("overlay ") {
                     return Err(ColossalErr::Io(std::io::Error::other(
-                        "Managed Nushell does not support overlay commands",
+                        "Managed Nushell does not support overlay commands \
+                         (overlay use, overlay hide, overlay new, overlay list); \
+                         define commands and aliases directly with def/alias instead",
                     )));
                 }
                 if Self::is_unsupported_module_command(trimmed) {
                     return Err(ColossalErr::Io(std::io::Error::other(
-                        "Managed Nushell does not support module/use/source commands",
+                        "Managed Nushell does not support module/use/source commands; \
+                         define commands and aliases directly with def/alias instead",
                     )));
                 }
 

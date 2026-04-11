@@ -1074,33 +1074,53 @@ async fn managed_nu_overlay_commands_fail_predictably() -> Result<(), Box<dyn st
     let (manager, session_id) =
         create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
 
-    let failed = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "overlay use foo".to_string(),
-            Some(10_000),
-            10_000,
-            None,
-        )
-        .await?;
+    // All four overlay subcommands must be rejected with a stable error.
+    for form in &[
+        "overlay use foo",
+        "overlay hide foo",
+        "overlay new myoverlay",
+        "overlay list",
+    ] {
+        let failed = manager
+            .exec_command_in_shell_session(
+                session_id.clone(),
+                form.to_string(),
+                Some(10_000),
+                10_000,
+                None,
+            )
+            .await?;
 
-    assert!(matches!(
-        failed.exit_status,
-        ExitStatus::Completed { code: 1 }
-    ));
-    assert!(
-        failed
-            .aggregated_output
-            .contains("does not support overlay commands"),
-        "overlay failure should be explicit: {:?}",
-        failed.aggregated_output
-    );
+        assert!(
+            matches!(failed.exit_status, ExitStatus::Completed { code: 1 }),
+            "{form:?} should exit with code 1, got {:?}",
+            failed.exit_status
+        );
+        assert!(
+            failed
+                .aggregated_output
+                .contains("does not support overlay commands"),
+            "{form:?} failure should be explicit: {:?}",
+            failed.aggregated_output
+        );
+    }
 
+    // After all rejections the managed-nu state must be clean.
     let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
     assert!(
-        snapshot.replay_commands.is_empty(),
-        "unsupported overlay commands must not leak into replay state: {:?}",
-        snapshot.replay_commands
+        snapshot.nu_custom_commands.is_empty(),
+        "failed overlay commands must not corrupt nu_custom_commands: {:?}",
+        snapshot.nu_custom_commands
+    );
+    assert!(
+        snapshot.nu_aliases.is_empty(),
+        "failed overlay commands must not corrupt nu_aliases: {:?}",
+        snapshot.nu_aliases
+    );
+    assert!(
+        snapshot.nu_variables.is_empty(),
+        "failed overlay commands must not corrupt nu_variables: {:?}",
+        snapshot.nu_variables
     );
 
     manager.terminate_session(session_id).await?;
@@ -3648,13 +3668,20 @@ async fn managed_nu_module_commands_fail_predictably() -> Result<(), Box<dyn std
     let (manager, session_id) =
         create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
 
-    let unsupported_commands = vec![
+    // All eight explicitly-rejected module/use/source forms must fail with a
+    // stable, explicit error message.
+    let unsupported_commands = [
         "module foo { export def bar [] { 1 } }",
         "use std",
         "source nonexistent.nu",
+        "source-env nonexistent.nu",
+        "export use std",
+        "export module mymod { }",
+        "export extern my-ext []",
+        "export const MY_CONST = 42",
     ];
 
-    for cmd in unsupported_commands {
+    for cmd in &unsupported_commands {
         let result = manager
             .exec_command_in_shell_session(
                 session_id.clone(),
@@ -3664,18 +3691,117 @@ async fn managed_nu_module_commands_fail_predictably() -> Result<(), Box<dyn std
                 None,
             )
             .await?;
+        assert!(
+            matches!(result.exit_status, ExitStatus::Completed { code: 1 }),
+            "'{cmd}' should exit with code 1, got {:?}",
+            result.exit_status
+        );
+        assert!(
+            result.aggregated_output.contains("module/use/source"),
+            "rejection for '{cmd}' should mention module/use/source: {:?}",
+            result.aggregated_output
+        );
+    }
+
+    // After all rejections the managed-nu state must be clean.
+    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
+    assert!(
+        snapshot.nu_custom_commands.is_empty(),
+        "failed module commands must not corrupt nu_custom_commands: {:?}",
+        snapshot.nu_custom_commands
+    );
+    assert!(
+        snapshot.nu_aliases.is_empty(),
+        "failed module commands must not corrupt nu_aliases: {:?}",
+        snapshot.nu_aliases
+    );
+    assert!(
+        snapshot.nu_variables.is_empty(),
+        "failed module commands must not corrupt nu_variables: {:?}",
+        snapshot.nu_variables
+    );
+
+    manager.terminate_session(session_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_nu_module_command_atomicity_blocks_following_segment()
+-> Result<(), Box<dyn std::error::Error>> {
+    // A multi-segment command where the first segment is a rejected module
+    // command must not allow subsequent segments to execute.
+    let _guard = shell_test_lock();
+    let Some(nu_path) = nushell_path() else {
+        return Ok(());
+    };
+
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) =
+        create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
+
+    // module command fails → the def that follows must NOT be registered.
+    let result = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "module bad {}; def should_not_exist [] { 99 }".to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+    assert!(
+        matches!(result.exit_status, ExitStatus::Completed { code: 1 }),
+        "module + def must fail: {:?}",
+        result.exit_status
+    );
+
+    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
+    assert!(
+        snapshot.nu_custom_commands.is_empty(),
+        "def after a module command must not be registered: {:?}",
+        snapshot.nu_custom_commands
+    );
+
+    manager.terminate_session(session_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_nu_fork_eval_rejects_module_commands() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = shell_test_lock();
+    let Some(nu_path) = nushell_path() else {
+        return Ok(());
+    };
+
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) =
+        create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
+
+    let unsupported_commands = [
+        "module foo { export def bar [] { 1 } }",
+        "use std",
+        "source nonexistent.nu",
+        "source-env nonexistent.nu",
+        "export use std",
+        "export module mymod { }",
+        "export extern my-ext []",
+        "export const MY_CONST = 42",
+    ];
+
+    for cmd in &unsupported_commands {
+        let result = manager
+            .fork_eval_in_managed_nu_session(session_id.clone(), cmd.to_string(), None)?
+            .expect("session is managed nu");
         assert_ne!(
             result.exit_status,
             ExitStatus::Completed { code: 0 },
-            "command '{}' should be rejected in managed mode, but got stdout={:?}",
-            cmd,
-            result.stdout
+            "'{cmd}' should fail in fork_eval: {:?}",
+            result.stderr
         );
         assert!(
-            result.stderr.contains("module/use/source") || result.stderr.contains("not support"),
-            "rejection error for '{}' should mention module/use/source: {:?}",
-            cmd,
-            result.stderr
+            result.aggregated_output.contains("module/use/source"),
+            "'{cmd}' fork_eval rejection should be explicit: {:?}",
+            result.aggregated_output
         );
     }
 
@@ -3879,16 +4005,30 @@ async fn managed_nu_fork_eval_rejects_state_mutations() -> Result<(), Box<dyn st
         result.stderr
     );
 
-    // overlay should be rejected
-    let result = manager
-        .fork_eval_in_managed_nu_session(session_id.clone(), "overlay use foo".to_string(), None)?
-        .expect("session is managed nu");
-    assert_ne!(
-        result.exit_status,
-        ExitStatus::Completed { code: 0 },
-        "overlay should fail in fork_eval: {:?}",
-        result.stderr
-    );
+    // all overlay subcommands should be rejected in fork_eval
+    for form in &[
+        "overlay use foo",
+        "overlay hide foo",
+        "overlay new myoverlay",
+        "overlay list",
+    ] {
+        let result = manager
+            .fork_eval_in_managed_nu_session(session_id.clone(), form.to_string(), None)?
+            .expect("session is managed nu");
+        assert_ne!(
+            result.exit_status,
+            ExitStatus::Completed { code: 0 },
+            "{form:?} should fail in fork_eval: {:?}",
+            result.stderr
+        );
+        assert!(
+            result
+                .aggregated_output
+                .contains("does not support overlay commands"),
+            "{form:?} fork_eval rejection should be explicit: {:?}",
+            result.aggregated_output
+        );
+    }
 
     manager.terminate_session(session_id).await?;
     Ok(())
