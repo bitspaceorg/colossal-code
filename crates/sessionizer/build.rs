@@ -4,7 +4,9 @@ use std::path::PathBuf;
 fn main() {
     // Tell rustc/clippy that this is an expected cfg value.
     println!("cargo:rustc-check-cfg=cfg(vendored_bwrap_available)");
+    println!("cargo:rustc-check-cfg=cfg(bundled_nu_available)");
     println!("cargo:rerun-if-env-changed=COLOSSAL_BWRAP_SOURCE_DIR");
+    println!("cargo:rerun-if-env-changed=COLOSSAL_NU_BINARY");
 
     // Rebuild if the vendored bwrap sources change.
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
@@ -18,7 +20,14 @@ fn main() {
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os != "linux" {
+        if let Err(err) = try_bundle_nu_binary() {
+            println!("cargo:warning=Could not bundle Nushell binary: {err}");
+        }
         return;
+    }
+
+    if let Err(err) = try_bundle_nu_binary() {
+        println!("cargo:warning=Could not bundle Nushell binary: {err}");
     }
 
     match try_build_vendored_bwrap(&vendor_dir) {
@@ -33,6 +42,40 @@ fn main() {
             );
         }
     }
+}
+
+fn try_bundle_nu_binary() -> Result<(), String> {
+    let Some(source) = env::var_os("COLOSSAL_NU_BINARY") else {
+        return Ok(());
+    };
+
+    let source = PathBuf::from(source);
+    if !source.is_file() {
+        return Err(format!(
+            "bundled nu binary not found at {}",
+            source.display()
+        ));
+    }
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").map_err(|err| err.to_string())?);
+    let file_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("invalid nu binary filename: {}", source.display()))?
+        .to_string();
+    let bundled_path = out_dir.join("bundled-nu.bin");
+
+    std::fs::copy(&source, &bundled_path).map_err(|err| {
+        format!(
+            "failed to copy bundled nu binary from {} to {}: {err}",
+            source.display(),
+            bundled_path.display()
+        )
+    })?;
+
+    println!("cargo:rustc-cfg=bundled_nu_available");
+    println!("cargo:rustc-env=COLOSSAL_BUNDLED_NU_FILENAME={file_name}");
+    Ok(())
 }
 
 fn try_build_vendored_bwrap(vendor_dir: &PathBuf) -> Result<(), String> {

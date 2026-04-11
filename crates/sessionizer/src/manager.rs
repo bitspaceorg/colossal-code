@@ -1,5 +1,6 @@
 use crate::error::{ColossalErr, SandboxErr};
 use crate::hash_id::hash_id_exists;
+use crate::managed_nu::ManagedNuRuntime;
 use crate::safety::assess_command_safety;
 use crate::session::{ExecCommandSession, PersistentShellSession, SemanticSearchSession};
 use crate::types::{
@@ -137,21 +138,175 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn parse_shell_runtime_snapshot(output: &str) -> Result<std::path::PathBuf, ColossalErr> {
-    let (_, rest) = output.split_once("__NITE_CWD_BEGIN__").ok_or_else(|| {
-        ColossalErr::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "shell snapshot missing cwd start marker",
-        ))
-    })?;
-    let (cwd, _) = rest.split_once("__NITE_CWD_END__").ok_or_else(|| {
+fn is_valid_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(ch) if ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn tracked_env_updates_from_command(command: &str) -> Vec<(String, Option<String>)> {
+    let Some(tokens) = shlex::split(command) else {
+        return Vec::new();
+    };
+
+    enum Mode {
+        None,
+        Export,
+        Unset,
+    }
+
+    let mut mode = Mode::None;
+    let mut updates = Vec::new();
+
+    for token in tokens {
+        match token.as_str() {
+            "export" => {
+                mode = Mode::Export;
+            }
+            "unset" => {
+                mode = Mode::Unset;
+            }
+            ";" | "&&" | "||" | "|" => {
+                mode = Mode::None;
+            }
+            _ => match mode {
+                Mode::Export => {
+                    if let Some((key, value)) = token.split_once('=')
+                        && is_valid_env_var_name(key)
+                    {
+                        updates.push((key.to_string(), Some(value.to_string())));
+                    }
+                }
+                Mode::Unset => {
+                    if is_valid_env_var_name(&token) {
+                        updates.push((token, None));
+                    }
+                }
+                Mode::None => {}
+            },
+        }
+    }
+
+    updates
+}
+
+fn parse_shell_runtime_cwd(output: &str) -> Result<std::path::PathBuf, ColossalErr> {
+    let (before_end, _) = output.rsplit_once("__NITE_CWD_END__").ok_or_else(|| {
         ColossalErr::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "shell snapshot missing cwd end marker",
         ))
     })?;
+    let (_, cwd) = before_end
+        .rsplit_once("__NITE_CWD_BEGIN__")
+        .ok_or_else(|| {
+            ColossalErr::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "shell snapshot missing cwd start marker",
+            ))
+        })?;
 
     Ok(std::path::PathBuf::from(cwd.trim()))
+}
+
+fn extract_last_marked_block<'a>(
+    output: &'a str,
+    start: &str,
+    end: &str,
+) -> Result<&'a str, ColossalErr> {
+    let (before_end, _) = output.rsplit_once(end).ok_or_else(|| {
+        ColossalErr::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("shell snapshot missing end marker {end}"),
+        ))
+    })?;
+    let (_, block) = before_end.rsplit_once(start).ok_or_else(|| {
+        ColossalErr::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("shell snapshot missing start marker {start}"),
+        ))
+    })?;
+    Ok(block.trim())
+}
+
+fn is_managed_nu_shell(shell_path: &str) -> bool {
+    matches!(
+        crate::shell::shell_kind_from_path(shell_path),
+        crate::shell::ShellKind::ManagedNu
+    )
+}
+
+pub(crate) fn flatten_json_env_to_string_map(value: &serde_json::Value) -> HashMap<String, String> {
+    let mut flattened = HashMap::new();
+    let Some(env) = value.as_object() else {
+        return flattened;
+    };
+
+    let path_separator = if cfg!(windows) { ';' } else { ':' };
+    for (key, value) in env {
+        let string_value = match value {
+            serde_json::Value::Null => String::new(),
+            serde_json::Value::String(raw) => raw.clone(),
+            serde_json::Value::Bool(flag) => flag.to_string(),
+            serde_json::Value::Number(number) => number.to_string(),
+            serde_json::Value::Array(entries) if key == "PATH" || key == "Path" => entries
+                .iter()
+                .filter_map(|entry| entry.as_str())
+                .collect::<Vec<_>>()
+                .join(&path_separator.to_string()),
+            other => other.to_string(),
+        };
+        flattened.insert(key.clone(), string_value);
+    }
+
+    flattened
+}
+
+fn parse_nu_runtime_snapshot(
+    output: &str,
+) -> Result<(PathBuf, String, Vec<NuAliasState>, Vec<String>), ColossalErr> {
+    let state_json =
+        extract_last_marked_block(output, "__NITE_NU_STATE_BEGIN__", "__NITE_NU_STATE_END__")?;
+    let parsed: serde_json::Value = serde_json::from_str(state_json).map_err(|err| {
+        ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+    })?;
+
+    let cwd = parsed
+        .get("cwd")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            ColossalErr::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "nu snapshot missing cwd",
+            ))
+        })?;
+    let env_value = parsed
+        .get("env")
+        .cloned()
+        .unwrap_or(serde_json::Value::Object(Default::default()));
+    let env_json = serde_json::to_string(&env_value).map_err(|err| {
+        ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+    })?;
+    let aliases = serde_json::from_value(
+        parsed
+            .get("aliases")
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(vec![])),
+    )
+    .map_err(|err| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err)))?;
+    let custom_commands = serde_json::from_value(
+        parsed
+            .get("custom_commands")
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(vec![])),
+    )
+    .map_err(|err| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err)))?;
+
+    Ok((PathBuf::from(cwd), env_json, aliases, custom_commands))
+}
+
+fn managed_nu_snapshot_command() -> String {
+    "let __nite_state = { cwd: $env.PWD, env: $env, aliases: (scope aliases | each {|a| { name: $a.name, expansion: (view source $a.name) } }), custom_commands: (scope commands | where type == custom | each {|c| (view source $c.name) }) }; print '__NITE_NU_STATE_BEGIN__'; $__nite_state | to json --raw; print '__NITE_NU_STATE_END__'".to_string()
 }
 
 fn build_control_wrapped_command(command: &str, control_id: &str) -> String {
@@ -279,15 +434,87 @@ fn extract_visible_output(
     visible
 }
 
-// Data structure for persisting session state
+/// Current snapshot format version.  Bump this when changing the
+/// `PersistentSessionState` layout in a way that older versions cannot
+/// deserialize.  The `#[serde(default)]` on the version field means
+/// snapshots written before versioning was added will deserialize with
+/// version 0 and still work.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
+
+/// A single Nushell alias captured for persistence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NuAliasState {
+    pub name: String,
+    pub expansion: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NuVariableState {
+    pub name: String,
+    pub mutable: bool,
+    pub value: nu_protocol::Value,
+}
+
+/// Continuity state for a shell session that must survive rotation
+/// (sandbox-policy changes).
+///
+/// # Shared fields (all shell types)
+///
+/// | Field           | Purpose                                               |
+/// |-----------------|-------------------------------------------------------|
+/// | `session_id`    | Identity of the originating session                   |
+/// | `shell_path`    | Path to the shell binary                              |
+/// | `initial_cwd`   | Original working directory at session creation        |
+/// | `env_vars`      | String-coerced environment variables                  |
+/// | `current_cwd`   | Working directory at snapshot time                    |
+/// | `created_at`    | Wall-clock time the session was first created         |
+///
+/// # POSIX-shell fields
+///
+/// | Field                | Purpose                                        |
+/// |----------------------|------------------------------------------------|
+/// | `structured_env_json`| Full JSON env (preserves non-string values)    |
+/// | `replay_commands`    | Commands replayed into the new shell instance  |
+///
+/// # Managed-Nu fields
+///
+/// | Field                | Purpose                                        |
+/// |----------------------|------------------------------------------------|
+/// | `nu_aliases`         | Custom aliases registered in the runtime       |
+/// | `nu_custom_commands` | Full source of custom `def`/`export def` cmds  |
+/// | `nu_variables`       | Persistent top-level `let`/`mut` session vars  |
+///
+/// For managed Nu, `env_vars` is populated from the stack's string-coercible
+/// env vars.  `structured_env_json` and `replay_commands` are not used
+/// because the managed runtime captures state structurally.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentSessionState {
+    /// Snapshot format version — allows detection of incompatible formats.
+    #[serde(default)]
+    pub version: u32,
     pub session_id: SessionId,
     pub shell_path: String,
     pub initial_cwd: std::path::PathBuf,
     pub env_vars: std::collections::HashMap<String, String>,
     pub current_cwd: std::path::PathBuf,
     pub created_at: std::time::SystemTime,
+    /// POSIX shell: full JSON env snapshot (preserves non-string values).
+    /// Managed Nu: always `None`.
+    #[serde(default)]
+    pub structured_env_json: Option<String>,
+    /// Managed Nu: alias definitions captured structurally.
+    #[serde(default)]
+    pub nu_aliases: Vec<NuAliasState>,
+    /// Managed Nu: full source text of custom commands (`def`/`export def`).
+    #[serde(default)]
+    pub nu_custom_commands: Vec<String>,
+    /// Managed Nu: persistent top-level let/mut session variables.
+    #[serde(default)]
+    pub nu_variables: Vec<NuVariableState>,
+    /// POSIX shell: commands replayed into a fresh shell for continuity.
+    /// Managed Nu: not used (state is restored structurally via `nu_*` fields).
+    #[serde(default)]
+    pub replay_commands: Vec<String>,
 }
 
 // Metadata for session lifecycle management
@@ -305,6 +532,7 @@ pub struct SessionManager {
     process_id: u32, // Store PID for unique session IDs across processes
     pub sessions: Mutex<Vec<(SessionId, ExecCommandSession)>>,
     pub persistent_shell_sessions: Mutex<Vec<(SessionId, PersistentShellSession)>>,
+    pub managed_nu_sessions: Mutex<Vec<(SessionId, Arc<Mutex<ManagedNuRuntime>>)>>,
     pub semantic_search_sessions: Mutex<Vec<(SessionId, SemanticSearchSession)>>,
     session_metadata: Mutex<HashMap<SessionId, SessionMetadata>>,
 }
@@ -316,6 +544,7 @@ impl Default for SessionManager {
             process_id: std::process::id(),
             sessions: Mutex::new(Vec::new()),
             persistent_shell_sessions: Mutex::new(Vec::new()),
+            managed_nu_sessions: Mutex::new(Vec::new()),
             semantic_search_sessions: Mutex::new(Vec::new()),
             session_metadata: Mutex::new(HashMap::new()),
         }
@@ -421,14 +650,33 @@ impl SessionManager {
                 };
 
                 let state = PersistentSessionState {
+                    version: SNAPSHOT_FORMAT_VERSION,
                     session_id: session_id.clone(),
                     shell_path: session.shell_path().to_string(),
-                    initial_cwd: session.initial_cwd().clone(),
+                    initial_cwd: session.initial_cwd(),
                     env_vars: session.get_all_env(),
                     current_cwd: session.current_cwd(),
                     created_at, // Use the actual creation time
+                    structured_env_json: None,
+                    nu_aliases: Vec::new(),
+                    nu_custom_commands: Vec::new(),
+                    nu_variables: Vec::new(),
+                    replay_commands: Vec::new(),
                 };
                 persistent_sessions.push(state);
+            }
+        }
+
+        {
+            let sessions = self.managed_nu_sessions.lock().unwrap().clone();
+            let metadata_map = self.session_metadata.lock().unwrap();
+            for (session_id, runtime) in sessions {
+                let created_at = metadata_map
+                    .get(&session_id)
+                    .map(|metadata| metadata.created_at_system_time)
+                    .unwrap_or_else(std::time::SystemTime::now);
+                let mut runtime = runtime.lock().unwrap();
+                persistent_sessions.push(runtime.snapshot(session_id.clone(), created_at)?);
             }
         }
 
@@ -457,6 +705,21 @@ impl SessionManager {
 
         // Recreate sessions
         for state in persistent_sessions {
+            if is_managed_nu_shell(&state.shell_path) {
+                let runtime = ManagedNuRuntime::from_snapshot(
+                    state.shell_path.clone(),
+                    sandbox_policy.clone(),
+                    &state,
+                )?;
+                self.managed_nu_sessions
+                    .lock()
+                    .unwrap()
+                    .push((state.session_id.clone(), Arc::new(Mutex::new(runtime))));
+                session_ids.push(state.session_id.clone());
+                self.create_session_metadata(state.session_id.clone(), Duration::from_secs(1800));
+                continue;
+            }
+
             let (session, _exit_rx) = crate::session::create_persistent_shell_session(
                 state.shell_path.clone(),
                 false, // login shell
@@ -542,6 +805,7 @@ impl SessionManager {
             false, // login shell
             params.sandbox_policy.clone(),
             params.cwd.clone(),
+            params.env.clone(),
         )
         .await?;
 
@@ -871,6 +1135,7 @@ impl SessionManager {
             false, // login shell
             params.sandbox_policy.clone(),
             params.cwd.clone(),
+            params.env.clone(),
         )
         .await?;
 
@@ -1010,6 +1275,18 @@ impl SessionManager {
         timeout_duration: Option<Duration>,
     ) -> Result<SessionId, ColossalErr> {
         let session_id = self.generate_unique_session_id();
+
+        if is_managed_nu_shell(&shell) {
+            let runtime = ManagedNuRuntime::new(shell, shared_state.get_cwd(), sandbox_policy)?;
+            self.managed_nu_sessions
+                .lock()
+                .unwrap()
+                .push((session_id.clone(), Arc::new(Mutex::new(runtime))));
+
+            let timeout = timeout_duration.unwrap_or(Duration::from_secs(1800));
+            self.create_session_metadata(session_id.clone(), timeout);
+            return Ok(session_id);
+        }
 
         let (session, _exit_rx) = crate::session::create_persistent_shell_session(
             shell,
@@ -1153,6 +1430,54 @@ impl SessionManager {
     ) -> Result<ExecCommandOutput, ColossalErr> {
         let start_time = Instant::now();
 
+        let managed_runtime = {
+            self.managed_nu_sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, runtime)| runtime.clone())
+        };
+        if let Some(runtime) = managed_runtime {
+            let approved_commands: HashSet<Vec<String>> = HashSet::new();
+            let command_parts = shlex::split(&command).unwrap_or_else(|| vec![command.clone()]);
+            let sandbox_policy = {
+                let runtime = runtime.lock().unwrap();
+                runtime.sandbox_policy().clone()
+            };
+            let safety_check = assess_command_safety(
+                &command_parts,
+                ask_for_approval.unwrap_or(crate::safety::yolo_mode()),
+                &sandbox_policy,
+                &approved_commands,
+                false,
+            );
+
+            match safety_check {
+                crate::safety::SafetyCheck::AutoApprove { .. } => {}
+                crate::safety::SafetyCheck::AskUser => {
+                    return Err(ColossalErr::Sandbox(SandboxErr::Denied(
+                        -1,
+                        "User approval required".to_string(),
+                        (),
+                    )));
+                }
+                crate::safety::SafetyCheck::Reject { reason } => {
+                    return Err(ColossalErr::Sandbox(SandboxErr::Denied(-1, reason, ())));
+                }
+            }
+
+            self.update_session_activity(session_id);
+            let mut runtime = runtime.lock().unwrap();
+            let mut result = runtime.exec_command(command)?;
+            if let Some(timeout_ms) = timeout_ms
+                && start_time.elapsed() > Duration::from_millis(timeout_ms)
+            {
+                result.exit_status = ExitStatus::Timeout;
+            }
+            return Ok(result);
+        }
+
         // Check safety before executing
         {
             let sessions = self.persistent_shell_sessions.lock().unwrap();
@@ -1212,6 +1537,8 @@ impl SessionManager {
             session.wait_until_ready(Duration::from_secs(10)).await?;
         }
 
+        let tracked_env_updates = tracked_env_updates_from_command(&command);
+
         // First, send Ctrl+C to clear any potentially hung state in the shell
         let _ = self
             .send_input_to_shell_session(session_id.clone(), "\x03".to_string(), None)
@@ -1238,7 +1565,7 @@ impl SessionManager {
         }
 
         let stream_rx = self
-            .send_input_to_shell_session(session_id, command_with_marker, None)
+            .send_input_to_shell_session(session_id.clone(), command_with_marker, None)
             .await?;
 
         let mut stdout_parts = Vec::new();
@@ -1324,6 +1651,19 @@ impl SessionManager {
         let aggregated_output = stdout_parts.join("");
         let cleaned_output = clean_shell_output(&aggregated_output, &command);
 
+        if !tracked_env_updates.is_empty() {
+            let sessions = self.persistent_shell_sessions.lock().unwrap();
+            if let Some((_, session)) = sessions.iter().find(|(id, _)| *id == session_id) {
+                for (key, value) in tracked_env_updates {
+                    if let Some(value) = value {
+                        session.set_env(key, value);
+                    } else {
+                        session.unset_env(&key);
+                    }
+                }
+            }
+        }
+
         Ok(ExecCommandOutput {
             duration: Instant::now().duration_since(start_time),
             exit_status: if let Some(code) = done_exit_code {
@@ -1340,6 +1680,60 @@ impl SessionManager {
             aggregated_output: cleaned_output,
             log_file: None,
         })
+    }
+
+    /// Execute a command against a **cloned** managed-Nu runtime so the
+    /// original session state is untouched.  Returns `None` if the session is
+    /// not a managed-Nu session (callers should fall back to the existing
+    /// one-shot exec path for POSIX shells).
+    pub fn fork_eval_in_managed_nu_session(
+        &self,
+        session_id: SessionId,
+        command: String,
+        ask_for_approval: Option<crate::safety::AskForApproval>,
+    ) -> Result<Option<ExecCommandOutput>, ColossalErr> {
+        let managed_runtime = {
+            self.managed_nu_sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, runtime)| runtime.clone())
+        };
+        let Some(runtime) = managed_runtime else {
+            return Ok(None);
+        };
+
+        let approved_commands: HashSet<Vec<String>> = HashSet::new();
+        let command_parts = shlex::split(&command).unwrap_or_else(|| vec![command.clone()]);
+        let sandbox_policy = {
+            let rt = runtime.lock().unwrap();
+            rt.sandbox_policy().clone()
+        };
+        let safety_check = assess_command_safety(
+            &command_parts,
+            ask_for_approval.unwrap_or(crate::safety::yolo_mode()),
+            &sandbox_policy,
+            &approved_commands,
+            false,
+        );
+
+        match safety_check {
+            crate::safety::SafetyCheck::AutoApprove { .. } => {}
+            crate::safety::SafetyCheck::AskUser => {
+                return Err(ColossalErr::Sandbox(SandboxErr::Denied(
+                    -1,
+                    "User approval required".to_string(),
+                    (),
+                )));
+            }
+            crate::safety::SafetyCheck::Reject { reason } => {
+                return Err(ColossalErr::Sandbox(SandboxErr::Denied(-1, reason, ())));
+            }
+        }
+
+        let rt = runtime.lock().unwrap();
+        Ok(Some(rt.fork_eval(command)?))
     }
 
     /// Send raw input to a persistent shell session (without automatic newline)
@@ -1478,6 +1872,21 @@ impl SessionManager {
         key: String,
         value: String,
     ) -> Result<(), ColossalErr> {
+        let managed_runtime = {
+            self.managed_nu_sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, runtime)| runtime.clone())
+        };
+        if let Some(runtime) = managed_runtime {
+            let mut runtime = runtime.lock().unwrap();
+            runtime.set_env(key, value);
+            self.update_session_activity(session_id);
+            return Ok(());
+        }
+
         // Store in the session's environment map
         {
             let sessions = self.persistent_shell_sessions.lock().unwrap();
@@ -1511,12 +1920,57 @@ impl SessionManager {
         Ok(())
     }
 
+    pub async fn set_managed_variable_in_shell_session(
+        &self,
+        session_id: SessionId,
+        variable: NuVariableState,
+    ) -> Result<(), ColossalErr> {
+        let managed_runtime = {
+            self.managed_nu_sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, runtime)| runtime.clone())
+        };
+        let Some(runtime) = managed_runtime else {
+            return Err(ColossalErr::Sandbox(SandboxErr::Denied(
+                -1,
+                format!("unknown managed nu session id {}", session_id.as_str()),
+                (),
+            )));
+        };
+
+        let mut runtime = runtime.lock().unwrap();
+        runtime.restore_persistent_variable(&variable)?;
+        self.update_session_activity(session_id);
+        Ok(())
+    }
+
     /// Capture continuity state from a persistent shell session so it can be
     /// replayed into a newly spawned shell under a different sandbox policy.
     pub async fn snapshot_shell_session(
         &self,
         session_id: SessionId,
     ) -> Result<PersistentSessionState, ColossalErr> {
+        let managed_runtime = {
+            let metadata_map = self.session_metadata.lock().unwrap();
+            let created_at = metadata_map
+                .get(&session_id)
+                .map(|metadata| metadata.created_at_system_time)
+                .unwrap_or_else(std::time::SystemTime::now);
+            self.managed_nu_sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, runtime)| (runtime.clone(), created_at))
+        };
+        if let Some((runtime, created_at)) = managed_runtime {
+            let mut runtime = runtime.lock().unwrap();
+            return runtime.snapshot(session_id, created_at);
+        }
+
         let (shell_path, initial_cwd, env_vars, created_at) = {
             let metadata_map = self.session_metadata.lock().unwrap();
             let sessions = self.persistent_shell_sessions.lock().unwrap();
@@ -1545,22 +1999,55 @@ impl SessionManager {
         let runtime_state = self
             .exec_command_in_shell_session(
                 session_id.clone(),
-                "printf '__NITE_CWD_BEGIN__\n'; pwd; printf '__NITE_CWD_END__\n'".to_string(),
+                if is_managed_nu_shell(&shell_path) {
+                    managed_nu_snapshot_command()
+                } else {
+                    "printf '__NITE_CWD_BEGIN__\n'; pwd; printf '__NITE_CWD_END__\n'".to_string()
+                },
                 Some(5_000),
                 10_000,
                 None,
             )
             .await?;
 
-        let current_cwd = parse_shell_runtime_snapshot(&runtime_state.stdout)?;
+        let (current_cwd, structured_env_json, nu_aliases, nu_custom_commands, env_vars) =
+            if is_managed_nu_shell(&shell_path) {
+                let (current_cwd, structured_env_json, nu_aliases, nu_custom_commands) =
+                    parse_nu_runtime_snapshot(&runtime_state.stdout)?;
+                let structured_value: serde_json::Value =
+                    serde_json::from_str(&structured_env_json).map_err(|err| {
+                        ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+                    })?;
+                (
+                    current_cwd,
+                    Some(structured_env_json),
+                    nu_aliases,
+                    nu_custom_commands,
+                    flatten_json_env_to_string_map(&structured_value),
+                )
+            } else {
+                (
+                    parse_shell_runtime_cwd(&runtime_state.stdout)?,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    env_vars,
+                )
+            };
 
         Ok(PersistentSessionState {
+            version: SNAPSHOT_FORMAT_VERSION,
             session_id,
             shell_path,
             initial_cwd,
             env_vars,
             current_cwd,
             created_at,
+            structured_env_json,
+            nu_aliases,
+            nu_custom_commands,
+            nu_variables: Vec::new(),
+            replay_commands: Vec::new(),
         })
     }
 
@@ -1570,6 +2057,17 @@ impl SessionManager {
         session_id: SessionId,
         key: &str,
     ) -> Result<Option<String>, ColossalErr> {
+        if let Some((_, runtime)) = self
+            .managed_nu_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(id, _)| *id == session_id)
+        {
+            let runtime = runtime.lock().unwrap();
+            return Ok(runtime.get_env(key));
+        }
+
         let sessions = self.persistent_shell_sessions.lock().unwrap();
         let session = sessions
             .iter()
@@ -1592,6 +2090,17 @@ impl SessionManager {
         session_id: SessionId,
         new_cwd: std::path::PathBuf,
     ) -> Result<(), ColossalErr> {
+        if let Some((_, runtime)) = self
+            .managed_nu_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(id, _)| *id == session_id)
+        {
+            let mut runtime = runtime.lock().unwrap();
+            return runtime.update_cwd(new_cwd);
+        }
+
         let sessions = self.persistent_shell_sessions.lock().unwrap();
         let session = sessions
             .iter()
@@ -1614,6 +2123,17 @@ impl SessionManager {
         &self,
         session_id: SessionId,
     ) -> Result<Vec<String>, ColossalErr> {
+        if let Some((_, runtime)) = self
+            .managed_nu_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(id, _)| *id == session_id)
+        {
+            let runtime = runtime.lock().unwrap();
+            return Ok(runtime.history());
+        }
+
         let sessions = self.persistent_shell_sessions.lock().unwrap();
         let session = sessions
             .iter()
@@ -1905,6 +2425,21 @@ impl SessionManager {
             }
         }
 
+        let managed_nu_sessions = self.managed_nu_sessions.lock().unwrap();
+        for (session_id, runtime) in managed_nu_sessions.iter() {
+            if let Some(metadata) = metadata_map.get(session_id) {
+                let age = Instant::now().duration_since(metadata.created_at);
+                let inactive_time = Instant::now().duration_since(metadata.last_activity);
+                let runtime = runtime.lock().unwrap();
+                session_info.push((
+                    session_id.clone(),
+                    format!("managed-nu:{}", runtime.shell_path()),
+                    age,
+                    inactive_time,
+                ));
+            }
+        }
+
         // Semantic search sessions
         for (session_id, _) in semantic_search_sessions.iter() {
             if let Some(metadata) = metadata_map.get(session_id) {
@@ -1958,6 +2493,23 @@ impl SessionManager {
             }
         }
 
+        {
+            let sessions = self.managed_nu_sessions.lock().unwrap();
+            if let Some((_, runtime)) = sessions.iter().find(|(id, _)| *id == session_id) {
+                if let Some(metadata) = metadata_map.get(&session_id) {
+                    let age = Instant::now().duration_since(metadata.created_at);
+                    let inactive_time = Instant::now().duration_since(metadata.last_activity);
+                    let runtime = runtime.lock().unwrap();
+                    return Some((
+                        "managed-nu".to_string(),
+                        age,
+                        inactive_time,
+                        Some(runtime.current_cwd()),
+                    ));
+                }
+            }
+        }
+
         // Check semantic search sessions
         {
             let sessions = self.semantic_search_sessions.lock().unwrap();
@@ -2002,6 +2554,14 @@ impl SessionManager {
                 if let Err(_e) = session.kill() {
                     // eprintln!("Failed to kill process for session {}: {}", session_id.as_str(), e);
                 }
+                return Ok(());
+            }
+        }
+
+        {
+            let mut sessions = self.managed_nu_sessions.lock().unwrap();
+            if let Some(pos) = sessions.iter().position(|(id, _)| *id == session_id) {
+                let _ = sessions.remove(pos);
                 return Ok(());
             }
         }
@@ -2081,6 +2641,7 @@ impl SessionManager {
             false, // login shell
             params.sandbox_policy.clone(),
             params.cwd.clone(),
+            params.env.clone(),
         )
         .await?;
 

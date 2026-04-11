@@ -4,12 +4,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::process::Child;
 
+pub mod bundled_nu;
 pub mod error;
 pub mod hash_id;
 #[cfg(target_os = "linux")]
 pub mod landlock;
 #[cfg(target_os = "linux")]
 pub mod linux_sandbox;
+pub mod managed_nu;
 pub mod manager;
 pub mod protocol;
 pub mod pty;

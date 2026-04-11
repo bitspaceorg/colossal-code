@@ -124,6 +124,9 @@ It is *EXTREMELY* important that your generated commands result in code that can
 5. Unless you are creating a new file, you MUST read the contents or section of what you're modifying before changing it.
 6. If you've introduced (linter) errors, fix them if clear how to (or you can easily figure out how to) using commands. Do not make uneducated guesses. And DO NOT loop more than 3 times on fixing linter errors on the same file. On the third time, you should stop and ask the user what to do next.
 7. If you've suggested a reasonable command that wasn't successful, you should try reapplying or adjusting the command.
+8. When using exec_command, set replay_state to true only when the command is intentionally changing shell state that later commands must observe, such as cd/load-env/hide-env/def/alias/$env.X assignments. Use replay_state false for ordinary commands.
+9. When running under a managed Nushell shell, the following state is automatically preserved across session rotations: environment variables (load-env, hide-env, $env.X = val), working directory (cd), custom commands (def), aliases (alias), and top-level session variables (let/mut and mut reassignment). Block-local or def-local let/mut bindings do NOT survive rotation.
+10. In the managed Nushell environment: `export def` and `export alias` work identically to `def`/`alias`. Module commands (module, use, source, source-env) are NOT supported — define commands and aliases directly. External/system commands (^echo, grep, etc.) are NOT available; only built-in Nushell language commands work. Config mutations ($env.config.X = ...) do not survive session rotation.
 </making_code_changes>
 
 <searching_and_reading>

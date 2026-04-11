@@ -51,6 +51,16 @@ fn shell_program_name(shell: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn shell_descriptor(shell: &str) -> crate::shell::Shell {
+    let path = PathBuf::from(shell);
+    let program_name = shell_program_name(shell);
+    if program_name == "nu" || program_name == "nu.exe" || program_name.contains("nushell") {
+        crate::shell::Shell::new_managed_nu(path)
+    } else {
+        crate::shell::Shell::new_posix(program_name, path)
+    }
+}
+
 fn maybe_remove_bwrap_new_session(request: &mut SandboxExecRequest) {
     if request.sandbox != crate::sandboxing::SandboxType::LinuxBubblewrap {
         return;
@@ -157,6 +167,7 @@ pub struct PersistentShellSession {
     _writer_handle: JoinHandle<()>,
     wait_handle: JoinHandle<Result<i32, std::io::Error>>,
     shell_path: String,
+    initial_cwd: PathBuf,
     // Shared session state
     shared_state: Arc<SharedSessionState>,
     // Command history
@@ -271,6 +282,7 @@ impl PersistentShellSession {
         writer_handle: JoinHandle<()>,
         wait_handle: JoinHandle<Result<i32, std::io::Error>>,
         shell_path: String,
+        initial_cwd: PathBuf,
         shared_state: Arc<SharedSessionState>,
         sandbox_policy: SandboxPolicy,
     ) -> Self {
@@ -282,6 +294,7 @@ impl PersistentShellSession {
             _writer_handle: writer_handle,
             wait_handle,
             shell_path,
+            initial_cwd,
             shared_state,
             history: Arc::new(Mutex::new(Vec::new())),
             history_position: Arc::new(Mutex::new(0)),
@@ -343,7 +356,7 @@ impl PersistentShellSession {
 
     /// Get the initial working directory
     pub fn initial_cwd(&self) -> PathBuf {
-        self.shared_state.get_cwd()
+        self.initial_cwd.clone()
     }
 
     /// Get the current working directory
@@ -354,6 +367,11 @@ impl PersistentShellSession {
     /// Set an environment variable
     pub fn set_env(&self, key: String, value: String) {
         self.shared_state.set_env_var(key, value);
+    }
+
+    /// Remove an environment variable
+    pub fn unset_env(&self, key: &str) {
+        self.shared_state.unset_env_var(key);
     }
 
     /// Get an environment variable
@@ -920,6 +938,7 @@ pub async fn create_sandboxed_exec_session(
     _login: bool,
     sandbox_policy: SandboxPolicy,
     cwd: PathBuf,
+    extra_env: HashMap<String, String>,
 ) -> Result<(ExecCommandSession, tokio::sync::oneshot::Receiver<i32>), ColossalErr> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -948,6 +967,7 @@ pub async fn create_sandboxed_exec_session(
     env.insert("HISTSIZE".to_string(), "0".to_string());
     env.insert("SAVEHIST".to_string(), "0".to_string());
     env.insert("HISTCONTROL".to_string(), "ignoreboth".to_string());
+    env.extend(extra_env);
     let mut request = SandboxManager::new().prepare_spawn(
         SandboxCommand {
             program: PathBuf::from(program),
@@ -1284,6 +1304,7 @@ pub async fn create_persistent_shell_session(
     sandbox_policy: SandboxPolicy,
     cwd: PathBuf,
 ) -> Result<(PersistentShellSession, tokio::sync::oneshot::Receiver<i32>), ColossalErr> {
+    let initial_cwd = cwd.clone();
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -1305,18 +1326,8 @@ pub async fn create_persistent_shell_session(
     env.insert("RPROMPT".to_string(), "".to_string());
     env.insert("RPS1".to_string(), "".to_string());
     env.insert("NO_COLOR".to_string(), "1".to_string());
-    let mut shell_args = Vec::new();
-    let shell_name = shell_program_name(&shell);
-    if login {
-        shell_args.push("-l".to_string());
-    }
-    shell_args.push("-s".to_string());
-    if shell_name.contains("bash") {
-        shell_args.push("--noprofile".to_string());
-        shell_args.push("--norc".to_string());
-    } else if shell_name.contains("zsh") {
-        shell_args.push("-f".to_string());
-    }
+    let shell_descriptor = shell_descriptor(&shell);
+    let shell_args = shell_descriptor.persistent_shell_args(login);
     let mut request = SandboxManager::new().prepare_spawn(
         SandboxCommand {
             program: PathBuf::from(&shell),
@@ -1629,6 +1640,7 @@ pub async fn create_persistent_shell_session(
         writer_handle,
         wait_handle,
         shell,
+        initial_cwd,
         shared_state,
         sandbox_policy,
     );

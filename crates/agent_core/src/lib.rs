@@ -43,6 +43,7 @@ struct GlobalState {
     manager: Arc<colossal_linux_sandbox::manager::SessionManager>,
     shell_session_id: tokio::sync::Mutex<Option<colossal_linux_sandbox::types::SessionId>>,
     shell: colossal_linux_sandbox::shell::Shell,
+    continuity_state: tokio::sync::Mutex<colossal_linux_sandbox::manager::PersistentSessionState>,
     pending_sandbox_policy: tokio::sync::Mutex<SandboxPolicy>,
     effective_sandbox_policy: tokio::sync::Mutex<SandboxPolicy>,
     // Track if current session has a background process running
@@ -52,6 +53,26 @@ struct GlobalState {
 }
 
 static GLOBAL_STATE: OnceCell<GlobalState> = OnceCell::new();
+
+fn default_continuity_state(
+    shell: &colossal_linux_sandbox::shell::Shell,
+) -> colossal_linux_sandbox::manager::PersistentSessionState {
+    let workspace_root = resolve_workspace_root();
+    colossal_linux_sandbox::manager::PersistentSessionState {
+        version: colossal_linux_sandbox::manager::SNAPSHOT_FORMAT_VERSION,
+        session_id: SessionId::new("pending-shell-state".to_string()),
+        shell_path: shell.path().to_string_lossy().to_string(),
+        initial_cwd: workspace_root.clone(),
+        env_vars: std::collections::HashMap::new(),
+        current_cwd: workspace_root,
+        created_at: std::time::SystemTime::now(),
+        structured_env_json: None,
+        nu_aliases: Vec::new(),
+        nu_custom_commands: Vec::new(),
+        nu_variables: Vec::new(),
+        replay_commands: Vec::new(),
+    }
+}
 
 fn thinking_debug_enabled() -> bool {
     static FLAG: OnceCell<bool> = OnceCell::new();
@@ -363,11 +384,13 @@ async fn ensure_global_state_initialized() {
         let shell = colossal_linux_sandbox::shell::default_user_shell().await;
         let safety_config = safety_config::SafetyConfig::load().unwrap_or_default();
         let sandbox_policy = sandbox_policy_from_config(&safety_config);
+        let continuity_state = default_continuity_state(&shell);
 
         let _ = GLOBAL_STATE.set(GlobalState {
             manager: Arc::new(colossal_linux_sandbox::manager::SessionManager::default()),
             shell_session_id: tokio::sync::Mutex::new(None),
             shell,
+            continuity_state: tokio::sync::Mutex::new(continuity_state),
             pending_sandbox_policy: tokio::sync::Mutex::new(sandbox_policy.clone()),
             effective_sandbox_policy: tokio::sync::Mutex::new(sandbox_policy),
             session_has_background_process: tokio::sync::Mutex::new(false),
@@ -415,7 +438,9 @@ pub async fn add_writable_root(path: std::path::PathBuf) -> Result<()> {
     }
 }
 
-pub(crate) async fn get_or_create_shell_session() -> Result<(
+pub(crate) async fn get_or_create_shell_session(
+    seed_cwd: Option<PathBuf>,
+) -> Result<(
     Arc<colossal_linux_sandbox::manager::SessionManager>,
     colossal_linux_sandbox::types::SessionId,
 )> {
@@ -434,19 +459,24 @@ pub(crate) async fn get_or_create_shell_session() -> Result<(
 
     let has_background = *state.session_has_background_process.lock().await;
     let pending_policy = state.pending_sandbox_policy.lock().await.clone();
+    let mut continuity_state = state.continuity_state.lock().await.clone();
+
+    if continuity_state.current_cwd == resolve_workspace_root() {
+        if let Some(seed_cwd) = seed_cwd.clone() {
+            continuity_state.current_cwd = seed_cwd.clone();
+            continuity_state.initial_cwd = seed_cwd;
+        }
+    }
 
     if let Some(existing) = session_id_lock.clone() {
         let effective_policy = state.effective_sandbox_policy.lock().await.clone();
         if !has_background && effective_policy != pending_policy {
-            let snapshot = state
-                .manager
-                .snapshot_shell_session(existing.clone())
-                .await?;
             state.manager.terminate_session(existing).await?;
             *session_id_lock = None;
 
             let new_session_id =
-                spawn_shell_session_with_snapshot(state, &pending_policy, &snapshot).await?;
+                spawn_shell_session_with_snapshot(state, &pending_policy, &continuity_state)
+                    .await?;
             *session_id_lock = Some(new_session_id.clone());
             *state.effective_sandbox_policy.lock().await = pending_policy.clone();
             return Ok((state.manager.clone(), new_session_id));
@@ -457,16 +487,8 @@ pub(crate) async fn get_or_create_shell_session() -> Result<(
     // 1. No session exists yet, OR
     // 2. Current session has a background process running
     if session_id_lock.is_none() || has_background {
-        let snapshot = colossal_linux_sandbox::manager::PersistentSessionState {
-            session_id: SessionId::new("pending-shell-state".to_string()),
-            shell_path: state.shell.path().to_string_lossy().to_string(),
-            initial_cwd: resolve_workspace_root(),
-            env_vars: std::collections::HashMap::new(),
-            current_cwd: resolve_workspace_root(),
-            created_at: std::time::SystemTime::now(),
-        };
         let session_id =
-            spawn_shell_session_with_snapshot(state, &pending_policy, &snapshot).await?;
+            spawn_shell_session_with_snapshot(state, &pending_policy, &continuity_state).await?;
         *session_id_lock = Some(session_id.clone());
         *state.effective_sandbox_policy.lock().await = pending_policy;
     }
@@ -482,17 +504,76 @@ async fn spawn_shell_session_with_snapshot(
     let shared_state = Arc::new(colossal_linux_sandbox::session::SharedSessionState::new(
         snapshot.current_cwd.clone(),
     ));
+    let shell_kind = colossal_linux_sandbox::shell::shell_kind_from_path(&snapshot.shell_path);
 
     let session_id = state
         .manager
         .create_persistent_shell_session(
-            state.shell.path().to_string_lossy().to_string(),
+            snapshot.shell_path.clone(),
             false,
             sandbox_policy.clone(),
             shared_state,
             None,
         )
         .await?;
+
+    if matches!(
+        shell_kind,
+        colossal_linux_sandbox::shell::ShellKind::ManagedNu
+    ) {
+        let _ = state
+            .manager
+            .update_cwd_in_shell_session(session_id.clone(), snapshot.current_cwd.clone());
+        for (key, value) in &snapshot.env_vars {
+            let _ = state
+                .manager
+                .set_env_in_shell_session(session_id.clone(), key.clone(), value.clone())
+                .await;
+        }
+        for variable in &snapshot.nu_variables {
+            let _ = state
+                .manager
+                .set_managed_variable_in_shell_session(session_id.clone(), variable.clone())
+                .await;
+        }
+        for source in &snapshot.nu_custom_commands {
+            let _ = state
+                .manager
+                .exec_command_in_shell_session(
+                    session_id.clone(),
+                    source.clone(),
+                    Some(30_000),
+                    10_000,
+                    None,
+                )
+                .await;
+        }
+        for alias in &snapshot.nu_aliases {
+            let _ = state
+                .manager
+                .exec_command_in_shell_session(
+                    session_id.clone(),
+                    format!("alias {} = {}", alias.name, alias.expansion),
+                    Some(30_000),
+                    10_000,
+                    None,
+                )
+                .await;
+        }
+        for replay_command in &snapshot.replay_commands {
+            let _ = state
+                .manager
+                .exec_command_in_shell_session(
+                    session_id.clone(),
+                    replay_command.clone(),
+                    Some(30_000),
+                    10_000,
+                    None,
+                )
+                .await;
+        }
+        return Ok(session_id);
+    }
 
     if snapshot.current_cwd != resolve_workspace_root() {
         let _ = state
@@ -515,6 +596,129 @@ async fn spawn_shell_session_with_snapshot(
     }
 
     Ok(session_id)
+}
+
+async fn sync_continuity_state_from_session(
+    state: &GlobalState,
+    session_id: SessionId,
+    replayed_command: Option<&str>,
+) -> Result<()> {
+    let mut snapshot = state.manager.snapshot_shell_session(session_id).await?;
+    let mut continuity_state = state.continuity_state.lock().await;
+    snapshot.replay_commands = continuity_state.replay_commands.clone();
+    if matches!(
+        colossal_linux_sandbox::shell::shell_kind_from_path(&snapshot.shell_path),
+        colossal_linux_sandbox::shell::ShellKind::ManagedNu
+    ) {
+        if let Some(command) = replayed_command {
+            snapshot.replay_commands.push(command.to_string());
+        }
+    }
+    *continuity_state = snapshot;
+    Ok(())
+}
+
+async fn run_isolated_exec_command(
+    state: &GlobalState,
+    command: &str,
+    is_background: bool,
+    timeout_ms: u64,
+    cwd_hint: PathBuf,
+    ask_for_approval: Option<colossal_linux_sandbox::safety::AskForApproval>,
+) -> std::result::Result<
+    colossal_linux_sandbox::types::ExecCommandOutput,
+    colossal_linux_sandbox::error::ColossalErr,
+> {
+    let continuity_state = state.continuity_state.lock().await.clone();
+    let sandbox_policy = state.pending_sandbox_policy.lock().await.clone();
+    let shell_kind = state.shell.kind();
+    let cwd = if continuity_state.current_cwd == resolve_workspace_root() {
+        cwd_hint
+    } else {
+        continuity_state.current_cwd.clone()
+    };
+
+    if matches!(
+        shell_kind,
+        colossal_linux_sandbox::shell::ShellKind::ManagedNu
+    ) && !is_background
+    {
+        let mut runtime = colossal_linux_sandbox::managed_nu::ManagedNuRuntime::from_snapshot(
+            continuity_state.shell_path.clone(),
+            sandbox_policy.clone(),
+            &continuity_state,
+        )
+        .map_err(|err| {
+            colossal_linux_sandbox::error::ColossalErr::Io(std::io::Error::other(err.to_string()))
+        })?;
+        runtime.update_cwd(cwd).map_err(|err| {
+            colossal_linux_sandbox::error::ColossalErr::Io(std::io::Error::other(err.to_string()))
+        })?;
+        return runtime.fork_eval(command.to_string()).map_err(|err| {
+            colossal_linux_sandbox::error::ColossalErr::Io(std::io::Error::other(err.to_string()))
+        });
+    }
+
+    let seeded_command = command.to_string();
+
+    state
+        .manager
+        .handle_exec_command_request(colossal_linux_sandbox::types::ExecCommandParams {
+            command: vec![seeded_command],
+            shell: state.shell.clone(),
+            cwd,
+            env: if matches!(
+                shell_kind,
+                colossal_linux_sandbox::shell::ShellKind::ManagedNu
+            ) {
+                Default::default()
+            } else {
+                continuity_state.env_vars
+            },
+            timeout_ms: if is_background {
+                None
+            } else {
+                Some(timeout_ms)
+            },
+            max_output_tokens: 1000,
+            sandbox_policy,
+            is_background,
+            ask_for_approval,
+        })
+        .await
+}
+
+fn exec_command_output_to_yaml(
+    command: &str,
+    result: colossal_linux_sandbox::types::ExecCommandOutput,
+) -> Result<String> {
+    match result.exit_status {
+        ExitStatus::Ongoing(session_id) => Ok(serde_yaml::to_string(&json!({
+            "command": command,
+            "status": "Background",
+            "session_id": session_id.as_str(),
+            "log_file": result.log_file.as_ref().map(|path| path.display().to_string()),
+            "message": result.aggregated_output,
+        }))?),
+        exit_status => {
+            let is_success = matches!(exit_status, ExitStatus::Completed { code } if code == 0);
+            let exec_result = ExecCommandResult {
+                command: command.to_string(),
+                status: if is_success {
+                    "Success".to_string()
+                } else {
+                    "Failure".to_string()
+                },
+                cmd_out: result.aggregated_output,
+                message: if is_success {
+                    None
+                } else {
+                    Some(format!("{:?}", exit_status))
+                },
+            };
+            Ok(serde_yaml::to_string(&exec_result)?)
+        }
+    }
 }
 
 async fn execute_tool_call(
@@ -544,6 +748,10 @@ async fn execute_tool_call(
                 .get("is_background")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let replay_state = arguments
+                .get("replay_state")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             // Parse timeout from arguments, default to 10 minutes (600000ms) for long-running commands
             let timeout_ms = arguments
                 .get("timeout")
@@ -559,110 +767,60 @@ async fn execute_tool_call(
 
             let mut current_approval = Some(safety_mode);
             let mut retried_session = false;
+            let uses_managed_nu_foreground = matches!(
+                state.shell.kind(),
+                colossal_linux_sandbox::shell::ShellKind::ManagedNu
+            ) && !is_background;
 
-            loop {
-                // Get or create shell session (will create new one if current has background process)
-                let (manager, session_id) = get_or_create_shell_session().await?;
+            if replay_state && is_background {
+                return Ok(serde_yaml::to_string(&json!({
+                    "status": "Failure",
+                    "command": command,
+                    "message": "Background commands cannot use replay_state because their shell state cannot be replayed safely"
+                }))?);
+            }
 
-                if is_background {
-                    // Mark session as busy BEFORE starting the command
-                    let mut has_background = state.session_has_background_process.lock().await;
-                    *has_background = true;
-                    drop(has_background); // Release lock
+            // Managed Nu isolated (non-replay_state) foreground: use fork_eval
+            // against the existing managed session so we get all persistent
+            // state (env, cwd, defs, aliases) without mutating the runtime.
+            if !replay_state && uses_managed_nu_foreground {
+                let (manager, session_id) =
+                    get_or_create_shell_session(Some(agent.effective_cwd())).await?;
 
-                    // Create log file for background output
-                    let log_file_path =
-                        colossal_linux_sandbox::manager::background_log_path(&session_id)
-                            .display()
-                            .to_string();
-
-                    // Run command in background with output redirected to log file
-                    // Strip trailing & if present since we'll add it with redirection
-                    let command_clean = command.trim_end().trim_end_matches('&').trim_end();
-                    let bg_command = format!(
-                        "{} > {} 2>&1 &",
-                        agent.wrap_command_for_shell(command_clean),
-                        log_file_path
-                    );
-
-                    match manager
-                        .send_input_to_shell_session(
-                            session_id.clone(),
-                            bg_command,
-                            current_approval,
-                        )
-                        .await
-                    {
-                        Ok(_) => {
-                            let exec_result = serde_json::json!({
-                                "command": command,
-                                "status": "Background",
-                                "session_id": session_id.as_str(),
-                                "log_file": log_file_path,
-                                "message": format!("Command started in background. Session ID: {}. Log file: {}", session_id.as_str(), log_file_path)
-                            });
-                            return Ok(serde_yaml::to_string(&exec_result)?);
+                loop {
+                    match manager.fork_eval_in_managed_nu_session(
+                        session_id.clone(),
+                        command.to_string(),
+                        current_approval,
+                    ) {
+                        Ok(Some(result)) => return exec_command_output_to_yaml(command, result),
+                        Ok(None) => {
+                            // Should not happen — we know it's managed Nu. Fall
+                            // through to the generic isolated path as safety net.
+                            break;
                         }
                         Err(e) => {
-                            if matches!(
-                                &e,
-                                colossal_linux_sandbox::error::ColossalErr::Io(err)
-                                    if err.to_string().contains("failed to send input to shell")
-                            ) && !retried_session
-                            {
-                                retried_session = true;
-                                if let Err(err) =
-                                    state.manager.terminate_session(session_id.clone()).await
-                                {
-                                    tracing::warn!(
-                                        "Failed to terminate broken shell session: {}",
-                                        err
-                                    );
-                                }
-                                let mut session_id_lock = state.shell_session_id.lock().await;
-                                *session_id_lock = None;
-                                let mut has_background =
-                                    state.session_has_background_process.lock().await;
-                                *has_background = false;
-                                continue;
-                            }
-
                             if let colossal_linux_sandbox::error::ColossalErr::Sandbox(
                                 colossal_linux_sandbox::error::SandboxErr::Denied(_, reason, _),
                             ) = &e
                             {
                                 if reason == "User approval required" {
-                                    // Send request to UI
                                     let (approval_tx, approval_rx) =
                                         tokio::sync::oneshot::channel();
                                     {
-                                        let state = GLOBAL_STATE.get().unwrap();
                                         let mut guard = state.pending_approval.lock().await;
                                         *guard = Some(approval_tx);
                                     }
-
-                                    let request_msg =
-                                        format!("Allow background command: {}", command);
+                                    let request_msg = format!("Allow command: {}", command);
                                     let _ = tx.send(AgentMessage::RequestApproval(request_msg));
-
-                                    // Wait for response
                                     match approval_rx.await {
                                         Ok(true) => {
-                                            // Approved, retry with Never (force approve)
-                                            current_approval = Some(colossal_linux_sandbox::safety::AskForApproval::Never);
-
-                                            // Reset background flag since we failed to start
-                                            let mut has_background =
-                                                state.session_has_background_process.lock().await;
-                                            *has_background = false;
+                                            current_approval = Some(
+                                                colossal_linux_sandbox::safety::AskForApproval::Never,
+                                            );
                                             continue;
                                         }
                                         Ok(false) => {
-                                            // Reset background flag since we failed to start
-                                            let mut has_background =
-                                                state.session_has_background_process.lock().await;
-                                            *has_background = false;
-
                                             return Ok(serde_yaml::to_string(&json!({
                                                 "status": "Failure",
                                                 "command": command,
@@ -675,11 +833,6 @@ async fn execute_tool_call(
                                     }
                                 }
                             }
-
-                            // Reset background flag on other errors
-                            let mut has_background =
-                                state.session_has_background_process.lock().await;
-                            *has_background = false;
                             return Ok(serde_yaml::to_string(&json!({
                                 "status": "Failure",
                                 "command": command,
@@ -687,79 +840,47 @@ async fn execute_tool_call(
                             }))?);
                         }
                     }
-                } else {
-                    // Foreground command - wait for completion
-                    match manager
-                        .exec_command_in_shell_session(
-                            session_id.clone(),
-                            agent.wrap_command_for_shell(command),
-                            Some(timeout_ms),
-                            1000,
-                            current_approval,
-                        )
-                        .await
-                    {
-                        Ok(result) => {
-                            let is_success = matches!(result.exit_status, ExitStatus::Completed { code } if code == 0);
-                            let exec_result = ExecCommandResult {
-                                command: command.to_string(),
-                                status: if is_success {
-                                    "Success".to_string()
-                                } else {
-                                    "Failure".to_string()
-                                },
-                                cmd_out: result.aggregated_output,
-                                message: if is_success {
-                                    None
-                                } else {
-                                    Some(format!("{:?}", result.exit_status))
-                                },
-                            };
-                            return Ok(serde_yaml::to_string(&exec_result)?);
-                        }
-                        Err(e) => {
-                            if matches!(
-                                &e,
-                                colossal_linux_sandbox::error::ColossalErr::Io(err)
-                                    if err.to_string().contains("failed to send input to shell")
-                            ) && !retried_session
-                            {
-                                retried_session = true;
-                                if let Err(err) =
-                                    state.manager.terminate_session(session_id.clone()).await
-                                {
-                                    tracing::warn!(
-                                        "Failed to terminate broken shell session: {}",
-                                        err
-                                    );
-                                }
-                                let mut session_id_lock = state.shell_session_id.lock().await;
-                                *session_id_lock = None;
-                                continue;
-                            }
+                }
+            }
 
+            if !replay_state && !uses_managed_nu_foreground {
+                loop {
+                    match run_isolated_exec_command(
+                        state,
+                        command,
+                        is_background,
+                        timeout_ms,
+                        agent.effective_cwd(),
+                        current_approval,
+                    )
+                    .await
+                    {
+                        Ok(result) => return exec_command_output_to_yaml(command, result),
+                        Err(e) => {
                             if let colossal_linux_sandbox::error::ColossalErr::Sandbox(
                                 colossal_linux_sandbox::error::SandboxErr::Denied(_, reason, _),
                             ) = &e
                             {
                                 if reason == "User approval required" {
-                                    // Send request to UI
                                     let (approval_tx, approval_rx) =
                                         tokio::sync::oneshot::channel();
                                     {
-                                        let state = GLOBAL_STATE.get().unwrap();
                                         let mut guard = state.pending_approval.lock().await;
                                         *guard = Some(approval_tx);
                                     }
 
-                                    let request_msg = format!("Allow command: {}", command);
+                                    let request_msg = if is_background {
+                                        format!("Allow background command: {}", command)
+                                    } else {
+                                        format!("Allow command: {}", command)
+                                    };
                                     let _ = tx.send(AgentMessage::RequestApproval(request_msg));
 
-                                    // Wait for response
                                     match approval_rx.await {
                                         Ok(true) => {
-                                            // Approved, retry with Never (force approve)
-                                            current_approval = Some(colossal_linux_sandbox::safety::AskForApproval::Never);
+                                            current_approval = Some(
+                                                colossal_linux_sandbox::safety::AskForApproval::Never,
+                                            );
                                             continue;
                                         }
                                         Ok(false) => {
@@ -775,12 +896,98 @@ async fn execute_tool_call(
                                     }
                                 }
                             }
+
                             return Ok(serde_yaml::to_string(&json!({
                                 "status": "Failure",
                                 "command": command,
                                 "message": format!("{}", e)
                             }))?);
                         }
+                    }
+                }
+            }
+
+            loop {
+                let (manager, session_id) =
+                    get_or_create_shell_session(Some(agent.effective_cwd())).await?;
+
+                match manager
+                    .exec_command_in_shell_session(
+                        session_id.clone(),
+                        command.to_string(),
+                        Some(timeout_ms),
+                        1000,
+                        current_approval,
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        sync_continuity_state_from_session(
+                            state,
+                            session_id,
+                            replay_state.then_some(command),
+                        )
+                        .await?;
+                        return exec_command_output_to_yaml(command, result);
+                    }
+                    Err(e) => {
+                        if matches!(
+                            &e,
+                            colossal_linux_sandbox::error::ColossalErr::Io(err)
+                                if err.to_string().contains("failed to send input to shell")
+                        ) && !retried_session
+                        {
+                            retried_session = true;
+                            if let Err(err) =
+                                state.manager.terminate_session(session_id.clone()).await
+                            {
+                                tracing::warn!("Failed to terminate broken shell session: {}", err);
+                            }
+                            let mut session_id_lock = state.shell_session_id.lock().await;
+                            *session_id_lock = None;
+                            continue;
+                        }
+
+                        if let colossal_linux_sandbox::error::ColossalErr::Sandbox(
+                            colossal_linux_sandbox::error::SandboxErr::Denied(_, reason, _),
+                        ) = &e
+                        {
+                            if reason == "User approval required" {
+                                let (approval_tx, approval_rx) = tokio::sync::oneshot::channel();
+                                {
+                                    let mut guard = state.pending_approval.lock().await;
+                                    *guard = Some(approval_tx);
+                                }
+
+                                let request_msg = format!("Allow command: {}", command);
+                                let _ = tx.send(AgentMessage::RequestApproval(request_msg));
+
+                                match approval_rx.await {
+                                    Ok(true) => {
+                                        current_approval = Some(
+                                            colossal_linux_sandbox::safety::AskForApproval::Never,
+                                        );
+                                        continue;
+                                    }
+                                    Ok(false) => {
+                                        return Ok(serde_yaml::to_string(&json!({
+                                            "status": "Failure",
+                                            "command": command,
+                                            "message": "Command denied by user"
+                                        }))?);
+                                    }
+                                    Err(_) => {
+                                        return Err(anyhow::anyhow!("Approval channel closed"));
+                                    }
+                                }
+                            }
+                        }
+
+                        return Ok(serde_yaml::to_string(&json!({
+                            "status": "Failure",
+                            "command": command,
+                            "message": format!("{}", e)
+                        }))?);
                     }
                 }
             }
@@ -1546,21 +1753,6 @@ impl Agent {
             .clone()
             .or_else(|| crate::workspace_root_override())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-    }
-
-    /// Wrap a shell command so it executes inside the agent's working directory
-    /// without mutating the shared shell session state.
-    fn wrap_command_for_shell(&self, command: &str) -> String {
-        if let Some(cwd) = self
-            .working_directory
-            .clone()
-            .or_else(|| crate::workspace_root_override())
-        {
-            let escaped = escape(cwd.to_string_lossy());
-            format!("(cd {} && {})", escaped, command)
-        } else {
-            command.to_string()
-        }
     }
 
     /// Create a new agent instance (legacy method, uses Local backend)
@@ -3817,6 +4009,7 @@ mod exec_command_tests {
             }
             *state.shell_session_id.lock().await = None;
             *state.session_has_background_process.lock().await = false;
+            *state.continuity_state.lock().await = default_continuity_state(&state.shell);
             let safety = safety_config::SafetyConfig::from_mode(safety_config::SafetyMode::Yolo);
             let policy =
                 sandbox_policy_from_config_with_workspace(&safety, resolve_workspace_root());
@@ -3872,7 +4065,10 @@ mod exec_command_tests {
 
         let result = execute_tool_call(
             &agent,
-            &tool_call("exec_command", json!({ "command": "printf 'hello'" })),
+            &tool_call(
+                "exec_command",
+                json!({ "command": "printf 'hello'", "replay_state": false }),
+            ),
             tx,
         )
         .await
@@ -3896,7 +4092,10 @@ mod exec_command_tests {
 
         let result = execute_tool_call(
             &agent,
-            &tool_call("exec_command", json!({ "command": "pwd" })),
+            &tool_call(
+                "exec_command",
+                json!({ "command": "pwd", "replay_state": false }),
+            ),
             tx,
         )
         .await
@@ -3923,7 +4122,7 @@ mod exec_command_tests {
             &agent,
             &tool_call(
                 "exec_command",
-                json!({ "command": "sleep 1", "is_background": true }),
+                json!({ "command": "sleep 1", "is_background": true, "replay_state": false }),
             ),
             tx,
         )
@@ -3939,7 +4138,7 @@ mod exec_command_tests {
     }
 
     #[tokio::test]
-    async fn policy_change_rotates_shell_and_replays_continuity() {
+    async fn policy_change_rotates_shell_and_replays_manual_shell_continuity() {
         let _guard = exec_test_lock();
         let temp = make_test_dir("policy-rotation");
         let nested = temp.join("nested");
@@ -3950,7 +4149,7 @@ mod exec_command_tests {
         let agent = build_test_agent(temp.clone());
         let (tx, _rx) = mpsc::unbounded_channel();
 
-        let (manager, session_id) = get_or_create_shell_session()
+        let (manager, session_id) = get_or_create_shell_session(None)
             .await
             .expect("create initial shell session");
         manager
@@ -3966,11 +4165,32 @@ mod exec_command_tests {
         manager
             .set_env_in_shell_session(
                 session_id.clone(),
-                "TEST_VALUE".to_string(),
+                "TRACKED_VALUE".to_string(),
                 "persisted".to_string(),
             )
             .await
             .expect("seed shell env");
+        manager
+            .exec_command_in_shell_session(
+                session_id.clone(),
+                "export MANUAL_VALUE=manual && unset TRACKED_VALUE".to_string(),
+                Some(5_000),
+                1_000,
+                None,
+            )
+            .await
+            .expect("seed manual shell env changes");
+
+        let snapshot = manager
+            .snapshot_shell_session(session_id.clone())
+            .await
+            .expect("capture shell snapshot");
+        *GLOBAL_STATE.get().unwrap().continuity_state.lock().await = snapshot.clone();
+        assert_eq!(
+            snapshot.env_vars.get("MANUAL_VALUE").map(String::as_str),
+            Some("manual")
+        );
+        assert!(!snapshot.env_vars.contains_key("TRACKED_VALUE"));
 
         let first_session_id = session_id;
 
@@ -3985,7 +4205,7 @@ mod exec_command_tests {
             &agent,
             &tool_call(
                 "exec_command",
-                json!({ "command": "printf '%s|%s' \"$PWD\" \"$TEST_VALUE\"" }),
+                json!({ "command": "printf '%s|%s|%s' \"$PWD\" \"${MANUAL_VALUE:-missing}\" \"${TRACKED_VALUE:-missing}\"", "replay_state": true }),
             ),
             tx,
         )
@@ -4005,7 +4225,7 @@ mod exec_command_tests {
 
         let parsed: serde_yaml::Value = serde_yaml::from_str(&result).expect("yaml result");
         assert_eq!(parsed["status"].as_str(), Some("Success"));
-        let expected = format!("{}|persisted", temp.display());
+        let expected = format!("{}|manual|missing", nested.display());
         assert_eq!(parsed["cmd_out"].as_str(), Some(expected.as_str()));
         assert_eq!(
             GLOBAL_STATE
@@ -4016,6 +4236,142 @@ mod exec_command_tests {
                 .and_then(|(_, _, _, cwd)| cwd),
             Some(nested)
         );
+    }
+
+    #[tokio::test]
+    async fn replay_state_false_does_not_persist_shell_state_changes() {
+        let _guard = exec_test_lock();
+        let temp = make_test_dir("replay-state-false");
+        let nested = temp.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+        set_workspace_root_override(&temp);
+        reset_global_shell_state().await;
+        let agent = build_test_agent(temp.clone());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        execute_tool_call(
+            &agent,
+            &tool_call(
+                "exec_command",
+                json!({ "command": "cd nested", "replay_state": false }),
+            ),
+            tx.clone(),
+        )
+        .await
+        .expect("non-replayed cd succeeds");
+
+        let result = execute_tool_call(
+            &agent,
+            &tool_call(
+                "exec_command",
+                json!({ "command": "pwd", "replay_state": false }),
+            ),
+            tx,
+        )
+        .await
+        .expect("pwd succeeds");
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&result).expect("yaml result");
+        assert_eq!(
+            parsed["cmd_out"].as_str(),
+            Some(temp.to_string_lossy().as_ref())
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_state_true_persists_shell_state_for_later_isolated_commands() {
+        let _guard = exec_test_lock();
+        let temp = make_test_dir("replay-state-true");
+        let nested = temp.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+        set_workspace_root_override(&temp);
+        reset_global_shell_state().await;
+        let agent = build_test_agent(temp.clone());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        execute_tool_call(
+            &agent,
+            &tool_call(
+                "exec_command",
+                json!({ "command": "cd nested", "replay_state": true }),
+            ),
+            tx.clone(),
+        )
+        .await
+        .expect("replayed cd succeeds");
+
+        let result = execute_tool_call(
+            &agent,
+            &tool_call(
+                "exec_command",
+                json!({ "command": "pwd", "replay_state": false }),
+            ),
+            tx,
+        )
+        .await
+        .expect("pwd succeeds");
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&result).expect("yaml result");
+        assert_eq!(
+            parsed["cmd_out"].as_str(),
+            Some(nested.to_string_lossy().as_ref())
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_nu_continuity_snapshot_includes_persistent_variables() {
+        let _guard = exec_test_lock();
+        let nu_path = match colossal_linux_sandbox::bundled_nu::resolve_nu_path() {
+            Ok(path) => path.to_string_lossy().to_string(),
+            Err(_) => return,
+        };
+
+        let temp = make_test_dir("managed-nu-isolated-vars");
+        set_workspace_root_override(&temp);
+        reset_global_shell_state().await;
+        let state = GLOBAL_STATE.get().unwrap();
+        let shared_state = Arc::new(colossal_linux_sandbox::session::SharedSessionState::new(
+            temp.clone(),
+        ));
+        let session_id = state
+            .manager
+            .create_persistent_shell_session(
+                nu_path,
+                false,
+                SandboxPolicy::DangerFullAccess,
+                shared_state,
+                None,
+            )
+            .await
+            .expect("create managed nu session");
+        *state.shell_session_id.lock().await = Some(session_id.clone());
+
+        state
+            .manager
+            .exec_command_in_shell_session(
+                session_id.clone(),
+                "let persist_me = 42; mut persist_mut = 10; $persist_mut = 11".to_string(),
+                Some(10_000),
+                10_000,
+                None,
+            )
+            .await
+            .expect("seed persistent vars");
+        sync_continuity_state_from_session(state, session_id.clone(), None)
+            .await
+            .expect("sync continuity");
+        let continuity = state.continuity_state.lock().await.clone();
+        assert!(
+            continuity
+                .nu_variables
+                .iter()
+                .any(|variable| variable.name == "$persist_me"),
+            "continuity snapshot should contain persistent let variable: {:?}",
+            continuity.nu_variables
+        );
+
+        let _ = state.manager.terminate_session(session_id).await;
+        *state.shell_session_id.lock().await = None;
     }
 
     #[tokio::test]
@@ -4104,6 +4460,193 @@ mod exec_command_tests {
         );
         assert_eq!(message_left_str(&entries[2], "role"), Some("system"));
         assert_eq!(message_left_str(&entries[2], "content"), Some(reminder));
+    }
+
+    #[tokio::test]
+    async fn managed_nu_rotation_restores_def_alias_env_cwd_vars() {
+        let _guard = exec_test_lock();
+
+        let nu_path = match colossal_linux_sandbox::bundled_nu::resolve_nu_path() {
+            Ok(path) => path.to_string_lossy().to_string(),
+            Err(_) => return, // skip if no nu binary available
+        };
+
+        let temp = make_test_dir("managed-nu-rotation");
+        let nested = temp.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+        let nested = std::fs::canonicalize(&nested).expect("canonicalize nested");
+        set_workspace_root_override(&temp);
+        reset_global_shell_state().await;
+
+        let state = GLOBAL_STATE.get().unwrap();
+
+        // Create a managed nu session directly via the manager
+        let shared_state = Arc::new(colossal_linux_sandbox::session::SharedSessionState::new(
+            temp.clone(),
+        ));
+        let session_id = state
+            .manager
+            .create_persistent_shell_session(
+                nu_path.clone(),
+                false,
+                SandboxPolicy::DangerFullAccess,
+                shared_state,
+                None,
+            )
+            .await
+            .expect("create managed nu session");
+
+        // Set up state: def, alias, env, cwd
+        state
+            .manager
+            .exec_command_in_shell_session(
+                session_id.clone(),
+                "def double [n: int] { $n * 2 }".to_string(),
+                Some(10_000),
+                10_000,
+                None,
+            )
+            .await
+            .expect("define custom command");
+        state
+            .manager
+            .exec_command_in_shell_session(
+                session_id.clone(),
+                "alias dbl = double".to_string(),
+                Some(10_000),
+                10_000,
+                None,
+            )
+            .await
+            .expect("define alias");
+        state
+            .manager
+            .exec_command_in_shell_session(
+                session_id.clone(),
+                "cd nested".to_string(),
+                Some(10_000),
+                10_000,
+                None,
+            )
+            .await
+            .expect("cd to nested");
+        state
+            .manager
+            .set_env_in_shell_session(
+                session_id.clone(),
+                "NU_ROTATION_KEY".to_string(),
+                "rotation_val".to_string(),
+            )
+            .await
+            .expect("set env");
+        state
+            .manager
+            .exec_command_in_shell_session(
+                session_id.clone(),
+                "let rot_let = 7; mut rot_mut = 8; $rot_mut = 9".to_string(),
+                Some(10_000),
+                10_000,
+                None,
+            )
+            .await
+            .expect("set persistent variables");
+
+        // Snapshot and simulate rotation
+        let snapshot = state
+            .manager
+            .snapshot_shell_session(session_id.clone())
+            .await
+            .expect("snapshot");
+        let policy = state.pending_sandbox_policy.lock().await.clone();
+        let rotated_id = spawn_shell_session_with_snapshot(state, &policy, &snapshot)
+            .await
+            .expect("spawn from snapshot");
+
+        // Verify def survived rotation
+        let result = state
+            .manager
+            .exec_command_in_shell_session(
+                rotated_id.clone(),
+                "double 21".to_string(),
+                Some(10_000),
+                10_000,
+                None,
+            )
+            .await
+            .expect("call custom command after rotation");
+        assert!(
+            result.stdout.contains("42"),
+            "def should survive rotation: {:?}",
+            result.stdout
+        );
+
+        // Verify alias survived rotation
+        let result = state
+            .manager
+            .exec_command_in_shell_session(
+                rotated_id.clone(),
+                "dbl 10".to_string(),
+                Some(10_000),
+                10_000,
+                None,
+            )
+            .await
+            .expect("call alias after rotation");
+        assert!(
+            result.stdout.contains("20"),
+            "alias should survive rotation: {:?}",
+            result.stdout
+        );
+
+        // Verify cwd survived rotation
+        let result = state
+            .manager
+            .exec_command_in_shell_session(
+                rotated_id.clone(),
+                "pwd".to_string(),
+                Some(10_000),
+                10_000,
+                None,
+            )
+            .await
+            .expect("pwd after rotation");
+        assert!(
+            result.stdout.contains("nested"),
+            "cwd should survive rotation: {:?}",
+            result.stdout
+        );
+
+        // Verify env survived rotation
+        let env_val = state
+            .manager
+            .get_env_from_shell_session(rotated_id.clone(), "NU_ROTATION_KEY")
+            .expect("get env after rotation");
+        assert_eq!(
+            env_val.as_deref(),
+            Some("rotation_val"),
+            "env should survive rotation"
+        );
+
+        let result = state
+            .manager
+            .exec_command_in_shell_session(
+                rotated_id.clone(),
+                "$\"($rot_let)|($rot_mut)\"".to_string(),
+                Some(10_000),
+                10_000,
+                None,
+            )
+            .await
+            .expect("variables after rotation");
+        assert!(
+            result.stdout.contains("7") && result.stdout.contains("9"),
+            "persistent variables should survive rotation: {:?}",
+            result.stdout
+        );
+
+        // Cleanup
+        let _ = state.manager.terminate_session(session_id).await;
+        let _ = state.manager.terminate_session(rotated_id).await;
     }
 }
 
