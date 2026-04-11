@@ -3331,8 +3331,10 @@ async fn managed_nu_nu_builtins_work_in_embedded_runtime() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
-async fn managed_nu_external_commands_fail_in_embedded_runtime()
--> Result<(), Box<dyn std::error::Error>> {
+async fn managed_nu_external_commands_explicitly_rejected() -> Result<(), Box<dyn std::error::Error>>
+{
+    // ^cmd and run-external are explicitly rejected with a stable error message
+    // directing agents to the agent-core exec path.
     let _guard = shell_test_lock();
     let Some(nu_path) = nushell_path() else {
         return Ok(());
@@ -3342,10 +3344,7 @@ async fn managed_nu_external_commands_fail_in_embedded_runtime()
     let (manager, session_id) =
         create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
 
-    // External command via ^ prefix is NOT available in the embedded runtime
-    // (requires nu-command which is not included). This is expected — external
-    // commands should be run through the agent-core exec path, not the managed
-    // runtime's exec_command.
+    // ^cmd form
     let result = manager
         .exec_command_in_shell_session(
             session_id.clone(),
@@ -3355,12 +3354,78 @@ async fn managed_nu_external_commands_fail_in_embedded_runtime()
             None,
         )
         .await?;
-    // External commands fail because run-external is not in nu-cmd-lang
-    assert_ne!(
-        result.exit_status,
-        ExitStatus::Completed { code: 0 },
-        "external commands are not available in embedded runtime"
+    assert!(
+        matches!(result.exit_status, ExitStatus::Completed { code: 1 }),
+        "^echo should be explicitly rejected: {:?}",
+        result.exit_status
     );
+    assert!(
+        result.aggregated_output.contains("external commands"),
+        "rejection message should mention external commands: {:?}",
+        result.aggregated_output
+    );
+
+    // run-external form
+    let result = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "run-external echo external-test".to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+    assert!(
+        matches!(result.exit_status, ExitStatus::Completed { code: 1 }),
+        "run-external should be explicitly rejected: {:?}",
+        result.exit_status
+    );
+    assert!(
+        result.aggregated_output.contains("external commands"),
+        "run-external rejection message should mention external commands: {:?}",
+        result.aggregated_output
+    );
+
+    // Rejection must not corrupt state.
+    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
+    assert!(
+        snapshot.nu_custom_commands.is_empty(),
+        "external command rejection must not corrupt nu_custom_commands: {:?}",
+        snapshot.nu_custom_commands
+    );
+
+    manager.terminate_session(session_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_nu_fork_eval_rejects_external_commands() -> Result<(), Box<dyn std::error::Error>>
+{
+    let _guard = shell_test_lock();
+    let Some(nu_path) = nushell_path() else {
+        return Ok(());
+    };
+
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) =
+        create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
+
+    for form in &["^echo hello", "^git status", "run-external echo hello"] {
+        let result = manager
+            .fork_eval_in_managed_nu_session(session_id.clone(), form.to_string(), None)?
+            .expect("session is managed nu");
+        assert_ne!(
+            result.exit_status,
+            ExitStatus::Completed { code: 0 },
+            "'{form}' should be rejected in fork_eval: {:?}",
+            result.aggregated_output
+        );
+        assert!(
+            result.aggregated_output.contains("external commands"),
+            "'{form}' fork_eval rejection must mention external commands: {:?}",
+            result.aggregated_output
+        );
+    }
 
     manager.terminate_session(session_id).await?;
     Ok(())
@@ -3369,8 +3434,10 @@ async fn managed_nu_external_commands_fail_in_embedded_runtime()
 // ── config mutation tests ────────────────────────────────────────────
 
 #[tokio::test]
-async fn managed_nu_config_mutation_does_not_survive_snapshot_restore()
--> Result<(), Box<dyn std::error::Error>> {
+async fn managed_nu_config_mutations_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    // $env.config mutations are explicitly rejected — the config record is not
+    // snapshot/restore-safe, so silent success followed by silent drop on
+    // rotation would be a best-effort middle ground.
     let _guard = shell_test_lock();
     let Some(nu_path) = nushell_path() else {
         return Ok(());
@@ -3384,62 +3451,138 @@ async fn managed_nu_config_mutation_does_not_survive_snapshot_restore()
     )
     .await?;
 
-    // Mutate config within the session — should work
+    // Sub-field mutation must be rejected.
     let result = manager
         .exec_command_in_shell_session(
             session_id.clone(),
-            "$env.config.show_banner = false; $env.config.show_banner".to_string(),
+            "$env.config.show_banner = false".to_string(),
             Some(5_000),
             1_000,
             None,
         )
         .await?;
-    assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
     assert!(
-        result.stdout.contains("false"),
-        "config mutation should work within session: {:?}",
-        result.stdout
+        matches!(result.exit_status, ExitStatus::Completed { code: 1 }),
+        "$env.config sub-field mutation should be rejected: {:?}",
+        result.exit_status
+    );
+    assert!(
+        result.aggregated_output.contains("$env.config"),
+        "rejection message should mention $env.config: {:?}",
+        result.aggregated_output
     );
 
-    // Snapshot should NOT contain $env.config as a string key
-    // (it's a structured Record that cannot be coerced to string)
-    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
-    assert!(
-        !snapshot.env_vars.contains_key("config"),
-        "config should not be in string-coerced env snapshot"
-    );
-
-    // Restore into new session — config changes should be gone (back to default)
-    let shared_state = Arc::new(SharedSessionState::new(snapshot.current_cwd.clone()));
-    let restored_id = manager
-        .create_persistent_shell_session(
-            nu_path,
-            false,
-            SandboxPolicy::DangerFullAccess,
-            shared_state,
-            Some(Duration::from_secs(30)),
-        )
-        .await?;
-
+    // Whole-config replacement must also be rejected.
     let result = manager
         .exec_command_in_shell_session(
-            restored_id.clone(),
-            "$env.config.show_banner".to_string(),
+            session_id.clone(),
+            "$env.config = {}".to_string(),
             Some(5_000),
             1_000,
             None,
         )
         .await?;
-    // The config mutation should not survive: either it's the default (true)
-    // or the key doesn't exist / errors. Either way it should NOT be "false".
     assert!(
-        !result.stdout.contains("false"),
-        "config mutation should not survive snapshot/restore: {:?}",
-        result.stdout
+        matches!(result.exit_status, ExitStatus::Completed { code: 1 }),
+        "whole $env.config replacement should be rejected: {:?}",
+        result.exit_status
+    );
+
+    // After rejections the managed-nu state must be clean.
+    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
+    assert!(
+        snapshot.nu_custom_commands.is_empty(),
+        "config rejection must not corrupt state: {:?}",
+        snapshot.nu_custom_commands
+    );
+    assert!(
+        !snapshot.env_vars.contains_key("config"),
+        "$env.config must not appear as a string env var: {:?}",
+        snapshot.env_vars.keys().collect::<Vec<_>>()
     );
 
     manager.terminate_session(session_id).await?;
-    manager.terminate_session(restored_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_nu_config_read_not_intercepted_by_rejection()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Read-only accesses to $env.config must NOT trigger our explicit rejection.
+    // (In embedded nu-cmd-lang, $env.config may not exist, so Nu produces its own
+    // "Cannot find column" error — that is acceptable.  What must NOT happen is our
+    // stable rejection message appearing for a read expression.)
+    let _guard = shell_test_lock();
+    let Some(nu_path) = nushell_path() else {
+        return Ok(());
+    };
+
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) =
+        create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
+
+    for form in &[
+        "$env.config",
+        "$env.config.show_banner == false",
+        "let x = $env.config",
+    ] {
+        let result = manager
+            .exec_command_in_shell_session(
+                session_id.clone(),
+                form.to_string(),
+                Some(5_000),
+                1_000,
+                None,
+            )
+            .await?;
+        // Whatever happens, it must NOT be our config-mutation rejection.
+        assert!(
+            !result
+                .aggregated_output
+                .contains("does not support $env.config mutations"),
+            "read-only '{form}' must not trigger config mutation rejection: {:?}",
+            result.aggregated_output
+        );
+    }
+
+    manager.terminate_session(session_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_nu_config_mutation_rejected_in_fork_eval() -> Result<(), Box<dyn std::error::Error>>
+{
+    let _guard = shell_test_lock();
+    let Some(nu_path) = nushell_path() else {
+        return Ok(());
+    };
+
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) =
+        create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
+
+    for form in &[
+        "$env.config.show_banner = false",
+        "$env.config = {}",
+        "$env.config.table.mode = \"light\"",
+    ] {
+        let result = manager
+            .fork_eval_in_managed_nu_session(session_id.clone(), form.to_string(), None)?
+            .expect("session is managed nu");
+        assert_ne!(
+            result.exit_status,
+            ExitStatus::Completed { code: 0 },
+            "'{form}' should be rejected in fork_eval: {:?}",
+            result.aggregated_output
+        );
+        assert!(
+            result.aggregated_output.contains("$env.config"),
+            "'{form}' fork_eval rejection must mention $env.config: {:?}",
+            result.aggregated_output
+        );
+    }
+
+    manager.terminate_session(session_id).await?;
     Ok(())
 }
 

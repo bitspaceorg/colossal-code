@@ -274,8 +274,16 @@ mod tests {
 ///   Use `def` / `alias` directly for custom commands and aliases.
 /// - Block-local or def-local `let`/`mut` bindings are not persisted; only
 ///   top-level session variables are captured structurally.
-/// - Config mutations (`$env.config.X = ...`) — not intercepted.
-/// - External process side-effects (files written, etc.) — outside our scope.
+/// - `$env.config` mutations are **explicitly rejected**: `$env.config = {...}`
+///   and `$env.config.X = val` both produce a stable error.  The config record
+///   is not string-coercible, so it would silently drop on rotation; explicit
+///   rejection removes that ambiguity.  Config reads (`$env.config.X`) are
+///   allowed.
+/// - External commands are **explicitly rejected**: `^cmd` and `run-external`
+///   produce a stable error directing agents to the agent-core exec path.  Bare
+///   unknown commands produce Nu's own "command not found" error.
+///   `nu-cmd-lang` provides the language primitives only; system commands must
+///   be routed through the sandboxed exec path.
 ///
 /// # `export def` / `export alias`
 ///
@@ -284,12 +292,13 @@ mod tests {
 ///
 /// # External commands
 ///
-/// The embedded runtime uses `nu-cmd-lang` only — external commands
-/// (`^echo`, `run-external`, etc.) and most `nu-command` builtins
-/// (e.g., `str upcase`, `save`, `open`) are NOT available.  The managed
-/// runtime handles state management (env, cwd, defs, aliases) and pure
-/// Nu evaluation.  External commands should be routed through the
-/// agent-core exec path instead.
+/// External commands (`^cmd`, `run-external cmd`) are **explicitly rejected**
+/// with a stable error that directs agents to the agent-core exec path.
+/// The embedded runtime uses `nu-cmd-lang` only — system commands, most
+/// `nu-command` builtins (e.g., `str upcase`, `save`, `open`), and any
+/// command requiring a child process are not available.  The managed runtime
+/// handles state management (env, cwd, defs, aliases) and pure Nu language
+/// evaluation only.
 ///
 /// # Background / interactive / PTY
 ///
@@ -434,6 +443,34 @@ impl ManagedNuRuntime {
             || source.starts_with("export module ")
             || source.starts_with("export extern ")
             || source.starts_with("export const ")
+    }
+
+    /// Returns `true` if the trimmed segment is a write to `$env.config` or
+    /// any of its sub-paths.
+    ///
+    /// Detected forms (assignment, not read-only access):
+    /// - `$env.config = { ... }`            — whole-config replacement
+    /// - `$env.config.show_banner = false`  — sub-field mutation
+    /// - `$env.config.table.mode = "light"` — deep path mutation
+    ///
+    /// Returns `false` for reads (`$env.config.show_banner`), comparisons
+    /// (`$env.config.show_banner == false`), and unrelated env vars
+    /// (`$env.config_file = ...`).
+    fn is_env_config_mutation(trimmed: &str) -> bool {
+        let rest = match trimmed.strip_prefix("$env.config") {
+            Some(r) => r,
+            None => return false,
+        };
+        // Must be $env.config, $env.config.path, or $env.config = ...
+        // Reject $env.config_other_var
+        if !rest.is_empty() && !rest.starts_with('.') && !rest.starts_with(' ') {
+            return false;
+        }
+        // Assignment uses " = " (single =). Comparison uses " == ".
+        // `rest.contains(" =") && !rest.contains(" ==")` distinguishes them:
+        //   ".show_banner = false"  → contains " =" ✓, no " ==" ✓  → true
+        //   ".show_banner == false" → contains " =" (in " ==") but also " ==" → false
+        rest.contains(" =") && !rest.contains(" ==")
     }
 
     fn register_def(&mut self, source: &str) {
@@ -718,6 +755,21 @@ impl ManagedNuRuntime {
             }
         }
 
+        if Self::is_env_config_mutation(trimmed) {
+            return Err(ColossalErr::Io(std::io::Error::other(
+                "Managed Nushell does not support $env.config mutations \
+                 ($env.config.X = val, $env.config = {...}); \
+                 config state is not snapshot/restore-safe in the embedded runtime",
+            )));
+        }
+
+        if trimmed.starts_with('^') || trimmed.starts_with("run-external ") {
+            return Err(ColossalErr::Io(std::io::Error::other(
+                "Managed Nushell does not support external commands (^cmd, run-external); \
+                 route system commands through the agent-core exec path instead",
+            )));
+        }
+
         let output = self.eval_string(trimmed)?;
         // After any general eval, sync current_cwd from the stack's PWD
         // in case the command mutated $env.PWD directly.
@@ -870,6 +922,13 @@ impl ManagedNuRuntime {
                         "def/alias in isolated (non-replay_state) mode has no persistent effect",
                     )));
                 }
+                if Self::is_env_config_mutation(trimmed) {
+                    return Err(ColossalErr::Io(std::io::Error::other(
+                        "Managed Nushell does not support $env.config mutations \
+                         ($env.config.X = val, $env.config = {...}); \
+                         config state is not snapshot/restore-safe in the embedded runtime",
+                    )));
+                }
                 if self.is_variable_mutation_segment(trimmed) {
                     return Err(ColossalErr::Io(std::io::Error::other(
                         "let/mut/assignment in isolated (non-replay_state) mode has no persistent effect",
@@ -886,6 +945,12 @@ impl ManagedNuRuntime {
                     return Err(ColossalErr::Io(std::io::Error::other(
                         "Managed Nushell does not support module/use/source commands; \
                          define commands and aliases directly with def/alias instead",
+                    )));
+                }
+                if trimmed.starts_with('^') || trimmed.starts_with("run-external ") {
+                    return Err(ColossalErr::Io(std::io::Error::other(
+                        "Managed Nushell does not support external commands (^cmd, run-external); \
+                         route system commands through the agent-core exec path instead",
                     )));
                 }
 
