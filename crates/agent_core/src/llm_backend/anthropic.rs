@@ -483,7 +483,7 @@ async fn process_anthropic_sse(
     };
     let mut tool_state: Vec<ToolState> = Vec::new();
     let mut current_tool_index: Option<usize> = None;
-    let mut stream_completed = false;
+    let stream_completed = false;
 
     while let Some(item) = body_stream.next().await {
         let chunk = item?;
@@ -636,7 +636,6 @@ async fn process_anthropic_sse(
                         object: "chat.completion".to_string(),
                         usage,
                     };
-                    stream_completed = true;
                     let _ = tx.send(Response::Done(done));
                     return Ok(());
                 }
