@@ -14,7 +14,6 @@ use mistralrs::{
 use mistralrs_core::{CalledFunction, MessageContent, ToolCallResponse, ToolCallType, ToolChoice};
 use once_cell::sync::OnceCell;
 use reqwest::{Client, Url, header::CONTENT_TYPE};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{net::IpAddr, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
@@ -26,8 +25,13 @@ mod openai_auth;
 mod openai_options;
 mod responses;
 
+mod openai_stream;
+pub mod openai_wire;
+
 use claude_auth::ClaudeCodeAuthState;
 use openai_auth::OpenAiAuthState;
+use openai_stream::{current_timestamp, estimate_tokens, process_sse_stream, usage_from_openai};
+use openai_wire::OpenAiChatResponse;
 
 #[async_trait]
 pub trait LLMBackend: Send + Sync {
@@ -42,16 +46,11 @@ pub trait LLMBackend: Send + Sync {
 
     async fn get_model(&self) -> Result<Arc<Model>>;
 
-    /// Return the most recent usage stats observed from the streaming backend.
-    /// Called on cancellation to recover prompt/completion token counts that
-    /// the API already sent before the stream was dropped.
     async fn get_latest_usage(&self) -> Option<Usage> {
         None
     }
 }
 
-/// Stub backend used when no model or provider is configured.
-/// Allows the TUI to start up and render the `/connect` modal.
 pub struct NoneBackend;
 
 #[async_trait]
@@ -141,8 +140,6 @@ impl LLMBackend for LocalBackend {
     async fn load_model(&self) -> Result<()> {
         let mut model_guard = self.model.lock().await;
         if model_guard.is_none() {
-            // Redirect stdout/stderr to /dev/null during model loading to suppress progress bars
-            // (Platform specific loading logic omitted for brevity in this first pass, but included in full implementation)
             let model_files = self.model_files.lock().await.clone();
             let model = GgufModelBuilder::new(self.model_path.clone(), model_files)
                 .build()
@@ -178,8 +175,6 @@ pub struct HttpBackend {
     chatgpt_account_id: Option<String>,
     openai_auth: Option<OpenAiAuthState>,
     claude_auth: Option<ClaudeCodeAuthState>,
-    /// Most recent usage stats observed from SSE events during streaming.
-    /// Written by the streaming task, read by the agent on cancellation.
     latest_usage: Arc<Mutex<Option<Usage>>>,
 }
 
@@ -437,7 +432,6 @@ impl HttpBackend {
     }
 
     fn user_project_header(&self) -> Option<String> {
-        // Prefer explicit user project env var; fall back to project id guess if provided in completions path
         if let Ok(project) = std::env::var("NITE_GOOGLE_USER_PROJECT") {
             if !project.trim().is_empty() {
                 return Some(project);
@@ -603,9 +597,8 @@ impl HttpBackend {
 impl LLMBackend for HttpBackend {
     async fn stream_chat_request(
         &self,
-        request: RequestBuilder,
+        mut request: RequestBuilder,
     ) -> Result<Box<dyn FuturesStream<Item = Response> + Unpin + Send>> {
-        // Clear stale usage from any previous request
         *self.latest_usage.lock().await = None;
 
         if self.is_responses_api() {
@@ -615,15 +608,14 @@ impl LLMBackend for HttpBackend {
             return anthropic::stream_anthropic_request(self, request).await;
         }
 
-        let mut request_builder = request;
         let enable_thinking: Option<bool> = None;
         let model_name = {
             let guard = self.model.lock().await;
             guard.clone()
         };
 
-        let openai_messages = serialize_messages(request_builder.messages_ref());
-        let tools_payload = request_builder.take_tools();
+        let openai_messages = serialize_messages(request.messages_ref());
+        let tools_payload = request.take_tools();
 
         let mut payload = json!({
             "model": model_name.clone(),
@@ -691,7 +683,6 @@ impl LLMBackend for HttpBackend {
             }
 
             if !is_google_api {
-                // Only send tool_choice for OpenAI-compatible APIs
                 let tool_choice_value = tool_choice_to_value(tool_choice);
                 payload["tool_choice"] = tool_choice_value;
             }
@@ -804,133 +795,6 @@ impl LLMBackend for HttpBackend {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
-struct OpenAiUsage {
-    completion_tokens: Option<usize>,
-    prompt_tokens: Option<usize>,
-    total_tokens: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiChatMessage {
-    #[serde(default)]
-    content: Option<OpenAiChatMessageContent>,
-    role: Option<String>,
-    #[serde(default)]
-    tool_calls: Option<Vec<OpenAiStreamToolCall>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum OpenAiChatMessageContent {
-    Text(String),
-    Parts(Vec<OpenAiChatMessagePart>),
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiChatMessagePart {
-    #[serde(rename = "type")]
-    _part_type: Option<String>,
-    text: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct OpenAiStreamToolCall {
-    #[serde(default)]
-    index: Option<usize>,
-    id: Option<String>,
-    #[serde(rename = "type")]
-    _typ: Option<String>,
-    function: Option<OpenAiToolFunction>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct OpenAiToolFunction {
-    name: Option<String>,
-    arguments: Option<String>,
-}
-
-impl OpenAiChatMessageContent {
-    fn to_text(&self) -> String {
-        match self {
-            OpenAiChatMessageContent::Text(text) => text.clone(),
-            OpenAiChatMessageContent::Parts(parts) => parts
-                .iter()
-                .filter_map(|part| part.text.as_ref())
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(""),
-        }
-    }
-}
-
-impl OpenAiChatMessage {
-    fn content_text(&self) -> String {
-        self.content
-            .as_ref()
-            .map(|content| content.to_text())
-            .unwrap_or_default()
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiChatChoice {
-    message: OpenAiChatMessage,
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiChatResponse {
-    id: Option<String>,
-    model: Option<String>,
-    created: Option<u64>,
-    system_fingerprint: Option<String>,
-    object: Option<String>,
-    choices: Vec<OpenAiChatChoice>,
-    usage: Option<OpenAiUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiStreamResponse {
-    id: Option<String>,
-    model: Option<String>,
-    created: Option<u64>,
-    system_fingerprint: Option<String>,
-    object: Option<String>,
-    choices: Vec<OpenAiStreamChoice>,
-    usage: Option<OpenAiUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiStreamChoice {
-    index: usize,
-    delta: OpenAiStreamDelta,
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiStreamDelta {
-    #[serde(default)]
-    content: Option<OpenAiChatMessageContent>,
-    #[serde(default)]
-    role: Option<String>,
-    #[serde(default)]
-    tool_calls: Option<Vec<OpenAiStreamToolCall>>,
-}
-
-fn estimate_tokens(text: &str) -> usize {
-    text.split_whitespace().count().max(1)
-}
-
-fn current_timestamp() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 fn serialize_messages(messages: &[IndexMap<String, MessageContent>]) -> Vec<Value> {
     messages
         .iter()
@@ -966,7 +830,7 @@ fn serialize_messages(messages: &[IndexMap<String, MessageContent>]) -> Vec<Valu
         .collect()
 }
 
-fn convert_tool_calls(calls: &[OpenAiStreamToolCall]) -> Vec<ToolCallResponse> {
+fn convert_tool_calls(calls: &[openai_wire::OpenAiStreamToolCall]) -> Vec<ToolCallResponse> {
     calls
         .iter()
         .enumerate()
@@ -994,510 +858,10 @@ fn convert_tool_calls(calls: &[OpenAiStreamToolCall]) -> Vec<ToolCallResponse> {
         .collect()
 }
 
-#[derive(Clone, Default)]
-struct StreamingToolCallState {
-    id: Option<String>,
-    name: String,
-    arguments: String,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct StreamMetrics {
-    completion_tokens: usize,
-    total_time_sec: f32,
-    time_to_first_token_sec: f32,
-}
-
-impl StreamMetrics {
-    fn from_timing(start: Instant, first_token: Option<Instant>, completion_tokens: usize) -> Self {
-        let total_time_sec = start.elapsed().as_secs_f32();
-        let time_to_first_token_sec = first_token
-            .map(|ts| ts.duration_since(start).as_secs_f32())
-            .unwrap_or(0.0);
-        Self {
-            completion_tokens,
-            total_time_sec,
-            time_to_first_token_sec,
-        }
-    }
-}
-
 fn tool_choice_to_value(tool_choice: ToolChoice) -> Value {
     match tool_choice {
         ToolChoice::None => Value::String("none".to_string()),
         ToolChoice::Auto => Value::String("auto".to_string()),
         ToolChoice::Tool(tool) => serde_json::to_value(tool).unwrap_or(Value::Null),
     }
-}
-
-fn usage_from_openai(usage: Option<OpenAiUsage>, content: &str) -> Usage {
-    if let Some(usage) = usage {
-        let completion = usage
-            .completion_tokens
-            .unwrap_or_else(|| estimate_tokens(content));
-        let prompt = usage.prompt_tokens.unwrap_or(0);
-        let total = usage.total_tokens.unwrap_or_else(|| completion + prompt);
-        Usage {
-            completion_tokens: completion,
-            prompt_tokens: prompt,
-            total_tokens: total,
-            avg_tok_per_sec: 0.0,
-            avg_prompt_tok_per_sec: 0.0,
-            avg_compl_tok_per_sec: 0.0,
-            total_time_sec: 0.0,
-            total_prompt_time_sec: 0.0,
-            total_completion_time_sec: 0.0,
-        }
-    } else {
-        Usage {
-            completion_tokens: estimate_tokens(content),
-            prompt_tokens: 0,
-            total_tokens: estimate_tokens(content),
-            avg_tok_per_sec: 0.0,
-            avg_prompt_tok_per_sec: 0.0,
-            avg_compl_tok_per_sec: 0.0,
-            total_time_sec: 0.0,
-            total_prompt_time_sec: 0.0,
-            total_completion_time_sec: 0.0,
-        }
-    }
-}
-
-fn update_streaming_tool_calls(
-    delta_calls: Vec<OpenAiStreamToolCall>,
-    state: &mut Vec<StreamingToolCallState>,
-) -> Vec<ToolCallResponse> {
-    let mut responses = Vec::new();
-    for call in delta_calls {
-        let idx = call.index.unwrap_or(state.len());
-        if state.len() <= idx {
-            state.resize_with(idx + 1, StreamingToolCallState::default);
-        }
-        if let Some(id) = call.id.clone() {
-            state[idx].id = Some(id);
-        }
-        if let Some(function) = call.function.clone() {
-            if let Some(name) = function.name {
-                if !name.is_empty() {
-                    state[idx].name = name;
-                }
-            }
-            if let Some(arguments) = function.arguments {
-                state[idx].arguments.push_str(&arguments);
-            }
-        }
-
-        let response = ToolCallResponse {
-            index: idx,
-            id: state[idx]
-                .id
-                .clone()
-                .unwrap_or_else(|| format!("call-{}", idx)),
-            tp: ToolCallType::Function,
-            function: CalledFunction {
-                name: state[idx].name.clone(),
-                arguments: state[idx].arguments.clone(),
-            },
-        };
-        responses.push(response);
-    }
-    responses
-}
-
-fn finalize_stream_tool_calls(state: &[StreamingToolCallState]) -> Option<Vec<ToolCallResponse>> {
-    if state.is_empty() {
-        return None;
-    }
-
-    let mut calls = Vec::new();
-    for (idx, entry) in state.iter().enumerate() {
-        if entry.name.is_empty() && entry.arguments.is_empty() {
-            continue;
-        }
-
-        calls.push(ToolCallResponse {
-            index: idx,
-            id: entry.id.clone().unwrap_or_else(|| format!("call-{}", idx)),
-            tp: ToolCallType::Function,
-            function: CalledFunction {
-                name: entry.name.clone(),
-                arguments: entry.arguments.clone(),
-            },
-        });
-    }
-
-    if calls.is_empty() { None } else { Some(calls) }
-}
-
-fn find_sse_separator(buffer: &[u8]) -> Option<(usize, usize)> {
-    let len = buffer.len();
-    let mut i = 0;
-    while i + 1 < len {
-        if buffer[i] == b'\n' && buffer[i + 1] == b'\n' {
-            return Some((i, 2));
-        }
-        if i + 3 < len
-            && buffer[i] == b'\r'
-            && buffer[i + 1] == b'\n'
-            && buffer[i + 2] == b'\r'
-            && buffer[i + 3] == b'\n'
-        {
-            return Some((i, 4));
-        }
-        i += 1;
-    }
-    None
-}
-
-fn extract_sse_event(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
-    if let Some((idx, sep_len)) = find_sse_separator(buffer) {
-        let event = buffer[..idx].to_vec();
-        buffer.drain(..idx + sep_len);
-        Some(event)
-    } else {
-        None
-    }
-}
-
-fn sse_data_from_event(event: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(event);
-    let mut data_lines = Vec::new();
-    for line in text.lines() {
-        if let Some(value) = line.strip_prefix("data:") {
-            data_lines.push(value.trim_start().to_string());
-        }
-    }
-
-    if data_lines.is_empty() {
-        None
-    } else {
-        Some(data_lines.join("\n"))
-    }
-}
-
-fn send_final_done(
-    tx: &mpsc::UnboundedSender<Response>,
-    response_id: Option<String>,
-    response_model: Option<String>,
-    created: Option<u64>,
-    fingerprint: Option<String>,
-    usage: Option<OpenAiUsage>,
-    accumulated_content: &str,
-    tool_state: &[StreamingToolCallState],
-    final_role: &str,
-    final_finish_reason: &str,
-    fallback_model: &str,
-    metrics: Option<StreamMetrics>,
-) -> bool {
-    let finish_reason = if final_finish_reason.is_empty() {
-        "stop".to_string()
-    } else {
-        final_finish_reason.to_string()
-    };
-
-    let message = ResponseMessage {
-        content: Some(accumulated_content.to_string()),
-        role: final_role.to_string(),
-        tool_calls: finalize_stream_tool_calls(tool_state),
-        reasoning_content: None,
-    };
-
-    let choice = Choice {
-        finish_reason,
-        index: 0,
-        message,
-        logprobs: None,
-    };
-
-    let mut usage = usage_from_openai(usage, accumulated_content);
-    if let Some(metrics) = metrics {
-        if usage.completion_tokens == 0 && metrics.completion_tokens > 0 {
-            usage.completion_tokens = metrics.completion_tokens;
-            usage.total_tokens = metrics.completion_tokens;
-        }
-        if usage.avg_compl_tok_per_sec == 0.0
-            && metrics.completion_tokens > 0
-            && metrics.total_time_sec > 0.0
-        {
-            usage.avg_compl_tok_per_sec =
-                metrics.completion_tokens as f32 / metrics.total_time_sec.max(0.001);
-            usage.total_completion_time_sec = metrics.total_time_sec;
-            usage.total_time_sec = metrics.total_time_sec;
-        }
-        if usage.total_prompt_time_sec == 0.0 && metrics.time_to_first_token_sec > 0.0 {
-            usage.total_prompt_time_sec = metrics.time_to_first_token_sec;
-        }
-    }
-
-    let done = ChatCompletionResponse {
-        id: response_id.unwrap_or_else(|| format!("nite-http-{}", Uuid::new_v4())),
-        choices: vec![choice],
-        created: created.unwrap_or_else(|| current_timestamp()),
-        model: response_model.unwrap_or_else(|| fallback_model.to_string()),
-        system_fingerprint: fingerprint.unwrap_or_default(),
-        object: "chat.completion".to_string(),
-        usage,
-    };
-
-    tx.send(Response::Done(done)).is_ok()
-}
-
-async fn process_sse_stream(
-    response: reqwest::Response,
-    fallback_model: String,
-    tx: mpsc::UnboundedSender<Response>,
-    request_start: Instant,
-    shared_usage: Arc<Mutex<Option<Usage>>>,
-) -> Result<()> {
-    let mut body_stream = response.bytes_stream();
-    let mut buffer = Vec::new();
-    let mut accumulated_content = String::new();
-    let mut tool_state: Vec<StreamingToolCallState> = Vec::new();
-    let mut final_finish_reason = String::from("stop");
-    let mut final_role = String::from("assistant");
-    let mut response_id: Option<String> = None;
-    let mut response_model: Option<String> = None;
-    let mut created_ts: Option<u64> = None;
-    let mut fingerprint: Option<String> = None;
-    let mut latest_usage: Option<OpenAiUsage> = None;
-    let mut first_token_time: Option<Instant> = None;
-    let mut estimated_tokens: usize = 0;
-
-    while let Some(item) = body_stream.next().await {
-        if tx.is_closed() {
-            http_debug_log("SSE downstream closed; aborting stream read");
-            // Propagate whatever usage we have before aborting
-            if let Some(ref usage) = latest_usage {
-                let converted = usage_from_openai(Some(usage.clone()), &accumulated_content);
-                *shared_usage.lock().await = Some(converted);
-            }
-            return Ok(());
-        }
-
-        let chunk = item?;
-        buffer.extend_from_slice(&chunk);
-
-        while let Some(event_bytes) = extract_sse_event(&mut buffer) {
-            if tx.is_closed() {
-                http_debug_log("SSE downstream closed during event processing; aborting");
-                if let Some(ref usage) = latest_usage {
-                    let converted = usage_from_openai(Some(usage.clone()), &accumulated_content);
-                    *shared_usage.lock().await = Some(converted);
-                }
-                return Ok(());
-            }
-
-            if event_bytes.is_empty() {
-                continue;
-            }
-
-            let Some(data) = sse_data_from_event(&event_bytes) else {
-                continue;
-            };
-
-            let trimmed = data.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            if trimmed == "[DONE]" {
-                http_debug_log("SSE stream received [DONE]");
-                let metrics = Some(StreamMetrics::from_timing(
-                    request_start,
-                    first_token_time,
-                    estimated_tokens,
-                ));
-                send_final_done(
-                    &tx,
-                    response_id.clone(),
-                    response_model.clone(),
-                    created_ts,
-                    fingerprint.clone(),
-                    latest_usage.clone(),
-                    &accumulated_content,
-                    &tool_state,
-                    &final_role,
-                    &final_finish_reason,
-                    &fallback_model,
-                    metrics,
-                );
-                return Ok(());
-            }
-
-            let parsed: OpenAiStreamResponse = match serde_json::from_str(&data) {
-                Ok(value) => value,
-                Err(err) => {
-                    http_debug_log(format!("Failed to parse SSE chunk: {}", err));
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
-                        if let Some(error) = value.get("error") {
-                            return Err(anyhow::anyhow!("Remote error: {}", error));
-                        }
-                    }
-                    return Err(anyhow::anyhow!("Failed to parse stream chunk: {}", err));
-                }
-            };
-
-            http_debug_log(format!(
-                "Parsed SSE chunk with {} choice(s)",
-                parsed.choices.len()
-            ));
-
-            if response_id.is_none() {
-                response_id = parsed.id.clone();
-            }
-            if response_model.is_none() {
-                response_model = parsed.model.clone();
-            }
-            if parsed.created.is_some() && created_ts.is_none() {
-                created_ts = parsed.created;
-            }
-            if parsed.system_fingerprint.is_some() && fingerprint.is_none() {
-                fingerprint = parsed.system_fingerprint.clone();
-            }
-            if parsed.usage.is_some() {
-                latest_usage = parsed.usage.clone();
-                // Eagerly propagate to shared state so cancellation can read it
-                if let Some(ref usage) = latest_usage {
-                    let converted = usage_from_openai(Some(usage.clone()), &accumulated_content);
-                    *shared_usage.lock().await = Some(converted);
-                }
-            }
-
-            let chunk_id = parsed
-                .id
-                .clone()
-                .or_else(|| response_id.clone())
-                .unwrap_or_else(|| format!("nite-http-{}", Uuid::new_v4()));
-            let chunk_model = parsed
-                .model
-                .clone()
-                .or_else(|| response_model.clone())
-                .unwrap_or_else(|| fallback_model.clone());
-            let chunk_created = parsed
-                .created
-                .or(created_ts)
-                .unwrap_or_else(|| current_timestamp());
-            let chunk_fingerprint = parsed
-                .system_fingerprint
-                .clone()
-                .or_else(|| fingerprint.clone())
-                .unwrap_or_default();
-            let chunk_object = parsed
-                .object
-                .clone()
-                .unwrap_or_else(|| "chat.completion.chunk".to_string());
-
-            for choice in parsed.choices {
-                if let Some(reason) = &choice.finish_reason {
-                    final_finish_reason = reason.clone();
-                }
-
-                let OpenAiStreamDelta {
-                    content,
-                    role,
-                    tool_calls,
-                } = choice.delta;
-
-                if let Some(new_role) = role.clone() {
-                    final_role = new_role;
-                }
-                let mut delta_role = final_role.clone();
-                if let Some(role_override) = role {
-                    delta_role = role_override;
-                }
-
-                let mut delta_content = None;
-                if let Some(content_value) = content {
-                    let text = content_value.to_text();
-                    if !text.is_empty() {
-                        http_debug_log(format!(
-                            "delta content len={} preview=\"{}\"",
-                            text.chars().count(),
-                            preview_chunk(&text)
-                        ));
-                        accumulated_content.push_str(&text);
-                        if first_token_time.is_none() {
-                            first_token_time = Some(Instant::now());
-                        }
-                        estimated_tokens += estimate_tokens(&text);
-                        delta_content = Some(text);
-                    }
-                } else {
-                    http_debug_log("delta content missing".to_string());
-                }
-
-                let mut delta_tool_calls = Vec::new();
-                if let Some(tool_call_vec) = tool_calls {
-                    http_debug_log(format!(
-                        "delta includes {} tool call(s)",
-                        tool_call_vec.len()
-                    ));
-                    delta_tool_calls = update_streaming_tool_calls(tool_call_vec, &mut tool_state);
-                }
-
-                if delta_content.is_none()
-                    && delta_tool_calls.is_empty()
-                    && choice.finish_reason.is_none()
-                {
-                    continue;
-                }
-
-                let delta = Delta {
-                    content: delta_content.clone(),
-                    role: delta_role,
-                    tool_calls: if delta_tool_calls.is_empty() {
-                        None
-                    } else {
-                        Some(delta_tool_calls.clone())
-                    },
-                    reasoning_content: None,
-                };
-
-                let chunk_choice = ChunkChoice {
-                    finish_reason: choice.finish_reason.clone(),
-                    index: choice.index,
-                    delta,
-                    logprobs: None,
-                };
-
-                let chunk_response = ChatCompletionChunkResponse {
-                    id: chunk_id.clone(),
-                    choices: vec![chunk_choice],
-                    created: chunk_created as u128,
-                    model: chunk_model.clone(),
-                    system_fingerprint: chunk_fingerprint.clone(),
-                    object: chunk_object.clone(),
-                    usage: None,
-                };
-
-                if tx.send(Response::Chunk(chunk_response)).is_err() {
-                    http_debug_log("SSE downstream closed while sending chunk; aborting");
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    let metrics = Some(StreamMetrics::from_timing(
-        request_start,
-        first_token_time,
-        estimated_tokens,
-    ));
-
-    let _ = send_final_done(
-        &tx,
-        response_id,
-        response_model,
-        created_ts,
-        fingerprint,
-        latest_usage,
-        &accumulated_content,
-        &tool_state,
-        &final_role,
-        &final_finish_reason,
-        &fallback_model,
-        metrics,
-    );
-
-    Ok(())
 }

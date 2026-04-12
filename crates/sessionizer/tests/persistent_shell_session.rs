@@ -89,11 +89,14 @@ mod managed_nu_env;
 #[path = "persistent_shell_session/managed_nu_cwd.rs"]
 mod managed_nu_cwd;
 
-#[path = "persistent_shell_session/managed_nu_defs_aliases.rs"]
-mod managed_nu_defs_aliases;
-
 #[path = "persistent_shell_session/managed_nu_variables.rs"]
 mod managed_nu_variables;
+
+#[path = "persistent_shell_session/managed_nu_defs.rs"]
+mod managed_nu_defs;
+
+#[path = "persistent_shell_session/managed_nu_aliases.rs"]
+mod managed_nu_aliases;
 
 #[path = "persistent_shell_session/managed_nu_boundaries.rs"]
 mod managed_nu_boundaries;

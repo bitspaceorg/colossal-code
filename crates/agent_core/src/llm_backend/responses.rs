@@ -14,7 +14,8 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
 use super::openai_options::OpenAiResponsesOptions;
-use super::{HttpBackend, OpenAiUsage, estimate_tokens, usage_from_openai};
+use super::openai_wire::OpenAiUsage;
+use super::{HttpBackend, estimate_tokens, usage_from_openai};
 
 const DEFAULT_INSTRUCTIONS: &str = "You are Nite 3, a coding agent deployed in the best TUI colossal code. You live inside the terminal, running lean, fast, and sharp. Your role is to serve as the developer's right hand.";
 
