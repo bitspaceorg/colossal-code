@@ -432,44 +432,6 @@ impl OrchestratorAgent for BlockingSubAgent {
     }
 }
 
-struct AlwaysPassVerifier;
-
-#[async_trait]
-impl Verifier for AlwaysPassVerifier {
-    async fn verify(&self, _summary: &TaskSummary) -> std::result::Result<(), FeedbackEntry> {
-        Ok(())
-    }
-}
-
-struct FailOnceVerifier {
-    attempts: Mutex<u32>,
-}
-
-impl FailOnceVerifier {
-    fn new() -> Self {
-        Self {
-            attempts: Mutex::new(0),
-        }
-    }
-}
-
-#[async_trait]
-impl Verifier for FailOnceVerifier {
-    async fn verify(&self, _summary: &TaskSummary) -> std::result::Result<(), FeedbackEntry> {
-        let mut guard = self.attempts.lock().unwrap();
-        if *guard == 0 {
-            *guard += 1;
-            Err(FeedbackEntry {
-                author: "verifier".to_string(),
-                message: "fail once".to_string(),
-                timestamp: Utc::now(),
-            })
-        } else {
-            Ok(())
-        }
-    }
-}
-
 #[tokio::test]
 async fn orchestrator_processes_stack_depth_first() {
     use std::path::PathBuf;

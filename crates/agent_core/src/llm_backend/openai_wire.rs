@@ -26,7 +26,7 @@ pub enum OpenAiChatMessageContent {
 #[derive(Debug, Deserialize)]
 pub struct OpenAiChatMessagePart {
     #[serde(rename = "type")]
-    pub part_type: Option<String>,
+    pub _part_type: Option<String>,
     pub text: Option<String>,
 }
 
@@ -36,7 +36,7 @@ pub struct OpenAiStreamToolCall {
     pub index: Option<usize>,
     pub id: Option<String>,
     #[serde(rename = "type")]
-    pub typ: Option<String>,
+    pub _typ: Option<String>,
     pub function: Option<OpenAiToolFunction>,
 }
 
