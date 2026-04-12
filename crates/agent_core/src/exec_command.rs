@@ -138,8 +138,7 @@ async fn execute_exec_command(
         colossal_linux_sandbox::safety::AskForApproval::Never
     };
 
-    let mut current_approval = Some(safety_mode);
-    let mut retried_session = false;
+    let current_approval = Some(safety_mode);
     let uses_managed_nu_foreground = matches!(
         state.shell.kind(),
         colossal_linux_sandbox::shell::ShellKind::ManagedNu
@@ -319,7 +318,7 @@ async fn execute_replay_state(
     state: &shell_session::GlobalState,
     agent: &Agent,
     command: &str,
-    is_background: bool,
+    _is_background: bool,
     timeout_ms: u64,
     replay_state: bool,
     mut current_approval: Option<colossal_linux_sandbox::safety::AskForApproval>,
@@ -414,7 +413,7 @@ async fn execute_generic_exec(
     state: &shell_session::GlobalState,
     agent: &Agent,
     command: &str,
-    is_background: bool,
+    _is_background: bool,
     timeout_ms: u64,
     current_approval: Option<colossal_linux_sandbox::safety::AskForApproval>,
     _tx: mpsc::UnboundedSender<crate::AgentMessage>,

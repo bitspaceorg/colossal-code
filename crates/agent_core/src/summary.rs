@@ -1,4 +1,3 @@
-use crate::{Agent, shell_session};
 use agent_protocol::types::message::Role;
 use agent_protocol::types::spec::{
     SpecSheet, SpecStep, StepStatus, TaskSummary, TaskVerification, TestRun, VerificationStatus,

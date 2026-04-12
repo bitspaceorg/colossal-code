@@ -5,7 +5,7 @@ use agent_protocol::types::{
 };
 use anyhow::anyhow;
 use chrono::Utc;
-use serde_json::{Value, map::Entry};
+use serde_json::Value;
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
@@ -828,7 +828,7 @@ async fn abort_sends_cancel_signal_to_running_step() {
     start_rx.recv().await.expect("step never started");
     control.abort().unwrap();
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), orchestrator_handle)
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), orchestrator_handle)
         .await
         .expect("orchestrator did not stop after abort");
 

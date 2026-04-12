@@ -1,6 +1,6 @@
 use crate::Agent;
 use anyhow::Result;
-use mistralrs::{RequestLike, TextMessageRole, ToolChoice};
+use mistralrs::{RequestLike, TextMessageRole};
 use serde_json::Value;
 
 pub async fn clear_conversation(agent: &Agent) {

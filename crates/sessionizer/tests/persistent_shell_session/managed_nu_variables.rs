@@ -403,7 +403,7 @@ async fn managed_nu_variable_value_shapes_survive_snapshot_restore()
     let restored = manager
         .exec_command_in_shell_session(
             restored_id.clone(),
-            "$\"($persisted)\"".to_string(),
+            "$\"($s)|($n)|($b)|($items)|($rec)\"".to_string(),
             Some(10_000),
             10_000,
             None,

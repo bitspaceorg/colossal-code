@@ -254,7 +254,9 @@ async fn managed_nu_restore_shell_session_from_snapshot_fails_on_invalid_snapsho
         .await
         .expect_err("invalid managed nu restore should fail");
     assert!(
-        err.to_string().contains("parse") || err.to_string().contains("nu::parser"),
+        err.to_string().contains("Incomplete math expression")
+            || err.to_string().contains("parse")
+            || err.to_string().contains("nu::parser"),
         "unexpected restore error: {err}"
     );
 

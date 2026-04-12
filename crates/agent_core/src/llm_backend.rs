@@ -1,6 +1,5 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use futures::StreamExt;
 use futures::stream::{self, Stream as FuturesStream};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -196,14 +195,6 @@ fn http_debug_log(message: impl AsRef<str>) {
     if http_debug_enabled() {
         eprintln!("[NITE HTTP] {}", message.as_ref());
     }
-}
-
-fn preview_chunk(text: &str) -> String {
-    let mut preview: String = text.chars().take(80).collect();
-    if text.chars().count() > 80 {
-        preview.push_str("…");
-    }
-    preview
 }
 
 impl HttpBackend {

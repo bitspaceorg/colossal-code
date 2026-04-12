@@ -1,13 +1,9 @@
-use std::path::PathBuf;
-
 use agent_protocol::types::spec::{SpecSheet, SpecStep, StepStatus, TaskSummary};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-
-use crate::{Agent, resolve_workspace_root};
+use serde::Deserialize;
+use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerificationOutcome {

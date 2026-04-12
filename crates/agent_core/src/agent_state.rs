@@ -1,4 +1,4 @@
-use crate::{safety_config, shell_session};
+use crate::safety_config;
 use anyhow::Result;
 use colossal_linux_sandbox::protocol::{SandboxPolicy, WritableRoot};
 use once_cell::sync::OnceCell;

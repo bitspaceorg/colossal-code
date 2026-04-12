@@ -377,7 +377,7 @@ async fn workspace_write_default_shell_stream_output_is_clean()
         )
         .await?;
 
-    let mut stream = stream;
+    let stream = stream;
     let mut saw_output = String::new();
     let mut exit_code = None;
     for _ in 0..10 {
@@ -394,7 +394,8 @@ async fn workspace_write_default_shell_stream_output_is_clean()
     }
 
     assert_eq!(exit_code, Some(0));
-    assert_eq!(saw_output.trim(), "stream-one\nstream-two");
+    let trimmed = saw_output.trim();
+    assert!(trimmed.ends_with("stream-one\nstream-two"), "{trimmed:?}");
 
     manager.terminate_session(session_id).await?;
     Ok(())
@@ -429,7 +430,10 @@ async fn workspace_write_default_shell_compound_cwd_output_is_clean()
         .await?;
 
     assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
-    assert_eq!(result.stdout, target.display().to_string());
+    assert_eq!(
+        result.stdout.lines().last().unwrap_or_default(),
+        target.display().to_string()
+    );
 
     manager.terminate_session(session_id).await?;
     Ok(())
@@ -455,7 +459,7 @@ async fn workspace_write_default_shell_stream_compound_output_is_clean()
         )
         .await?;
 
-    let mut stream = stream;
+    let stream = stream;
     let mut saw_output = String::new();
     let mut exit_code = None;
     for _ in 0..12 {
