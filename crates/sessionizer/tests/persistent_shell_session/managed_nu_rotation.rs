@@ -247,6 +247,7 @@ async fn managed_nu_restore_shell_session_from_snapshot_fails_on_invalid_snapsho
         nu_custom_commands: vec!["def broken [x] { $x + }".to_string()],
         nu_variables: Vec::new(),
         replay_commands: Vec::new(),
+        nu_config: None,
     };
 
     let err = manager

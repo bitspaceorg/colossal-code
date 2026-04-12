@@ -3,18 +3,143 @@ use crate::manager::{NuVariableState, PersistentSessionState};
 use crate::protocol::SandboxPolicy;
 use crate::types::{ExecCommandOutput, ExitStatus, SessionId};
 use nu_cmd_lang::create_default_context;
-use nu_engine::eval_block;
+use nu_engine::{CallExt, env_to_strings, eval_block};
 use nu_parser::parse;
 use nu_protocol::debugger::WithoutDebug;
-use nu_protocol::engine::{EngineState, Stack, StateWorkingSet};
+use nu_protocol::engine::{Call, Command, EngineState, Stack, StateWorkingSet};
 use nu_protocol::{
-    PipelineData, ShellError, Span, Value,
+    Category, IntoValue, PipelineData, ShellError, Signature, Span, SyntaxShape, Type, Value,
     ast::{Expr, Operator},
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Minimal `run-external` implementation for the managed Nushell runtime.
+///
+/// This command is registered during `ManagedNuRuntime::new()` so that
+/// external-command syntax (`^cmd arg`, `run-external cmd arg`) works inside
+/// the embedded runtime.  The command spawns a child process, waits for it,
+/// and returns captured stdout/stderr combined output as a Nu string value.
+///
+/// # Sandbox enforcement
+///
+/// No special sandbox logic lives here.  The managed runtime runs inside the
+/// same OS-level sandbox (landlock / seccomp on Linux, Seatbelt on macOS) as
+/// the rest of the agent process, so kernel-level policy automatically applies
+/// to every process this command spawns.
+///
+/// # What is NOT a shell-state side effect
+///
+/// External processes are isolated from the Nu shell state: they cannot mutate
+/// `$env`, the CWD tracker, custom commands, aliases, or session variables
+/// unless they use explicit Nu pipes to do so.  After an external command
+/// `sync_cwd_from_stack` is still called (in `run_segment`) to catch the
+/// rare case where someone wired `$env.PWD = (^some-cmd)`.
+#[derive(Clone)]
+struct ManagedExternalCommand;
+
+impl Command for ManagedExternalCommand {
+    fn name(&self) -> &str {
+        "run-external"
+    }
+
+    fn description(&self) -> &str {
+        "Run an external command (managed Nu sandbox path)."
+    }
+
+    fn signature(&self) -> Signature {
+        Signature::build(self.name())
+            .input_output_types(vec![(Type::Any, Type::Any)])
+            .rest(
+                "command",
+                SyntaxShape::OneOf(vec![SyntaxShape::String, SyntaxShape::Any]),
+                "External command to run, with arguments.",
+            )
+            .category(Category::System)
+            .allows_unknown_args()
+    }
+
+    fn run(
+        &self,
+        engine_state: &EngineState,
+        stack: &mut Stack,
+        call: &Call,
+        _input: PipelineData,
+    ) -> Result<PipelineData, ShellError> {
+        let args: Vec<Value> = call.rest(engine_state, stack, 0)?;
+        let mut iter = args.into_iter();
+
+        let Some(cmd_val) = iter.next() else {
+            return Err(ShellError::MissingParameter {
+                param_name: "no command given".into(),
+                span: call.head,
+            });
+        };
+
+        let cmd_name = match cmd_val.coerce_into_string() {
+            Ok(s) => s,
+            Err(e) => return Err(e),
+        };
+
+        let mut cmd_args: Vec<String> = Vec::new();
+        for arg in iter {
+            match arg.coerce_into_string() {
+                Ok(s) => cmd_args.push(s),
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Use the Nu stack's env vars as the child process environment so that
+        // any `load-env` / `$env.X = ...` mutations the agent made are visible
+        // to child processes.
+        let env_vars = env_to_strings(engine_state, stack).unwrap_or_default();
+
+        // Derive CWD from the stack so `cd` changes are reflected.
+        let cwd = engine_state
+            .cwd(Some(stack))
+            .map(|p| p.into_std_path_buf())
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
+
+        let output = std::process::Command::new(&cmd_name)
+            .args(&cmd_args)
+            .current_dir(&cwd)
+            .envs(&env_vars)
+            .output()
+            .map_err(|_e| ShellError::ExternalNotSupported { span: call.head })?;
+
+        // Combine stdout and stderr into a single string value, mirroring how
+        // `collect_string` works for the rest of the managed runtime.
+        let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr_str = String::from_utf8_lossy(&output.stderr);
+        if !stderr_str.is_empty() {
+            if !combined.is_empty() {
+                combined.push('\n');
+            }
+            combined.push_str(&stderr_str);
+        }
+        // Trim the trailing newline that most CLI tools append so callers get
+        // clean string values without trailing whitespace.
+        let combined = combined.trim_end_matches('\n').to_string();
+
+        if output.status.success() {
+            Ok(PipelineData::Value(
+                Value::string(combined, call.head),
+                None,
+            ))
+        } else {
+            Err(ShellError::ExternalCommand {
+                label: format!(
+                    "External command `{cmd_name}` failed with exit code {}",
+                    output.status.code().unwrap_or(-1)
+                ),
+                help: combined,
+                span: call.head,
+            })
+        }
+    }
+}
 
 fn shell_error_to_io(err: ShellError) -> ColossalErr {
     ColossalErr::Io(std::io::Error::other(err.to_string()))
@@ -245,60 +370,78 @@ mod tests {
 /// `exec_command` calls, survive `snapshot`/`restore` cycles, and are
 /// carried through agent-core session rotations (policy changes).
 ///
-/// | Category        | Mutated by                        | Stored in              |
-/// |-----------------|-----------------------------------|------------------------|
-/// | Environment     | `load-env`, `set_env`, `hide-env` | `stack` env vars       |
-/// | Working dir     | `cd`, `update_cwd`                | `current_cwd` field    |
-/// | Custom commands | `def`                             | `custom_commands` list |
-/// | Aliases         | `alias`                           | `aliases` list         |
-/// | Session vars    | top-level `let`, `mut`, assignment| `variables` list       |
+/// | Category        | Mutated by                              | Stored in              |
+/// |-----------------|-----------------------------------------|------------------------|
+/// | Environment     | `load-env`, `$env.X = val`, `hide-env`  | `stack` env vars       |
+/// | Working dir     | `cd`, `update_cwd`                      | `current_cwd` field    |
+/// | Custom commands | `def`, `export def`                     | `custom_commands` list |
+/// | Aliases         | `alias`, `export alias`                 | `aliases` list         |
+/// | Session vars    | top-level `let`, `mut`, assignment      | `variables` list       |
+/// | Config          | `$env.config = ...`, sub-field writes   | `stack.config` / `nu_config` in snapshot |
+///
+/// # Config mutations (`$env.config`)
+///
+/// `$env.config` mutations are **fully supported** and **structurally
+/// persistent**.  The runtime calls `Stack::update_config` after every
+/// evaluation so config changes take effect immediately.  At snapshot time the
+/// current `Stack::config` override is serialized as JSON into the
+/// `nu_config` field of `PersistentSessionState`.  At restore time it is
+/// deserialized back into the new stack, so the config survives rotation.
+///
+/// If the snapshot's `nu_config` JSON is missing or unparseable (e.g., an
+/// older snapshot format), the runtime silently falls back to the Nu default
+/// config.  The next `$env.config` mutation in the new session will overwrite
+/// it as usual.
+///
+/// Both sub-field writes (`$env.config.show_banner = false`) and whole-config
+/// replacement (`$env.config = {table: {mode: "light"}}`) are handled
+/// correctly.  `fork_eval` respects the live config within the fork, and the
+/// forked config is discarded with the fork (consistent with all other
+/// fork-local mutations).
+///
+/// # External commands (`^cmd`, `run-external`)
+///
+/// External commands are **fully supported**.  The runtime registers a
+/// `run-external` implementation (`ManagedExternalCommand`) that spawns child
+/// processes using the Nu stack's environment variables and the current working
+/// directory.  Nu's external-call syntax (`^cmd args`, `run-external cmd args`)
+/// resolves through this implementation exactly as it would in a real Nu shell.
+///
+/// **Sandbox enforcement** is at the OS level (landlock/seccomp on Linux,
+/// Seatbelt on macOS), not inside this runtime.  The policy decides what
+/// processes may and may not do.  The managed runtime does not pre-filter
+/// external commands.
+///
+/// **Persistence semantics**: external process side effects (filesystem
+/// changes, spawned sub-processes, network activity) are governed by sandbox
+/// policy and are not shell state.  They do not affect the snapshot fields.
+/// After an external command `sync_cwd_from_stack` runs to catch the rare
+/// case where a command wires `$env.PWD = (^some-cmd)`.
+///
+/// **Limitations**:
+/// - Interactive programs that require a TTY will not work (the runtime runs
+///   without a PTY).
+/// - Commands that read stdin will see an empty pipe.
+/// - `run-external` only captures stdout and stderr as a combined string; it
+///   does not stream output.  Long-running or high-output commands should be
+///   run through the agent-core PTY path instead.
 ///
 /// # What does NOT survive rotation
 ///
-/// - All `overlay` subcommands are rejected in managed mode: `overlay use`,
-///   `overlay hide`, `overlay new`, `overlay list`.  Overlay state lives in
-///   `EngineState`'s active overlay stack and cannot be snapshot/restored
-///   without re-executing file-backed module sources, which is outside the
-///   managed runtime's scope.
-/// - The full module/use/source family is **explicitly rejected** in managed
-///   mode.  Rejected forms and reasons:
-///   - `module` / `export module`: module definitions are loaded into
-///     `EngineState` overlays; there is no structural API to extract exactly
-///     what was imported separately from the overlay stack.
-///   - `use` / `export use`: imports go into the active overlay; overlay state
-///     is itself rejected (see above).
-///   - `source` / `source-env`: execute external files whose content can
-///     change between snapshot and restore — replay is non-deterministic.
-///   - `export extern` / `export const`: file-backed module namespace
-///     semantics; same structural ownership problem as `module`.
-///   Use `def` / `alias` directly for custom commands and aliases.
+/// - `overlay` subcommands are rejected: overlay state lives in `EngineState`'s
+///   active overlay stack and cannot be snapshot/restored without re-executing
+///   file-backed module sources.
+/// - `module` / `use` / `source` / `source-env` / `export use` / `export
+///   module` / `export extern` / `export const` are rejected.  These forms
+///   load state into `EngineState` overlays with no structural extraction API.
+///   Use `def` / `alias` directly.
 /// - Block-local or def-local `let`/`mut` bindings are not persisted; only
-///   top-level session variables are captured structurally.
-/// - `$env.config` mutations are **explicitly rejected**: `$env.config = {...}`
-///   and `$env.config.X = val` both produce a stable error.  The config record
-///   is not string-coercible, so it would silently drop on rotation; explicit
-///   rejection removes that ambiguity.  Config reads (`$env.config.X`) are
-///   allowed.
-/// - External commands are **explicitly rejected**: `^cmd` and `run-external`
-///   produce a stable error directing agents to the agent-core exec path.  Bare
-///   unknown commands produce Nu's own "command not found" error.
-///   `nu-cmd-lang` provides the language primitives only; system commands must
-///   be routed through the sandboxed exec path.
+///   top-level session variables are captured.
 ///
 /// # `export def` / `export alias`
 ///
 /// These are treated identically to `def` / `alias` at the top level and are
 /// part of the persistence contract.
-///
-/// # External commands
-///
-/// External commands (`^cmd`, `run-external cmd`) are **explicitly rejected**
-/// with a stable error that directs agents to the agent-core exec path.
-/// The embedded runtime uses `nu-cmd-lang` only — system commands, most
-/// `nu-command` builtins (e.g., `str upcase`, `save`, `open`), and any
-/// command requiring a child process are not available.  The managed runtime
-/// handles state management (env, cwd, defs, aliases) and pure Nu language
-/// evaluation only.
 ///
 /// # Background / interactive / PTY
 ///
@@ -351,6 +494,13 @@ impl ManagedNuRuntime {
     ) -> Result<Self, ColossalErr> {
         let mut engine_state = create_default_context();
         engine_state.generate_nu_constant();
+
+        // Register the managed `run-external` implementation so that external
+        // command syntax (`^cmd`, `run-external cmd`) resolves correctly.
+        let mut working_set = StateWorkingSet::new(&engine_state);
+        working_set.add_decl(Box::new(ManagedExternalCommand));
+        let delta = working_set.render();
+        engine_state.merge_delta(delta).map_err(shell_error_to_io)?;
 
         let mut stack = Stack::new().collect_value();
         for (key, value) in std::env::vars() {
@@ -443,34 +593,6 @@ impl ManagedNuRuntime {
             || source.starts_with("export module ")
             || source.starts_with("export extern ")
             || source.starts_with("export const ")
-    }
-
-    /// Returns `true` if the trimmed segment is a write to `$env.config` or
-    /// any of its sub-paths.
-    ///
-    /// Detected forms (assignment, not read-only access):
-    /// - `$env.config = { ... }`            — whole-config replacement
-    /// - `$env.config.show_banner = false`  — sub-field mutation
-    /// - `$env.config.table.mode = "light"` — deep path mutation
-    ///
-    /// Returns `false` for reads (`$env.config.show_banner`), comparisons
-    /// (`$env.config.show_banner == false`), and unrelated env vars
-    /// (`$env.config_file = ...`).
-    fn is_env_config_mutation(trimmed: &str) -> bool {
-        let rest = match trimmed.strip_prefix("$env.config") {
-            Some(r) => r,
-            None => return false,
-        };
-        // Must be $env.config, $env.config.path, or $env.config = ...
-        // Reject $env.config_other_var
-        if !rest.is_empty() && !rest.starts_with('.') && !rest.starts_with(' ') {
-            return false;
-        }
-        // Assignment uses " = " (single =). Comparison uses " == ".
-        // `rest.contains(" =") && !rest.contains(" ==")` distinguishes them:
-        //   ".show_banner = false"  → contains " =" ✓, no " ==" ✓  → true
-        //   ".show_banner == false" → contains " =" (in " ==") but also " ==" → false
-        rest.contains(" =") && !rest.contains(" ==")
     }
 
     fn register_def(&mut self, source: &str) {
@@ -608,9 +730,15 @@ impl ManagedNuRuntime {
         )
         .map_err(shell_error_to_io)?;
 
+        // Pick up any $env.config mutations the block may have made.  Nu stores
+        // config in Stack::config, and update_config() syncs it from $env.config.
+        // Errors are soft (config values that didn't parse are skipped); we
+        // ignore warnings here since this is a library context without a REPL.
+        let _ = self.stack.update_config(&self.engine_state);
+
         result
             .body
-            .collect_string("", self.engine_state.get_config())
+            .collect_string("", self.stack.get_config(&self.engine_state).as_ref())
             .map_err(shell_error_to_io)
     }
 
@@ -626,6 +754,9 @@ impl ManagedNuRuntime {
             PipelineData::empty(),
         )
         .map_err(shell_error_to_io)?;
+
+        // Propagate any config changes, same as eval_string.
+        let _ = self.stack.update_config(&self.engine_state);
 
         result
             .body
@@ -755,24 +886,10 @@ impl ManagedNuRuntime {
             }
         }
 
-        if Self::is_env_config_mutation(trimmed) {
-            return Err(ColossalErr::Io(std::io::Error::other(
-                "Managed Nushell does not support $env.config mutations \
-                 ($env.config.X = val, $env.config = {...}); \
-                 config state is not snapshot/restore-safe in the embedded runtime",
-            )));
-        }
-
-        if trimmed.starts_with('^') || trimmed.starts_with("run-external ") {
-            return Err(ColossalErr::Io(std::io::Error::other(
-                "Managed Nushell does not support external commands (^cmd, run-external); \
-                 route system commands through the agent-core exec path instead",
-            )));
-        }
-
         let output = self.eval_string(trimmed)?;
         // After any general eval, sync current_cwd from the stack's PWD
-        // in case the command mutated $env.PWD directly.
+        // in case the command mutated $env.PWD directly (via $env.config or
+        // an external command that wrote to PWD).
         self.sync_cwd_from_stack();
         self.sync_persistent_variables_from_runtime();
         Ok(output)
@@ -847,12 +964,26 @@ impl ManagedNuRuntime {
             .get_env_vars(&self.engine_state)
             .into_iter()
             .filter_map(|(key, value)| {
+                // Skip the "config" env var — it's a structured Value, not a
+                // plain string.  Its canonical persistence is `nu_config`.
+                if key == "config" {
+                    return None;
+                }
                 value
                     .coerce_str()
                     .ok()
                     .map(|value| (key, value.into_owned()))
             })
             .collect();
+
+        // Serialize the current config only if it has been mutated (i.e. the
+        // stack has its own config override rather than deferring to the engine
+        // state default).
+        let nu_config = self
+            .stack
+            .config
+            .as_ref()
+            .and_then(|cfg| serde_json::to_string(cfg.as_ref()).ok());
 
         Ok(PersistentSessionState {
             version: crate::manager::SNAPSHOT_FORMAT_VERSION,
@@ -867,6 +998,7 @@ impl ManagedNuRuntime {
             nu_custom_commands: self.custom_commands.clone(),
             nu_variables: self.variables.clone(),
             replay_commands: Vec::new(),
+            nu_config,
         })
     }
 
@@ -922,16 +1054,14 @@ impl ManagedNuRuntime {
                         "def/alias in isolated (non-replay_state) mode has no persistent effect",
                     )));
                 }
-                if Self::is_env_config_mutation(trimmed) {
+                // $env.* assignments (including $env.config mutations) are
+                // allowed in fork_eval: they only affect the forked stack,
+                // which is discarded at the end of this call.  Session
+                // variable assignments (let, mut, $x = ...) are rejected
+                // because they silently appear to succeed but have no effect.
+                if !trimmed.starts_with("$env.") && self.is_variable_mutation_segment(trimmed) {
                     return Err(ColossalErr::Io(std::io::Error::other(
-                        "Managed Nushell does not support $env.config mutations \
-                         ($env.config.X = val, $env.config = {...}); \
-                         config state is not snapshot/restore-safe in the embedded runtime",
-                    )));
-                }
-                if self.is_variable_mutation_segment(trimmed) {
-                    return Err(ColossalErr::Io(std::io::Error::other(
-                        "let/mut/assignment in isolated (non-replay_state) mode has no persistent effect",
+                        "let/mut/session-variable assignment in isolated (non-replay_state) mode has no persistent effect",
                     )));
                 }
                 if trimmed.starts_with("overlay ") {
@@ -947,12 +1077,6 @@ impl ManagedNuRuntime {
                          define commands and aliases directly with def/alias instead",
                     )));
                 }
-                if trimmed.starts_with('^') || trimmed.starts_with("run-external ") {
-                    return Err(ColossalErr::Io(std::io::Error::other(
-                        "Managed Nushell does not support external commands (^cmd, run-external); \
-                         route system commands through the agent-core exec path instead",
-                    )));
-                }
 
                 let (block, delta) = parse_block(&forked_engine, trimmed)?;
                 forked_engine
@@ -966,9 +1090,15 @@ impl ManagedNuRuntime {
                 )
                 .map_err(shell_error_to_io)?;
 
+                // Propagate any $env.config mutations into the forked stack's
+                // config so subsequent expressions in the same fork_eval see
+                // the updated config.  The forked stack is discarded at the end
+                // of fork_eval; this does not affect the live runtime.
+                let _ = forked_stack.update_config(&forked_engine);
+
                 let output = eval_result
                     .body
-                    .collect_string("", forked_engine.get_config())
+                    .collect_string("", forked_stack.get_config(&forked_engine).as_ref())
                     .map_err(shell_error_to_io)?;
                 collected.push_str(&output);
                 Ok(collected)
@@ -1016,6 +1146,23 @@ impl ManagedNuRuntime {
         }
 
         self.variables = snapshot.nu_variables.clone();
+
+        // Restore config if the snapshot carries a serialized override.
+        // A missing or malformed nu_config JSON is treated as "use default"
+        // rather than an error so that snapshots from older versions or
+        // partial-write failures degrade gracefully.
+        if let Some(cfg_json) = &snapshot.nu_config {
+            if let Ok(cfg) = serde_json::from_str::<nu_protocol::Config>(cfg_json) {
+                self.stack.config = Some(Arc::new(cfg.clone()));
+                // Set the config env var from the restored Config so $env.config
+                // works during subsequent commands. Use Config::into_value which is the
+                // standard Nu way to convert Config -> Value.
+                let cfg_value = cfg.into_value(Span::unknown());
+                self.stack.add_env_var("config".to_string(), cfg_value);
+            }
+            // If deserialization fails we log nothing and use the default —
+            // the agent's next $env.config mutation will overwrite it anyway.
+        }
 
         Ok(())
     }

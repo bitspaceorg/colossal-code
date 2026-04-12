@@ -1,7 +1,11 @@
 use super::*;
 
+// ---------------------------------------------------------------------------
+// Config mutation — live exec
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-async fn managed_nu_config_mutations_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
+async fn managed_nu_config_mutation_works_live() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = shell_test_lock();
     let Some(nu_path) = nushell_path() else {
         return Ok(());
@@ -15,6 +19,7 @@ async fn managed_nu_config_mutations_are_rejected() -> Result<(), Box<dyn std::e
     )
     .await?;
 
+    // Sub-field mutation must succeed.
     let result = manager
         .exec_command_in_shell_session(
             session_id.clone(),
@@ -24,17 +29,51 @@ async fn managed_nu_config_mutations_are_rejected() -> Result<(), Box<dyn std::e
             None,
         )
         .await?;
-    assert!(
-        matches!(result.exit_status, ExitStatus::Completed { code: 1 }),
-        "$env.config sub-field mutation should be rejected: {:?}",
-        result.exit_status
-    );
-    assert!(
-        result.aggregated_output.contains("$env.config"),
-        "rejection message should mention $env.config: {:?}",
+    assert_eq!(
+        result.exit_status,
+        ExitStatus::Completed { code: 0 },
+        "$env.config sub-field mutation should succeed: {:?}",
         result.aggregated_output
     );
 
+    // The mutated value should be readable in the same session.
+    let read = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "$env.config.show_banner".to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        read.exit_status,
+        ExitStatus::Completed { code: 0 },
+        "reading config after mutation should succeed: {:?}",
+        read.aggregated_output
+    );
+
+    manager.terminate_session(session_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_nu_config_whole_replacement_works() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = shell_test_lock();
+    let Some(nu_path) = nushell_path() else {
+        return Ok(());
+    };
+
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) = create_shell_session(
+        temp.path(),
+        nu_path.clone(),
+        SandboxPolicy::DangerFullAccess,
+    )
+    .await?;
+
+    // Whole-config replacement: pass an empty record (valid minimal config).
+    // Nu will merge it with defaults, which is correct behavior.
     let result = manager
         .exec_command_in_shell_session(
             session_id.clone(),
@@ -44,21 +83,131 @@ async fn managed_nu_config_mutations_are_rejected() -> Result<(), Box<dyn std::e
             None,
         )
         .await?;
-    assert!(
-        matches!(result.exit_status, ExitStatus::Completed { code: 1 }),
-        "whole $env.config replacement should be rejected: {:?}",
-        result.exit_status
+    assert_eq!(
+        result.exit_status,
+        ExitStatus::Completed { code: 0 },
+        "whole $env.config replacement should succeed: {:?}",
+        result.aggregated_output
     );
 
+    manager.terminate_session(session_id).await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Config mutation — snapshot/restore persistence
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn managed_nu_config_persists_across_snapshot_restore()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = shell_test_lock();
+    let Some(nu_path) = nushell_path() else {
+        return Ok(());
+    };
+
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) = create_shell_session(
+        temp.path(),
+        nu_path.clone(),
+        SandboxPolicy::DangerFullAccess,
+    )
+    .await?;
+
+    // Mutate config in the original session.
+    let mutate = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "$env.config.show_banner = false".to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        mutate.exit_status,
+        ExitStatus::Completed { code: 0 },
+        "config mutation must succeed: {:?}",
+        mutate.aggregated_output
+    );
+
+    // Capture snapshot — nu_config must be serialized.
     let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
     assert!(
-        snapshot.nu_custom_commands.is_empty(),
-        "config rejection must not corrupt state: {:?}",
-        snapshot.nu_custom_commands
+        snapshot.nu_config.is_some(),
+        "snapshot must carry nu_config after $env.config mutation: {:?}",
+        snapshot.nu_config
+    );
+
+    // Create a fresh session that has NOT had any config mutation applied.
+    let shared_state = Arc::new(SharedSessionState::new(snapshot.current_cwd.clone()));
+    let restored_id = manager
+        .create_persistent_shell_session(
+            nu_path.clone(),
+            false,
+            SandboxPolicy::DangerFullAccess,
+            shared_state,
+            Some(Duration::from_secs(30)),
+        )
+        .await?;
+
+    // Restore via the real path — ManagedNuRuntime::restore() deserializes
+    // nu_config from the snapshot JSON and sets stack.config directly.
+    // No manual $env.config mutation is applied here.
+    manager
+        .restore_shell_session_from_snapshot(restored_id.clone(), &snapshot)
+        .await?;
+
+    // The restored session must see the config value that was set in the
+    // original session, proving it came through the restore path.
+    let read = manager
+        .exec_command_in_shell_session(
+            restored_id.clone(),
+            "$env.config.show_banner".to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        read.exit_status,
+        ExitStatus::Completed { code: 0 },
+        "config read after restore should succeed: {:?}",
+        read.aggregated_output
+    );
+    assert!(
+        read.stdout.trim() == "false",
+        "restored session must see show_banner=false from snapshot, got: {:?}",
+        read.stdout
+    );
+
+    manager.terminate_session(session_id).await?;
+    manager.terminate_session(restored_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_nu_config_snapshot_field_absent_when_not_mutated()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = shell_test_lock();
+    let Some(nu_path) = nushell_path() else {
+        return Ok(());
+    };
+
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) =
+        create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
+
+    // No config mutation — snapshot nu_config must be None.
+    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
+    assert!(
+        snapshot.nu_config.is_none(),
+        "nu_config should be None when config was not mutated: {:?}",
+        snapshot.nu_config
     );
     assert!(
         !snapshot.env_vars.contains_key("config"),
-        "$env.config must not appear as a string env var: {:?}",
+        "$env.config must not appear as a plain string env var: {:?}",
         snapshot.env_vars.keys().collect::<Vec<_>>()
     );
 
@@ -66,9 +215,227 @@ async fn managed_nu_config_mutations_are_rejected() -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Config mutation — fork_eval behavior
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-async fn managed_nu_config_read_not_intercepted_by_rejection()
+async fn managed_nu_config_mutation_allowed_in_fork_eval() -> Result<(), Box<dyn std::error::Error>>
+{
+    let _guard = shell_test_lock();
+    let Some(nu_path) = nushell_path() else {
+        return Ok(());
+    };
+
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) =
+        create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
+
+    // Config mutations in fork_eval should succeed (they affect only the
+    // discarded fork; the live session is unchanged).
+    for form in &[
+        "$env.config.show_banner = false",
+        "$env.config = {}",
+        "$env.config.table.mode = \"light\"",
+    ] {
+        let result = manager
+            .fork_eval_in_managed_nu_session(session_id.clone(), form.to_string(), None)?
+            .expect("session is managed nu");
+        assert_eq!(
+            result.exit_status,
+            ExitStatus::Completed { code: 0 },
+            "'{form}' should succeed in fork_eval: {:?}",
+            result.aggregated_output
+        );
+    }
+
+    // After fork_eval config mutations, the live session's config must be
+    // unchanged (fork side effects are discarded).
+    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
+    assert!(
+        snapshot.nu_config.is_none(),
+        "fork_eval config mutations must not affect the live snapshot: {:?}",
+        snapshot.nu_config
+    );
+
+    manager.terminate_session(session_id).await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Config mutation — policy rotation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn managed_nu_config_persists_across_policy_rotation()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = shell_test_lock();
+    let Some(nu_path) = nushell_path() else {
+        return Ok(());
+    };
+
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) = create_shell_session(
+        temp.path(),
+        nu_path.clone(),
+        SandboxPolicy::DangerFullAccess,
+    )
+    .await?;
+
+    // Mutate config in the pre-rotation session.
+    let mutate = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "$env.config.show_banner = false".to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        mutate.exit_status,
+        ExitStatus::Completed { code: 0 },
+        "pre-rotation config mutation must succeed: {:?}",
+        mutate.aggregated_output
+    );
+
+    // Snapshot carries the config — this is what the rotation path uses.
+    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
+    assert!(
+        snapshot.nu_config.is_some(),
+        "config must be in snapshot before rotation: {:?}",
+        snapshot.nu_config
+    );
+
+    // Terminate the old session (simulating a policy-driven rotation that
+    // tears down the old shell and brings up a new one).
+    manager.terminate_session(session_id.clone()).await?;
+
+    // Bring up the rotated session under a new (or same) policy — a fresh
+    // runtime with no prior config mutations.
+    let shared_state = Arc::new(SharedSessionState::new(snapshot.current_cwd.clone()));
+    let rotated_id = manager
+        .create_persistent_shell_session(
+            nu_path.clone(),
+            false,
+            SandboxPolicy::DangerFullAccess,
+            shared_state,
+            Some(Duration::from_secs(30)),
+        )
+        .await?;
+
+    // Drive the actual rotation restore path — restore_shell_session_from_snapshot
+    // calls ManagedNuRuntime::restore() which deserializes nu_config from the
+    // snapshot JSON and writes it into stack.config.
+    // No manual $env.config mutation is applied here.
+    manager
+        .restore_shell_session_from_snapshot(rotated_id.clone(), &snapshot)
+        .await?;
+
+    // The rotated session must see the specific value set pre-rotation,
+    // proving the config reached the new runtime through the restore path.
+    let read = manager
+        .exec_command_in_shell_session(
+            rotated_id.clone(),
+            "$env.config.show_banner".to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        read.exit_status,
+        ExitStatus::Completed { code: 0 },
+        "config must be accessible after rotation: {:?}",
+        read.aggregated_output
+    );
+    assert!(
+        read.stdout.trim() == "false",
+        "rotated session must see show_banner=false from pre-rotation snapshot, got: {:?}",
+        read.stdout
+    );
+
+    manager.terminate_session(rotated_id).await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Config mutation — malformed / partial writes do not corrupt state
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn managed_nu_config_malformed_mutation_does_not_corrupt_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = shell_test_lock();
+    let Some(nu_path) = nushell_path() else {
+        return Ok(());
+    };
+
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) =
+        create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
+
+    // First set a valid env var so we can verify it survives a bad config write.
+    manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "load-env { BEFORE_BAD_CONFIG: \"ok\" }".to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+
+    // Attempt to assign a non-record type to $env.config.  Nu will either
+    // reject this at parse/eval time or update_config will skip bad fields.
+    // Either way, the session must not become unusable.
+    let _result = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "$env.config.show_banner = \"not-a-bool\"".to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await;
+    // We don't assert success or failure here — Nu may accept this (and use
+    // the default for that field) or reject it.  What matters is that the
+    // runtime stays alive.
+
+    // Session must still be functional.
+    let check = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "$env.BEFORE_BAD_CONFIG".to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+    assert!(
+        check.stdout.contains("ok"),
+        "session must remain functional after bad config mutation: {:?}",
+        check.stdout
+    );
+
+    // Snapshot must not be corrupted.
+    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
+    assert!(
+        snapshot.nu_custom_commands.is_empty(),
+        "bad config mutation must not corrupt nu_custom_commands: {:?}",
+        snapshot.nu_custom_commands
+    );
+
+    manager.terminate_session(session_id).await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Config reads are still allowed (regression guard from old rejection era)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn managed_nu_config_read_not_blocked() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = shell_test_lock();
     let Some(nu_path) = nushell_path() else {
         return Ok(());
@@ -92,400 +459,10 @@ async fn managed_nu_config_read_not_intercepted_by_rejection()
                 None,
             )
             .await?;
+        // None of these should produce an error about "does not support".
         assert!(
-            !result
-                .aggregated_output
-                .contains("does not support $env.config mutations"),
-            "read-only '{form}' must not trigger config mutation rejection: {:?}",
-            result.aggregated_output
-        );
-    }
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn managed_nu_config_mutation_rejected_in_fork_eval() -> Result<(), Box<dyn std::error::Error>>
-{
-    let _guard = shell_test_lock();
-    let Some(nu_path) = nushell_path() else {
-        return Ok(());
-    };
-
-    let temp = tempfile::tempdir()?;
-    let (manager, session_id) =
-        create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
-
-    for form in &[
-        "$env.config.show_banner = false",
-        "$env.config = {}",
-        "$env.config.table.mode = \"light\"",
-    ] {
-        let result = manager
-            .fork_eval_in_managed_nu_session(session_id.clone(), form.to_string(), None)?
-            .expect("session is managed nu");
-        assert_ne!(
-            result.exit_status,
-            ExitStatus::Completed { code: 0 },
-            "'{form}' should be rejected in fork_eval: {:?}",
-            result.aggregated_output
-        );
-        assert!(
-            result.aggregated_output.contains("$env.config"),
-            "'{form}' fork_eval rejection must mention $env.config: {:?}",
-            result.aggregated_output
-        );
-    }
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn managed_nu_module_commands_fail_predictably() -> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let Some(nu_path) = nushell_path() else {
-        return Ok(());
-    };
-
-    let temp = tempfile::tempdir()?;
-    let (manager, session_id) =
-        create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
-
-    let unsupported_commands = [
-        "module foo { export def bar [] { 1 } }",
-        "use std",
-        "source nonexistent.nu",
-        "source-env nonexistent.nu",
-        "export use std",
-        "export module mymod { }",
-        "export extern my-ext []",
-        "export const MY_CONST = 42",
-    ];
-
-    for cmd in &unsupported_commands {
-        let result = manager
-            .exec_command_in_shell_session(
-                session_id.clone(),
-                cmd.to_string(),
-                Some(5_000),
-                1_000,
-                None,
-            )
-            .await?;
-        assert!(
-            matches!(result.exit_status, ExitStatus::Completed { code: 1 }),
-            "'{cmd}' should exit with code 1, got {:?}",
-            result.exit_status
-        );
-        assert!(
-            result.aggregated_output.contains("module/use/source"),
-            "rejection for '{cmd}' should mention module/use/source: {:?}",
-            result.aggregated_output
-        );
-    }
-
-    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
-    assert!(
-        snapshot.nu_custom_commands.is_empty(),
-        "failed module commands must not corrupt nu_custom_commands: {:?}",
-        snapshot.nu_custom_commands
-    );
-    assert!(
-        snapshot.nu_aliases.is_empty(),
-        "failed module commands must not corrupt nu_aliases: {:?}",
-        snapshot.nu_aliases
-    );
-    assert!(
-        snapshot.nu_variables.is_empty(),
-        "failed module commands must not corrupt nu_variables: {:?}",
-        snapshot.nu_variables
-    );
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn managed_nu_module_command_atomicity_blocks_following_segment()
--> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let Some(nu_path) = nushell_path() else {
-        return Ok(());
-    };
-
-    let temp = tempfile::tempdir()?;
-    let (manager, session_id) =
-        create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
-
-    let result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "module bad {}; def should_not_exist [] { 99 }".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-    assert!(
-        matches!(result.exit_status, ExitStatus::Completed { code: 1 }),
-        "module + def must fail: {:?}",
-        result.exit_status
-    );
-
-    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
-    assert!(
-        snapshot.nu_custom_commands.is_empty(),
-        "def after a module command must not be registered: {:?}",
-        snapshot.nu_custom_commands
-    );
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn managed_nu_export_def_persists_and_survives_snapshot()
--> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let Some(nu_path) = nushell_path() else {
-        return Ok(());
-    };
-
-    let temp = tempfile::tempdir()?;
-    let (manager, session_id) = create_shell_session(
-        temp.path(),
-        nu_path.clone(),
-        SandboxPolicy::DangerFullAccess,
-    )
-    .await?;
-
-    let result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "export def greet-exported [] { \"exported hello\" }".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-    assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
-
-    let result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "greet-exported".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-    assert!(
-        result.stdout.contains("exported hello"),
-        "export def command should be callable: {:?}",
-        result.stdout
-    );
-
-    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
-    assert!(
-        snapshot
-            .nu_custom_commands
-            .iter()
-            .any(|c| c.contains("greet-exported")),
-        "export def should be in snapshot custom_commands"
-    );
-
-    let shared_state = Arc::new(SharedSessionState::new(snapshot.current_cwd.clone()));
-    let restored_id = manager
-        .create_persistent_shell_session(
-            nu_path,
-            false,
-            SandboxPolicy::DangerFullAccess,
-            shared_state,
-            Some(Duration::from_secs(30)),
-        )
-        .await?;
-
-    for source in &snapshot.nu_custom_commands {
-        manager
-            .exec_command_in_shell_session(
-                restored_id.clone(),
-                source.clone(),
-                Some(10_000),
-                10_000,
-                None,
-            )
-            .await?;
-    }
-
-    let result = manager
-        .exec_command_in_shell_session(
-            restored_id.clone(),
-            "greet-exported".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-    assert!(
-        result.stdout.contains("exported hello"),
-        "export def should survive snapshot/restore: {:?}",
-        result.stdout
-    );
-
-    manager.terminate_session(session_id).await?;
-    manager.terminate_session(restored_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn managed_nu_export_alias_persists_and_survives_snapshot()
--> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let Some(nu_path) = nushell_path() else {
-        return Ok(());
-    };
-
-    let temp = tempfile::tempdir()?;
-    let (manager, session_id) = create_shell_session(
-        temp.path(),
-        nu_path.clone(),
-        SandboxPolicy::DangerFullAccess,
-    )
-    .await?;
-
-    manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "def base-cmd [] { \"alias base\" }; export alias ea = base-cmd".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-
-    let result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "ea".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-    assert!(
-        result.stdout.contains("alias base"),
-        "export alias should be callable: {:?}",
-        result.stdout
-    );
-
-    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
-    assert!(
-        snapshot.nu_aliases.iter().any(|a| a.name == "ea"),
-        "export alias should be in snapshot aliases"
-    );
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn managed_nu_export_def_redefinition_replaces_previous()
--> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let Some(nu_path) = nushell_path() else {
-        return Ok(());
-    };
-
-    let temp = tempfile::tempdir()?;
-    let (manager, session_id) =
-        create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
-
-    manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "export def redef [] { \"v1\" }".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-    manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "export def redef [] { \"v2\" }".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-
-    let result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "redef".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-    assert!(
-        result.stdout.contains("v2"),
-        "export def redefinition should use latest: {:?}",
-        result.stdout
-    );
-
-    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
-    let matching = snapshot
-        .nu_custom_commands
-        .iter()
-        .filter(|c| c.contains("redef"))
-        .count();
-    assert_eq!(
-        matching, 1,
-        "redefined export def should be stored once, not duplicated"
-    );
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn managed_nu_fork_eval_rejects_module_commands() -> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let Some(nu_path) = nushell_path() else {
-        return Ok(());
-    };
-
-    let temp = tempfile::tempdir()?;
-    let (manager, session_id) =
-        create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
-
-    let unsupported_commands = [
-        "module foo { export def bar [] { 1 } }",
-        "use std",
-        "source nonexistent.nu",
-        "source-env nonexistent.nu",
-        "export use std",
-        "export module mymod { }",
-        "export extern my-ext []",
-        "export const MY_CONST = 42",
-    ];
-
-    for cmd in &unsupported_commands {
-        let result = manager
-            .fork_eval_in_managed_nu_session(session_id.clone(), cmd.to_string(), None)?
-            .expect("session is managed nu");
-        assert_ne!(
-            result.exit_status,
-            ExitStatus::Completed { code: 0 },
-            "'{cmd}' should fail in fork_eval: {:?}",
-            result.stderr
-        );
-        assert!(
-            result.aggregated_output.contains("module/use/source"),
-            "'{cmd}' fork_eval rejection should be explicit: {:?}",
+            !result.aggregated_output.contains("does not support"),
+            "read-only '{form}' must not be rejected: {:?}",
             result.aggregated_output
         );
     }

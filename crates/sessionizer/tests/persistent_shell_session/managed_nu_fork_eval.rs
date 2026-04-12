@@ -92,8 +92,17 @@ async fn managed_nu_fork_eval_sees_session_state_without_mutating_it()
     Ok(())
 }
 
+/// Verify fork_eval's isolation contract:
+/// - Structural session mutations (cd, def, alias, let, mut, session-var assignment,
+///   load-env, hide-env) are rejected with a clear error because they would
+///   silently appear to succeed but have no effect on the live session.
+/// - `$env.*` assignments (including `$env.config`) are ALLOWED: they only
+///   affect the forked stack and are discarded with the fork.  This enables
+///   natural Nu patterns like `$env.config.show_banner = false` in fork_eval.
+/// - overlay and module commands remain rejected for structural reasons.
 #[tokio::test]
-async fn managed_nu_fork_eval_rejects_state_mutations() -> Result<(), Box<dyn std::error::Error>> {
+async fn managed_nu_fork_eval_rejects_structural_session_mutations()
+-> Result<(), Box<dyn std::error::Error>> {
     let _guard = shell_test_lock();
     let Some(nu_path) = nushell_path() else {
         return Ok(());
@@ -103,16 +112,21 @@ async fn managed_nu_fork_eval_rejects_state_mutations() -> Result<(), Box<dyn st
     let (manager, session_id) =
         create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
 
+    // cd is rejected: CWD is tracked separately and silently discarding a cd
+    // in fork_eval would be surprising.
     let result = manager
         .fork_eval_in_managed_nu_session(session_id.clone(), "cd /tmp".to_string(), None)?
         .expect("session is managed nu");
     assert_ne!(result.exit_status, ExitStatus::Completed { code: 0 });
 
+    // def in fork_eval: rejected (def has no persistent effect; agent should
+    // use replay_state:true instead).
     let result = manager
         .fork_eval_in_managed_nu_session(session_id.clone(), "def nope [] { 1 }".to_string(), None)?
         .expect("session is managed nu");
     assert_ne!(result.exit_status, ExitStatus::Completed { code: 0 });
 
+    // let/mut: rejected (session variable assignment is not persistent).
     let result = manager
         .fork_eval_in_managed_nu_session(session_id.clone(), "let nope = 1".to_string(), None)?
         .expect("session is managed nu");
@@ -123,11 +137,7 @@ async fn managed_nu_fork_eval_rejects_state_mutations() -> Result<(), Box<dyn st
         .expect("session is managed nu");
     assert_ne!(result.exit_status, ExitStatus::Completed { code: 0 });
 
-    let result = manager
-        .fork_eval_in_managed_nu_session(session_id.clone(), "$env.PATH = 'x'".to_string(), None)?
-        .expect("session is managed nu");
-    assert_ne!(result.exit_status, ExitStatus::Completed { code: 0 });
-
+    // alias in fork_eval: rejected.
     let result = manager
         .fork_eval_in_managed_nu_session(
             session_id.clone(),
@@ -137,6 +147,9 @@ async fn managed_nu_fork_eval_rejects_state_mutations() -> Result<(), Box<dyn st
         .expect("session is managed nu");
     assert_ne!(result.exit_status, ExitStatus::Completed { code: 0 });
 
+    // load-env / hide-env in fork_eval: rejected (env mutations via explicit
+    // load-env are structural session mutations; use $env.X = val for fork-local
+    // env changes).
     let result = manager
         .fork_eval_in_managed_nu_session(session_id.clone(), "load-env { X: 1 }".to_string(), None)?
         .expect("session is managed nu");
@@ -147,6 +160,27 @@ async fn managed_nu_fork_eval_rejects_state_mutations() -> Result<(), Box<dyn st
         .expect("session is managed nu");
     assert_ne!(result.exit_status, ExitStatus::Completed { code: 0 });
 
+    // $env.PATH = 'x' is ALLOWED in fork_eval (env assignment affects only the
+    // forked stack and is discarded; this enables natural Nu idioms).
+    let result = manager
+        .fork_eval_in_managed_nu_session(session_id.clone(), "$env.PATH = 'x'".to_string(), None)?
+        .expect("session is managed nu");
+    assert_eq!(
+        result.exit_status,
+        ExitStatus::Completed { code: 0 },
+        "$env.* assignment must succeed in fork_eval (affects only the fork): {:?}",
+        result.aggregated_output
+    );
+
+    // After $env.PATH = 'x' in fork_eval, live session PATH must be unchanged.
+    let live_snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
+    assert_ne!(
+        live_snapshot.env_vars.get("PATH").map(String::as_str),
+        Some("x"),
+        "fork_eval $env.PATH mutation must not affect live session"
+    );
+
+    // Overlay and module commands remain rejected.
     for form in &[
         "overlay use foo",
         "overlay hide foo",

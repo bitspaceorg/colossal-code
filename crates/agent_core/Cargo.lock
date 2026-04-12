@@ -6629,6 +6629,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sessionizer-sandbox",
+ "shell-escape",
  "shellexpand",
  "shlex",
  "strip-ansi-escapes",

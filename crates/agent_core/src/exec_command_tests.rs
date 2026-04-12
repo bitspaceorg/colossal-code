@@ -558,16 +558,49 @@ async fn managed_nu_rotation_restores_def_alias_env_cwd_vars() {
         )
         .await
         .expect("set persistent variables");
+    state
+        .manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "$env.config.show_banner = false".to_string(),
+            Some(10_000),
+            10_000,
+            None,
+        )
+        .await
+        .expect("set config");
 
     let snapshot = state
         .manager
         .snapshot_shell_session(session_id.clone())
         .await
         .expect("snapshot");
+    assert!(
+        snapshot.nu_config.is_some(),
+        "config must be in snapshot before rotation"
+    );
     let policy = state.pending_sandbox_policy.lock().await.clone();
     let rotated_id = shell_session::spawn_shell_session_with_snapshot(state, &policy, &snapshot)
         .await
         .expect("spawn from snapshot");
+
+    // Verify config survives through the actual policy rotation path
+    let result = state
+        .manager
+        .exec_command_in_shell_session(
+            rotated_id.clone(),
+            "$env.config.show_banner".to_string(),
+            Some(10_000),
+            10_000,
+            None,
+        )
+        .await
+        .expect("read config after rotation");
+    assert!(
+        result.stdout.trim() == "false",
+        "config should survive rotation through actual system path: {:?}",
+        result.stdout
+    );
 
     let result = state
         .manager

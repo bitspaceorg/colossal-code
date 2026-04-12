@@ -36,6 +36,7 @@ pub(crate) fn default_continuity_state(
         nu_custom_commands: Vec::new(),
         nu_variables: Vec::new(),
         replay_commands: Vec::new(),
+        nu_config: None,
     }
 }
 

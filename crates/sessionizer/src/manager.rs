@@ -515,6 +515,13 @@ pub struct PersistentSessionState {
     /// Managed Nu: not used (state is restored structurally via `nu_*` fields).
     #[serde(default)]
     pub replay_commands: Vec<String>,
+    /// Managed Nu: serialized `nu_protocol::Config` as JSON, capturing any
+    /// `$env.config` mutations the agent made during the session.  `None` means
+    /// no config mutation occurred and the runtime default is used.
+    ///
+    /// Stored separately from `env_vars` because `Config` is not a plain string.
+    #[serde(default)]
+    pub nu_config: Option<String>,
 }
 
 // Metadata for session lifecycle management
@@ -662,6 +669,7 @@ impl SessionManager {
                     nu_custom_commands: Vec::new(),
                     nu_variables: Vec::new(),
                     replay_commands: Vec::new(),
+                    nu_config: None,
                 };
                 persistent_sessions.push(state);
             }
@@ -2106,6 +2114,7 @@ impl SessionManager {
             nu_custom_commands,
             nu_variables: Vec::new(),
             replay_commands: Vec::new(),
+            nu_config: None,
         })
     }
 
