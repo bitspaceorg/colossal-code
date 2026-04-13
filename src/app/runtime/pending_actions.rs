@@ -1,7 +1,7 @@
 use std::time::{Instant, SystemTime};
 
 use agent_core::AgentMessage;
-use clipboard::{ClipboardContext, ClipboardProvider};
+use arboard::Clipboard;
 use color_eyre::Result;
 
 use crate::app::runtime::agent_stream::AgentStreamOutcome;
@@ -331,8 +331,8 @@ impl App {
         if let Some(agent) = &self.agent {
             if let Some(json_string) = agent.export_conversation().await {
                 // Try to copy to clipboard
-                let clipboard_result: Result<(), Box<dyn std::error::Error>> =
-                    ClipboardContext::new().and_then(|mut ctx| ctx.set_contents(json_string));
+                let clipboard_result =
+                    Clipboard::new().and_then(|mut ctx| ctx.set_text(json_string));
 
                 if clipboard_result.is_ok() {
                     self.messages.push(
