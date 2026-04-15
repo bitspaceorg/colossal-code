@@ -35,6 +35,7 @@ pub(crate) fn default_continuity_state(
         nu_aliases: Vec::new(),
         nu_custom_commands: Vec::new(),
         nu_variables: Vec::new(),
+        nu_replay_commands: Vec::new(),
         replay_commands: Vec::new(),
         nu_config: None,
     }
@@ -42,6 +43,20 @@ pub(crate) fn default_continuity_state(
 
 pub(crate) fn global_state() -> Option<&'static GlobalState> {
     GLOBAL_STATE.get()
+}
+
+pub async fn execution_mode_badge() -> &'static str {
+    let shell_kind = if colossal_linux_sandbox::bundled_nu::managed_nu_requested() {
+        colossal_linux_sandbox::shell::ShellKind::ManagedNu
+    } else {
+        let shell_path = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        colossal_linux_sandbox::shell::shell_kind_from_path(&shell_path)
+    };
+
+    match shell_kind {
+        colossal_linux_sandbox::shell::ShellKind::ManagedNu => "exec: NU",
+        colossal_linux_sandbox::shell::ShellKind::Posix => "exec: PTY",
+    }
 }
 
 pub(crate) async fn ensure_global_state_initialized() {

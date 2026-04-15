@@ -22,6 +22,37 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tokio::select;
 
+async fn run_managed_nu_command_with_timeout<F>(
+    runtime: Arc<Mutex<ManagedNuRuntime>>,
+    timeout_ms: Option<u64>,
+    f: F,
+) -> Result<Option<ExecCommandOutput>, ColossalErr>
+where
+    F: FnOnce(&mut ManagedNuRuntime) -> Result<ExecCommandOutput, ColossalErr> + Send + 'static,
+{
+    let Some(timeout_ms) = timeout_ms else {
+        let mut runtime = runtime.lock().unwrap();
+        return f(&mut runtime).map(Some);
+    };
+
+    let task = tokio::task::spawn_blocking(move || {
+        let mut runtime = runtime.lock().unwrap();
+        f(&mut runtime)
+    });
+
+    match tokio::time::timeout(Duration::from_millis(timeout_ms), task).await {
+        Ok(join_result) => {
+            let output = join_result.map_err(|err| {
+                ColossalErr::Io(std::io::Error::other(format!(
+                    "managed Nushell command task failed: {err}"
+                )))
+            })??;
+            Ok(Some(output))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 fn background_log_dir() -> PathBuf {
     if let Ok(home) = std::env::var("HOME") {
         PathBuf::from(home).join(".local/state/nite/shell-logs")
@@ -455,6 +486,20 @@ pub struct NuVariableState {
     pub value: nu_protocol::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NuReplayFileState {
+    pub path: PathBuf,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NuReplayCommandState {
+    pub command: String,
+    pub cwd: PathBuf,
+    #[serde(default)]
+    pub files: Vec<NuReplayFileState>,
+}
+
 /// Continuity state for a shell session that must survive rotation
 /// (sandbox-policy changes).
 ///
@@ -483,6 +528,7 @@ pub struct NuVariableState {
 /// | `nu_aliases`         | Custom aliases registered in the runtime       |
 /// | `nu_custom_commands` | Full source of custom `def`/`export def` cmds  |
 /// | `nu_variables`       | Persistent top-level `let`/`mut` session vars  |
+/// | `nu_replay_commands` | Ordered replay journal for non-structural state |
 ///
 /// For managed Nu, `env_vars` is populated from the stack's string-coercible
 /// env vars.  `structured_env_json` and `replay_commands` are not used
@@ -511,6 +557,10 @@ pub struct PersistentSessionState {
     /// Managed Nu: persistent top-level let/mut session variables.
     #[serde(default)]
     pub nu_variables: Vec<NuVariableState>,
+    /// Managed Nu: ordered replay journal for shell state that is not captured
+    /// structurally (modules, use/source/overlay forms, consts, etc.).
+    #[serde(default)]
+    pub nu_replay_commands: Vec<NuReplayCommandState>,
     /// POSIX shell: commands replayed into a fresh shell for continuity.
     /// Managed Nu: not used (state is restored structurally via `nu_*` fields).
     #[serde(default)]
@@ -668,6 +718,7 @@ impl SessionManager {
                     nu_aliases: Vec::new(),
                     nu_custom_commands: Vec::new(),
                     nu_variables: Vec::new(),
+                    nu_replay_commands: Vec::new(),
                     replay_commands: Vec::new(),
                     nu_config: None,
                 };
@@ -1122,7 +1173,7 @@ impl SessionManager {
         // Format the command as a string
         let formatted_command = params
             .shell
-            .format_default_shell_invocation(params.command.clone(), true)
+            .format_default_shell_invocation(params.command.clone(), false)
             .ok_or_else(|| {
                 ColossalErr::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -1168,15 +1219,26 @@ impl SessionManager {
             session.output_receiver()
         };
         let (tx, rx) = unbounded::<StreamEvent>();
+        let timeout_duration = params.timeout_ms.map(Duration::from_millis);
 
         // Spawn the streaming task
         tokio::spawn(async move {
             let mut output_rx = output_rx;
             let mut exit_future = Box::pin(exit_rx);
             let process_exited = false;
+            let timeout_sleep = timeout_duration.map(tokio::time::sleep);
+            let mut timeout_sleep = timeout_sleep.map(Box::pin);
             loop {
                 select! {
                     biased;
+                    _ = async {
+                        if let Some(sleep) = &mut timeout_sleep {
+                            sleep.as_mut().await;
+                        }
+                    }, if timeout_sleep.is_some() => {
+                        let _ = tx.send(StreamEvent::Error("Command timed out".to_string())).await;
+                        break;
+                    }
                     exit_result = &mut *exit_future, if !process_exited => {
                         match exit_result {
                             Ok(code) => {
@@ -1475,15 +1537,28 @@ impl SessionManager {
                 }
             }
 
-            self.update_session_activity(session_id);
-            let mut runtime = runtime.lock().unwrap();
-            let mut result = runtime.exec_command(command)?;
-            if let Some(timeout_ms) = timeout_ms
-                && start_time.elapsed() > Duration::from_millis(timeout_ms)
-            {
-                result.exit_status = ExitStatus::Timeout;
+            self.update_session_activity(session_id.clone());
+            let maybe_result =
+                run_managed_nu_command_with_timeout(runtime, timeout_ms, move |rt| {
+                    rt.exec_command(command)
+                })
+                .await?;
+
+            if let Some(result) = maybe_result {
+                return Ok(result);
             }
-            return Ok(result);
+
+            // A timed-out managed Nu eval may still be holding the runtime lock in a blocking
+            // worker thread, so retire the session and force callers to rotate.
+            let _ = self.terminate_session(session_id.clone()).await;
+            return Ok(ExecCommandOutput {
+                duration: start_time.elapsed(),
+                exit_status: ExitStatus::Timeout,
+                stdout: String::new(),
+                stderr: String::new(),
+                aggregated_output: String::new(),
+                log_file: None,
+            });
         }
 
         // Check safety before executing
@@ -2113,6 +2188,7 @@ impl SessionManager {
             nu_aliases,
             nu_custom_commands,
             nu_variables: Vec::new(),
+            nu_replay_commands: Vec::new(),
             replay_commands: Vec::new(),
             nu_config: None,
         })
@@ -2687,7 +2763,7 @@ impl SessionManager {
         // Format the command as a string
         let formatted_command = params
             .shell
-            .format_default_shell_invocation(params.command.clone(), true)
+            .format_default_shell_invocation(params.command.clone(), false)
             .ok_or_else(|| {
                 ColossalErr::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -2733,16 +2809,27 @@ impl SessionManager {
             session.subscribe_stream() // Use the enhanced subscription method
         };
         let (tx, rx) = unbounded::<StreamEvent>();
+        let timeout_duration = params.timeout_ms.map(Duration::from_millis);
 
         // Spawn the streaming task with backpressure handling
         tokio::spawn(async move {
             let mut output_rx = output_rx;
             let mut exit_future = Box::pin(exit_rx);
             let mut buffer = String::new(); // Buffer to handle split messages
+            let timeout_sleep = timeout_duration.map(tokio::time::sleep);
+            let mut timeout_sleep = timeout_sleep.map(Box::pin);
 
             loop {
                 select! {
                     biased;
+                    _ = async {
+                        if let Some(sleep) = &mut timeout_sleep {
+                            sleep.as_mut().await;
+                        }
+                    }, if timeout_sleep.is_some() => {
+                        let _ = tx.send(StreamEvent::Error("Command timed out".to_string())).await;
+                        break;
+                    }
                     // Handle process exit
                     exit_result = &mut *exit_future => {
                         match exit_result {
@@ -2997,6 +3084,51 @@ mod tests {
         assert!(!command_completed);
         assert_eq!(done_exit_code, None);
         assert_eq!(visible, format!("__NITE_CTL__{control_id}__DONE__oops\n"));
+    }
+
+    #[test]
+    fn extract_visible_output_ignores_marker_for_different_control_id() {
+        let control_id = "expected123";
+        let mut pending = String::new();
+        let mut command_completed = false;
+        let mut done_exit_code = None;
+
+        let visible = extract_visible_output(
+            "before __NITE_CTL__other123__DONE__0 after\n",
+            &mut pending,
+            control_id,
+            &mut command_completed,
+            &mut done_exit_code,
+            false,
+        );
+
+        assert!(!command_completed);
+        assert_eq!(done_exit_code, None);
+        assert_eq!(visible, "before __NITE_CTL__other123__DONE__0 after\n");
+    }
+
+    #[test]
+    fn extract_visible_output_keeps_user_output_with_control_prefix_when_id_mismatches() {
+        let control_id = "expected456";
+        let mut pending = String::new();
+        let mut command_completed = false;
+        let mut done_exit_code = None;
+
+        let visible = extract_visible_output(
+            "__NITE_CTL__not-our-marker plain text\nreal line\n",
+            &mut pending,
+            control_id,
+            &mut command_completed,
+            &mut done_exit_code,
+            false,
+        );
+
+        assert!(!command_completed);
+        assert_eq!(done_exit_code, None);
+        assert_eq!(
+            visible,
+            "__NITE_CTL__not-our-marker plain text\nreal line\n"
+        );
     }
 
     #[test]

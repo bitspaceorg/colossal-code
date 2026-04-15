@@ -129,6 +129,67 @@ async fn managed_nu_load_env_overwrites_existing_key() -> Result<(), Box<dyn std
 }
 
 #[tokio::test]
+async fn managed_nu_structured_env_value_survives_snapshot_restore()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = shell_test_lock();
+    let Some(nu_path) = nushell_path() else {
+        return Ok(());
+    };
+
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) = create_shell_session(
+        temp.path(),
+        nu_path.clone(),
+        SandboxPolicy::DangerFullAccess,
+    )
+    .await?;
+
+    manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "load-env { META: { nested: 7, label: 'ok' } }".to_string(),
+            Some(10_000),
+            10_000,
+            None,
+        )
+        .await?;
+
+    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
+    manager.terminate_session(session_id).await?;
+
+    let shared_state = Arc::new(SharedSessionState::new(snapshot.current_cwd.clone()));
+    let restored_id = manager
+        .create_persistent_shell_session(
+            snapshot.shell_path.clone(),
+            false,
+            SandboxPolicy::DangerFullAccess,
+            shared_state,
+            Some(Duration::from_secs(30)),
+        )
+        .await?;
+
+    manager
+        .restore_shell_session_from_snapshot(restored_id.clone(), &snapshot)
+        .await?;
+
+    let result = manager
+        .exec_command_in_shell_session(
+            restored_id.clone(),
+            "$env.META.nested; $env.META.label".to_string(),
+            Some(10_000),
+            10_000,
+            None,
+        )
+        .await?;
+    assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
+    assert!(result.stdout.contains('7'), "{:?}", result.stdout);
+    assert!(result.stdout.contains("ok"), "{:?}", result.stdout);
+
+    manager.terminate_session(restored_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn managed_nu_hide_env_with_quoted_name() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = shell_test_lock();
     let Some(nu_path) = nushell_path() else {
@@ -168,7 +229,8 @@ async fn managed_nu_hide_env_with_quoted_name() -> Result<(), Box<dyn std::error
 }
 
 #[tokio::test]
-async fn managed_nu_hide_env_pwd_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+async fn managed_nu_hide_env_pwd_is_allowed_but_cwd_stays_tracked()
+-> Result<(), Box<dyn std::error::Error>> {
     let _guard = shell_test_lock();
     let Some(nu_path) = nushell_path() else {
         return Ok(());
@@ -188,11 +250,7 @@ async fn managed_nu_hide_env_pwd_is_rejected() -> Result<(), Box<dyn std::error:
             None,
         )
         .await?;
-    assert_ne!(
-        result.exit_status,
-        ExitStatus::Completed { code: 0 },
-        "hide-env PWD should be rejected"
-    );
+    assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
 
     let pwd_result = manager
         .exec_command_in_shell_session(
@@ -205,8 +263,14 @@ async fn managed_nu_hide_env_pwd_is_rejected() -> Result<(), Box<dyn std::error:
         .await?;
     assert!(
         pwd_result.stdout.contains(&canonical.display().to_string()),
-        "PWD should be unaffected after rejected hide-env PWD: {:?}",
+        "managed cwd tracking should survive hide-env PWD: {:?}",
         pwd_result.stdout
+    );
+
+    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
+    assert!(
+        !snapshot.env_vars.contains_key("PWD"),
+        "hide-env PWD should be persisted through the replay journal"
     );
 
     manager.terminate_session(session_id).await?;

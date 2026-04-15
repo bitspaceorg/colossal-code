@@ -153,7 +153,7 @@ async fn execute_exec_command(
     }
 
     if !replay_state && uses_managed_nu_foreground {
-        execute_managed_nu_foreground(state, agent, command, current_approval, tx).await
+        execute_managed_nu_foreground(state, agent, command, timeout_ms, current_approval, tx).await
     } else if !replay_state && !uses_managed_nu_foreground {
         execute_isolated_exec(
             state,
@@ -184,6 +184,7 @@ async fn execute_managed_nu_foreground(
     state: &shell_session::GlobalState,
     agent: &Agent,
     command: &str,
+    timeout_ms: u64,
     mut current_approval: Option<colossal_linux_sandbox::safety::AskForApproval>,
     tx: mpsc::UnboundedSender<crate::AgentMessage>,
 ) -> Result<String> {
@@ -191,53 +192,90 @@ async fn execute_managed_nu_foreground(
         shell_session::get_or_create_shell_session(Some(agent.effective_cwd())).await?;
 
     loop {
-        match manager.fork_eval_in_managed_nu_session(
-            session_id.clone(),
-            command.to_string(),
-            current_approval,
-        ) {
-            Ok(Some(result)) => return exec_command_output_to_yaml(command, result),
-            Ok(None) => {
-                break;
+        let manager_for_eval = manager.clone();
+        let session_id_for_eval = session_id.clone();
+        let command_for_eval = command.to_string();
+        let approval_for_eval = current_approval;
+
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(timeout_ms),
+            tokio::task::spawn_blocking(move || {
+                manager_for_eval.fork_eval_in_managed_nu_session(
+                    session_id_for_eval,
+                    command_for_eval,
+                    approval_for_eval,
+                )
+            }),
+        )
+        .await
+        {
+            Err(_) => {
+                let _ = manager.terminate_session(session_id.clone()).await;
+                *state.shell_session_id.lock().await = None;
+                return exec_command_output_to_yaml(
+                    command,
+                    colossal_linux_sandbox::types::ExecCommandOutput {
+                        duration: std::time::Duration::from_millis(timeout_ms),
+                        exit_status: ExitStatus::Timeout,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        aggregated_output: String::new(),
+                        log_file: None,
+                    },
+                );
             }
-            Err(e) => {
-                if let colossal_linux_sandbox::error::ColossalErr::Sandbox(
-                    colossal_linux_sandbox::error::SandboxErr::Denied(_, reason, _),
-                ) = &e
-                {
-                    if reason == "User approval required" {
-                        let (approval_tx, approval_rx) = tokio::sync::oneshot::channel();
-                        {
-                            let mut guard = state.pending_approval.lock().await;
-                            *guard = Some(approval_tx);
-                        }
-                        let request_msg = format!("Allow command: {}", command);
-                        let _ = tx.send(crate::AgentMessage::RequestApproval(request_msg));
-                        match approval_rx.await {
-                            Ok(true) => {
-                                current_approval =
-                                    Some(colossal_linux_sandbox::safety::AskForApproval::Never);
-                                continue;
-                            }
-                            Ok(false) => {
-                                return Ok(serde_yaml::to_string(&json!({
-                                    "status": "Failure",
-                                    "command": command,
-                                    "message": "Command denied by user"
-                                }))?);
-                            }
-                            Err(_) => {
-                                return Err(anyhow::anyhow!("Approval channel closed"));
-                            }
-                        }
+            Ok(join_result) => match join_result {
+                Ok(result) => match result {
+                    Ok(Some(result)) => return exec_command_output_to_yaml(command, result),
+                    Ok(None) => {
+                        break;
                     }
+                    Err(e) => {
+                        if let colossal_linux_sandbox::error::ColossalErr::Sandbox(
+                            colossal_linux_sandbox::error::SandboxErr::Denied(_, reason, _),
+                        ) = &e
+                        {
+                            if reason == "User approval required" {
+                                let (approval_tx, approval_rx) = tokio::sync::oneshot::channel();
+                                {
+                                    let mut guard = state.pending_approval.lock().await;
+                                    *guard = Some(approval_tx);
+                                }
+                                let request_msg = format!("Allow command: {}", command);
+                                let _ = tx.send(crate::AgentMessage::RequestApproval(request_msg));
+                                match approval_rx.await {
+                                    Ok(true) => {
+                                        current_approval = Some(
+                                            colossal_linux_sandbox::safety::AskForApproval::Never,
+                                        );
+                                        continue;
+                                    }
+                                    Ok(false) => {
+                                        return Ok(serde_yaml::to_string(&json!({
+                                            "status": "Failure",
+                                            "command": command,
+                                            "message": "Command denied by user"
+                                        }))?);
+                                    }
+                                    Err(_) => {
+                                        return Err(anyhow::anyhow!("Approval channel closed"));
+                                    }
+                                }
+                            }
+                        }
+                        return Ok(serde_yaml::to_string(&json!({
+                            "status": "Failure",
+                            "command": command,
+                            "message": format!("{}", e)
+                        }))?);
+                    }
+                },
+                Err(err) => {
+                    return Err(anyhow::anyhow!(
+                        "managed Nushell command task failed: {err}"
+                    ));
                 }
-                return Ok(serde_yaml::to_string(&json!({
-                    "status": "Failure",
-                    "command": command,
-                    "message": format!("{}", e)
-                }))?);
-            }
+            },
         }
     }
 
@@ -341,12 +379,23 @@ async fn execute_replay_state(
             .await
         {
             Ok(result) => {
-                shell_session::sync_continuity_state_from_session(
+                if let Err(err) = shell_session::sync_continuity_state_from_session(
                     state,
-                    session_id,
+                    session_id.clone(),
                     replay_state.then_some(command),
                 )
-                .await?;
+                .await
+                {
+                    if matches!(result.exit_status, ExitStatus::Timeout | ExitStatus::Killed) {
+                        let _ = state.manager.terminate_session(session_id.clone()).await;
+                        let mut session_id_lock = state.shell_session_id.lock().await;
+                        if session_id_lock.as_ref() == Some(&session_id) {
+                            *session_id_lock = None;
+                        }
+                        return exec_command_output_to_yaml(command, result);
+                    }
+                    return Err(err);
+                }
                 return exec_command_output_to_yaml(command, result);
             }
             Err(e) => {

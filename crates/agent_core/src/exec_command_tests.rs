@@ -1,5 +1,9 @@
 use super::*;
+use crate::message_helpers::message_left_str;
+use colossal_linux_sandbox::protocol::SandboxPolicy;
+use mistralrs::ToolCallResponse;
 use mistralrs::{CalledFunction, ToolCallType};
+use serde_json::json;
 use std::path::PathBuf;
 use std::sync::{Mutex as StdMutex, OnceLock};
 
@@ -61,6 +65,10 @@ fn tool_call(name: &str, arguments: serde_json::Value) -> ToolCallResponse {
             arguments: arguments.to_string(),
         },
     }
+}
+
+fn parse_yaml_result(result: &str) -> serde_yaml::Value {
+    serde_yaml::from_str(result).expect("yaml result")
 }
 
 #[tokio::test]
@@ -144,6 +152,162 @@ async fn exec_command_reports_background_metadata() {
     assert!(parsed["log_file"].as_str().is_some());
 
     reset_global_shell_state().await;
+}
+
+#[tokio::test]
+async fn exec_command_reports_timeout_for_isolated_exec_and_later_commands_still_work() {
+    let _guard = exec_test_lock();
+    let temp = make_test_dir("isolated-timeout");
+    set_workspace_root_override(&temp);
+    reset_global_shell_state().await;
+    let agent = build_test_agent(temp.clone());
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    let timeout_result = execute_tool_call(
+        &agent,
+        &tool_call(
+            "exec_command",
+            json!({
+                "command": "sh -c 'sleep 2'",
+                "replay_state": false,
+                "timeout": 100
+            }),
+        ),
+        tx.clone(),
+    )
+    .await
+    .expect("timeout result returned");
+
+    let parsed = parse_yaml_result(&timeout_result);
+    assert_eq!(
+        parsed["status"].as_str(),
+        Some("Failure"),
+        "{timeout_result}"
+    );
+    assert_eq!(
+        parsed["message"].as_str(),
+        Some("Timeout"),
+        "{timeout_result}"
+    );
+
+    let recovered = execute_tool_call(
+        &agent,
+        &tool_call(
+            "exec_command",
+            json!({ "command": "printf 'isolated-recovered'", "replay_state": false }),
+        ),
+        tx,
+    )
+    .await
+    .expect("recovery command succeeds");
+
+    let parsed = parse_yaml_result(&recovered);
+    assert_eq!(parsed["status"].as_str(), Some("Success"), "{recovered}");
+    assert_eq!(parsed["cmd_out"].as_str(), Some("isolated-recovered"));
+}
+
+#[tokio::test]
+async fn exec_command_replay_state_times_out_for_stdin_wait_and_recovers() {
+    let _guard = exec_test_lock();
+    let temp = make_test_dir("replay-read-timeout");
+    set_workspace_root_override(&temp);
+    reset_global_shell_state().await;
+    let agent = build_test_agent(temp.clone());
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    let timeout_result = execute_tool_call(
+        &agent,
+        &tool_call(
+            "exec_command",
+            json!({
+                "command": "read waiting_value",
+                "replay_state": true,
+                "timeout": 100
+            }),
+        ),
+        tx.clone(),
+    )
+    .await
+    .expect("timeout result returned");
+
+    let parsed = parse_yaml_result(&timeout_result);
+    assert_eq!(
+        parsed["status"].as_str(),
+        Some("Failure"),
+        "{timeout_result}"
+    );
+    assert_eq!(
+        parsed["message"].as_str(),
+        Some("Timeout"),
+        "{timeout_result}"
+    );
+
+    let recovered = execute_tool_call(
+        &agent,
+        &tool_call(
+            "exec_command",
+            json!({ "command": "printf 'replay-recovered'", "replay_state": true }),
+        ),
+        tx,
+    )
+    .await
+    .expect("recovery command succeeds");
+
+    let parsed = parse_yaml_result(&recovered);
+    assert_eq!(parsed["status"].as_str(), Some("Success"), "{recovered}");
+    assert_eq!(parsed["cmd_out"].as_str(), Some("replay-recovered"));
+}
+
+#[tokio::test]
+async fn exec_command_replay_state_recovers_after_shell_replacing_exec_times_out() {
+    let _guard = exec_test_lock();
+    let temp = make_test_dir("replay-exec-timeout");
+    set_workspace_root_override(&temp);
+    reset_global_shell_state().await;
+    let agent = build_test_agent(temp.clone());
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    let timeout_result = execute_tool_call(
+        &agent,
+        &tool_call(
+            "exec_command",
+            json!({
+                "command": "exec sleep 2",
+                "replay_state": true,
+                "timeout": 100
+            }),
+        ),
+        tx.clone(),
+    )
+    .await
+    .expect("timeout result returned");
+
+    let parsed = parse_yaml_result(&timeout_result);
+    assert_eq!(
+        parsed["status"].as_str(),
+        Some("Failure"),
+        "{timeout_result}"
+    );
+    assert_eq!(
+        parsed["message"].as_str(),
+        Some("Timeout"),
+        "{timeout_result}"
+    );
+
+    let recovered = execute_tool_call(
+        &agent,
+        &tool_call(
+            "exec_command",
+            json!({ "command": "printf 'exec-recovered'", "replay_state": true }),
+        ),
+        tx,
+    )
+    .await
+    .expect("recovery command succeeds");
+
+    let parsed = parse_yaml_result(&recovered);
+    assert_eq!(parsed["status"].as_str(), Some("Success"), "{recovered}");
+    assert_eq!(parsed["cmd_out"].as_str(), Some("exec-recovered"));
 }
 
 #[tokio::test]

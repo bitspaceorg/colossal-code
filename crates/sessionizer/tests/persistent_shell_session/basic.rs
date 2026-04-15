@@ -148,6 +148,188 @@ async fn timeout_does_not_prevent_next_command_from_running()
 }
 
 #[tokio::test]
+async fn stdin_waiting_command_times_out_and_next_command_recovers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = shell_test_lock();
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) = create_shell_session(
+        temp.path(),
+        deterministic_shell_path(),
+        SandboxPolicy::DangerFullAccess,
+    )
+    .await?;
+
+    let timeout_result = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "read waiting_value".to_string(),
+            Some(100),
+            1_000,
+            None,
+        )
+        .await?;
+    assert_eq!(timeout_result.exit_status, ExitStatus::Timeout);
+
+    let recovered = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "echo recovered-after-read".to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+    assert_eq!(recovered.exit_status, ExitStatus::Completed { code: 0 });
+    assert!(
+        recovered.stdout.contains("recovered-after-read"),
+        "unexpected recovery output: {:?}",
+        recovered.stdout
+    );
+
+    manager.terminate_session(session_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cat_times_out_and_next_command_recovers() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = shell_test_lock();
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) = create_shell_session(
+        temp.path(),
+        deterministic_shell_path(),
+        SandboxPolicy::DangerFullAccess,
+    )
+    .await?;
+
+    let timeout_result = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "cat".to_string(),
+            Some(100),
+            1_000,
+            None,
+        )
+        .await?;
+    assert_eq!(timeout_result.exit_status, ExitStatus::Timeout);
+
+    let recovered = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "echo recovered-after-cat".to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+    assert_eq!(recovered.exit_status, ExitStatus::Completed { code: 0 });
+    assert!(
+        recovered.stdout.contains("recovered-after-cat"),
+        "unexpected recovery output: {:?}",
+        recovered.stdout
+    );
+
+    manager.terminate_session(session_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn partial_output_before_timeout_is_preserved_and_session_recovers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = shell_test_lock();
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) = create_shell_session(
+        temp.path(),
+        deterministic_shell_path(),
+        SandboxPolicy::DangerFullAccess,
+    )
+    .await?;
+
+    let timeout_result = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "echo before-timeout; sleep 2".to_string(),
+            Some(300),
+            1_000,
+            None,
+        )
+        .await?;
+    let recovered = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "echo recovered-after-partial-timeout".to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+
+    manager.terminate_session(session_id).await?;
+
+    assert_eq!(timeout_result.exit_status, ExitStatus::Timeout);
+    assert!(
+        timeout_result.stdout.contains("before-timeout"),
+        "partial output should be preserved on timeout: {:?}",
+        timeout_result.stdout
+    );
+    assert_eq!(recovered.exit_status, ExitStatus::Completed { code: 0 });
+    assert!(
+        recovered.stdout.contains("recovered-after-partial-timeout"),
+        "unexpected recovery output: {:?}",
+        recovered.stdout
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn repeated_timeouts_do_not_prevent_later_command_from_running()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = shell_test_lock();
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) = create_shell_session(
+        temp.path(),
+        deterministic_shell_path(),
+        SandboxPolicy::DangerFullAccess,
+    )
+    .await?;
+
+    for command in ["sleep 2", "read waiting_value"] {
+        let timeout_result = manager
+            .exec_command_in_shell_session(
+                session_id.clone(),
+                command.to_string(),
+                Some(100),
+                1_000,
+                None,
+            )
+            .await?;
+        assert_eq!(
+            timeout_result.exit_status,
+            ExitStatus::Timeout,
+            "command {command:?} should timeout"
+        );
+    }
+
+    let recovered = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "echo recovered-after-repeated-timeouts".to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+    assert_eq!(recovered.exit_status, ExitStatus::Completed { code: 0 });
+    assert!(
+        recovered
+            .stdout
+            .contains("recovered-after-repeated-timeouts")
+    );
+
+    manager.terminate_session(session_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn non_zero_exit_preserves_output_and_status() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = shell_test_lock();
     let temp = tempfile::tempdir()?;

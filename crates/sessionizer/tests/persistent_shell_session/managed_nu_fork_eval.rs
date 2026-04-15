@@ -93,15 +93,11 @@ async fn managed_nu_fork_eval_sees_session_state_without_mutating_it()
 }
 
 /// Verify fork_eval's isolation contract:
-/// - Structural session mutations (cd, def, alias, let, mut, session-var assignment,
-///   load-env, hide-env) are rejected with a clear error because they would
-///   silently appear to succeed but have no effect on the live session.
-/// - `$env.*` assignments (including `$env.config`) are ALLOWED: they only
-///   affect the forked stack and are discarded with the fork.  This enables
-///   natural Nu patterns like `$env.config.show_banner = false` in fork_eval.
-/// - overlay and module commands remain rejected for structural reasons.
+/// - stateful Nushell commands run successfully inside the fork
+/// - their effects are visible later in the same forked command
+/// - none of those effects leak back into the live managed-Nu session
 #[tokio::test]
-async fn managed_nu_fork_eval_rejects_structural_session_mutations()
+async fn managed_nu_fork_eval_allows_stateful_commands_without_persisting_them()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = shell_test_lock();
     let Some(nu_path) = nushell_path() else {
@@ -109,70 +105,143 @@ async fn managed_nu_fork_eval_rejects_structural_session_mutations()
     };
 
     let temp = tempfile::tempdir()?;
+    let sourced = temp.path().join("sourced.nu");
+    std::fs::write(&sourced, "def sourced-greet [] { 'hello-from-source' }")?;
     let (manager, session_id) =
         create_shell_session(temp.path(), nu_path, SandboxPolicy::DangerFullAccess).await?;
 
-    // cd is rejected: CWD is tracked separately and silently discarding a cd
-    // in fork_eval would be surprising.
-    let result = manager
-        .fork_eval_in_managed_nu_session(session_id.clone(), "cd /tmp".to_string(), None)?
-        .expect("session is managed nu");
-    assert_ne!(result.exit_status, ExitStatus::Completed { code: 0 });
+    let fork_dir = temp.path().join("fork-dir");
+    std::fs::create_dir_all(&fork_dir)?;
 
-    // def in fork_eval: rejected (def has no persistent effect; agent should
-    // use replay_state:true instead).
-    let result = manager
-        .fork_eval_in_managed_nu_session(session_id.clone(), "def nope [] { 1 }".to_string(), None)?
-        .expect("session is managed nu");
-    assert_ne!(result.exit_status, ExitStatus::Completed { code: 0 });
-
-    // let/mut: rejected (session variable assignment is not persistent).
-    let result = manager
-        .fork_eval_in_managed_nu_session(session_id.clone(), "let nope = 1".to_string(), None)?
-        .expect("session is managed nu");
-    assert_ne!(result.exit_status, ExitStatus::Completed { code: 0 });
-
-    let result = manager
-        .fork_eval_in_managed_nu_session(session_id.clone(), "mut nope = 1".to_string(), None)?
-        .expect("session is managed nu");
-    assert_ne!(result.exit_status, ExitStatus::Completed { code: 0 });
-
-    // alias in fork_eval: rejected.
+    // cd is allowed in the fork and affects later segments in the same command.
     let result = manager
         .fork_eval_in_managed_nu_session(
             session_id.clone(),
-            "alias nope = echo no".to_string(),
+            format!("cd {}; pwd", fork_dir.display()),
             None,
         )?
         .expect("session is managed nu");
-    assert_ne!(result.exit_status, ExitStatus::Completed { code: 0 });
+    assert_eq!(
+        result.exit_status,
+        ExitStatus::Completed { code: 0 },
+        "{result:?}"
+    );
+    assert_eq!(result.stdout.trim(), fork_dir.display().to_string());
 
-    // load-env / hide-env in fork_eval: rejected (env mutations via explicit
-    // load-env are structural session mutations; use $env.X = val for fork-local
-    // env changes).
+    // defs work in the fork and can be called later in the same command.
     let result = manager
-        .fork_eval_in_managed_nu_session(session_id.clone(), "load-env { X: 1 }".to_string(), None)?
+        .fork_eval_in_managed_nu_session(
+            session_id.clone(),
+            "def nope [] { 1 }; nope".to_string(),
+            None,
+        )?
         .expect("session is managed nu");
-    assert_ne!(result.exit_status, ExitStatus::Completed { code: 0 });
+    assert_eq!(
+        result.exit_status,
+        ExitStatus::Completed { code: 0 },
+        "{result:?}"
+    );
+    assert!(result.stdout.contains('1'));
 
+    // let/mut are also allowed in the fork.
     let result = manager
-        .fork_eval_in_managed_nu_session(session_id.clone(), "hide-env PATH".to_string(), None)?
+        .fork_eval_in_managed_nu_session(
+            session_id.clone(),
+            "let nope = 1; mut counter = 2; $counter = 3; [$nope $counter] | to json -r"
+                .to_string(),
+            None,
+        )?
         .expect("session is managed nu");
-    assert_ne!(result.exit_status, ExitStatus::Completed { code: 0 });
+    assert_eq!(
+        result.exit_status,
+        ExitStatus::Completed { code: 0 },
+        "{result:?}"
+    );
+    assert!(result.stdout.contains("[1,3]"), "{:?}", result.stdout);
 
-    // $env.PATH = 'x' is ALLOWED in fork_eval (env assignment affects only the
-    // forked stack and is discarded; this enables natural Nu idioms).
+    // alias works in the fork.
+    let result = manager
+        .fork_eval_in_managed_nu_session(
+            session_id.clone(),
+            "alias nope = echo no; nope".to_string(),
+            None,
+        )?
+        .expect("session is managed nu");
+    assert_eq!(
+        result.exit_status,
+        ExitStatus::Completed { code: 0 },
+        "{result:?}"
+    );
+    assert!(result.stdout.contains("no"));
+
+    // load-env / hide-env affect only the fork.
+    let result = manager
+        .fork_eval_in_managed_nu_session(
+            session_id.clone(),
+            "load-env { X: 1 }; hide-env PATH; [$env.X ($env.PATH? | default 'missing')] | to json -r"
+                .to_string(),
+            None,
+        )?
+        .expect("session is managed nu");
+    assert_eq!(
+        result.exit_status,
+        ExitStatus::Completed { code: 0 },
+        "{result:?}"
+    );
+    assert!(
+        result.stdout.contains("[1,\"missing\"]"),
+        "{:?}",
+        result.stdout
+    );
+
+    // $env.* assignments remain allowed in the fork.
     let result = manager
         .fork_eval_in_managed_nu_session(session_id.clone(), "$env.PATH = 'x'".to_string(), None)?
         .expect("session is managed nu");
     assert_eq!(
         result.exit_status,
         ExitStatus::Completed { code: 0 },
-        "$env.* assignment must succeed in fork_eval (affects only the fork): {:?}",
+        "{:?}",
         result.aggregated_output
     );
 
-    // After $env.PATH = 'x' in fork_eval, live session PATH must be unchanged.
+    // module/use/source/overlay commands should also run in the fork.
+    let result = manager
+        .fork_eval_in_managed_nu_session(
+            session_id.clone(),
+            format!(
+                "module inline {{ export def greet [] {{ 'hi-inline' }} }}; use inline greet; source {}; sourced-greet; greet",
+                sourced.display()
+            ),
+            None,
+        )?
+        .expect("session is managed nu");
+    assert_eq!(
+        result.exit_status,
+        ExitStatus::Completed { code: 0 },
+        "{result:?}"
+    );
+    assert!(
+        result.stdout.contains("hello-from-source"),
+        "{:?}",
+        result.stdout
+    );
+    assert!(result.stdout.contains("hi-inline"), "{:?}", result.stdout);
+
+    let result = manager
+        .fork_eval_in_managed_nu_session(
+            session_id.clone(),
+            "overlay new fork_overlay; overlay list | length".to_string(),
+            None,
+        )?
+        .expect("session is managed nu");
+    assert_eq!(
+        result.exit_status,
+        ExitStatus::Completed { code: 0 },
+        "{result:?}"
+    );
+
+    // None of the fork-local changes leak into the live session.
     let live_snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
     assert_ne!(
         live_snapshot.env_vars.get("PATH").map(String::as_str),
@@ -180,25 +249,28 @@ async fn managed_nu_fork_eval_rejects_structural_session_mutations()
         "fork_eval $env.PATH mutation must not affect live session"
     );
 
-    // Overlay and module commands remain rejected.
-    for form in &[
-        "overlay use foo",
-        "overlay hide foo",
-        "overlay new myoverlay",
-        "overlay list",
-    ] {
-        let result = manager
-            .fork_eval_in_managed_nu_session(session_id.clone(), form.to_string(), None)?
-            .expect("session is managed nu");
-        assert_ne!(result.exit_status, ExitStatus::Completed { code: 0 });
-        assert!(
-            result
-                .aggregated_output
-                .contains("does not support overlay commands"),
-            "{form:?} fork_eval rejection should be explicit: {:?}",
-            result.aggregated_output
-        );
-    }
+    let live_check = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "pwd; $env.X? | default 'none'; which nope | length; which sourced-greet | length"
+                .to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+    assert_eq!(live_check.exit_status, ExitStatus::Completed { code: 0 });
+    assert!(
+        live_check.stdout.contains("none"),
+        "{:?}",
+        live_check.stdout
+    );
+    assert!(live_check.stdout.contains('0'), "{:?}", live_check.stdout);
+    assert!(
+        !live_check.stdout.contains("fork-dir"),
+        "{:?}",
+        live_check.stdout
+    );
 
     manager.terminate_session(session_id).await?;
     Ok(())

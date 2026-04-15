@@ -1,17 +1,21 @@
 use crate::error::ColossalErr;
-use crate::manager::{NuVariableState, PersistentSessionState};
+use crate::manager::{
+    NuReplayCommandState, NuReplayFileState, NuVariableState, PersistentSessionState,
+};
 use crate::protocol::SandboxPolicy;
 use crate::types::{ExecCommandOutput, ExitStatus, SessionId};
 use nu_cmd_lang::create_default_context;
+use nu_command::add_shell_command_context;
 use nu_engine::{CallExt, env_to_strings, eval_block};
 use nu_parser::parse;
 use nu_protocol::debugger::WithoutDebug;
 use nu_protocol::engine::{Call, Command, EngineState, Stack, StateWorkingSet};
 use nu_protocol::{
     Category, IntoValue, PipelineData, ShellError, Signature, Span, SyntaxShape, Type, Value,
-    ast::{Expr, Operator},
 };
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -469,6 +473,7 @@ pub struct ManagedNuRuntime {
     custom_commands: Vec<String>,
     aliases: Vec<crate::manager::NuAliasState>,
     variables: Vec<NuVariableState>,
+    replay_commands: Vec<NuReplayCommandState>,
 }
 
 impl std::fmt::Debug for ManagedNuRuntime {
@@ -482,6 +487,7 @@ impl std::fmt::Debug for ManagedNuRuntime {
             .field("custom_commands_len", &self.custom_commands.len())
             .field("aliases_len", &self.aliases.len())
             .field("variables_len", &self.variables.len())
+            .field("replay_commands_len", &self.replay_commands.len())
             .finish()
     }
 }
@@ -492,7 +498,7 @@ impl ManagedNuRuntime {
         initial_cwd: PathBuf,
         sandbox_policy: SandboxPolicy,
     ) -> Result<Self, ColossalErr> {
-        let mut engine_state = create_default_context();
+        let mut engine_state = add_shell_command_context(create_default_context());
         engine_state.generate_nu_constant();
 
         // Register the managed `run-external` implementation so that external
@@ -524,6 +530,7 @@ impl ManagedNuRuntime {
             custom_commands: Vec::new(),
             aliases: Vec::new(),
             variables: Vec::new(),
+            replay_commands: Vec::new(),
         })
     }
 
@@ -569,32 +576,6 @@ impl ManagedNuRuntime {
         Some((name_part.trim(), expansion.trim()))
     }
 
-    /// Returns `true` if the segment is one of the eight explicitly-rejected
-    /// module/use/source forms.
-    ///
-    /// Rejected forms (all for structural reasons — not laziness):
-    /// - `module` / `export module`: loaded into EngineState overlays; no API
-    ///   to extract imported symbols outside the overlay stack.
-    /// - `use` / `export use`: imports go into the active overlay, which is
-    ///   itself rejected.
-    /// - `source` / `source-env`: execute external files; replay is
-    ///   non-deterministic if files change between snapshot and restore.
-    /// - `export extern` / `export const`: file-backed module namespace
-    ///   semantics; same structural ownership problem as `module`.
-    ///
-    /// `export def` and `export alias` are NOT in this list — they are treated
-    /// identically to `def` / `alias` and are fully supported.
-    fn is_unsupported_module_command(source: &str) -> bool {
-        source.starts_with("module ")
-            || source.starts_with("use ")
-            || source.starts_with("source ")
-            || source.starts_with("source-env ")
-            || source.starts_with("export use ")
-            || source.starts_with("export module ")
-            || source.starts_with("export extern ")
-            || source.starts_with("export const ")
-    }
-
     fn register_def(&mut self, source: &str) {
         if let Some(name) = Self::extract_def_name(source) {
             let name = name.to_string();
@@ -612,6 +593,86 @@ impl ManagedNuRuntime {
 
     fn is_persistent_variable_name(name: &str) -> bool {
         !matches!(name, "$env" | "$nu" | "$in")
+    }
+
+    fn is_replay_journal_segment(trimmed: &str) -> bool {
+        trimmed.starts_with("overlay ")
+            || trimmed.starts_with("module ")
+            || trimmed.starts_with("use ")
+            || trimmed.starts_with("source ")
+            || trimmed.starts_with("source-env ")
+            || trimmed.starts_with("export use ")
+            || trimmed.starts_with("export module ")
+            || trimmed.starts_with("export extern ")
+            || trimmed.starts_with("export const ")
+            || trimmed.starts_with("const ")
+            || trimmed == "hide-env PWD"
+            || trimmed == "hide-env 'PWD'"
+            || trimmed == "hide-env \"PWD\""
+    }
+
+    fn replay_dependency_candidates(trimmed: &str) -> Vec<PathBuf> {
+        let Some(tokens) = shlex::split(trimmed) else {
+            return Vec::new();
+        };
+        let Some(first) = tokens.first().map(String::as_str) else {
+            return Vec::new();
+        };
+
+        let candidate = match first {
+            "source" | "source-env" | "use" => tokens.get(1),
+            "export" => match tokens.get(1).map(String::as_str) {
+                Some("use") => tokens.get(2),
+                _ => None,
+            },
+            "overlay" => match tokens.get(1).map(String::as_str) {
+                Some("use") => tokens.get(2),
+                _ => None,
+            },
+            _ => None,
+        };
+
+        candidate
+            .filter(|path| path.contains('/') || path.ends_with(".nu") || path.starts_with('.'))
+            .map(|path| vec![PathBuf::from(path)])
+            .unwrap_or_default()
+    }
+
+    fn resolve_replay_file(&self, path: &PathBuf) -> PathBuf {
+        if path.is_absolute() {
+            path.clone()
+        } else {
+            self.current_cwd().join(path)
+        }
+    }
+
+    fn record_replay_segment(&mut self, trimmed: &str) -> Result<(), ColossalErr> {
+        if !Self::is_replay_journal_segment(trimmed) {
+            return Ok(());
+        }
+
+        let files = Self::replay_dependency_candidates(trimmed)
+            .into_iter()
+            .map(|candidate| {
+                let path = self.resolve_replay_file(&candidate);
+                let bytes = fs::read(&path).map_err(|err| {
+                    ColossalErr::Io(std::io::Error::other(format!(
+                        "failed to read managed Nu replay dependency {}: {}",
+                        path.display(),
+                        err
+                    )))
+                })?;
+                let sha256 = format!("{:x}", Sha256::digest(bytes));
+                Ok(NuReplayFileState { path, sha256 })
+            })
+            .collect::<Result<Vec<_>, ColossalErr>>()?;
+
+        self.replay_commands.push(NuReplayCommandState {
+            command: trimmed.to_string(),
+            cwd: self.current_cwd(),
+            files,
+        });
+        Ok(())
     }
 
     fn sync_persistent_variables_from_runtime(&mut self) {
@@ -666,27 +727,6 @@ impl ManagedNuRuntime {
             .map_err(shell_error_to_io)?;
         self.stack.add_var(var_id, variable.value.clone());
         Ok(())
-    }
-
-    fn is_variable_mutation_segment(&self, trimmed: &str) -> bool {
-        if trimmed.starts_with("let ") || trimmed.starts_with("mut ") {
-            return true;
-        }
-
-        let Ok((block, _)) = parse_block(&self.engine_state, trimmed) else {
-            return false;
-        };
-        let Some(pipeline) = block.pipelines.first() else {
-            return false;
-        };
-        let Some(first) = pipeline.elements.first() else {
-            return false;
-        };
-
-        matches!(
-            &first.expr.expr,
-            Expr::BinaryOp(_, op, _) if matches!(op.expr, Expr::Operator(Operator::Assignment(_)))
-        )
     }
 
     pub fn current_cwd(&self) -> PathBuf {
@@ -848,28 +888,11 @@ impl ManagedNuRuntime {
                         .and_then(|s| s.strip_suffix('\''))
                 })
                 .unwrap_or(var_name);
-            if var_name == "PWD" {
-                return Err(ColossalErr::Io(std::io::Error::other(
-                    "cannot hide-env PWD; use cd to change the working directory",
-                )));
-            }
             self.unset_env(var_name);
+            if var_name == "PWD" {
+                self.record_replay_segment(trimmed)?;
+            }
             return Ok(String::new());
-        }
-
-        if trimmed.starts_with("overlay ") {
-            return Err(ColossalErr::Io(std::io::Error::other(
-                "Managed Nushell does not support overlay commands \
-                 (overlay use, overlay hide, overlay new, overlay list); \
-                 define commands and aliases directly with def/alias instead",
-            )));
-        }
-
-        if Self::is_unsupported_module_command(trimmed) {
-            return Err(ColossalErr::Io(std::io::Error::other(
-                "Managed Nushell does not support module/use/source commands; \
-                 define commands and aliases directly with def/alias instead",
-            )));
         }
 
         if trimmed.starts_with("def ") || trimmed.starts_with("export def ") {
@@ -887,6 +910,7 @@ impl ManagedNuRuntime {
         }
 
         let output = self.eval_string(trimmed)?;
+        self.record_replay_segment(trimmed)?;
         // After any general eval, sync current_cwd from the stack's PWD
         // in case the command mutated $env.PWD directly (via $env.config or
         // an external command that wrote to PWD).
@@ -959,22 +983,22 @@ impl ManagedNuRuntime {
         created_at: std::time::SystemTime,
     ) -> Result<PersistentSessionState, ColossalErr> {
         self.sync_persistent_variables_from_runtime();
-        let env_vars = self
+        let structured_env: HashMap<String, Value> = self
             .stack
             .get_env_vars(&self.engine_state)
             .into_iter()
+            .filter(|(key, _)| key != "config")
+            .collect();
+        let env_vars = structured_env
+            .iter()
             .filter_map(|(key, value)| {
-                // Skip the "config" env var — it's a structured Value, not a
-                // plain string.  Its canonical persistence is `nu_config`.
-                if key == "config" {
-                    return None;
-                }
                 value
                     .coerce_str()
                     .ok()
-                    .map(|value| (key, value.into_owned()))
+                    .map(|value| (key.clone(), value.into_owned()))
             })
             .collect();
+        let structured_env_json = serde_json::to_string(&structured_env).ok();
 
         // Serialize the current config only if it has been mutated (i.e. the
         // stack has its own config override rather than deferring to the engine
@@ -993,10 +1017,11 @@ impl ManagedNuRuntime {
             env_vars,
             current_cwd: self.current_cwd(),
             created_at,
-            structured_env_json: None,
+            structured_env_json,
             nu_aliases: self.aliases.clone(),
             nu_custom_commands: self.custom_commands.clone(),
             nu_variables: self.variables.clone(),
+            nu_replay_commands: self.replay_commands.clone(),
             replay_commands: Vec::new(),
             nu_config,
         })
@@ -1029,53 +1054,12 @@ impl ManagedNuRuntime {
                 }
 
                 if trimmed == "pwd" {
-                    collected.push_str(&self.current_cwd.display().to_string());
+                    let cwd = forked_engine
+                        .cwd(Some(&forked_stack))
+                        .map(|path| path.into_std_path_buf())
+                        .unwrap_or_else(|_| self.current_cwd.clone());
+                    collected.push_str(&cwd.display().to_string());
                     return Ok(collected);
-                }
-
-                // In forked mode, reject state-mutating commands since they
-                // would only affect the discarded clone.
-                if trimmed == "cd" || trimmed.starts_with("cd ") {
-                    return Err(ColossalErr::Io(std::io::Error::other(
-                        "cd in isolated (non-replay_state) mode has no persistent effect",
-                    )));
-                }
-                if trimmed.starts_with("load-env ") || trimmed.starts_with("hide-env ") {
-                    return Err(ColossalErr::Io(std::io::Error::other(
-                        "env mutation in isolated (non-replay_state) mode has no persistent effect",
-                    )));
-                }
-                if trimmed.starts_with("def ")
-                    || trimmed.starts_with("export def ")
-                    || trimmed.starts_with("alias ")
-                    || trimmed.starts_with("export alias ")
-                {
-                    return Err(ColossalErr::Io(std::io::Error::other(
-                        "def/alias in isolated (non-replay_state) mode has no persistent effect",
-                    )));
-                }
-                // $env.* assignments (including $env.config mutations) are
-                // allowed in fork_eval: they only affect the forked stack,
-                // which is discarded at the end of this call.  Session
-                // variable assignments (let, mut, $x = ...) are rejected
-                // because they silently appear to succeed but have no effect.
-                if !trimmed.starts_with("$env.") && self.is_variable_mutation_segment(trimmed) {
-                    return Err(ColossalErr::Io(std::io::Error::other(
-                        "let/mut/session-variable assignment in isolated (non-replay_state) mode has no persistent effect",
-                    )));
-                }
-                if trimmed.starts_with("overlay ") {
-                    return Err(ColossalErr::Io(std::io::Error::other(
-                        "Managed Nushell does not support overlay commands \
-                         (overlay use, overlay hide, overlay new, overlay list); \
-                         define commands and aliases directly with def/alias instead",
-                    )));
-                }
-                if Self::is_unsupported_module_command(trimmed) {
-                    return Err(ColossalErr::Io(std::io::Error::other(
-                        "Managed Nushell does not support module/use/source commands; \
-                         define commands and aliases directly with def/alias instead",
-                    )));
                 }
 
                 let (block, delta) = parse_block(&forked_engine, trimmed)?;
@@ -1126,8 +1110,18 @@ impl ManagedNuRuntime {
     }
 
     pub fn restore(&mut self, snapshot: &PersistentSessionState) -> Result<(), ColossalErr> {
-        for (key, value) in &snapshot.env_vars {
-            self.set_env(key.clone(), value.clone());
+        if let Some(structured_env_json) = &snapshot.structured_env_json {
+            if let Ok(structured_env) =
+                serde_json::from_str::<HashMap<String, Value>>(structured_env_json)
+            {
+                for (key, value) in structured_env {
+                    self.stack.add_env_var(key, value);
+                }
+            }
+        } else {
+            for (key, value) in &snapshot.env_vars {
+                self.set_env(key.clone(), value.clone());
+            }
         }
         self.update_cwd(snapshot.current_cwd.clone())?;
 
@@ -1145,7 +1139,32 @@ impl ManagedNuRuntime {
             self.register_alias(alias.name.clone(), alias.expansion.clone());
         }
 
+        for replay in &snapshot.nu_replay_commands {
+            for file in &replay.files {
+                let bytes = fs::read(&file.path).map_err(|err| {
+                    ColossalErr::Io(std::io::Error::other(format!(
+                        "failed to read managed Nu replay dependency {} during restore: {}",
+                        file.path.display(),
+                        err
+                    )))
+                })?;
+                let current_hash = format!("{:x}", Sha256::digest(bytes));
+                if current_hash != file.sha256 {
+                    return Err(ColossalErr::Io(std::io::Error::other(format!(
+                        "managed Nu replay dependency changed since snapshot: {}",
+                        file.path.display()
+                    ))));
+                }
+            }
+
+            let original_cwd = self.current_cwd();
+            self.update_cwd(replay.cwd.clone())?;
+            let _ = self.run_segment(&replay.command)?;
+            self.update_cwd(original_cwd)?;
+        }
+
         self.variables = snapshot.nu_variables.clone();
+        self.replay_commands = snapshot.nu_replay_commands.clone();
 
         // Restore config if the snapshot carries a serialized override.
         // A missing or malformed nu_config JSON is treated as "use default"

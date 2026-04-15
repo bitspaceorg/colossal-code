@@ -48,7 +48,8 @@ pub fn resolve_workspace_root() -> PathBuf {
 }
 
 pub fn resolve_tools_binary_path_for_runtime() -> Result<PathBuf> {
-    crate::resolve_tools_binary_path_for_runtime()
+    colossal_linux_sandbox::resolve_tools_binary_path()
+        .map_err(|err| anyhow::anyhow!(err.to_string()))
 }
 
 fn push_writable_root_unique(writable_roots: &mut Vec<WritableRoot>, root: PathBuf) {

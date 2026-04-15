@@ -62,6 +62,7 @@ impl App {
             Self::build_available_models(&auth_store.connections).unwrap_or_default();
         let limit_thinking_to_first_token = backend_env.limit_thinking_to_first_token;
         Self::apply_backend_environment(&backend_env);
+        let execution_mode_badge = agent_core::execution_mode_badge().await.to_string();
 
         let agent = Agent::new_with_model(current_model.clone())
             .await
@@ -92,6 +93,7 @@ impl App {
             input_modified: false,
             mode: Mode::Normal,
             status_left: Self::compute_status_left_initial()?,
+            execution_mode_badge,
             phase: Phase::Ascii,
             title_lines,
             visible_chars,

@@ -246,6 +246,7 @@ async fn managed_nu_restore_shell_session_from_snapshot_fails_on_invalid_snapsho
         nu_aliases: Vec::new(),
         nu_custom_commands: vec!["def broken [x] { $x + }".to_string()],
         nu_variables: Vec::new(),
+        nu_replay_commands: Vec::new(),
         replay_commands: Vec::new(),
         nu_config: None,
     };
@@ -259,6 +260,175 @@ async fn managed_nu_restore_shell_session_from_snapshot_fails_on_invalid_snapsho
             || err.to_string().contains("parse")
             || err.to_string().contains("nu::parser"),
         "unexpected restore error: {err}"
+    );
+
+    manager.terminate_session(restored_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_nu_replay_journal_preserves_module_overlay_source_and_const_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = shell_test_lock();
+    let Some(nu_path) = nushell_path() else {
+        return Ok(());
+    };
+
+    let temp = tempfile::tempdir()?;
+    let sourced = temp.path().join("sourced.nu");
+    std::fs::write(&sourced, "def sourced-greet [] { 'hello-from-source' }")?;
+    let (manager, session_id) = create_shell_session(
+        temp.path(),
+        nu_path.clone(),
+        SandboxPolicy::DangerFullAccess,
+    )
+    .await?;
+
+    manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            format!(
+                "module greetings {{ export def greet [] {{ 'hello-inline' }} }}; overlay use greetings; source {}; const greeting_name = 'const-hi'",
+                sourced.display()
+            ),
+            Some(10_000),
+            10_000,
+            None,
+        )
+        .await?;
+
+    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
+    assert!(
+        snapshot
+            .nu_replay_commands
+            .iter()
+            .any(|entry| entry.command.starts_with("module greetings"))
+    );
+    assert!(
+        snapshot
+            .nu_replay_commands
+            .iter()
+            .any(|entry| entry.command.starts_with("overlay use greetings"))
+    );
+    assert!(
+        snapshot
+            .nu_replay_commands
+            .iter()
+            .any(|entry| entry.command.starts_with("source "))
+    );
+    assert!(
+        snapshot
+            .nu_replay_commands
+            .iter()
+            .any(|entry| entry.command.starts_with("const greeting_name"))
+    );
+
+    manager.terminate_session(session_id.clone()).await?;
+
+    let shared_state = Arc::new(SharedSessionState::new(snapshot.current_cwd.clone()));
+    let restored_id = manager
+        .create_persistent_shell_session(
+            snapshot.shell_path.clone(),
+            false,
+            SandboxPolicy::DangerFullAccess,
+            shared_state,
+            Some(Duration::from_secs(30)),
+        )
+        .await?;
+
+    manager
+        .restore_shell_session_from_snapshot(restored_id.clone(), &snapshot)
+        .await?;
+
+    let result = manager
+        .exec_command_in_shell_session(
+            restored_id.clone(),
+            "[(greet) (sourced-greet) $greeting_name (overlay list | length)] | to json -r"
+                .to_string(),
+            Some(10_000),
+            10_000,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        result.exit_status,
+        ExitStatus::Completed { code: 0 },
+        "{result:?}"
+    );
+    assert!(
+        result.stdout.contains("hello-inline"),
+        "{:?}",
+        result.stdout
+    );
+    assert!(
+        result.stdout.contains("hello-from-source"),
+        "{:?}",
+        result.stdout
+    );
+    assert!(result.stdout.contains("const-hi"), "{:?}", result.stdout);
+
+    manager.terminate_session(restored_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_nu_restore_fails_when_sourced_file_changes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = shell_test_lock();
+    let Some(nu_path) = nushell_path() else {
+        return Ok(());
+    };
+
+    let temp = tempfile::tempdir()?;
+    let sourced = temp.path().join("sourced.nu");
+    std::fs::write(&sourced, "def sourced-greet [] { 'hello-v1' }")?;
+    let (manager, session_id) = create_shell_session(
+        temp.path(),
+        nu_path.clone(),
+        SandboxPolicy::DangerFullAccess,
+    )
+    .await?;
+
+    manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            format!("source {}", sourced.display()),
+            Some(10_000),
+            10_000,
+            None,
+        )
+        .await?;
+
+    let snapshot = manager.snapshot_shell_session(session_id.clone()).await?;
+    manager.terminate_session(session_id).await?;
+
+    std::fs::write(&sourced, "def sourced-greet [] { 'hello-v2' }")?;
+
+    let shared_state = Arc::new(SharedSessionState::new(snapshot.current_cwd.clone()));
+    let restored_id = manager
+        .create_persistent_shell_session(
+            snapshot.shell_path.clone(),
+            false,
+            SandboxPolicy::DangerFullAccess,
+            shared_state,
+            Some(Duration::from_secs(30)),
+        )
+        .await?;
+
+    let restore = manager
+        .restore_shell_session_from_snapshot(restored_id.clone(), &snapshot)
+        .await;
+    assert!(
+        restore.is_err(),
+        "restore should fail when sourced file hash changes"
+    );
+    assert!(
+        restore
+            .err()
+            .map(|err| err.to_string())
+            .unwrap_or_default()
+            .contains("managed Nu replay dependency changed"),
+        "restore failure should mention replay dependency change"
     );
 
     manager.terminate_session(restored_id).await?;

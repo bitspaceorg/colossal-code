@@ -57,6 +57,7 @@ pub fn resolve_tools_binary_path_for_runtime() -> Result<PathBuf> {
 pub use agent_state::sandbox_policy_from_config;
 pub use agent_state::sandbox_policy_from_config_with_workspace;
 pub use agent_state::set_workspace_root_override;
+pub use shell_session::execution_mode_badge;
 
 /// Agent instance that can be used from the TUI
 #[derive(Clone)]
