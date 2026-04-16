@@ -154,7 +154,8 @@ async fn execute_exec_command(
 
     if !replay_state && uses_managed_nu_foreground {
         execute_managed_nu_foreground(state, agent, command, timeout_ms, current_approval, tx).await
-    } else if !replay_state && !uses_managed_nu_foreground {
+    } else if !replay_state && is_background {
+        // Background commands are fire-and-forget: isolated execution is fine
         execute_isolated_exec(
             state,
             agent,
@@ -166,6 +167,9 @@ async fn execute_exec_command(
         )
         .await
     } else {
+        // All foreground non-ManagedNu commands (bash etc.) use the persistent session,
+        // same as replay_state=true — state is maintained across calls.
+        // replay_state=false means the command is not stored in the continuity journal.
         execute_replay_state(
             state,
             agent,

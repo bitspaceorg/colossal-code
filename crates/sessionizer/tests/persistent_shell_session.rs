@@ -103,3 +103,6 @@ mod managed_nu_boundaries;
 
 #[path = "persistent_shell_session/managed_nu_config.rs"]
 mod managed_nu_config;
+
+#[path = "persistent_shell_session/osc133_completion.rs"]
+mod osc133_completion;

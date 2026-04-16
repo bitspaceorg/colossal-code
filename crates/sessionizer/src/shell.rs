@@ -88,15 +88,18 @@ impl Shell {
             }
             ShellKind::Posix => {
                 let mut shell_args = Vec::new();
-                if login {
-                    shell_args.push("-l".to_string());
-                }
-                shell_args.push("-s".to_string());
+                // bash requires long options (--noprofile, --norc) BEFORE short options
+                // (-s) or it rejects them as invalid.  Place shell-specific suppression
+                // flags first, then the stdin-read flag, then the optional -l.
                 if self.name.contains("bash") {
                     shell_args.push("--noprofile".to_string());
                     shell_args.push("--norc".to_string());
                 } else if self.name.contains("zsh") {
                     shell_args.push("-f".to_string());
+                }
+                shell_args.push("-s".to_string());
+                if login {
+                    shell_args.push("-l".to_string());
                 }
                 shell_args
             }

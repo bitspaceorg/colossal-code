@@ -13,6 +13,7 @@ pub mod landlock;
 pub mod linux_sandbox;
 pub mod managed_nu;
 pub mod manager;
+pub mod osc133;
 pub mod protocol;
 pub mod pty;
 pub mod safety;

@@ -163,7 +163,35 @@ fn clean_shell_output(output: &str, command: &str) -> String {
     cleaned_lines.join("\n")
 }
 
-const CONTROL_PREFIX: &str = "__NITE_CTL__";
+/// Apply a batch of OSC 133 events to the shared command-tracking state.
+///
+/// `command_started` is set by `CommandStart` (B) or `CommandExecuted` (C).
+/// `command_finished` is set by `CommandFinished` (D) or by a subsequent
+/// `PromptStart` (A) once a command is already running — the new prompt
+/// appearing means the previous command's output is complete.
+fn apply_osc133_events(
+    events: Vec<crate::osc133::Event>,
+    command_started: &mut bool,
+    command_finished: &mut bool,
+    exit_code: &mut Option<i32>,
+) {
+    for event in events {
+        match event {
+            crate::osc133::Event::CommandStart | crate::osc133::Event::CommandExecuted => {
+                *command_started = true;
+            }
+            crate::osc133::Event::CommandFinished { exit_code: code } => {
+                *exit_code = code;
+                *command_finished = true;
+            }
+            crate::osc133::Event::PromptStart => {
+                if *command_started {
+                    *command_finished = true;
+                }
+            }
+        }
+    }
+}
 
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
@@ -338,131 +366,6 @@ fn parse_nu_runtime_snapshot(
 
 fn managed_nu_snapshot_command() -> String {
     "let __nite_state = { cwd: $env.PWD, env: $env, aliases: (scope aliases | each {|a| { name: $a.name, expansion: (view source $a.name) } }), custom_commands: (scope commands | where type == custom | each {|c| (view source $c.name) }) }; print '__NITE_NU_STATE_BEGIN__'; $__nite_state | to json --raw; print '__NITE_NU_STATE_END__'".to_string()
-}
-
-fn build_control_wrapped_command(command: &str, control_id: &str) -> String {
-    format!(
-        "{{ printf '{prefix}{control_id}__START__0\\n'; {command} ; __nite_code=$?; printf '{prefix}{control_id}__DONE__%s\\n' \"$__nite_code\"; }}",
-        prefix = CONTROL_PREFIX,
-    )
-}
-
-fn consume_numeric_prefix(value: &str, allow_negative: bool) -> Option<(usize, i32)> {
-    let mut end = 0;
-
-    for (idx, ch) in value.char_indices() {
-        let is_sign = allow_negative && idx == 0 && ch == '-';
-        if is_sign || ch.is_ascii_digit() {
-            end = idx + ch.len_utf8();
-            continue;
-        }
-        break;
-    }
-
-    if end == 0 || (allow_negative && end == 1 && value.starts_with('-')) {
-        return None;
-    }
-
-    let parsed = value[..end].parse::<i32>().ok()?;
-    Some((end, parsed))
-}
-
-fn strip_control_markers(
-    line: &str,
-    control_id: &str,
-    command_completed: &mut bool,
-    done_exit_code: &mut Option<i32>,
-) -> String {
-    let start_prefix = format!("{CONTROL_PREFIX}{control_id}__START__");
-    let heartbeat_marker = format!("{CONTROL_PREFIX}{control_id}__HEARTBEAT__");
-    let done_prefix = format!("{CONTROL_PREFIX}{control_id}__DONE__");
-    let mut remaining = line;
-    let mut visible = String::new();
-
-    loop {
-        let next_marker = [
-            remaining.find(&start_prefix).map(|idx| (idx, 0_u8)),
-            remaining.find(&heartbeat_marker).map(|idx| (idx, 1_u8)),
-            remaining.find(&done_prefix).map(|idx| (idx, 2_u8)),
-        ]
-        .into_iter()
-        .flatten()
-        .min_by_key(|(idx, _)| *idx);
-
-        let Some((marker_start, marker_kind)) = next_marker else {
-            visible.push_str(remaining);
-            return visible;
-        };
-
-        visible.push_str(&remaining[..marker_start]);
-        remaining = &remaining[marker_start..];
-
-        match marker_kind {
-            0 => {
-                let suffix = &remaining[start_prefix.len()..];
-                if let Some((consumed, _pid)) = consume_numeric_prefix(suffix, false) {
-                    remaining = &suffix[consumed..];
-                } else {
-                    visible.push_str(CONTROL_PREFIX);
-                    remaining = &remaining[CONTROL_PREFIX.len()..];
-                }
-            }
-            1 => {
-                remaining = &remaining[heartbeat_marker.len()..];
-            }
-            2 => {
-                let suffix = &remaining[done_prefix.len()..];
-                if let Some((consumed, code)) = consume_numeric_prefix(suffix, true) {
-                    *command_completed = true;
-                    *done_exit_code = Some(code);
-                    remaining = &suffix[consumed..];
-                } else {
-                    visible.push_str(CONTROL_PREFIX);
-                    remaining = &remaining[CONTROL_PREFIX.len()..];
-                }
-            }
-            _ => unreachable!(),
-        }
-    }
-}
-
-fn extract_visible_output(
-    chunk: &str,
-    pending: &mut String,
-    control_id: &str,
-    command_completed: &mut bool,
-    done_exit_code: &mut Option<i32>,
-    flush_partial: bool,
-) -> String {
-    pending.push_str(chunk);
-    let mut visible = String::new();
-
-    while let Some(pos) = pending.find('\n') {
-        let mut line = pending[..pos].to_string();
-        if line.ends_with('\r') {
-            line.pop();
-        }
-        pending.drain(..=pos);
-
-        let stripped = strip_control_markers(&line, control_id, command_completed, done_exit_code);
-        if stripped.trim().is_empty() {
-            continue;
-        }
-
-        visible.push_str(&stripped);
-        visible.push('\n');
-    }
-
-    if flush_partial && !pending.is_empty() {
-        let line = pending.trim_end_matches('\r').to_string();
-        pending.clear();
-        let stripped = strip_control_markers(&line, control_id, command_completed, done_exit_code);
-        if !stripped.trim().is_empty() {
-            visible.push_str(&stripped);
-        }
-    }
-
-    visible
 }
 
 /// Current snapshot format version.  Bump this when changing the
@@ -1409,39 +1312,40 @@ impl SessionManager {
             }
         }
 
-        let control_id = format!(
-            "__CMD_DONE_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or_default()
-        );
-        let wrapped_command = build_control_wrapped_command(&command, &control_id);
+        // Use OSC 133 for command completion detection instead of injected markers
+        let mut osc_parser = crate::osc133::Parser::new();
         let user_command = command.clone();
         let raw_stream = self
-            .send_input_to_shell_session(session_id, wrapped_command, None)
+            .send_input_to_shell_session(session_id, command, None)
             .await?;
         let (tx, rx) = unbounded::<StreamEvent>();
 
         tokio::spawn(async move {
             let raw_stream = raw_stream;
-            let mut pending = String::new();
-            let mut command_completed = false;
-            let mut done_exit_code = None;
+            let pending = Vec::new();
+            let mut command_started = false;
+            let mut command_finished = false;
+            let mut exit_code: Option<i32> = None;
 
             loop {
                 match raw_stream.recv().await {
                     Ok(StreamEvent::Stdout(output)) | Ok(StreamEvent::Stderr(output)) => {
-                        let visible = extract_visible_output(
-                            &output,
-                            &mut pending,
-                            &control_id,
-                            &mut command_completed,
-                            &mut done_exit_code,
-                            false,
+                        let events = osc_parser.push(output.as_bytes());
+                        apply_osc133_events(
+                            events,
+                            &mut command_started,
+                            &mut command_finished,
+                            &mut exit_code,
                         );
-                        let mut cleaned = clean_shell_output(&visible, &user_command);
-                        if !cleaned.is_empty() && visible.contains('\n') && !cleaned.ends_with('\n')
+
+                        // Strip OSC 133 escape sequences for display
+                        let visible = crate::osc133::strip_osc133(output.as_bytes());
+                        let visible_str = String::from_utf8_lossy(&visible).to_string();
+
+                        let mut cleaned = clean_shell_output(&visible_str, &user_command);
+                        if !cleaned.is_empty()
+                            && visible_str.contains('\n')
+                            && !cleaned.ends_with('\n')
                         {
                             cleaned.push('\n');
                         }
@@ -1450,11 +1354,12 @@ impl SessionManager {
                         {
                             break;
                         }
-                        if command_completed {
+                        if command_finished {
                             break;
                         }
                     }
                     Ok(StreamEvent::Exit(code)) => {
+                        // Fallback: process exited without OSC 133
                         let _ = tx.send(StreamEvent::Exit(code)).await;
                         return;
                     }
@@ -1466,23 +1371,21 @@ impl SessionManager {
                 }
             }
 
-            let flushed = extract_visible_output(
-                "",
-                &mut pending,
-                &control_id,
-                &mut command_completed,
-                &mut done_exit_code,
-                true,
-            );
-            let mut cleaned = clean_shell_output(&flushed, &user_command);
-            if !cleaned.is_empty() && flushed.contains('\n') && !cleaned.ends_with('\n') {
-                cleaned.push('\n');
-            }
-            if !cleaned.trim().is_empty() {
-                let _ = tx.send(StreamEvent::Stdout(cleaned)).await;
+            // Flush any remaining output
+            if !pending.is_empty() {
+                let visible = crate::osc133::strip_osc133(&pending);
+                let visible_str = String::from_utf8_lossy(&visible).to_string();
+                let mut cleaned = clean_shell_output(&visible_str, &user_command);
+                if !cleaned.is_empty() && visible_str.contains('\n') && !cleaned.ends_with('\n') {
+                    cleaned.push('\n');
+                }
+                if !cleaned.trim().is_empty() {
+                    let _ = tx.send(StreamEvent::Stdout(cleaned)).await;
+                }
             }
 
-            let code = done_exit_code.unwrap_or(if command_completed { 0 } else { -1 });
+            // Use OSC 133 exit code, or fallback to 0 if command started but no explicit exit
+            let code = exit_code.unwrap_or(if command_started { 0 } else { -1 });
             let _ = tx.send(StreamEvent::Exit(code)).await;
         });
 
@@ -1616,30 +1519,10 @@ impl SessionManager {
                     ))
                 })?;
 
-            // Wait up to 10 seconds for shell to be ready
             session.wait_until_ready(Duration::from_secs(10)).await?;
         }
 
-        let tracked_env_updates = tracked_env_updates_from_command(&command);
-
-        // First, send Ctrl+C to clear any potentially hung state in the shell
-        let _ = self
-            .send_input_to_shell_session(session_id.clone(), "\x03".to_string(), None)
-            .await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Generate a unique control id for internal command lifecycle markers.
-        let control_id = format!(
-            "__CMD_DONE_{}__",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-
-        // Wrap the command with internal START/HEARTBEAT/DONE control markers.
-        let command_with_marker = build_control_wrapped_command(&command, &control_id);
-
+        // Add command to history
         {
             let sessions = self.persistent_shell_sessions.lock().unwrap();
             if let Some((_, session)) = sessions.iter().find(|(id, _)| *id == session_id) {
@@ -1647,8 +1530,12 @@ impl SessionManager {
             }
         }
 
+        let tracked_env_updates = tracked_env_updates_from_command(&command);
+
+        // Use OSC 133 for command completion detection instead of injected markers
+        let mut osc_parser = crate::osc133::Parser::new();
         let stream_rx = self
-            .send_input_to_shell_session(session_id.clone(), command_with_marker, None)
+            .send_input_to_shell_session(session_id.clone(), command.clone(), None)
             .await?;
 
         let mut stdout_parts = Vec::new();
@@ -1656,12 +1543,13 @@ impl SessionManager {
             .map(Duration::from_millis)
             .unwrap_or(Duration::from_secs(30));
         let deadline = start_time + timeout_duration;
-        let mut command_completed = false;
-        let mut done_exit_code: Option<i32> = None;
-        let mut pending_stdout = String::new();
-        let mut pending_stderr = String::new();
+        let mut command_started = false;
+        let mut command_finished = false;
+        let mut exit_code: Option<i32> = None;
+        let pending_stdout = Vec::new();
+        let pending_stderr = Vec::new();
 
-        // Collect all streaming output until we see the marker
+        // Collect all streaming output until command completes
         while let Ok(event) = tokio::time::timeout(
             deadline.saturating_duration_since(Instant::now()),
             stream_rx.recv(),
@@ -1669,70 +1557,49 @@ impl SessionManager {
         .await
         {
             match event {
-                Ok(StreamEvent::Stdout(output)) => {
-                    let visible = extract_visible_output(
-                        &output,
-                        &mut pending_stdout,
-                        &control_id,
-                        &mut command_completed,
-                        &mut done_exit_code,
-                        false,
+                Ok(StreamEvent::Stdout(output)) | Ok(StreamEvent::Stderr(output)) => {
+                    let events = osc_parser.push(output.as_bytes());
+                    apply_osc133_events(
+                        events,
+                        &mut command_started,
+                        &mut command_finished,
+                        &mut exit_code,
                     );
-                    if !visible.is_empty() {
-                        stdout_parts.push(visible);
+
+                    // Strip OSC 133 escape sequences for display
+                    let visible = crate::osc133::strip_osc133(output.as_bytes());
+                    let visible_str = String::from_utf8_lossy(&visible).to_string();
+
+                    if !visible_str.is_empty() {
+                        stdout_parts.push(visible_str);
                     }
-                    if command_completed {
+                    if command_finished {
                         break;
                     }
                 }
-                Ok(StreamEvent::Stderr(output)) => {
-                    let visible = extract_visible_output(
-                        &output,
-                        &mut pending_stderr,
-                        &control_id,
-                        &mut command_completed,
-                        &mut done_exit_code,
-                        false,
-                    );
-                    if !visible.is_empty() {
-                        stdout_parts.push(visible);
+                Ok(StreamEvent::Exit(code)) => {
+                    // Fallback: process exited without OSC 133
+                    if exit_code.is_none() {
+                        exit_code = Some(code);
                     }
-                    if command_completed {
-                        break;
-                    }
+                    break;
                 }
-                Ok(StreamEvent::Exit(_)) => break,
                 Ok(StreamEvent::Error(_)) => break,
                 Err(_) => break, // Channel closed
             }
         }
 
-        let flushed_stdout = extract_visible_output(
-            "",
-            &mut pending_stdout,
-            &control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            true,
-        );
-        if !flushed_stdout.is_empty() {
-            stdout_parts.push(flushed_stdout);
-        }
-
-        let flushed_stderr = extract_visible_output(
-            "",
-            &mut pending_stderr,
-            &control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            true,
-        );
-        if !flushed_stderr.is_empty() {
-            stdout_parts.push(flushed_stderr);
+        // Strip any pending OSC 133 sequences from stdout
+        for pending in vec![pending_stdout, pending_stderr] {
+            let visible = crate::osc133::strip_osc133(&pending);
+            let visible_str = String::from_utf8_lossy(&visible).to_string();
+            if !visible_str.is_empty() {
+                stdout_parts.push(visible_str);
+            }
         }
 
         let aggregated_output = stdout_parts.join("");
-        let cleaned_output = clean_shell_output(&aggregated_output, &command);
+        let cleaned_output = clean_shell_output(&aggregated_output, &command.clone());
 
         if !tracked_env_updates.is_empty() {
             let sessions = self.persistent_shell_sessions.lock().unwrap();
@@ -1749,10 +1616,12 @@ impl SessionManager {
 
         Ok(ExecCommandOutput {
             duration: Instant::now().duration_since(start_time),
-            exit_status: if let Some(code) = done_exit_code {
+            exit_status: if let Some(code) = exit_code {
                 ExitStatus::Completed { code }
-            } else if command_completed {
+            } else if command_started && command_finished {
                 ExitStatus::Completed { code: 0 }
+            } else if command_started {
+                ExitStatus::Killed
             } else if Instant::now() < deadline {
                 ExitStatus::Killed
             } else {
@@ -2966,170 +2835,8 @@ impl SessionManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_shell_output, extract_visible_output};
-
-    #[test]
-    fn extract_visible_output_detects_embedded_done_marker() {
-        let control_id = "abc123";
-        let mut pending = String::new();
-        let mut command_completed = false;
-        let mut done_exit_code = None;
-
-        let visible = extract_visible_output(
-            &format!("prompt __NITE_CTL__{control_id}__DONE__0 next-prompt\nreal output\n"),
-            &mut pending,
-            control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            false,
-        );
-
-        assert!(command_completed);
-        assert_eq!(done_exit_code, Some(0));
-        assert_eq!(visible, "prompt  next-prompt\nreal output\n");
-    }
-
-    #[test]
-    fn extract_visible_output_handles_partial_done_marker_on_flush() {
-        let control_id = "flush123";
-        let mut pending = String::new();
-        let mut command_completed = false;
-        let mut done_exit_code = None;
-
-        let visible = extract_visible_output(
-            &format!("before __NITE_CTL__{control_id}__DONE__17"),
-            &mut pending,
-            control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            true,
-        );
-
-        assert!(command_completed);
-        assert_eq!(done_exit_code, Some(17));
-        assert_eq!(visible, "before ");
-    }
-
-    #[test]
-    fn extract_visible_output_handles_marker_split_across_chunks() {
-        let control_id = "split123";
-        let mut pending = String::new();
-        let mut command_completed = false;
-        let mut done_exit_code = None;
-
-        let visible = extract_visible_output(
-            &format!("hello __NITE_CTL__{control_id}__DO"),
-            &mut pending,
-            control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            false,
-        );
-        assert_eq!(visible, "");
-        assert!(!command_completed);
-
-        let visible = extract_visible_output(
-            "NE__5 world\n",
-            &mut pending,
-            control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            false,
-        );
-
-        assert!(command_completed);
-        assert_eq!(done_exit_code, Some(5));
-        assert_eq!(visible, "hello  world\n");
-    }
-
-    #[test]
-    fn extract_visible_output_strips_start_and_heartbeat_markers() {
-        let control_id = "markers123";
-        let mut pending = String::new();
-        let mut command_completed = false;
-        let mut done_exit_code = None;
-
-        let visible = extract_visible_output(
-            &format!(
-                "before __NITE_CTL__{control_id}__START__123 after\n__NITE_CTL__{control_id}__HEARTBEAT__\n"
-            ),
-            &mut pending,
-            control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            false,
-        );
-
-        assert!(!command_completed);
-        assert_eq!(done_exit_code, None);
-        assert_eq!(visible, "before  after\n");
-    }
-
-    #[test]
-    fn extract_visible_output_ignores_malformed_done_marker() {
-        let control_id = "bad123";
-        let mut pending = String::new();
-        let mut command_completed = false;
-        let mut done_exit_code = None;
-
-        let visible = extract_visible_output(
-            &format!("__NITE_CTL__{control_id}__DONE__oops\n"),
-            &mut pending,
-            control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            false,
-        );
-
-        assert!(!command_completed);
-        assert_eq!(done_exit_code, None);
-        assert_eq!(visible, format!("__NITE_CTL__{control_id}__DONE__oops\n"));
-    }
-
-    #[test]
-    fn extract_visible_output_ignores_marker_for_different_control_id() {
-        let control_id = "expected123";
-        let mut pending = String::new();
-        let mut command_completed = false;
-        let mut done_exit_code = None;
-
-        let visible = extract_visible_output(
-            "before __NITE_CTL__other123__DONE__0 after\n",
-            &mut pending,
-            control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            false,
-        );
-
-        assert!(!command_completed);
-        assert_eq!(done_exit_code, None);
-        assert_eq!(visible, "before __NITE_CTL__other123__DONE__0 after\n");
-    }
-
-    #[test]
-    fn extract_visible_output_keeps_user_output_with_control_prefix_when_id_mismatches() {
-        let control_id = "expected456";
-        let mut pending = String::new();
-        let mut command_completed = false;
-        let mut done_exit_code = None;
-
-        let visible = extract_visible_output(
-            "__NITE_CTL__not-our-marker plain text\nreal line\n",
-            &mut pending,
-            control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            false,
-        );
-
-        assert!(!command_completed);
-        assert_eq!(done_exit_code, None);
-        assert_eq!(
-            visible,
-            "__NITE_CTL__not-our-marker plain text\nreal line\n"
-        );
-    }
+    use super::{apply_osc133_events, clean_shell_output};
+    use crate::osc133::Event;
 
     #[test]
     fn clean_shell_output_removes_prompts_markers_and_wrapper_echoes() {
@@ -3171,5 +2878,170 @@ mod tests {
             clean_shell_output(&raw, command),
             "Hello from persistent shell!"
         );
+    }
+
+    // ── apply_osc133_events ──────────────────────────────────────────────────
+
+    #[test]
+    fn apply_osc133_command_start_sets_started() {
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![Event::CommandStart],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(started);
+        assert!(!finished);
+        assert_eq!(code, None);
+    }
+
+    #[test]
+    fn apply_osc133_command_executed_also_sets_started() {
+        // C marker without B — must still mark started so downstream logic works
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![Event::CommandExecuted],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(started);
+        assert!(!finished);
+    }
+
+    #[test]
+    fn apply_osc133_command_finished_sets_finished_and_captures_code() {
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![Event::CommandFinished {
+                exit_code: Some(42),
+            }],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(finished);
+        assert_eq!(code, Some(42));
+    }
+
+    #[test]
+    fn apply_osc133_command_finished_with_no_exit_code() {
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![Event::CommandFinished { exit_code: None }],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(finished);
+        assert_eq!(code, None);
+    }
+
+    #[test]
+    fn apply_osc133_prompt_start_finishes_command_when_already_started() {
+        // The bug we fixed: A marker after C signals the next prompt = previous command done
+        let (mut started, mut finished, mut code) = (true, false, None);
+        apply_osc133_events(
+            vec![Event::PromptStart],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(
+            finished,
+            "PromptStart after command started should mark finished"
+        );
+    }
+
+    #[test]
+    fn apply_osc133_prompt_start_does_not_finish_before_command_starts() {
+        // Initial A marker (shell is rendering its first prompt) must not trigger completion
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![Event::PromptStart],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(!started);
+        assert!(!finished);
+    }
+
+    #[test]
+    fn apply_osc133_full_sequence_a_b_c_output_d_a() {
+        // Realistic shell lifecycle: A→B→C→D→A
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![
+                Event::PromptStart,                            // A — initial prompt, no-op
+                Event::CommandStart,                           // B — command_started = true
+                Event::CommandExecuted,                        // C — already started
+                Event::CommandFinished { exit_code: Some(0) }, // D — finished, code=0
+                Event::PromptStart,                            // A — next prompt, already finished
+            ],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(started);
+        assert!(finished);
+        assert_eq!(code, Some(0));
+    }
+
+    #[test]
+    fn apply_osc133_a_c_d_sequence_without_b_still_completes() {
+        // Shell skips B marker — C must also mark started
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![
+                Event::PromptStart,                            // A
+                Event::CommandExecuted,                        // C (no B)
+                Event::CommandFinished { exit_code: Some(1) }, // D
+            ],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(started);
+        assert!(finished);
+        assert_eq!(code, Some(1));
+    }
+
+    #[test]
+    fn apply_osc133_prompt_start_instead_of_d_still_completes() {
+        // Shell emits A→B→C→output→A (no D) — PromptStart must trigger completion
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![
+                Event::PromptStart,     // A — no-op (not started yet)
+                Event::CommandStart,    // B
+                Event::CommandExecuted, // C
+                Event::PromptStart,     // A — command started, so this finishes it
+            ],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(
+            finished,
+            "PromptStart should substitute for missing D marker"
+        );
+        assert_eq!(code, None); // no exit code from D
+    }
+
+    #[test]
+    fn apply_osc133_negative_exit_code_is_preserved() {
+        // Bash uses -1 for signal-killed processes in some contexts
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![Event::CommandFinished {
+                exit_code: Some(-1),
+            }],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert_eq!(code, Some(-1));
     }
 }

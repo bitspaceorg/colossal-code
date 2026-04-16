@@ -1320,13 +1320,41 @@ pub async fn create_persistent_shell_session(
     env.insert("HISTSIZE".to_string(), "0".to_string());
     env.insert("SAVEHIST".to_string(), "0".to_string());
     env.insert("HISTCONTROL".to_string(), "ignoreboth".to_string());
-    env.insert("TERM".to_string(), "dumb".to_string());
-    env.insert("PS1".to_string(), "".to_string());
-    env.insert("PROMPT".to_string(), "".to_string());
-    env.insert("RPROMPT".to_string(), "".to_string());
-    env.insert("RPS1".to_string(), "".to_string());
+    env.insert("TERM".to_string(), "xterm-256color".to_string());
+    env.insert("COLORTERM".to_string(), "truecolor".to_string());
     env.insert("NO_COLOR".to_string(), "1".to_string());
+    // Suppress bash warnings about escape sequence failures (bash 5.1+).
+    env.insert(
+        "BASH_SILENCE_ESCAPE_SEQ_FAILURE".to_string(),
+        "1".to_string(),
+    );
+
+    // Configure OSC 133 command-completion markers for bash.
+    //
+    // bash inherits PROMPT_COMMAND and PS1 from its environment, honouring them even
+    // when --norc / --noprofile suppress init-file loading.
+    //
+    // PROMPT_COMMAND runs before each prompt and emits the D (CommandFinished) marker
+    // carrying the real exit code.  PS1 emits the A (PromptStart) and B (CommandStart)
+    // markers around the prompt text.  Together these give exec_command_in_shell_session
+    // reliable, exit-code-accurate completion detection without wrapping every command.
+    //
+    // Non-bash POSIX shells (dash, sh) ignore PROMPT_COMMAND, so we only inject for bash.
     let shell_descriptor = shell_descriptor(&shell);
+    if shell_descriptor.name().contains("bash") {
+        // PROMPT_COMMAND: emit D;$? (CommandFinished with real exit code) before each prompt.
+        // Single-quoted to defer $? expansion to run time inside PROMPT_COMMAND.
+        env.insert(
+            "PROMPT_COMMAND".to_string(),
+            r#"printf "\033]133;D;%s\007" "$?""#.to_string(),
+        );
+        // PS1: emit A (PromptStart) before the prompt text and B (CommandStart) after.
+        // \x1b = ESC, \x07 = BEL, \$ = $ for non-root / # for root.
+        env.insert(
+            "PS1".to_string(),
+            "\x1b]133;A\x07\\$ \x1b]133;B\x07".to_string(),
+        );
+    }
     let shell_args = shell_descriptor.persistent_shell_args(login);
     let mut request = SandboxManager::new().prepare_spawn(
         SandboxCommand {
@@ -1664,9 +1692,13 @@ pub async fn create_persistent_shell_session(
             return;
         }
 
-        // Wait for the marker in output
+        // Wait for the marker in output, then also drain the D/A/B markers that
+        // bash emits immediately afterwards (PROMPT_COMMAND + PS1).  Consuming
+        // them here prevents them from leaking into the first real command's
+        // broadcast subscription, which would cause a spurious early completion.
         let timeout = tokio::time::Duration::from_secs(3);
         let start = tokio::time::Instant::now();
+        let mut saw_ready = false;
 
         while start.elapsed() < timeout {
             match tokio::time::timeout(
@@ -1677,10 +1709,19 @@ pub async fn create_persistent_shell_session(
             {
                 Ok(Ok(output)) => {
                     let output_str = String::from_utf8_lossy(&output);
-                    if output_str.contains(test_marker) {
-                        // Shell is ready!
-                        *ready_flag.write().await = true;
-                        return;
+                    if !saw_ready && output_str.contains(test_marker) {
+                        saw_ready = true;
+                        // Keep reading to drain the D/A/B markers that follow.
+                    }
+                    if saw_ready {
+                        // The B marker (OSC 133;B) is the last thing bash emits
+                        // before settling into the idle-prompt state.  Once we
+                        // see it we know the startup markers are fully consumed
+                        // and it is safe for the next subscriber to start.
+                        if output_str.contains("\x1b]133;B") {
+                            *ready_flag.write().await = true;
+                            return;
+                        }
                     }
                 }
                 Ok(Err(_)) => {
@@ -1688,7 +1729,7 @@ pub async fn create_persistent_shell_session(
                     break;
                 }
                 Err(_) => {
-                    // Timeout on recv, continue waiting
+                    // Timeout on recv — keep looping until outer timeout fires.
                     continue;
                 }
             }
