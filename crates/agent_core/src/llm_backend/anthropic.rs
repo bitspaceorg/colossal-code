@@ -238,8 +238,32 @@ fn anthropic_tool_choice_to_value(tool_choice: ToolChoice) -> Value {
 }
 
 fn extract_system_prompt(messages: &[IndexMap<String, MessageContent>]) -> String {
-    let _ = messages;
-    SYSTEM_IDENTITY_PREFIX.to_string()
+    let mut parts = vec![SYSTEM_IDENTITY_PREFIX.to_string()];
+
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(content_as_text)
+            .unwrap_or_default();
+        if role != "system" {
+            continue;
+        }
+
+        let content = message
+            .get("content")
+            .and_then(content_as_text)
+            .unwrap_or_default();
+        if should_forward_system_message(&content) {
+            parts.push(content);
+        }
+    }
+
+    parts.join("\n\n")
+}
+
+fn should_forward_system_message(content: &str) -> bool {
+    let trimmed = content.trim();
+    trimmed.contains("<system-reminder>") && trimmed.contains("</system-reminder>")
 }
 
 fn system_blocks(system: &str) -> Vec<Value> {
@@ -727,4 +751,35 @@ fn current_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use either::Either;
+
+    fn text_message(role: &str, content: &str) -> IndexMap<String, MessageContent> {
+        let mut message = IndexMap::new();
+        message.insert("role".to_string(), Either::Left(role.to_string()));
+        message.insert("content".to_string(), Either::Left(content.to_string()));
+        message
+    }
+
+    #[test]
+    fn extract_system_prompt_forwards_only_system_reminders() {
+        let messages = vec![
+            text_message("system", "base system prompt should stay out"),
+            text_message(
+                "system",
+                "<system-reminder>\nPlan mode active.\n</system-reminder>",
+            ),
+            text_message("user", "hello"),
+        ];
+
+        let system = extract_system_prompt(&messages);
+
+        assert!(system.starts_with(SYSTEM_IDENTITY_PREFIX));
+        assert!(system.contains("<system-reminder>\nPlan mode active.\n</system-reminder>"));
+        assert!(!system.contains("base system prompt should stay out"));
+    }
 }
