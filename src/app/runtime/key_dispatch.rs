@@ -39,6 +39,7 @@ impl App {
                 if let Some(agent_arc) = &self.agent {
                     let agent_clone = Arc::clone(agent_arc);
                     let config_clone = config.clone();
+                    agent_clone.apply_safety_config_immediately(config.clone());
                     let reminder_clone = reminder.clone();
                     task::spawn(async move {
                         let _ = agent_clone.update_safety_config(config_clone).await;
@@ -100,6 +101,7 @@ impl App {
             if let Some(agent_arc) = &self.agent {
                 let agent_clone = Arc::clone(agent_arc);
                 let config_clone = config.clone();
+                agent_clone.apply_safety_config_immediately(config.clone());
                 task::spawn(async move {
                     let _ = agent_clone.update_safety_config(config_clone).await;
                 });

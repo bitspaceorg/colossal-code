@@ -664,6 +664,33 @@ impl Agent {
         Ok(())
     }
 
+    /// Best-effort synchronous safety update for UI mode toggles.
+    ///
+    /// This updates the in-memory safety config and pending sandbox policy
+    /// immediately so the next tool call observes the new mode even if the
+    /// full async refresh has not completed yet.
+    pub fn apply_safety_config_immediately(&self, new_safety_config: safety_config::SafetyConfig) {
+        if let Ok(mut config_guard) = self.safety_config.try_lock() {
+            *config_guard = new_safety_config.clone();
+        }
+
+        let new_tools = if new_safety_config.mode == safety_config::SafetyMode::ReadOnly {
+            tools::get_readonly_tools()
+        } else {
+            tools::get_all_tools()
+        };
+        if let Ok(mut tools_guard) = self.tools.try_lock() {
+            *tools_guard = new_tools;
+        }
+
+        if let Some(state) = shell_session::global_state()
+            && let Ok(mut policy_guard) = state.pending_sandbox_policy.try_lock()
+        {
+            *policy_guard =
+                sandbox_policy_from_config_with_workspace(&new_safety_config, self.effective_cwd());
+        }
+    }
+
     pub fn collect_summary(&self, task: &Task) -> TaskSummary {
         build_summary(task, None)
     }
