@@ -73,6 +73,8 @@ impl App {
         env: crate::app::init::constructor_backend::BackendEnvironment,
         model: Option<String>,
     ) -> Result<()> {
+        let replace_system_prompt =
+            Self::is_claude_code_auth_transition(env.provider_id(), env.auth_kind());
         let conversation = self
             .agent
             .as_ref()
@@ -94,8 +96,14 @@ impl App {
         futures::executor::block_on(agent.initialize_backend())
             .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))?;
         if let Some(messages_json) = conversation.as_deref() {
-            futures::executor::block_on(agent.restore_conversation(messages_json))
-                .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))?;
+            let restore_result = if replace_system_prompt {
+                futures::executor::block_on(
+                    agent.restore_conversation_with_replaced_system_prompt(messages_json),
+                )
+            } else {
+                futures::executor::block_on(agent.restore_conversation(messages_json))
+            };
+            restore_result.map_err(|e| color_eyre::eyre::eyre!(e.to_string()))?;
         }
 
         let agent_arc = Arc::new(agent);
@@ -107,5 +115,17 @@ impl App {
         self.agent_rx = Some(output_rx);
 
         Ok(())
+    }
+
+    fn is_claude_code_auth_transition(
+        target_provider_id: Option<&str>,
+        target_auth_kind: Option<&str>,
+    ) -> bool {
+        let current_provider_id = std::env::var("NITE_HTTP_PROVIDER_ID").ok();
+        let current_auth_kind = std::env::var("NITE_HTTP_AUTH_KIND").ok();
+
+        current_provider_id.as_deref() == Some("anthropic")
+            && current_auth_kind.as_deref() == Some("claude_code")
+            && !(target_provider_id == Some("anthropic") && target_auth_kind == Some("claude_code"))
     }
 }

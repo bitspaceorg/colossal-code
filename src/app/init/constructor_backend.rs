@@ -154,6 +154,16 @@ impl BackendConfig {
     }
 }
 
+impl BackendEnvironment {
+    pub(crate) fn provider_id(&self) -> Option<&str> {
+        self.provider_id.as_deref()
+    }
+
+    pub(crate) fn auth_kind(&self) -> Option<&str> {
+        self.auth_kind.as_deref()
+    }
+}
+
 impl App {
     pub(crate) fn apply_backend_environment(env: &BackendEnvironment) {
         unsafe {
