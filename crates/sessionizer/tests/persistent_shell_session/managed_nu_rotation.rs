@@ -501,7 +501,8 @@ async fn managed_nu_fork_eval_works_after_rotation() -> Result<(), Box<dyn std::
     }
 
     let fork_result = manager
-        .fork_eval_in_managed_nu_session(restored_id.clone(), "square 7".to_string(), None)?
+        .fork_eval_in_managed_nu_session(restored_id.clone(), "square 7".to_string(), None, None)
+        .await?
         .expect("should be Some for managed Nu");
     assert!(
         fork_result.stdout.contains("49"),
@@ -510,7 +511,8 @@ async fn managed_nu_fork_eval_works_after_rotation() -> Result<(), Box<dyn std::
     );
 
     let fork_result = manager
-        .fork_eval_in_managed_nu_session(restored_id.clone(), "$env.MY_KEY".to_string(), None)?
+        .fork_eval_in_managed_nu_session(restored_id.clone(), "$env.MY_KEY".to_string(), None, None)
+        .await?
         .expect("should be Some for managed Nu");
     assert!(
         fork_result.stdout.contains("rotation_val"),

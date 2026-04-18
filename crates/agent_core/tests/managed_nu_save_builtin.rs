@@ -1,5 +1,6 @@
 use agent_core::{
-    Agent, BackendConfig, execute_tool_call, safety_config::SafetyConfig,
+    Agent, BackendConfig, execute_tool_call,
+    safety_config::{SafetyConfig, SafetyMode},
     set_workspace_root_override,
 };
 use mistralrs::{CalledFunction, ToolCallResponse, ToolCallType};
@@ -17,6 +18,17 @@ fn managed_nu_env_lock() -> std::sync::MutexGuard<'static, ()> {
 
 fn build_test_agent(cwd: PathBuf) -> Agent {
     let safety = SafetyConfig::from_mode(agent_core::safety_config::SafetyMode::Yolo);
+    Agent::new_with_backend(
+        BackendConfig::None,
+        String::new(),
+        vec![],
+        safety,
+        "test".into(),
+    )
+    .with_working_directory(cwd)
+}
+
+fn build_test_agent_with_safety(cwd: PathBuf, safety: SafetyConfig) -> Agent {
     Agent::new_with_backend(
         BackendConfig::None,
         String::new(),
@@ -194,6 +206,142 @@ async fn managed_nu_exec_command_runs_filesystem_builtins() {
     let parsed: serde_yaml::Value = serde_yaml::from_str(&rm_result).expect("yaml result");
     assert_eq!(parsed["status"].as_str(), Some("Success"), "{rm_result}");
     assert!(!moved_path.exists());
+
+    unsafe {
+        std::env::remove_var("NITE_MANAGED_SHELL");
+    }
+}
+
+#[tokio::test]
+async fn managed_nu_exec_command_runs_compound_filesystem_flow() {
+    let _guard = managed_nu_env_lock();
+    if std::process::Command::new("sh")
+        .arg("-lc")
+        .arg("command -v nu >/dev/null 2>&1")
+        .status()
+        .map(|status| !status.success())
+        .unwrap_or(true)
+    {
+        return;
+    }
+
+    unsafe {
+        std::env::set_var("NITE_MANAGED_SHELL", "nu");
+    }
+
+    let temp = make_test_dir("compound-filesystem-flow");
+    let file_path = temp.join("temp_exec_demo.txt");
+    set_workspace_root_override(&temp);
+    let agent = build_test_agent(temp.clone());
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    let result = execute_tool_call(
+        &agent,
+        &tool_call(json!({
+            "command": format!(
+                "let file = '{}'; touch $file; if ($file | path exists) {{ print 'EXISTS_AFTER_CREATE=yes' }} else {{ print 'EXISTS_AFTER_CREATE=no' }}; rm $file; if ($file | path exists) {{ print 'EXISTS_AFTER_REMOVE=yes' }} else {{ print 'EXISTS_AFTER_REMOVE=no' }}",
+                file_path.display()
+            ),
+            "replay_state": false
+        })),
+        tx,
+    )
+    .await
+    .expect("managed nu compound flow result");
+
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&result).expect("yaml result");
+    assert_eq!(parsed["status"].as_str(), Some("Success"), "{result}");
+    assert_eq!(
+        parsed["cmd_out"].as_str(),
+        Some("EXISTS_AFTER_CREATE=yes\nEXISTS_AFTER_REMOVE=no\n"),
+        "{result}"
+    );
+
+    unsafe {
+        std::env::remove_var("NITE_MANAGED_SHELL");
+    }
+}
+
+#[tokio::test]
+async fn managed_nu_exec_command_can_print_inside_if_block() {
+    let _guard = managed_nu_env_lock();
+    if std::process::Command::new("sh")
+        .arg("-lc")
+        .arg("command -v nu >/dev/null 2>&1")
+        .status()
+        .map(|status| !status.success())
+        .unwrap_or(true)
+    {
+        return;
+    }
+
+    unsafe {
+        std::env::set_var("NITE_MANAGED_SHELL", "nu");
+    }
+
+    let temp = make_test_dir("if-print");
+    set_workspace_root_override(&temp);
+    let agent = build_test_agent(temp.clone());
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    let result = execute_tool_call(
+        &agent,
+        &tool_call(json!({
+            "command": "if true { print 'yes' } else { print 'no' }",
+            "replay_state": false
+        })),
+        tx,
+    )
+    .await
+    .expect("managed nu if-print result");
+
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&result).expect("yaml result");
+    assert_eq!(parsed["status"].as_str(), Some("Success"), "{result}");
+    assert_eq!(parsed["cmd_out"].as_str(), Some("yes\n"), "{result}");
+
+    unsafe {
+        std::env::remove_var("NITE_MANAGED_SHELL");
+    }
+}
+
+#[tokio::test]
+async fn managed_nu_readonly_blocks_write_in_foreground_exec_command() {
+    let _guard = managed_nu_env_lock();
+    if std::process::Command::new("sh")
+        .arg("-lc")
+        .arg("command -v nu >/dev/null 2>&1")
+        .status()
+        .map(|status| !status.success())
+        .unwrap_or(true)
+    {
+        return;
+    }
+
+    unsafe {
+        std::env::set_var("NITE_MANAGED_SHELL", "nu");
+    }
+
+    let temp = make_test_dir("readonly-blocks-write");
+    let file_path = temp.join("blocked.txt");
+    set_workspace_root_override(&temp);
+    let agent =
+        build_test_agent_with_safety(temp.clone(), SafetyConfig::from_mode(SafetyMode::ReadOnly));
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    let result = execute_tool_call(
+        &agent,
+        &tool_call(json!({
+            "command": format!("'blocked' | save -f {}", file_path.display()),
+            "replay_state": false
+        })),
+        tx,
+    )
+    .await
+    .expect("managed nu readonly write result");
+
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&result).expect("yaml result");
+    assert_eq!(parsed["status"].as_str(), Some("Failure"), "{result}");
+    assert!(!file_path.exists(), "{result}");
 
     unsafe {
         std::env::remove_var("NITE_MANAGED_SHELL");

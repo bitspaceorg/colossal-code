@@ -655,7 +655,8 @@ async fn managed_nu_fork_eval_external_commands_work() -> Result<(), Box<dyn std
 
     for form in &["^echo hello", "run-external echo hello"] {
         let result = manager
-            .fork_eval_in_managed_nu_session(session_id.clone(), form.to_string(), None)?
+            .fork_eval_in_managed_nu_session(session_id.clone(), form.to_string(), None, None)
+            .await?
             .expect("session is managed nu");
         assert_eq!(
             result.exit_status,

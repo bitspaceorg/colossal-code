@@ -30,26 +30,43 @@ async fn run_managed_nu_command_with_timeout<F>(
 where
     F: FnOnce(&mut ManagedNuRuntime) -> Result<ExecCommandOutput, ColossalErr> + Send + 'static,
 {
-    let Some(timeout_ms) = timeout_ms else {
-        let mut runtime = runtime.lock().unwrap();
-        return f(&mut runtime).map(Some);
+    let (sandbox_policy, workspace_root) = {
+        let rt = runtime.lock().unwrap();
+        (rt.sandbox_policy().clone(), rt.initial_cwd())
     };
 
-    let task = tokio::task::spawn_blocking(move || {
-        let mut runtime = runtime.lock().unwrap();
-        f(&mut runtime)
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<ExecCommandOutput, ColossalErr>>();
+    std::thread::spawn(move || {
+        if !matches!(
+            sandbox_policy,
+            crate::protocol::SandboxPolicy::DangerFullAccess
+        ) {
+            if let Err(e) = crate::landlock::apply_sandbox_policy_to_current_thread(
+                &sandbox_policy,
+                &workspace_root,
+            ) {
+                let _ = tx.send(Err(e));
+                return;
+            }
+        }
+        let mut rt = runtime.lock().unwrap();
+        let _ = tx.send(f(&mut rt));
     });
 
-    match tokio::time::timeout(Duration::from_millis(timeout_ms), task).await {
-        Ok(join_result) => {
-            let output = join_result.map_err(|err| {
-                ColossalErr::Io(std::io::Error::other(format!(
-                    "managed Nushell command task failed: {err}"
-                )))
-            })??;
-            Ok(Some(output))
-        }
-        Err(_) => Ok(None),
+    let result_future = async {
+        rx.await.unwrap_or_else(|_| {
+            Err(ColossalErr::Io(std::io::Error::other(
+                "managed Nu command thread disconnected",
+            )))
+        })
+    };
+
+    match timeout_ms {
+        None => result_future.await.map(Some),
+        Some(ms) => match tokio::time::timeout(Duration::from_millis(ms), result_future).await {
+            Ok(result) => result.map(Some),
+            Err(_) => Ok(None),
+        },
     }
 }
 
@@ -161,6 +178,24 @@ fn clean_shell_output(output: &str, command: &str) -> String {
     }
 
     cleaned_lines.join("\n")
+}
+
+fn shell_has_prompt_osc133(shell_path: &str) -> bool {
+    std::path::Path::new(shell_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.eq_ignore_ascii_case("bash"))
+        .unwrap_or(false)
+}
+
+fn wrap_command_for_completion(shell_path: &str, command: &str) -> String {
+    if shell_has_prompt_osc133(shell_path) {
+        return command.to_string();
+    }
+
+    format!(
+        "{{ {command}; __nite_cmd_status=$?; printf '\\033]133;D;%s\\007\\033]133;A\\007\\033]133;B\\007' \"$__nite_cmd_status\"; unset __nite_cmd_status; }}"
+    )
 }
 
 /// Apply a batch of OSC 133 events to the shared command-tracking state.
@@ -1315,8 +1350,23 @@ impl SessionManager {
         // Use OSC 133 for command completion detection instead of injected markers
         let mut osc_parser = crate::osc133::Parser::new();
         let user_command = command.clone();
+        let shell_path = {
+            let sessions = self.persistent_shell_sessions.lock().unwrap();
+            sessions
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, session)| session.shell_path().to_string())
+                .ok_or_else(|| {
+                    ColossalErr::Sandbox(SandboxErr::Denied(
+                        -1,
+                        format!("unknown session id {}", session_id.as_str()),
+                        (),
+                    ))
+                })?
+        };
+        let wrapped_command = wrap_command_for_completion(&shell_path, &command);
         let raw_stream = self
-            .send_input_to_shell_session(session_id, command, None)
+            .send_input_to_shell_session(session_id, wrapped_command, None)
             .await?;
         let (tx, rx) = unbounded::<StreamEvent>();
 
@@ -1531,11 +1581,26 @@ impl SessionManager {
         }
 
         let tracked_env_updates = tracked_env_updates_from_command(&command);
+        let shell_path = {
+            let sessions = self.persistent_shell_sessions.lock().unwrap();
+            sessions
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, session)| session.shell_path().to_string())
+                .ok_or_else(|| {
+                    ColossalErr::Sandbox(crate::error::SandboxErr::Denied(
+                        -1,
+                        format!("unknown session id {}", session_id.as_str()),
+                        (),
+                    ))
+                })?
+        };
+        let wrapped_command = wrap_command_for_completion(&shell_path, &command);
 
         // Use OSC 133 for command completion detection instead of injected markers
         let mut osc_parser = crate::osc133::Parser::new();
         let stream_rx = self
-            .send_input_to_shell_session(session_id.clone(), command.clone(), None)
+            .send_input_to_shell_session(session_id.clone(), wrapped_command, None)
             .await?;
 
         let mut stdout_parts = Vec::new();
@@ -1638,10 +1703,11 @@ impl SessionManager {
     /// original session state is untouched.  Returns `None` if the session is
     /// not a managed-Nu session (callers should fall back to the existing
     /// one-shot exec path for POSIX shells).
-    pub fn fork_eval_in_managed_nu_session(
+    pub async fn fork_eval_in_managed_nu_session(
         &self,
         session_id: SessionId,
         command: String,
+        timeout_ms: Option<u64>,
         ask_for_approval: Option<crate::safety::AskForApproval>,
     ) -> Result<Option<ExecCommandOutput>, ColossalErr> {
         let managed_runtime = {
@@ -1684,8 +1750,8 @@ impl SessionManager {
             }
         }
 
-        let rt = runtime.lock().unwrap();
-        Ok(Some(rt.fork_eval(command)?))
+        run_managed_nu_command_with_timeout(runtime, timeout_ms, move |rt| rt.fork_eval(command))
+            .await
     }
 
     /// Send raw input to a persistent shell session (without automatic newline)

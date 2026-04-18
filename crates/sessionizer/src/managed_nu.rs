@@ -5,6 +5,7 @@ use crate::manager::{
 use crate::protocol::SandboxPolicy;
 use crate::types::{ExecCommandOutput, ExitStatus, SessionId};
 use nu_cmd_lang::create_default_context;
+use nu_command::UTouch;
 use nu_command::add_shell_command_context;
 use nu_engine::{CallExt, env_to_strings, eval_block};
 use nu_parser::parse;
@@ -44,6 +45,9 @@ use std::time::Instant;
 #[derive(Clone)]
 struct ManagedExternalCommand;
 
+#[derive(Clone)]
+struct ManagedPrintCommand;
+
 impl Command for ManagedExternalCommand {
     fn name(&self) -> &str {
         "run-external"
@@ -82,17 +86,13 @@ impl Command for ManagedExternalCommand {
             });
         };
 
-        let cmd_name = match cmd_val.coerce_into_string() {
-            Ok(s) => s,
-            Err(e) => return Err(e),
-        };
+        let config = stack.get_config(engine_state);
+
+        let cmd_name = cmd_val.to_expanded_string(", ", config.as_ref());
 
         let mut cmd_args: Vec<String> = Vec::new();
         for arg in iter {
-            match arg.coerce_into_string() {
-                Ok(s) => cmd_args.push(s),
-                Err(e) => return Err(e),
-            }
+            cmd_args.push(arg.to_expanded_string(", ", config.as_ref()));
         }
 
         // Use the Nu stack's env vars as the child process environment so that
@@ -145,6 +145,47 @@ impl Command for ManagedExternalCommand {
     }
 }
 
+impl Command for ManagedPrintCommand {
+    fn name(&self) -> &str {
+        "print"
+    }
+
+    fn description(&self) -> &str {
+        "Print values in the managed Nu runtime."
+    }
+
+    fn signature(&self) -> Signature {
+        Signature::build(self.name())
+            .input_output_types(vec![
+                (Type::Nothing, Type::String),
+                (Type::Any, Type::String),
+            ])
+            .rest("args", SyntaxShape::Any, "Values to print.")
+            .category(Category::Core)
+            .allows_unknown_args()
+    }
+
+    fn run(
+        &self,
+        engine_state: &EngineState,
+        stack: &mut Stack,
+        call: &Call,
+        _input: PipelineData,
+    ) -> Result<PipelineData, ShellError> {
+        let config = stack.get_config(engine_state);
+        let rendered = call
+            .rest::<Value>(engine_state, stack, 0)?
+            .into_iter()
+            .map(|value| value.to_expanded_string(" ", config.as_ref()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Ok(PipelineData::Value(
+            Value::string(format!("{rendered}\n"), call.head),
+            None,
+        ))
+    }
+}
+
 fn shell_error_to_io(err: ShellError) -> ColossalErr {
     ColossalErr::Io(std::io::Error::other(err.to_string()))
 }
@@ -170,6 +211,60 @@ fn parse_block(
     }
 
     Ok((block, working_set.render()))
+}
+
+fn external_commands_not_supported(err: &ColossalErr) -> bool {
+    err.to_string()
+        .contains("Running external commands not supported")
+}
+
+fn should_retry_with_run_external(source: &str) -> bool {
+    let trimmed = source.trim_start();
+    !trimmed.is_empty()
+        && !trimmed.starts_with('^')
+        && !trimmed.starts_with("run-external ")
+        && !trimmed.starts_with("run-external\n")
+}
+
+fn caret_prefix_external(source: &str) -> String {
+    let trimmed = source.trim_start();
+    let leading_ws_len = source.len().saturating_sub(trimmed.len());
+    let leading_ws = &source[..leading_ws_len];
+    format!("{leading_ws}^{trimmed}")
+}
+
+fn eval_string_once(
+    engine_state: &mut EngineState,
+    stack: &mut Stack,
+    source: &str,
+) -> Result<String, ColossalErr> {
+    let (block, delta) = parse_block(engine_state, source)?;
+    engine_state.merge_delta(delta).map_err(shell_error_to_io)?;
+    let result = eval_block::<WithoutDebug>(engine_state, stack, &block, PipelineData::empty())
+        .map_err(shell_error_to_io)?;
+
+    let _ = stack.update_config(engine_state);
+
+    result
+        .body
+        .collect_string("", stack.get_config(engine_state).as_ref())
+        .map_err(shell_error_to_io)
+}
+
+fn eval_string_with_external_fallback(
+    engine_state: &mut EngineState,
+    stack: &mut Stack,
+    source: &str,
+) -> Result<String, ColossalErr> {
+    match eval_string_once(engine_state, stack, source) {
+        Ok(output) => Ok(output),
+        Err(err)
+            if external_commands_not_supported(&err) && should_retry_with_run_external(source) =>
+        {
+            eval_string_once(engine_state, stack, &caret_prefix_external(source))
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn split_top_level_segments(source: &str) -> Vec<String> {
@@ -504,6 +599,12 @@ impl ManagedNuRuntime {
         // Register the managed `run-external` implementation so that external
         // command syntax (`^cmd`, `run-external cmd`) resolves correctly.
         let mut working_set = StateWorkingSet::new(&engine_state);
+        if engine_state.find_decl(b"touch", &[]).is_none() {
+            working_set.add_decl(Box::new(UTouch));
+        }
+        if engine_state.find_decl(b"print", &[]).is_none() {
+            working_set.add_decl(Box::new(ManagedPrintCommand));
+        }
         working_set.add_decl(Box::new(ManagedExternalCommand));
         let delta = working_set.render();
         engine_state.merge_delta(delta).map_err(shell_error_to_io)?;
@@ -758,28 +859,7 @@ impl ManagedNuRuntime {
     }
 
     fn eval_string(&mut self, source: &str) -> Result<String, ColossalErr> {
-        let (block, delta) = parse_block(&self.engine_state, source)?;
-        self.engine_state
-            .merge_delta(delta)
-            .map_err(shell_error_to_io)?;
-        let result = eval_block::<WithoutDebug>(
-            &self.engine_state,
-            &mut self.stack,
-            &block,
-            PipelineData::empty(),
-        )
-        .map_err(shell_error_to_io)?;
-
-        // Pick up any $env.config mutations the block may have made.  Nu stores
-        // config in Stack::config, and update_config() syncs it from $env.config.
-        // Errors are soft (config values that didn't parse are skipped); we
-        // ignore warnings here since this is a library context without a REPL.
-        let _ = self.stack.update_config(&self.engine_state);
-
-        result
-            .body
-            .collect_string("", self.stack.get_config(&self.engine_state).as_ref())
-            .map_err(shell_error_to_io)
+        eval_string_with_external_fallback(&mut self.engine_state, &mut self.stack, source)
     }
 
     fn eval_value(&mut self, source: &str) -> Result<Value, ColossalErr> {
@@ -1062,28 +1142,11 @@ impl ManagedNuRuntime {
                     return Ok(collected);
                 }
 
-                let (block, delta) = parse_block(&forked_engine, trimmed)?;
-                forked_engine
-                    .merge_delta(delta)
-                    .map_err(shell_error_to_io)?;
-                let eval_result = eval_block::<WithoutDebug>(
-                    &forked_engine,
+                let output = eval_string_with_external_fallback(
+                    &mut forked_engine,
                     &mut forked_stack,
-                    &block,
-                    PipelineData::empty(),
-                )
-                .map_err(shell_error_to_io)?;
-
-                // Propagate any $env.config mutations into the forked stack's
-                // config so subsequent expressions in the same fork_eval see
-                // the updated config.  The forked stack is discarded at the end
-                // of fork_eval; this does not affect the live runtime.
-                let _ = forked_stack.update_config(&forked_engine);
-
-                let output = eval_result
-                    .body
-                    .collect_string("", forked_stack.get_config(&forked_engine).as_ref())
-                    .map_err(shell_error_to_io)?;
+                    trimmed,
+                )?;
                 collected.push_str(&output);
                 Ok(collected)
             },

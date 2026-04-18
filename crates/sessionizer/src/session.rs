@@ -44,7 +44,9 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
 fn shell_program_name(shell: &str) -> String {
-    PathBuf::from(shell)
+    let path = PathBuf::from(shell);
+    let resolved = path.canonicalize().unwrap_or(path);
+    resolved
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(shell)

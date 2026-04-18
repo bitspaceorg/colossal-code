@@ -106,3 +106,6 @@ mod managed_nu_config;
 
 #[path = "persistent_shell_session/osc133_completion.rs"]
 mod osc133_completion;
+
+#[path = "persistent_shell_session/sandbox_policy.rs"]
+mod sandbox_policy;

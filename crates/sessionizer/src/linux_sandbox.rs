@@ -133,6 +133,7 @@ pub fn create_bwrap_command_args(
         "--new-session".to_string(),
         "--unshare-user".to_string(),
         "--unshare-pid".to_string(),
+        "--unshare-ipc".to_string(),
     ];
     if !sandbox_policy.has_full_network_access() {
         args.push("--unshare-net".to_string());
@@ -145,12 +146,27 @@ pub fn create_bwrap_command_args(
         args.push("--tmpfs".to_string());
         args.push("/".to_string());
     }
-    args.extend([
-        "--dev".to_string(),
-        "/dev".to_string(),
-        "--proc".to_string(),
-        "/proc".to_string(),
-    ]);
+    if matches!(sandbox_policy, SandboxPolicy::ReadOnly) {
+        for dev in &[
+            "/dev/null",
+            "/dev/zero",
+            "/dev/urandom",
+            "/dev/random",
+            "/dev/tty",
+        ] {
+            if Path::new(dev).exists() {
+                args.push("--dev-bind".to_string());
+                args.push(dev.to_string());
+                args.push(dev.to_string());
+            }
+        }
+    } else {
+        args.extend(["--dev".to_string(), "/dev".to_string()]);
+    }
+    // Nushell and other tools expect procfs to exist even in read-only sandboxes.
+    // Bubblewrap's --proc mount is read-only enough for this use and restores
+    // behavior that regressed when ReadOnly stopped mounting /proc entirely.
+    args.extend(["--proc".to_string(), "/proc".to_string()]);
 
     for system_path in SYSTEM_PATHS {
         let path = Path::new(system_path);
@@ -162,7 +178,7 @@ pub fn create_bwrap_command_args(
     }
 
     add_read_only_bind(args.as_mut(), Path::new(&command[0]));
-    ensure_command_parents_visible(&mut args, Path::new(&command[0]));
+    ensure_path_parents_visible(&mut args, Path::new(&command[0]), false);
 
     match sandbox_policy {
         SandboxPolicy::DangerFullAccess => {
@@ -180,7 +196,10 @@ pub fn create_bwrap_command_args(
             ]);
         }
         SandboxPolicy::ReadOnly => {
+            ensure_path_parents_visible(&mut args, cwd, true);
             add_read_only_bind(&mut args, cwd);
+            args.push("--remount-ro".to_string());
+            args.push("/".to_string());
         }
         SandboxPolicy::WorkspaceWrite {
             writable_roots,
@@ -213,7 +232,7 @@ pub fn create_bwrap_command_args(
     args
 }
 
-fn ensure_command_parents_visible(args: &mut Vec<String>, path: &Path) {
+fn ensure_path_parents_visible(args: &mut Vec<String>, path: &Path, lock_down: bool) {
     if !path.is_absolute() {
         return;
     }
@@ -223,8 +242,25 @@ fn ensure_command_parents_visible(args: &mut Vec<String>, path: &Path) {
             Component::RootDir => current.push(component),
             Component::Normal(part) => {
                 current.push(part);
-                if current != path {
-                    add_read_only_bind(args, &current);
+                if current == path {
+                    break;
+                }
+                // Already covered transitively by a system-path bind, or is an ancestor
+                // of one that bwrap will create implicitly — skip to avoid exposing siblings.
+                if SYSTEM_PATHS
+                    .iter()
+                    .any(|sp| current.starts_with(sp) || Path::new(sp).starts_with(&current))
+                {
+                    continue;
+                }
+                // Use --dir to create an empty traversable node rather than --ro-bind,
+                // which would expose the directory's contents (sibling files/dirs).
+                args.push("--dir".to_string());
+                args.push(current.to_string_lossy().to_string());
+                if lock_down {
+                    args.push("--chmod".to_string());
+                    args.push("0555".to_string());
+                    args.push(current.to_string_lossy().to_string());
                 }
             }
             _ => {}
@@ -236,7 +272,9 @@ fn add_read_only_bind(args: &mut Vec<String>, path: &Path) {
     if !path.exists() {
         return;
     }
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let Ok(canonical) = path.canonicalize() else {
+        return;
+    };
     let rendered = canonical.to_string_lossy().to_string();
     args.push("--ro-bind".to_string());
     args.push(rendered.clone());
@@ -247,7 +285,9 @@ fn add_read_write_bind(args: &mut Vec<String>, path: &Path) {
     if !path.exists() {
         return;
     }
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let Ok(canonical) = path.canonicalize() else {
+        return;
+    };
     let rendered = canonical.to_string_lossy().to_string();
     args.push("--bind".to_string());
     args.push(rendered.clone());
@@ -269,6 +309,33 @@ mod tests {
         assert!(
             args.windows(3)
                 .any(|window| window == ["--ro-bind", rendered.as_str(), rendered.as_str()])
+        );
+    }
+
+    #[test]
+    fn readonly_policy_locks_down_synthetic_cwd_ancestors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("nested").join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let command = vec!["/bin/echo".to_string(), "hi".to_string()];
+        let args = create_bwrap_command_args(&SandboxPolicy::ReadOnly, &workspace, &command);
+
+        let parent = workspace
+            .parent()
+            .expect("workspace parent")
+            .canonicalize()
+            .expect("canonical parent");
+        let rendered = parent.to_string_lossy().to_string();
+
+        assert!(
+            args.windows(2)
+                .any(|window| window == ["--dir", rendered.as_str()]),
+            "expected readonly cwd ancestor to be created as traversable dir"
+        );
+        assert!(
+            args.windows(3)
+                .any(|window| window == ["--chmod", "0555", rendered.as_str()]),
+            "expected readonly cwd ancestor to be non-writable"
         );
     }
 
@@ -340,6 +407,19 @@ mod tests {
 
         assert!(args.contains(&"--tmpfs".to_string()));
         assert!(args.contains(&"/".to_string()));
+    }
+
+    #[test]
+    fn readonly_policy_remounts_root_readonly() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let command = vec!["/bin/echo".to_string(), "hi".to_string()];
+        let args = create_bwrap_command_args(&SandboxPolicy::ReadOnly, temp.path(), &command);
+
+        assert!(
+            args.windows(2)
+                .any(|window| window == ["--remount-ro", "/"]),
+            "expected readonly sandbox to remount synthetic root readonly"
+        );
     }
 
     #[test]

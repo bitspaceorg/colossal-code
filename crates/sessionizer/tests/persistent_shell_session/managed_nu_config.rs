@@ -239,7 +239,8 @@ async fn managed_nu_config_mutation_allowed_in_fork_eval() -> Result<(), Box<dyn
         "$env.config.table.mode = \"light\"",
     ] {
         let result = manager
-            .fork_eval_in_managed_nu_session(session_id.clone(), form.to_string(), None)?
+            .fork_eval_in_managed_nu_session(session_id.clone(), form.to_string(), None, None)
+            .await?
             .expect("session is managed nu");
         assert_eq!(
             result.exit_status,

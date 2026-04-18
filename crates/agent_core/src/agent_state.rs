@@ -70,10 +70,6 @@ pub fn sandbox_policy_from_config_with_workspace(
     let mut writable_roots = Vec::new();
     push_writable_root_unique(&mut writable_roots, workspace_path.clone());
 
-    if let Some(parent) = workspace_path.parent() {
-        push_writable_root_unique(&mut writable_roots, parent.to_path_buf());
-    }
-
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_parent) = exe_path.parent().and_then(|p| p.parent()) {
             push_writable_root_unique(&mut writable_roots, exe_parent.to_path_buf());
@@ -88,13 +84,18 @@ pub fn sandbox_policy_from_config_with_workspace(
 
     if let Ok(extra_roots) = std::env::var("SANDBOX_EXTRA_ROOTS") {
         for root_path in extra_roots.split(':') {
-            if !root_path.is_empty() {
-                writable_roots.push(WritableRoot {
-                    root: PathBuf::from(root_path),
-                    recursive: true,
-                    read_only_subpaths: vec![],
-                });
+            if root_path.is_empty() {
+                continue;
             }
+            let path = PathBuf::from(root_path);
+            let Ok(canonical) = path.canonicalize() else {
+                continue;
+            };
+            writable_roots.push(WritableRoot {
+                root: canonical,
+                recursive: true,
+                read_only_subpaths: vec![],
+            });
         }
     }
 

@@ -46,13 +46,20 @@ async fn managed_nu_fork_eval_sees_session_state_without_mutating_it()
     manager.update_cwd_in_shell_session(session_id.clone(), nested.clone())?;
 
     let result = manager
-        .fork_eval_in_managed_nu_session(session_id.clone(), "$env.FORK_VAR".to_string(), None)?
+        .fork_eval_in_managed_nu_session(
+            session_id.clone(),
+            "$env.FORK_VAR".to_string(),
+            None,
+            None,
+        )
+        .await?
         .expect("session is managed nu");
     assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
     assert!(result.stdout.contains("visible"), "{:?}", result.stdout);
 
     let result = manager
-        .fork_eval_in_managed_nu_session(session_id.clone(), "fork-greet".to_string(), None)?
+        .fork_eval_in_managed_nu_session(session_id.clone(), "fork-greet".to_string(), None, None)
+        .await?
         .expect("session is managed nu");
     assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
     assert!(
@@ -66,7 +73,9 @@ async fn managed_nu_fork_eval_sees_session_state_without_mutating_it()
             session_id.clone(),
             "$fork_let; $fork_mut".to_string(),
             None,
-        )?
+            None,
+        )
+        .await?
         .expect("session is managed nu");
     assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
     assert!(
@@ -76,7 +85,8 @@ async fn managed_nu_fork_eval_sees_session_state_without_mutating_it()
     );
 
     let result = manager
-        .fork_eval_in_managed_nu_session(session_id.clone(), "pwd".to_string(), None)?
+        .fork_eval_in_managed_nu_session(session_id.clone(), "pwd".to_string(), None, None)
+        .await?
         .expect("session is managed nu");
     assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
     assert!(result.stdout.contains("sub"), "{:?}", result.stdout);
@@ -119,7 +129,9 @@ async fn managed_nu_fork_eval_allows_stateful_commands_without_persisting_them()
             session_id.clone(),
             format!("cd {}; pwd", fork_dir.display()),
             None,
-        )?
+            None,
+        )
+        .await?
         .expect("session is managed nu");
     assert_eq!(
         result.exit_status,
@@ -134,7 +146,9 @@ async fn managed_nu_fork_eval_allows_stateful_commands_without_persisting_them()
             session_id.clone(),
             "def nope [] { 1 }; nope".to_string(),
             None,
-        )?
+            None,
+        )
+        .await?
         .expect("session is managed nu");
     assert_eq!(
         result.exit_status,
@@ -150,7 +164,9 @@ async fn managed_nu_fork_eval_allows_stateful_commands_without_persisting_them()
             "let nope = 1; mut counter = 2; $counter = 3; [$nope $counter] | to json -r"
                 .to_string(),
             None,
-        )?
+            None,
+        )
+        .await?
         .expect("session is managed nu");
     assert_eq!(
         result.exit_status,
@@ -165,7 +181,9 @@ async fn managed_nu_fork_eval_allows_stateful_commands_without_persisting_them()
             session_id.clone(),
             "alias nope = echo no; nope".to_string(),
             None,
-        )?
+            None,
+        )
+        .await?
         .expect("session is managed nu");
     assert_eq!(
         result.exit_status,
@@ -181,7 +199,9 @@ async fn managed_nu_fork_eval_allows_stateful_commands_without_persisting_them()
             "load-env { X: 1 }; hide-env PATH; [$env.X ($env.PATH? | default 'missing')] | to json -r"
                 .to_string(),
             None,
-        )?
+            None,
+        )
+        .await?
         .expect("session is managed nu");
     assert_eq!(
         result.exit_status,
@@ -196,7 +216,13 @@ async fn managed_nu_fork_eval_allows_stateful_commands_without_persisting_them()
 
     // $env.* assignments remain allowed in the fork.
     let result = manager
-        .fork_eval_in_managed_nu_session(session_id.clone(), "$env.PATH = 'x'".to_string(), None)?
+        .fork_eval_in_managed_nu_session(
+            session_id.clone(),
+            "$env.PATH = 'x'".to_string(),
+            None,
+            None,
+        )
+        .await?
         .expect("session is managed nu");
     assert_eq!(
         result.exit_status,
@@ -214,7 +240,9 @@ async fn managed_nu_fork_eval_allows_stateful_commands_without_persisting_them()
                 sourced.display()
             ),
             None,
-        )?
+            None,
+        )
+        .await?
         .expect("session is managed nu");
     assert_eq!(
         result.exit_status,
@@ -233,7 +261,9 @@ async fn managed_nu_fork_eval_allows_stateful_commands_without_persisting_them()
             session_id.clone(),
             "overlay new fork_overlay; overlay list | length".to_string(),
             None,
-        )?
+            None,
+        )
+        .await?
         .expect("session is managed nu");
     assert_eq!(
         result.exit_status,
@@ -288,11 +318,9 @@ async fn managed_nu_fork_eval_returns_none_for_posix_session()
     )
     .await?;
 
-    let result = manager.fork_eval_in_managed_nu_session(
-        session_id.clone(),
-        "echo test".to_string(),
-        None,
-    )?;
+    let result = manager
+        .fork_eval_in_managed_nu_session(session_id.clone(), "echo test".to_string(), None, None)
+        .await?;
     assert!(
         result.is_none(),
         "fork_eval should return None for POSIX sessions"
