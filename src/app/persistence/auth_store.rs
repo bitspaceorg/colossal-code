@@ -1,4 +1,5 @@
 use color_eyre::Result;
+use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -67,6 +68,7 @@ pub(crate) struct AuthStore {
 }
 
 const AUTH_FILE_NAME: &str = "auth.json";
+const KEYRING_SERVICE: &str = "cocode";
 
 fn default_version() -> u32 {
     1
@@ -85,12 +87,17 @@ pub(crate) fn load_auth_store() -> Result<AuthStore> {
     }
 
     let content = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&content).unwrap_or_default())
+    let mut store = serde_json::from_str(&content).unwrap_or_default();
+    hydrate_store_secrets(&mut store);
+    Ok(store)
 }
 
 pub(crate) fn save_auth_store(store: &AuthStore) -> Result<()> {
     let path = auth_file_path()?;
-    let content = serde_json::to_string_pretty(store)?;
+    persist_store_secrets(store)?;
+    let mut scrubbed = store.clone();
+    scrub_store_secrets(&mut scrubbed);
+    let content = serde_json::to_string_pretty(&scrubbed)?;
     fs::write(&path, content)?;
     set_restricted_permissions(&path)?;
     Ok(())
@@ -131,6 +138,86 @@ impl AuthStore {
         self.connections.push(connection);
         self.connections
             .sort_by(|a, b| a.provider_name.cmp(&b.provider_name));
+    }
+}
+
+fn secret_field_names() -> [&'static str; 3] {
+    ["api_key", "access_token", "refresh_token"]
+}
+
+fn keyring_entry(connection_id: &str, field: &str) -> Result<Entry> {
+    Ok(Entry::new(
+        KEYRING_SERVICE,
+        &format!("connection:{connection_id}:{field}"),
+    )?)
+}
+
+fn persist_store_secrets(store: &AuthStore) -> Result<()> {
+    for connection in &store.connections {
+        persist_connection_secret(connection, "api_key", connection.api_key.as_deref())?;
+        persist_connection_secret(
+            connection,
+            "access_token",
+            connection.access_token.as_deref(),
+        )?;
+        persist_connection_secret(
+            connection,
+            "refresh_token",
+            connection.refresh_token.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
+fn persist_connection_secret(
+    connection: &StoredConnection,
+    field: &str,
+    value: Option<&str>,
+) -> Result<()> {
+    let entry = keyring_entry(&connection.id, field)?;
+    match value.filter(|value| !value.trim().is_empty()) {
+        Some(secret) => entry.set_password(secret)?,
+        None => match entry.delete_credential() {
+            Ok(()) | Err(KeyringError::NoEntry) => {}
+            Err(err) => return Err(err.into()),
+        },
+    }
+    Ok(())
+}
+
+fn hydrate_store_secrets(store: &mut AuthStore) {
+    for connection in &mut store.connections {
+        hydrate_connection_secret(&connection.id, "api_key", &mut connection.api_key);
+        hydrate_connection_secret(&connection.id, "access_token", &mut connection.access_token);
+        hydrate_connection_secret(
+            &connection.id,
+            "refresh_token",
+            &mut connection.refresh_token,
+        );
+    }
+}
+
+fn hydrate_connection_secret(connection_id: &str, field: &str, slot: &mut Option<String>) {
+    let Ok(entry) = keyring_entry(connection_id, field) else {
+        return;
+    };
+    match entry.get_password() {
+        Ok(secret) if !secret.trim().is_empty() => *slot = Some(secret),
+        Ok(_) | Err(KeyringError::NoEntry) => {}
+        Err(_) => {}
+    }
+}
+
+fn scrub_store_secrets(store: &mut AuthStore) {
+    for connection in &mut store.connections {
+        for field in secret_field_names() {
+            match field {
+                "api_key" => connection.api_key = None,
+                "access_token" => connection.access_token = None,
+                "refresh_token" => connection.refresh_token = None,
+                _ => {}
+            }
+        }
     }
 }
 

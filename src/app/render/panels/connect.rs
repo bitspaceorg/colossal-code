@@ -463,7 +463,13 @@ impl App {
                 ]));
             }
         } else if is_claude {
-            // Claude Code auth flow (no saved tokens)
+            let masked = if self.connect.input.is_empty() {
+                "paste claude token here".to_string()
+            } else {
+                "*".repeat(self.connect.input.chars().count())
+            };
+
+            // Claude Code token flow (no saved tokens)
             if let Some(status) = self.connect.oauth_state.status.as_deref() {
                 lines.push(Line::from(Span::styled(
                     status,
@@ -471,7 +477,7 @@ impl App {
                 )));
             } else {
                 lines.push(Line::from(Span::styled(
-                    "Press Enter to start Claude Code login.",
+                    "Press Enter for setup instructions, then paste your Claude token.",
                     Style::default().fg(Color::DarkGray),
                 )));
             }
@@ -482,8 +488,33 @@ impl App {
                     Span::styled(url, Style::default().fg(Color::White)),
                 ]));
             }
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Token", Style::default().fg(Color::Yellow)),
+                Span::raw(": "),
+                Span::styled(
+                    masked,
+                    if self.connect.input.is_empty() {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Length", Style::default().fg(Color::Yellow)),
+                Span::raw(": "),
+                Span::styled(
+                    self.connect.input.chars().count().to_string(),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
             lines.push(Line::from(Span::styled(
-                "Press Enter after you finish authorization.",
+                "The token is stored in your OS keyring, not in auth.json.",
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::from(Span::styled(
+                "Press Enter after you finish setup and paste the token.",
                 Style::default().fg(Color::DarkGray),
             )));
         } else {

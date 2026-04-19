@@ -1340,6 +1340,7 @@ dependencies = [
  "edtui",
  "futures",
  "insta",
+ "keyring",
  "markdown-renderer",
  "rand 0.8.5",
  "ratatui",
@@ -4175,6 +4176,16 @@ checksum = "f4eacb0641a310445a4c513f2a5e23e19952e269c6a38887254d5f837a305506"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "keyring"
+version = "3.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
+dependencies = [
+ "log",
+ "zeroize",
 ]
 
 [[package]]

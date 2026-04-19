@@ -13,6 +13,7 @@ pub(super) struct ClaudeCodeAuthState {
     organization_id: Mutex<Option<String>>,
     refresh_lock: Mutex<()>,
     cli_version: String,
+    refresh_via_cli_allowed: bool,
 }
 
 impl ClaudeCodeAuthState {
@@ -35,6 +36,7 @@ impl ClaudeCodeAuthState {
             organization_id: Mutex::new(organization_id),
             refresh_lock: Mutex::new(()),
             cli_version: detected_claude_cli_version(),
+            refresh_via_cli_allowed: access_expires_at.is_some(),
         })
     }
 
@@ -63,6 +65,12 @@ impl ClaudeCodeAuthState {
 
         if !force && self.sync_from_claude_store().await? {
             return Ok(());
+        }
+
+        if !self.refresh_via_cli_allowed {
+            return Err(anyhow::anyhow!(
+                "Claude token refresh is not available for this connection. Run `claude setup-token`, reconnect the provider, and try again."
+            ));
         }
 
         if let Err(err) = refresh_via_cli() {
@@ -102,7 +110,7 @@ impl ClaudeCodeAuthState {
         let expires_at = *self.access_expires_at.lock().await;
         match expires_at {
             Some(value) => value <= now + 60,
-            None => true,
+            None => false,
         }
     }
 
