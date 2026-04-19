@@ -25,7 +25,7 @@ impl App {
     }
 
     pub(crate) fn poll_claude_code_auth(&mut self) -> Result<bool> {
-        let token = self.sanitized_connect_api_key();
+        let token = normalize_claude_setup_token(&self.connect.input);
         if token.is_empty() {
             self.connect.oauth_state.status = Some(
                 "Paste the token produced by `claude setup-token`, then press Enter again."
@@ -63,4 +63,43 @@ fn read_claude_auth_status() -> Option<ClaudeAuthStatus> {
         return None;
     }
     serde_json::from_slice::<ClaudeAuthStatus>(&output.stdout).ok()
+}
+
+fn normalize_claude_setup_token(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let candidate = trimmed
+        .lines()
+        .rev()
+        .find_map(extract_claude_token_candidate)
+        .unwrap_or(trimmed);
+
+    candidate
+        .trim()
+        .trim_matches(|c| matches!(c, '"' | '\'' | '`'))
+        .trim_start_matches("Bearer ")
+        .trim()
+        .to_string()
+}
+
+fn extract_claude_token_candidate(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    for prefix in [
+        "export CLAUDE_CODE_OAUTH_TOKEN=",
+        "CLAUDE_CODE_OAUTH_TOKEN=",
+        "set -x CLAUDE_CODE_OAUTH_TOKEN ",
+    ] {
+        if let Some(value) = trimmed.strip_prefix(prefix) {
+            return Some(value.trim());
+        }
+    }
+
+    Some(trimmed)
 }
