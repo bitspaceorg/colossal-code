@@ -409,6 +409,14 @@ impl App {
                 Self::insert_at_char(&mut self.connect.input, self.connect.input_cursor, &data);
                 self.connect.input_cursor += data.chars().count();
             }
+            ConnectModalMode::Subscription
+                if self.connect.selected_auth_method
+                    == Some(crate::app::connect::ConnectAuthMethod::ClaudeCode)
+                    && !self.connect.oauth_state.access_token.is_some() =>
+            {
+                Self::insert_at_char(&mut self.connect.input, self.connect.input_cursor, &data);
+                self.connect.input_cursor += data.chars().count();
+            }
             ConnectModalMode::AuthMethod
             | ConnectModalMode::Subscription
             | ConnectModalMode::Models => {}
