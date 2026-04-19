@@ -372,6 +372,12 @@ impl HttpBackend {
         self.claude_auth.is_some()
     }
 
+    fn can_force_refresh_claude_auth(&self) -> bool {
+        self.claude_auth
+            .as_ref()
+            .is_some_and(ClaudeCodeAuthState::can_force_refresh)
+    }
+
     fn is_anthropic_api(&self) -> bool {
         self.provider_id.as_deref() == Some("anthropic")
             || self

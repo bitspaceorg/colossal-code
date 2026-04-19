@@ -141,7 +141,10 @@ async fn send_anthropic_request(
 
     let body = response.text().await.unwrap_or_default();
 
-    if status.as_u16() == 401 && backend.has_claude_auth() {
+    if status.as_u16() == 401
+        && backend.has_claude_auth()
+        && backend.can_force_refresh_claude_auth()
+    {
         backend.force_refresh_claude_auth().await?;
         let retried = build_anthropic_request(backend, model_name, payload)
             .await

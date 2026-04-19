@@ -53,6 +53,10 @@ impl ClaudeCodeAuthState {
         self.organization_id.lock().await.clone()
     }
 
+    pub(super) fn can_force_refresh(&self) -> bool {
+        self.refresh_via_cli_allowed
+    }
+
     pub(super) async fn ensure_fresh(&self, _client: &reqwest::Client, force: bool) -> Result<()> {
         if !force && !self.should_refresh().await {
             return Ok(());
