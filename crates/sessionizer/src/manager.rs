@@ -37,6 +37,7 @@ where
 
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<ExecCommandOutput, ColossalErr>>();
     std::thread::spawn(move || {
+        #[cfg(target_os = "linux")]
         if !matches!(
             sandbox_policy,
             crate::protocol::SandboxPolicy::DangerFullAccess
