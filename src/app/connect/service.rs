@@ -1,6 +1,7 @@
 use color_eyre::Result;
 
 use crate::app::App;
+use crate::app::connect::claude_code::read_claude_auth_status;
 use crate::app::connect::model_discovery::{
     fallback_formatted_model_display_name, provider_model_metadata, resolve_provider_models,
 };
@@ -287,7 +288,18 @@ impl App {
                 }
             }
             ConnectAuthMethod::ClaudeCode => {
-                if self.connect.oauth_state.access_token.is_none() {
+                let auth_status = read_claude_auth_status();
+                let subscription_type =
+                    self.connect
+                        .oauth_state
+                        .subscription_type
+                        .clone()
+                        .or_else(|| {
+                            auth_status
+                                .as_ref()
+                                .and_then(|s| s.subscription_type.clone())
+                        });
+                if subscription_type.is_none() {
                     return Err(color_eyre::eyre::eyre!(
                         "Claude Code authorization has not completed yet"
                     ));
@@ -306,9 +318,14 @@ impl App {
                     refresh_token: self.connect.oauth_state.refresh_token.clone(),
                     access_expires_at: self.connect.oauth_state.expires_at,
                     oauth_scopes: self.connect.oauth_state.scopes.clone(),
-                    oauth_subscription_type: self.connect.oauth_state.subscription_type.clone(),
+                    oauth_subscription_type: subscription_type,
                     oauth_rate_limit_tier: self.connect.oauth_state.rate_limit_tier.clone(),
-                    organization_id: self.connect.oauth_state.organization_id.clone(),
+                    organization_id: self
+                        .connect
+                        .oauth_state
+                        .organization_id
+                        .clone()
+                        .or_else(|| auth_status.and_then(|s| s.org_id)),
                     created_at,
                     updated_at: now,
                 }
