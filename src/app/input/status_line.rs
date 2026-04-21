@@ -241,6 +241,12 @@ impl App {
     fn shortcuts_status_line(&self) -> Line<'static> {
         let mut spans = Vec::new();
 
+        // spans.push(Span::styled(
+        //     self.execution_mode_badge.clone(),
+        //     Style::default().fg(Color::DarkGray),
+        // ));
+        // spans.push(Span::styled(" • ", Style::default().fg(Color::Gray)));
+
         if self.current_model_supports_reasoning() {
             spans.push(Span::styled("ctrl+e", Style::default().fg(Color::DarkGray)));
             spans.push(Span::raw(" "));

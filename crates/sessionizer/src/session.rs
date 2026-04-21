@@ -44,11 +44,23 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
 fn shell_program_name(shell: &str) -> String {
-    PathBuf::from(shell)
+    let path = PathBuf::from(shell);
+    let resolved = path.canonicalize().unwrap_or(path);
+    resolved
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(shell)
         .to_ascii_lowercase()
+}
+
+fn shell_descriptor(shell: &str) -> crate::shell::Shell {
+    let path = PathBuf::from(shell);
+    let program_name = shell_program_name(shell);
+    if program_name == "nu" || program_name == "nu.exe" || program_name.contains("nushell") {
+        crate::shell::Shell::new_managed_nu(path)
+    } else {
+        crate::shell::Shell::new_posix(program_name, path)
+    }
 }
 
 fn maybe_remove_bwrap_new_session(request: &mut SandboxExecRequest) {
@@ -157,6 +169,7 @@ pub struct PersistentShellSession {
     _writer_handle: JoinHandle<()>,
     wait_handle: JoinHandle<Result<i32, std::io::Error>>,
     shell_path: String,
+    initial_cwd: PathBuf,
     // Shared session state
     shared_state: Arc<SharedSessionState>,
     // Command history
@@ -271,6 +284,7 @@ impl PersistentShellSession {
         writer_handle: JoinHandle<()>,
         wait_handle: JoinHandle<Result<i32, std::io::Error>>,
         shell_path: String,
+        initial_cwd: PathBuf,
         shared_state: Arc<SharedSessionState>,
         sandbox_policy: SandboxPolicy,
     ) -> Self {
@@ -282,6 +296,7 @@ impl PersistentShellSession {
             _writer_handle: writer_handle,
             wait_handle,
             shell_path,
+            initial_cwd,
             shared_state,
             history: Arc::new(Mutex::new(Vec::new())),
             history_position: Arc::new(Mutex::new(0)),
@@ -343,7 +358,7 @@ impl PersistentShellSession {
 
     /// Get the initial working directory
     pub fn initial_cwd(&self) -> PathBuf {
-        self.shared_state.get_cwd()
+        self.initial_cwd.clone()
     }
 
     /// Get the current working directory
@@ -354,6 +369,11 @@ impl PersistentShellSession {
     /// Set an environment variable
     pub fn set_env(&self, key: String, value: String) {
         self.shared_state.set_env_var(key, value);
+    }
+
+    /// Remove an environment variable
+    pub fn unset_env(&self, key: &str) {
+        self.shared_state.unset_env_var(key);
     }
 
     /// Get an environment variable
@@ -920,6 +940,7 @@ pub async fn create_sandboxed_exec_session(
     _login: bool,
     sandbox_policy: SandboxPolicy,
     cwd: PathBuf,
+    extra_env: HashMap<String, String>,
 ) -> Result<(ExecCommandSession, tokio::sync::oneshot::Receiver<i32>), ColossalErr> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -948,6 +969,7 @@ pub async fn create_sandboxed_exec_session(
     env.insert("HISTSIZE".to_string(), "0".to_string());
     env.insert("SAVEHIST".to_string(), "0".to_string());
     env.insert("HISTCONTROL".to_string(), "ignoreboth".to_string());
+    env.extend(extra_env);
     let mut request = SandboxManager::new().prepare_spawn(
         SandboxCommand {
             program: PathBuf::from(program),
@@ -1284,6 +1306,7 @@ pub async fn create_persistent_shell_session(
     sandbox_policy: SandboxPolicy,
     cwd: PathBuf,
 ) -> Result<(PersistentShellSession, tokio::sync::oneshot::Receiver<i32>), ColossalErr> {
+    let initial_cwd = cwd.clone();
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -1299,24 +1322,42 @@ pub async fn create_persistent_shell_session(
     env.insert("HISTSIZE".to_string(), "0".to_string());
     env.insert("SAVEHIST".to_string(), "0".to_string());
     env.insert("HISTCONTROL".to_string(), "ignoreboth".to_string());
-    env.insert("TERM".to_string(), "dumb".to_string());
-    env.insert("PS1".to_string(), "".to_string());
-    env.insert("PROMPT".to_string(), "".to_string());
-    env.insert("RPROMPT".to_string(), "".to_string());
-    env.insert("RPS1".to_string(), "".to_string());
+    env.insert("TERM".to_string(), "xterm-256color".to_string());
+    env.insert("COLORTERM".to_string(), "truecolor".to_string());
     env.insert("NO_COLOR".to_string(), "1".to_string());
-    let mut shell_args = Vec::new();
-    let shell_name = shell_program_name(&shell);
-    if login {
-        shell_args.push("-l".to_string());
+    // Suppress bash warnings about escape sequence failures (bash 5.1+).
+    env.insert(
+        "BASH_SILENCE_ESCAPE_SEQ_FAILURE".to_string(),
+        "1".to_string(),
+    );
+
+    // Configure OSC 133 command-completion markers for bash.
+    //
+    // bash inherits PROMPT_COMMAND and PS1 from its environment, honouring them even
+    // when --norc / --noprofile suppress init-file loading.
+    //
+    // PROMPT_COMMAND runs before each prompt and emits the D (CommandFinished) marker
+    // carrying the real exit code.  PS1 emits the A (PromptStart) and B (CommandStart)
+    // markers around the prompt text.  Together these give exec_command_in_shell_session
+    // reliable, exit-code-accurate completion detection without wrapping every command.
+    //
+    // Non-bash POSIX shells (dash, sh) ignore PROMPT_COMMAND, so we only inject for bash.
+    let shell_descriptor = shell_descriptor(&shell);
+    if shell_descriptor.name().contains("bash") {
+        // PROMPT_COMMAND: emit D;$? (CommandFinished with real exit code) before each prompt.
+        // Single-quoted to defer $? expansion to run time inside PROMPT_COMMAND.
+        env.insert(
+            "PROMPT_COMMAND".to_string(),
+            r#"printf "\033]133;D;%s\007" "$?""#.to_string(),
+        );
+        // PS1: emit A (PromptStart) before the prompt text and B (CommandStart) after.
+        // \x1b = ESC, \x07 = BEL, \$ = $ for non-root / # for root.
+        env.insert(
+            "PS1".to_string(),
+            "\x1b]133;A\x07\\$ \x1b]133;B\x07".to_string(),
+        );
     }
-    shell_args.push("-s".to_string());
-    if shell_name.contains("bash") {
-        shell_args.push("--noprofile".to_string());
-        shell_args.push("--norc".to_string());
-    } else if shell_name.contains("zsh") {
-        shell_args.push("-f".to_string());
-    }
+    let shell_args = shell_descriptor.persistent_shell_args(login);
     let mut request = SandboxManager::new().prepare_spawn(
         SandboxCommand {
             program: PathBuf::from(&shell),
@@ -1629,6 +1670,7 @@ pub async fn create_persistent_shell_session(
         writer_handle,
         wait_handle,
         shell,
+        initial_cwd,
         shared_state,
         sandbox_policy,
     );
@@ -1652,9 +1694,13 @@ pub async fn create_persistent_shell_session(
             return;
         }
 
-        // Wait for the marker in output
+        // Wait for the marker in output, then also drain the D/A/B markers that
+        // bash emits immediately afterwards (PROMPT_COMMAND + PS1).  Consuming
+        // them here prevents them from leaking into the first real command's
+        // broadcast subscription, which would cause a spurious early completion.
         let timeout = tokio::time::Duration::from_secs(3);
         let start = tokio::time::Instant::now();
+        let mut saw_ready = false;
 
         while start.elapsed() < timeout {
             match tokio::time::timeout(
@@ -1665,10 +1711,19 @@ pub async fn create_persistent_shell_session(
             {
                 Ok(Ok(output)) => {
                     let output_str = String::from_utf8_lossy(&output);
-                    if output_str.contains(test_marker) {
-                        // Shell is ready!
-                        *ready_flag.write().await = true;
-                        return;
+                    if !saw_ready && output_str.contains(test_marker) {
+                        saw_ready = true;
+                        // Keep reading to drain the D/A/B markers that follow.
+                    }
+                    if saw_ready {
+                        // The B marker (OSC 133;B) is the last thing bash emits
+                        // before settling into the idle-prompt state.  Once we
+                        // see it we know the startup markers are fully consumed
+                        // and it is safe for the next subscriber to start.
+                        if output_str.contains("\x1b]133;B") {
+                            *ready_flag.write().await = true;
+                            return;
+                        }
                     }
                 }
                 Ok(Err(_)) => {
@@ -1676,7 +1731,7 @@ pub async fn create_persistent_shell_session(
                     break;
                 }
                 Err(_) => {
-                    // Timeout on recv, continue waiting
+                    // Timeout on recv — keep looping until outer timeout fires.
                     continue;
                 }
             }

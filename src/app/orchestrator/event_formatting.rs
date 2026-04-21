@@ -220,8 +220,13 @@ impl App {
                 .map(|cmd_out| {
                     let lines = cmd_out.lines().count();
                     if let Some(first_line) = cmd_out.lines().next() {
-                        let preview = if first_line.len() > 50 {
-                            format!("{}...", &first_line[..47])
+                        let preview = if first_line.chars().count() > 50 {
+                            let cut = first_line
+                                .char_indices()
+                                .nth(47)
+                                .map(|(i, _)| i)
+                                .unwrap_or(first_line.len());
+                            format!("{}...", &first_line[..cut])
                         } else {
                             first_line.to_string()
                         };

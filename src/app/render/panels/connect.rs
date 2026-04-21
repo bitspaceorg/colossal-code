@@ -414,6 +414,8 @@ impl App {
 
         let bottom_hint = if has_saved_tokens {
             " Up/Down move · Enter select · Esc back "
+        } else if is_claude {
+            " Type or paste token · Enter continue · Esc back "
         } else {
             " Enter continue · Esc back "
         };
@@ -427,6 +429,104 @@ impl App {
             .title_bottom(Line::from(bottom_hint).centered());
         let inner = block.inner(area);
         frame.render_widget(block, area);
+
+        if is_claude && !has_saved_tokens {
+            let provider_name = self
+                .connect
+                .selected_provider
+                .as_ref()
+                .map(|provider| provider.name.as_str())
+                .unwrap_or("Anthropic");
+            let masked = if self.connect.input.is_empty() {
+                "paste claude token here".to_string()
+            } else {
+                "*".repeat(self.connect.input.chars().count())
+            };
+            let sections = Layout::vertical([
+                Constraint::Length(5),
+                Constraint::Length(3),
+                Constraint::Length(4),
+                Constraint::Min(2),
+            ])
+            .split(inner);
+
+            let mut intro = vec![
+                Line::from(Span::styled(description, Style::default().fg(Color::White))),
+                Line::from(Span::styled(
+                    "Run `claude setup-token`, then paste the generated token below.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            if let Some(status) = self.connect.oauth_state.status.as_deref() {
+                intro.push(Line::from(Span::styled(
+                    status,
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            if let Some(command) = self.connect.oauth_state.launch_command.as_deref() {
+                intro.push(Line::from(vec![
+                    Span::styled("Run", Style::default().fg(Color::Yellow)),
+                    Span::raw(": "),
+                    Span::styled(command, Style::default().fg(Color::White)),
+                ]));
+            }
+            frame.render_widget(
+                Paragraph::new(intro)
+                    .style(Style::default().bg(CONNECT_BG))
+                    .wrap(Wrap { trim: false }),
+                sections[0],
+            );
+
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .style(Style::default().bg(CONNECT_BG))
+                .border_style(Style::default().fg(Color::DarkGray));
+            let input_inner = input_block.inner(sections[1]);
+            frame.render_widget(input_block, sections[1]);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    masked,
+                    if self.connect.input.is_empty() {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                )))
+                .style(Style::default().bg(CONNECT_BG)),
+                input_inner,
+            );
+
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from(vec![
+                        Span::styled("Provider", Style::default().fg(Color::Yellow)),
+                        Span::raw(": "),
+                        Span::styled(provider_name, Style::default().fg(Color::White)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Token length", Style::default().fg(Color::Yellow)),
+                        Span::raw(": "),
+                        Span::styled(
+                            self.connect.input.chars().count().to_string(),
+                            Style::default().fg(Color::White),
+                        ),
+                    ]),
+                ])
+                .style(Style::default().bg(CONNECT_BG)),
+                sections[2],
+            );
+
+            frame.render_widget(
+                Paragraph::new(vec![Line::from(Span::styled(
+                    "The token is stored in your OS keyring, not in auth.json.",
+                    Style::default().fg(Color::DarkGray),
+                ))])
+                .style(Style::default().bg(CONNECT_BG))
+                .wrap(Wrap { trim: false }),
+                sections[3],
+            );
+            return;
+        }
 
         let mut lines = vec![Line::from(Span::styled(
             description,
@@ -462,30 +562,6 @@ impl App {
                     ),
                 ]));
             }
-        } else if is_claude {
-            // Claude Code auth flow (no saved tokens)
-            if let Some(status) = self.connect.oauth_state.status.as_deref() {
-                lines.push(Line::from(Span::styled(
-                    status,
-                    Style::default().fg(Color::DarkGray),
-                )));
-            } else {
-                lines.push(Line::from(Span::styled(
-                    "Press Enter to start Claude Code login.",
-                    Style::default().fg(Color::DarkGray),
-                )));
-            }
-            if let Some(url) = self.connect.oauth_state.launch_command.as_deref() {
-                lines.push(Line::from(vec![
-                    Span::styled("Run", Style::default().fg(Color::Yellow)),
-                    Span::raw(": "),
-                    Span::styled(url, Style::default().fg(Color::White)),
-                ]));
-            }
-            lines.push(Line::from(Span::styled(
-                "Press Enter after you finish authorization.",
-                Style::default().fg(Color::DarkGray),
-            )));
         } else {
             // OpenAI subscription flow (no saved tokens)
             if let Some(url) = self.connect.subscription_state.verification_url.as_deref() {

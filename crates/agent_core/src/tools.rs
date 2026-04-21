@@ -45,6 +45,10 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                                 "type": "boolean",
                                 "description": "Whether to run the command in the background"
                             },
+                            "replay_state": {
+                                "type": "boolean",
+                                "description": "Whether this command intentionally mutates shell state that later commands must observe. Use true for stateful shell changes like cd, load-env, hide-env, def, alias, $env.X = val; use false for ordinary commands."
+                            },
                             "require_user_approval": {
                                 "type": "boolean",
                                 "description": "Whether to require user approval before running"

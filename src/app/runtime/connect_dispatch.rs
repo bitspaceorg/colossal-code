@@ -163,6 +163,33 @@ impl App {
                 KeyCode::Esc => {
                     self.connect.mode = ConnectModalMode::AuthMethod;
                 }
+                KeyCode::Backspace
+                    if self.connect.selected_auth_method == Some(ConnectAuthMethod::ClaudeCode)
+                        && !self.subscription_has_saved_tokens() =>
+                {
+                    self.backspace_connect_input();
+                }
+                KeyCode::Left
+                    if self.connect.selected_auth_method == Some(ConnectAuthMethod::ClaudeCode)
+                        && !self.subscription_has_saved_tokens() =>
+                {
+                    self.connect.input_cursor = self.connect.input_cursor.saturating_sub(1);
+                }
+                KeyCode::Right
+                    if self.connect.selected_auth_method == Some(ConnectAuthMethod::ClaudeCode)
+                        && !self.subscription_has_saved_tokens() =>
+                {
+                    self.connect.input_cursor =
+                        (self.connect.input_cursor + 1).min(self.connect.input.chars().count());
+                }
+                KeyCode::Char(c)
+                    if self.connect.selected_auth_method == Some(ConnectAuthMethod::ClaudeCode)
+                        && !self.subscription_has_saved_tokens()
+                        && !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    self.insert_connect_char(c);
+                }
                 KeyCode::Up => {
                     if self.connect.selected_index > 0 {
                         self.connect.selected_index -= 1;
@@ -217,6 +244,8 @@ impl App {
     fn reset_subscription_tokens_for_reauth(&mut self) {
         if self.connect.selected_auth_method == Some(ConnectAuthMethod::ClaudeCode) {
             self.connect.oauth_state = Default::default();
+            self.connect.input.clear();
+            self.connect.input_cursor = 0;
         } else {
             self.connect.subscription_state = Default::default();
         }

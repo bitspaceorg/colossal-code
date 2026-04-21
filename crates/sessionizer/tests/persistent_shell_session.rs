@@ -43,6 +43,24 @@ fn deterministic_shell_path() -> String {
     }
 }
 
+fn nushell_path() -> Option<String> {
+    let output = std::process::Command::new("sh")
+        .arg("-lc")
+        .arg("command -v nu")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?;
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 fn workspace_write_policy(cwd: &Path) -> SandboxPolicy {
     SandboxPolicy::WorkspaceWrite {
         writable_roots: vec![colossal_linux_sandbox::protocol::WritableRoot {
@@ -56,525 +74,38 @@ fn workspace_write_policy(cwd: &Path) -> SandboxPolicy {
     }
 }
 
-#[tokio::test]
-async fn silent_redirect_command_completes_and_writes_file()
--> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let temp = tempfile::tempdir()?;
-    let (manager, session_id) = create_shell_session(
-        temp.path(),
-        deterministic_shell_path(),
-        SandboxPolicy::DangerFullAccess,
-    )
-    .await?;
+#[path = "persistent_shell_session/basic.rs"]
+mod basic;
 
-    let result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "printf 'hello world' > silent.txt".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
+#[path = "persistent_shell_session/managed_nu_rotation.rs"]
+mod managed_nu_rotation;
 
-    assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
-    assert!(
-        result.stdout.trim().is_empty(),
-        "silent command produced visible output: {:?}",
-        result.stdout
-    );
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("silent.txt"))?,
-        "hello world"
-    );
+#[path = "persistent_shell_session/managed_nu_fork_eval.rs"]
+mod managed_nu_fork_eval;
 
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
+#[path = "persistent_shell_session/managed_nu_env.rs"]
+mod managed_nu_env;
 
-#[tokio::test]
-async fn shell_session_preserves_cwd_and_environment_across_commands()
--> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let temp = tempfile::tempdir()?;
-    std::fs::create_dir_all(temp.path().join("nested"))?;
-    let (manager, session_id) = create_shell_session(
-        temp.path(),
-        deterministic_shell_path(),
-        SandboxPolicy::DangerFullAccess,
-    )
-    .await?;
+#[path = "persistent_shell_session/managed_nu_cwd.rs"]
+mod managed_nu_cwd;
 
-    let result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "cd nested && export TEST_VALUE=persisted && pwd".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-    assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
-    assert!(
-        result.stdout.contains("nested"),
-        "unexpected pwd output: {}",
-        result.stdout
-    );
+#[path = "persistent_shell_session/managed_nu_variables.rs"]
+mod managed_nu_variables;
 
-    let pwd_result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "pwd".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-    assert_eq!(pwd_result.exit_status, ExitStatus::Completed { code: 0 });
-    assert!(
-        pwd_result
-            .stdout
-            .contains(&temp.path().join("nested").display().to_string()),
-        "unexpected pwd output: {:?}",
-        pwd_result.stdout
-    );
+#[path = "persistent_shell_session/managed_nu_defs.rs"]
+mod managed_nu_defs;
 
-    let env_result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "printf '%s' \"$TEST_VALUE\"".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-    assert_eq!(env_result.exit_status, ExitStatus::Completed { code: 0 });
-    assert!(
-        env_result.stdout.contains("persisted"),
-        "unexpected env output: {:?}",
-        env_result.stdout
-    );
+#[path = "persistent_shell_session/managed_nu_aliases.rs"]
+mod managed_nu_aliases;
 
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
+#[path = "persistent_shell_session/managed_nu_boundaries.rs"]
+mod managed_nu_boundaries;
 
-#[tokio::test]
-async fn timeout_does_not_prevent_next_command_from_running()
--> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let temp = tempfile::tempdir()?;
-    let (manager, session_id) = create_shell_session(
-        temp.path(),
-        deterministic_shell_path(),
-        SandboxPolicy::DangerFullAccess,
-    )
-    .await?;
+#[path = "persistent_shell_session/managed_nu_config.rs"]
+mod managed_nu_config;
 
-    let timeout_result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "sleep 2".to_string(),
-            Some(100),
-            1_000,
-            None,
-        )
-        .await?;
-    assert_eq!(timeout_result.exit_status, ExitStatus::Timeout);
+#[path = "persistent_shell_session/osc133_completion.rs"]
+mod osc133_completion;
 
-    let recovered = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "echo recovered".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-    assert_eq!(recovered.exit_status, ExitStatus::Completed { code: 0 });
-    assert!(
-        recovered.stdout.contains("recovered"),
-        "unexpected recovery output: {:?}",
-        recovered.stdout
-    );
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn non_zero_exit_preserves_output_and_status() -> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let temp = tempfile::tempdir()?;
-    let (manager, session_id) = create_shell_session(
-        temp.path(),
-        deterministic_shell_path(),
-        SandboxPolicy::DangerFullAccess,
-    )
-    .await?;
-
-    let result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "sh -c 'printf boom >&2; exit 7'".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-
-    assert_eq!(result.exit_status, ExitStatus::Completed { code: 7 });
-    assert!(
-        result.stdout.contains("boom"),
-        "missing stderr text in PTY output: {}",
-        result.stdout
-    );
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn workspace_write_shell_completes_simple_command() -> Result<(), Box<dyn std::error::Error>>
-{
-    let _guard = shell_test_lock();
-    let temp = tempfile::tempdir()?;
-    let (manager, session_id) = create_shell_session(
-        temp.path(),
-        deterministic_shell_path(),
-        workspace_write_policy(temp.path()),
-    )
-    .await?;
-
-    let result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "echo sandbox-ok".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-
-    assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
-    assert!(
-        result.stdout.contains("sandbox-ok"),
-        "unexpected sandbox output: {:?}",
-        result.stdout
-    );
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn workspace_write_default_shell_completes_simple_command()
--> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let temp = tempfile::tempdir()?;
-    let default_shell = shell::default_user_shell().await;
-    let (manager, session_id) = create_shell_session(
-        temp.path(),
-        default_shell.path().to_string_lossy().to_string(),
-        workspace_write_policy(temp.path()),
-    )
-    .await?;
-
-    let result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "echo user-shell-ok".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-
-    assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
-    assert!(
-        result.stdout.contains("user-shell-ok"),
-        "unexpected user shell output: {:?}",
-        result.stdout
-    );
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn workspace_write_silent_redirect_completes_and_writes_file()
--> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let temp = tempfile::tempdir()?;
-    let (manager, session_id) = create_shell_session(
-        temp.path(),
-        deterministic_shell_path(),
-        workspace_write_policy(temp.path()),
-    )
-    .await?;
-
-    let result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "printf 'sandbox data' > sandbox.txt".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-
-    assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
-    assert!(
-        result.stdout.trim().is_empty(),
-        "unexpected visible output for sandbox redirect: {:?}",
-        result.stdout
-    );
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("sandbox.txt"))?,
-        "sandbox data"
-    );
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn workspace_write_default_shell_env_output_is_clean()
--> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let temp = tempfile::tempdir()?;
-    let default_shell = shell::default_user_shell().await;
-    let (manager, session_id) = create_shell_session(
-        temp.path(),
-        default_shell.path().to_string_lossy().to_string(),
-        workspace_write_policy(temp.path()),
-    )
-    .await?;
-
-    let _ = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "export TEST_VALUE=cleanvalue".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-
-    let result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "echo $TEST_VALUE".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-
-    assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
-    assert_eq!(result.stdout, "cleanvalue");
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn workspace_write_default_shell_cwd_output_is_clean()
--> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let temp = tempfile::tempdir()?;
-    std::fs::create_dir_all(temp.path().join("nested"))?;
-    let default_shell = shell::default_user_shell().await;
-    let (manager, session_id) = create_shell_session(
-        temp.path(),
-        default_shell.path().to_string_lossy().to_string(),
-        workspace_write_policy(temp.path()),
-    )
-    .await?;
-
-    let result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            "cd nested && pwd".to_string(),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-
-    assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
-    assert_eq!(
-        result.stdout,
-        temp.path().join("nested").display().to_string()
-    );
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn workspace_write_default_shell_stream_output_is_clean()
--> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let temp = tempfile::tempdir()?;
-    let default_shell = shell::default_user_shell().await;
-    let (manager, session_id) = create_shell_session(
-        temp.path(),
-        default_shell.path().to_string_lossy().to_string(),
-        workspace_write_policy(temp.path()),
-    )
-    .await?;
-
-    let stream = manager
-        .send_command_to_shell_session(
-            session_id.clone(),
-            "printf 'stream-one\\nstream-two\\n'".to_string(),
-        )
-        .await?;
-
-    let mut stream = stream;
-    let mut saw_output = String::new();
-    let mut exit_code = None;
-    for _ in 0..10 {
-        let event = tokio::time::timeout(Duration::from_secs(2), stream.recv()).await??;
-        match event {
-            StreamEvent::Stdout(output) => saw_output.push_str(&output),
-            StreamEvent::Exit(code) => {
-                exit_code = Some(code);
-                break;
-            }
-            StreamEvent::Stderr(output) => saw_output.push_str(&output),
-            StreamEvent::Error(error) => panic!("unexpected stream error: {error}"),
-        }
-    }
-
-    assert_eq!(exit_code, Some(0));
-    assert_eq!(saw_output.trim(), "stream-one\nstream-two");
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn workspace_write_default_shell_compound_cwd_output_is_clean()
--> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let temp = tempfile::tempdir()?;
-    let target = temp.path().join("nested");
-    let default_shell = shell::default_user_shell().await;
-    let (manager, session_id) = create_shell_session(
-        temp.path(),
-        default_shell.path().to_string_lossy().to_string(),
-        workspace_write_policy(temp.path()),
-    )
-    .await?;
-
-    let result = manager
-        .exec_command_in_shell_session(
-            session_id.clone(),
-            format!(
-                "mkdir -p {} && cd {} && pwd",
-                target.display(),
-                target.display()
-            ),
-            Some(5_000),
-            1_000,
-            None,
-        )
-        .await?;
-
-    assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
-    assert_eq!(result.stdout, target.display().to_string());
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn workspace_write_default_shell_stream_compound_output_is_clean()
--> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let temp = tempfile::tempdir()?;
-    let default_shell = shell::default_user_shell().await;
-    let (manager, session_id) = create_shell_session(
-        temp.path(),
-        default_shell.path().to_string_lossy().to_string(),
-        workspace_write_policy(temp.path()),
-    )
-    .await?;
-
-    let stream = manager
-        .send_command_to_shell_session(
-            session_id.clone(),
-            "echo 'This is streaming output' && sleep 1 && echo 'Streaming complete'".to_string(),
-        )
-        .await?;
-
-    let mut stream = stream;
-    let mut saw_output = String::new();
-    let mut exit_code = None;
-    for _ in 0..12 {
-        let event = tokio::time::timeout(Duration::from_secs(2), stream.recv()).await??;
-        match event {
-            StreamEvent::Stdout(output) => saw_output.push_str(&output),
-            StreamEvent::Exit(code) => {
-                exit_code = Some(code);
-                break;
-            }
-            StreamEvent::Stderr(output) => saw_output.push_str(&output),
-            StreamEvent::Error(error) => panic!("unexpected stream error: {error}"),
-        }
-    }
-
-    assert_eq!(exit_code, Some(0));
-    assert_eq!(
-        saw_output.trim(),
-        "This is streaming output\nStreaming complete"
-    );
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn streaming_command_emits_exit_when_command_finishes()
--> Result<(), Box<dyn std::error::Error>> {
-    let _guard = shell_test_lock();
-    let temp = tempfile::tempdir()?;
-    let (manager, session_id) = create_shell_session(
-        temp.path(),
-        deterministic_shell_path(),
-        SandboxPolicy::DangerFullAccess,
-    )
-    .await?;
-
-    let stream = manager
-        .send_command_to_shell_session(
-            session_id.clone(),
-            "printf 'stream-one\\nstream-two\\n'".to_string(),
-        )
-        .await?;
-
-    let mut saw_output = String::new();
-    let mut exit_code = None;
-    for _ in 0..10 {
-        let event = tokio::time::timeout(Duration::from_secs(2), stream.recv()).await??;
-        match event {
-            StreamEvent::Stdout(output) => saw_output.push_str(&output),
-            StreamEvent::Exit(code) => {
-                exit_code = Some(code);
-                break;
-            }
-            StreamEvent::Stderr(output) => saw_output.push_str(&output),
-            StreamEvent::Error(error) => panic!("unexpected stream error: {error}"),
-        }
-    }
-
-    assert_eq!(exit_code, Some(0));
-    assert!(saw_output.contains("stream-one"));
-    assert!(saw_output.contains("stream-two"));
-
-    manager.terminate_session(session_id).await?;
-    Ok(())
-}
+#[path = "persistent_shell_session/sandbox_policy.rs"]
+mod sandbox_policy;

@@ -18,10 +18,7 @@
                     pkg-config
                     python3
                 ];
-                buildInputs = with pkgs; [
-                    openssl
-                    libxcb
-                ];
+                buildInputs = with pkgs; [ openssl ];
                 doCheck = false;
 
                 meta = {
@@ -41,10 +38,7 @@
                     clippy
                     python
                 ];
-                buildInputs = with pkgs; [
-                    openssl
-                    libxcb
-                ];
+                buildInputs = with pkgs; [ openssl ];
             };
 
             packages.default = cocode-package;

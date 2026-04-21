@@ -46,6 +46,7 @@ mod imp {
 }
 
 #[cfg(not(vendored_bwrap_available))]
+#[allow(dead_code)]
 mod imp {
     /// Vendored bubblewrap is not available in this build.
     pub fn exec_vendored_bwrap(_argv: Vec<String>) -> ! {
@@ -59,5 +60,7 @@ mod imp {
     pub const VENDORED_BWRAP_AVAILABLE: bool = false;
 }
 
+#[allow(unused_imports)]
 pub use imp::VENDORED_BWRAP_AVAILABLE;
+#[allow(unused_imports)]
 pub use imp::exec_vendored_bwrap;

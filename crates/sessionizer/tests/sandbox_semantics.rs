@@ -54,6 +54,32 @@ fn run_probe_under_policy(sandbox_policy: &SandboxPolicy, cwd: &Path, args: Vec<
         .expect("run sandboxed probe")
 }
 
+fn run_program_under_policy(
+    sandbox_policy: &SandboxPolicy,
+    cwd: &Path,
+    program: &Path,
+    args: Vec<String>,
+) -> Output {
+    let request = SandboxManager::new()
+        .prepare_spawn(
+            SandboxCommand {
+                program: program.to_path_buf(),
+                args,
+                cwd: cwd.to_path_buf(),
+                env: HashMap::new(),
+            },
+            sandbox_policy,
+        )
+        .expect("prepare spawn");
+
+    std::process::Command::new(&request.program)
+        .args(&request.args)
+        .current_dir(&request.cwd)
+        .envs(&request.env)
+        .output()
+        .expect("run sandboxed program")
+}
+
 fn workspace_write_policy(cwd: &Path) -> SandboxPolicy {
     SandboxPolicy::WorkspaceWrite {
         writable_roots: vec![WritableRoot {
@@ -89,6 +115,59 @@ fn readonly_blocks_write() {
         !target.exists(),
         "readonly policy created file unexpectedly"
     );
+}
+
+#[test]
+fn readonly_blocks_creating_new_top_level_paths() {
+    let _guard = semantic_test_lock();
+    cleanup_windows_firewall_rules();
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let output = run_program_under_policy(
+        &SandboxPolicy::ReadOnly,
+        temp.path(),
+        Path::new("/bin/sh"),
+        vec![
+            "-lc".to_string(),
+            "mkdir -p /run/user/999999/test && printf hello > /run/user/999999/test/file"
+                .to_string(),
+        ],
+    );
+
+    assert!(
+        !output.status.success(),
+        "readonly policy unexpectedly allowed creating synthetic root paths: {output:?}"
+    );
+}
+
+#[test]
+fn readonly_allows_nushell_with_procfs() {
+    let _guard = semantic_test_lock();
+    cleanup_windows_firewall_rules();
+    let Ok(nu_path) = std::process::Command::new("sh")
+        .arg("-lc")
+        .arg("command -v nu")
+        .output()
+    else {
+        return;
+    };
+    if !nu_path.status.success() {
+        return;
+    }
+
+    let nu = String::from_utf8_lossy(&nu_path.stdout).trim().to_string();
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let output = run_program_under_policy(
+        &SandboxPolicy::ReadOnly,
+        temp.path(),
+        Path::new(&nu),
+        vec!["-c".to_string(), "print 'proc-ok'".to_string()],
+    );
+
+    assert!(output.status.success(), "nushell failed: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("proc-ok"), "unexpected stdout: {stdout}");
 }
 
 #[test]

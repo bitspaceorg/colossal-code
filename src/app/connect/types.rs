@@ -31,7 +31,9 @@ impl ConnectAuthMethod {
             Self::OpenAiSubscription => {
                 "Uses your ChatGPT subscription through the Codex auth flow"
             }
-            Self::ClaudeCode => "Uses your Claude subscription through the Claude Code auth flow",
+            Self::ClaudeCode => {
+                "Uses a Claude subscription token generated with `claude setup-token`"
+            }
         }
     }
 }

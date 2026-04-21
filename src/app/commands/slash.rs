@@ -253,6 +253,7 @@ impl App {
                         if let Ok(config) = agent_core::safety_config::SafetyConfig::load() {
                             if let Some(agent_arc) = &self.agent {
                                 let agent_clone = Arc::clone(agent_arc);
+                                agent_clone.apply_safety_config_immediately(config.clone());
                                 let reminder = AssistantMode::transition_reminder(
                                     previous_mode,
                                     self.safety_state.assistant_mode,

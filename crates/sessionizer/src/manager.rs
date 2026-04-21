@@ -1,5 +1,6 @@
 use crate::error::{ColossalErr, SandboxErr};
 use crate::hash_id::hash_id_exists;
+use crate::managed_nu::ManagedNuRuntime;
 use crate::safety::assess_command_safety;
 use crate::session::{ExecCommandSession, PersistentShellSession, SemanticSearchSession};
 use crate::types::{
@@ -20,6 +21,55 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tokio::select;
+
+async fn run_managed_nu_command_with_timeout<F>(
+    runtime: Arc<Mutex<ManagedNuRuntime>>,
+    timeout_ms: Option<u64>,
+    f: F,
+) -> Result<Option<ExecCommandOutput>, ColossalErr>
+where
+    F: FnOnce(&mut ManagedNuRuntime) -> Result<ExecCommandOutput, ColossalErr> + Send + 'static,
+{
+    let (sandbox_policy, workspace_root) = {
+        let rt = runtime.lock().unwrap();
+        (rt.sandbox_policy().clone(), rt.initial_cwd())
+    };
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<ExecCommandOutput, ColossalErr>>();
+    std::thread::spawn(move || {
+        #[cfg(target_os = "linux")]
+        if !matches!(
+            sandbox_policy,
+            crate::protocol::SandboxPolicy::DangerFullAccess
+        ) {
+            if let Err(e) = crate::landlock::apply_sandbox_policy_to_current_thread(
+                &sandbox_policy,
+                &workspace_root,
+            ) {
+                let _ = tx.send(Err(e));
+                return;
+            }
+        }
+        let mut rt = runtime.lock().unwrap();
+        let _ = tx.send(f(&mut rt));
+    });
+
+    let result_future = async {
+        rx.await.unwrap_or_else(|_| {
+            Err(ColossalErr::Io(std::io::Error::other(
+                "managed Nu command thread disconnected",
+            )))
+        })
+    };
+
+    match timeout_ms {
+        None => result_future.await.map(Some),
+        Some(ms) => match tokio::time::timeout(Duration::from_millis(ms), result_future).await {
+            Ok(result) => result.map(Some),
+            Err(_) => Ok(None),
+        },
+    }
+}
 
 fn background_log_dir() -> PathBuf {
     if let Ok(home) = std::env::var("HOME") {
@@ -131,142 +181,336 @@ fn clean_shell_output(output: &str, command: &str) -> String {
     cleaned_lines.join("\n")
 }
 
-const CONTROL_PREFIX: &str = "__NITE_CTL__";
+fn shell_has_prompt_osc133(shell_path: &str) -> bool {
+    std::path::Path::new(shell_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.eq_ignore_ascii_case("bash"))
+        .unwrap_or(false)
+}
 
-fn build_control_wrapped_command(command: &str, control_id: &str) -> String {
+fn wrap_command_for_completion(shell_path: &str, command: &str) -> String {
+    if shell_has_prompt_osc133(shell_path) {
+        return command.to_string();
+    }
+
     format!(
-        "{{ printf '{prefix}{control_id}__START__0\\n'; {command} ; __nite_code=$?; printf '{prefix}{control_id}__DONE__%s\\n' \"$__nite_code\"; }}",
-        prefix = CONTROL_PREFIX,
+        "{{ {command}; __nite_cmd_status=$?; printf '\\033]133;D;%s\\007\\033]133;A\\007\\033]133;B\\007' \"$__nite_cmd_status\"; unset __nite_cmd_status; }}"
     )
 }
 
-fn consume_numeric_prefix(value: &str, allow_negative: bool) -> Option<(usize, i32)> {
-    let mut end = 0;
-
-    for (idx, ch) in value.char_indices() {
-        let is_sign = allow_negative && idx == 0 && ch == '-';
-        if is_sign || ch.is_ascii_digit() {
-            end = idx + ch.len_utf8();
-            continue;
+/// Apply a batch of OSC 133 events to the shared command-tracking state.
+///
+/// `command_started` is set by `CommandStart` (B) or `CommandExecuted` (C).
+/// `command_finished` is set by `CommandFinished` (D) or by a subsequent
+/// `PromptStart` (A) once a command is already running — the new prompt
+/// appearing means the previous command's output is complete.
+fn apply_osc133_events(
+    events: Vec<crate::osc133::Event>,
+    command_started: &mut bool,
+    command_finished: &mut bool,
+    exit_code: &mut Option<i32>,
+) {
+    for event in events {
+        match event {
+            crate::osc133::Event::CommandStart | crate::osc133::Event::CommandExecuted => {
+                *command_started = true;
+            }
+            crate::osc133::Event::CommandFinished { exit_code: code } => {
+                *exit_code = code;
+                *command_finished = true;
+            }
+            crate::osc133::Event::PromptStart => {
+                if *command_started {
+                    *command_finished = true;
+                }
+            }
         }
-        break;
     }
-
-    if end == 0 || (allow_negative && end == 1 && value.starts_with('-')) {
-        return None;
-    }
-
-    let parsed = value[..end].parse::<i32>().ok()?;
-    Some((end, parsed))
 }
 
-fn strip_control_markers(
-    line: &str,
-    control_id: &str,
-    command_completed: &mut bool,
-    done_exit_code: &mut Option<i32>,
-) -> String {
-    let start_prefix = format!("{CONTROL_PREFIX}{control_id}__START__");
-    let heartbeat_marker = format!("{CONTROL_PREFIX}{control_id}__HEARTBEAT__");
-    let done_prefix = format!("{CONTROL_PREFIX}{control_id}__DONE__");
-    let mut remaining = line;
-    let mut visible = String::new();
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
 
-    loop {
-        let next_marker = [
-            remaining.find(&start_prefix).map(|idx| (idx, 0_u8)),
-            remaining.find(&heartbeat_marker).map(|idx| (idx, 1_u8)),
-            remaining.find(&done_prefix).map(|idx| (idx, 2_u8)),
-        ]
-        .into_iter()
-        .flatten()
-        .min_by_key(|(idx, _)| *idx);
+fn is_valid_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(ch) if ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
 
-        let Some((marker_start, marker_kind)) = next_marker else {
-            visible.push_str(remaining);
-            return visible;
+fn tracked_env_updates_from_command(command: &str) -> Vec<(String, Option<String>)> {
+    let Some(tokens) = shlex::split(command) else {
+        return Vec::new();
+    };
+
+    enum Mode {
+        None,
+        Export,
+        Unset,
+    }
+
+    let mut mode = Mode::None;
+    let mut updates = Vec::new();
+
+    for token in tokens {
+        match token.as_str() {
+            "export" => {
+                mode = Mode::Export;
+            }
+            "unset" => {
+                mode = Mode::Unset;
+            }
+            ";" | "&&" | "||" | "|" => {
+                mode = Mode::None;
+            }
+            _ => match mode {
+                Mode::Export => {
+                    if let Some((key, value)) = token.split_once('=')
+                        && is_valid_env_var_name(key)
+                    {
+                        updates.push((key.to_string(), Some(value.to_string())));
+                    }
+                }
+                Mode::Unset => {
+                    if is_valid_env_var_name(&token) {
+                        updates.push((token, None));
+                    }
+                }
+                Mode::None => {}
+            },
+        }
+    }
+
+    updates
+}
+
+fn parse_shell_runtime_cwd(output: &str) -> Result<std::path::PathBuf, ColossalErr> {
+    let (before_end, _) = output.rsplit_once("__NITE_CWD_END__").ok_or_else(|| {
+        ColossalErr::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "shell snapshot missing cwd end marker",
+        ))
+    })?;
+    let (_, cwd) = before_end
+        .rsplit_once("__NITE_CWD_BEGIN__")
+        .ok_or_else(|| {
+            ColossalErr::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "shell snapshot missing cwd start marker",
+            ))
+        })?;
+
+    Ok(std::path::PathBuf::from(cwd.trim()))
+}
+
+fn extract_last_marked_block<'a>(
+    output: &'a str,
+    start: &str,
+    end: &str,
+) -> Result<&'a str, ColossalErr> {
+    let (before_end, _) = output.rsplit_once(end).ok_or_else(|| {
+        ColossalErr::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("shell snapshot missing end marker {end}"),
+        ))
+    })?;
+    let (_, block) = before_end.rsplit_once(start).ok_or_else(|| {
+        ColossalErr::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("shell snapshot missing start marker {start}"),
+        ))
+    })?;
+    Ok(block.trim())
+}
+
+fn is_managed_nu_shell(shell_path: &str) -> bool {
+    matches!(
+        crate::shell::shell_kind_from_path(shell_path),
+        crate::shell::ShellKind::ManagedNu
+    )
+}
+
+pub(crate) fn flatten_json_env_to_string_map(value: &serde_json::Value) -> HashMap<String, String> {
+    let mut flattened = HashMap::new();
+    let Some(env) = value.as_object() else {
+        return flattened;
+    };
+
+    let path_separator = if cfg!(windows) { ';' } else { ':' };
+    for (key, value) in env {
+        let string_value = match value {
+            serde_json::Value::Null => String::new(),
+            serde_json::Value::String(raw) => raw.clone(),
+            serde_json::Value::Bool(flag) => flag.to_string(),
+            serde_json::Value::Number(number) => number.to_string(),
+            serde_json::Value::Array(entries) if key == "PATH" || key == "Path" => entries
+                .iter()
+                .filter_map(|entry| entry.as_str())
+                .collect::<Vec<_>>()
+                .join(&path_separator.to_string()),
+            other => other.to_string(),
         };
-
-        visible.push_str(&remaining[..marker_start]);
-        remaining = &remaining[marker_start..];
-
-        match marker_kind {
-            0 => {
-                let suffix = &remaining[start_prefix.len()..];
-                if let Some((consumed, _pid)) = consume_numeric_prefix(suffix, false) {
-                    remaining = &suffix[consumed..];
-                } else {
-                    visible.push_str(CONTROL_PREFIX);
-                    remaining = &remaining[CONTROL_PREFIX.len()..];
-                }
-            }
-            1 => {
-                remaining = &remaining[heartbeat_marker.len()..];
-            }
-            2 => {
-                let suffix = &remaining[done_prefix.len()..];
-                if let Some((consumed, code)) = consume_numeric_prefix(suffix, true) {
-                    *command_completed = true;
-                    *done_exit_code = Some(code);
-                    remaining = &suffix[consumed..];
-                } else {
-                    visible.push_str(CONTROL_PREFIX);
-                    remaining = &remaining[CONTROL_PREFIX.len()..];
-                }
-            }
-            _ => unreachable!(),
-        }
+        flattened.insert(key.clone(), string_value);
     }
+
+    flattened
 }
 
-fn extract_visible_output(
-    chunk: &str,
-    pending: &mut String,
-    control_id: &str,
-    command_completed: &mut bool,
-    done_exit_code: &mut Option<i32>,
-    flush_partial: bool,
-) -> String {
-    pending.push_str(chunk);
-    let mut visible = String::new();
+fn parse_nu_runtime_snapshot(
+    output: &str,
+) -> Result<(PathBuf, String, Vec<NuAliasState>, Vec<String>), ColossalErr> {
+    let state_json =
+        extract_last_marked_block(output, "__NITE_NU_STATE_BEGIN__", "__NITE_NU_STATE_END__")?;
+    let parsed: serde_json::Value = serde_json::from_str(state_json).map_err(|err| {
+        ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+    })?;
 
-    while let Some(pos) = pending.find('\n') {
-        let mut line = pending[..pos].to_string();
-        if line.ends_with('\r') {
-            line.pop();
-        }
-        pending.drain(..=pos);
+    let cwd = parsed
+        .get("cwd")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            ColossalErr::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "nu snapshot missing cwd",
+            ))
+        })?;
+    let env_value = parsed
+        .get("env")
+        .cloned()
+        .unwrap_or(serde_json::Value::Object(Default::default()));
+    let env_json = serde_json::to_string(&env_value).map_err(|err| {
+        ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+    })?;
+    let aliases = serde_json::from_value(
+        parsed
+            .get("aliases")
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(vec![])),
+    )
+    .map_err(|err| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err)))?;
+    let custom_commands = serde_json::from_value(
+        parsed
+            .get("custom_commands")
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(vec![])),
+    )
+    .map_err(|err| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err)))?;
 
-        let stripped = strip_control_markers(&line, control_id, command_completed, done_exit_code);
-        if stripped.trim().is_empty() {
-            continue;
-        }
-
-        visible.push_str(&stripped);
-        visible.push('\n');
-    }
-
-    if flush_partial && !pending.is_empty() {
-        let line = pending.trim_end_matches('\r').to_string();
-        pending.clear();
-        let stripped = strip_control_markers(&line, control_id, command_completed, done_exit_code);
-        if !stripped.trim().is_empty() {
-            visible.push_str(&stripped);
-        }
-    }
-
-    visible
+    Ok((PathBuf::from(cwd), env_json, aliases, custom_commands))
 }
 
-// Data structure for persisting session state
-#[derive(Debug, Serialize, Deserialize)]
-struct PersistentSessionState {
-    session_id: SessionId,
-    shell_path: String,
-    initial_cwd: std::path::PathBuf,
-    env_vars: std::collections::HashMap<String, String>,
-    current_cwd: std::path::PathBuf,
-    created_at: std::time::SystemTime,
+fn managed_nu_snapshot_command() -> String {
+    "let __nite_state = { cwd: $env.PWD, env: $env, aliases: (scope aliases | each {|a| { name: $a.name, expansion: (view source $a.name) } }), custom_commands: (scope commands | where type == custom | each {|c| (view source $c.name) }) }; print '__NITE_NU_STATE_BEGIN__'; $__nite_state | to json --raw; print '__NITE_NU_STATE_END__'".to_string()
+}
+
+/// Current snapshot format version.  Bump this when changing the
+/// `PersistentSessionState` layout in a way that older versions cannot
+/// deserialize.  The `#[serde(default)]` on the version field means
+/// snapshots written before versioning was added will deserialize with
+/// version 0 and still work.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
+
+/// A single Nushell alias captured for persistence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NuAliasState {
+    pub name: String,
+    pub expansion: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NuVariableState {
+    pub name: String,
+    pub mutable: bool,
+    pub value: nu_protocol::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NuReplayFileState {
+    pub path: PathBuf,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NuReplayCommandState {
+    pub command: String,
+    pub cwd: PathBuf,
+    #[serde(default)]
+    pub files: Vec<NuReplayFileState>,
+}
+
+/// Continuity state for a shell session that must survive rotation
+/// (sandbox-policy changes).
+///
+/// # Shared fields (all shell types)
+///
+/// | Field           | Purpose                                               |
+/// |-----------------|-------------------------------------------------------|
+/// | `session_id`    | Identity of the originating session                   |
+/// | `shell_path`    | Path to the shell binary                              |
+/// | `initial_cwd`   | Original working directory at session creation        |
+/// | `env_vars`      | String-coerced environment variables                  |
+/// | `current_cwd`   | Working directory at snapshot time                    |
+/// | `created_at`    | Wall-clock time the session was first created         |
+///
+/// # POSIX-shell fields
+///
+/// | Field                | Purpose                                        |
+/// |----------------------|------------------------------------------------|
+/// | `structured_env_json`| Full JSON env (preserves non-string values)    |
+/// | `replay_commands`    | Commands replayed into the new shell instance  |
+///
+/// # Managed-Nu fields
+///
+/// | Field                | Purpose                                        |
+/// |----------------------|------------------------------------------------|
+/// | `nu_aliases`         | Custom aliases registered in the runtime       |
+/// | `nu_custom_commands` | Full source of custom `def`/`export def` cmds  |
+/// | `nu_variables`       | Persistent top-level `let`/`mut` session vars  |
+/// | `nu_replay_commands` | Ordered replay journal for non-structural state |
+///
+/// For managed Nu, `env_vars` is populated from the stack's string-coercible
+/// env vars.  `structured_env_json` and `replay_commands` are not used
+/// because the managed runtime captures state structurally.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistentSessionState {
+    /// Snapshot format version — allows detection of incompatible formats.
+    #[serde(default)]
+    pub version: u32,
+    pub session_id: SessionId,
+    pub shell_path: String,
+    pub initial_cwd: std::path::PathBuf,
+    pub env_vars: std::collections::HashMap<String, String>,
+    pub current_cwd: std::path::PathBuf,
+    pub created_at: std::time::SystemTime,
+    /// POSIX shell: full JSON env snapshot (preserves non-string values).
+    /// Managed Nu: always `None`.
+    #[serde(default)]
+    pub structured_env_json: Option<String>,
+    /// Managed Nu: alias definitions captured structurally.
+    #[serde(default)]
+    pub nu_aliases: Vec<NuAliasState>,
+    /// Managed Nu: full source text of custom commands (`def`/`export def`).
+    #[serde(default)]
+    pub nu_custom_commands: Vec<String>,
+    /// Managed Nu: persistent top-level let/mut session variables.
+    #[serde(default)]
+    pub nu_variables: Vec<NuVariableState>,
+    /// Managed Nu: ordered replay journal for shell state that is not captured
+    /// structurally (modules, use/source/overlay forms, consts, etc.).
+    #[serde(default)]
+    pub nu_replay_commands: Vec<NuReplayCommandState>,
+    /// POSIX shell: commands replayed into a fresh shell for continuity.
+    /// Managed Nu: not used (state is restored structurally via `nu_*` fields).
+    #[serde(default)]
+    pub replay_commands: Vec<String>,
+    /// Managed Nu: serialized `nu_protocol::Config` as JSON, capturing any
+    /// `$env.config` mutations the agent made during the session.  `None` means
+    /// no config mutation occurred and the runtime default is used.
+    ///
+    /// Stored separately from `env_vars` because `Config` is not a plain string.
+    #[serde(default)]
+    pub nu_config: Option<String>,
 }
 
 // Metadata for session lifecycle management
@@ -284,6 +528,7 @@ pub struct SessionManager {
     process_id: u32, // Store PID for unique session IDs across processes
     pub sessions: Mutex<Vec<(SessionId, ExecCommandSession)>>,
     pub persistent_shell_sessions: Mutex<Vec<(SessionId, PersistentShellSession)>>,
+    pub managed_nu_sessions: Mutex<Vec<(SessionId, Arc<Mutex<ManagedNuRuntime>>)>>,
     pub semantic_search_sessions: Mutex<Vec<(SessionId, SemanticSearchSession)>>,
     session_metadata: Mutex<HashMap<SessionId, SessionMetadata>>,
 }
@@ -295,6 +540,7 @@ impl Default for SessionManager {
             process_id: std::process::id(),
             sessions: Mutex::new(Vec::new()),
             persistent_shell_sessions: Mutex::new(Vec::new()),
+            managed_nu_sessions: Mutex::new(Vec::new()),
             semantic_search_sessions: Mutex::new(Vec::new()),
             session_metadata: Mutex::new(HashMap::new()),
         }
@@ -400,14 +646,35 @@ impl SessionManager {
                 };
 
                 let state = PersistentSessionState {
+                    version: SNAPSHOT_FORMAT_VERSION,
                     session_id: session_id.clone(),
                     shell_path: session.shell_path().to_string(),
-                    initial_cwd: session.initial_cwd().clone(),
+                    initial_cwd: session.initial_cwd(),
                     env_vars: session.get_all_env(),
                     current_cwd: session.current_cwd(),
                     created_at, // Use the actual creation time
+                    structured_env_json: None,
+                    nu_aliases: Vec::new(),
+                    nu_custom_commands: Vec::new(),
+                    nu_variables: Vec::new(),
+                    nu_replay_commands: Vec::new(),
+                    replay_commands: Vec::new(),
+                    nu_config: None,
                 };
                 persistent_sessions.push(state);
+            }
+        }
+
+        {
+            let sessions = self.managed_nu_sessions.lock().unwrap().clone();
+            let metadata_map = self.session_metadata.lock().unwrap();
+            for (session_id, runtime) in sessions {
+                let created_at = metadata_map
+                    .get(&session_id)
+                    .map(|metadata| metadata.created_at_system_time)
+                    .unwrap_or_else(std::time::SystemTime::now);
+                let mut runtime = runtime.lock().unwrap();
+                persistent_sessions.push(runtime.snapshot(session_id.clone(), created_at)?);
             }
         }
 
@@ -436,6 +703,21 @@ impl SessionManager {
 
         // Recreate sessions
         for state in persistent_sessions {
+            if is_managed_nu_shell(&state.shell_path) {
+                let runtime = ManagedNuRuntime::from_snapshot(
+                    state.shell_path.clone(),
+                    sandbox_policy.clone(),
+                    &state,
+                )?;
+                self.managed_nu_sessions
+                    .lock()
+                    .unwrap()
+                    .push((state.session_id.clone(), Arc::new(Mutex::new(runtime))));
+                session_ids.push(state.session_id.clone());
+                self.create_session_metadata(state.session_id.clone(), Duration::from_secs(1800));
+                continue;
+            }
+
             let (session, _exit_rx) = crate::session::create_persistent_shell_session(
                 state.shell_path.clone(),
                 false, // login shell
@@ -521,6 +803,7 @@ impl SessionManager {
             false, // login shell
             params.sandbox_policy.clone(),
             params.cwd.clone(),
+            params.env.clone(),
         )
         .await?;
 
@@ -829,7 +1112,7 @@ impl SessionManager {
         // Format the command as a string
         let formatted_command = params
             .shell
-            .format_default_shell_invocation(params.command.clone(), true)
+            .format_default_shell_invocation(params.command.clone(), false)
             .ok_or_else(|| {
                 ColossalErr::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -850,6 +1133,7 @@ impl SessionManager {
             false, // login shell
             params.sandbox_policy.clone(),
             params.cwd.clone(),
+            params.env.clone(),
         )
         .await?;
 
@@ -874,15 +1158,26 @@ impl SessionManager {
             session.output_receiver()
         };
         let (tx, rx) = unbounded::<StreamEvent>();
+        let timeout_duration = params.timeout_ms.map(Duration::from_millis);
 
         // Spawn the streaming task
         tokio::spawn(async move {
             let mut output_rx = output_rx;
             let mut exit_future = Box::pin(exit_rx);
             let process_exited = false;
+            let timeout_sleep = timeout_duration.map(tokio::time::sleep);
+            let mut timeout_sleep = timeout_sleep.map(Box::pin);
             loop {
                 select! {
                     biased;
+                    _ = async {
+                        if let Some(sleep) = &mut timeout_sleep {
+                            sleep.as_mut().await;
+                        }
+                    }, if timeout_sleep.is_some() => {
+                        let _ = tx.send(StreamEvent::Error("Command timed out".to_string())).await;
+                        break;
+                    }
                     exit_result = &mut *exit_future, if !process_exited => {
                         match exit_result {
                             Ok(code) => {
@@ -990,6 +1285,18 @@ impl SessionManager {
     ) -> Result<SessionId, ColossalErr> {
         let session_id = self.generate_unique_session_id();
 
+        if is_managed_nu_shell(&shell) {
+            let runtime = ManagedNuRuntime::new(shell, shared_state.get_cwd(), sandbox_policy)?;
+            self.managed_nu_sessions
+                .lock()
+                .unwrap()
+                .push((session_id.clone(), Arc::new(Mutex::new(runtime))));
+
+            let timeout = timeout_duration.unwrap_or(Duration::from_secs(1800));
+            self.create_session_metadata(session_id.clone(), timeout);
+            return Ok(session_id);
+        }
+
         let (session, _exit_rx) = crate::session::create_persistent_shell_session(
             shell,
             login,
@@ -1041,15 +1348,24 @@ impl SessionManager {
             }
         }
 
-        let control_id = format!(
-            "__CMD_DONE_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or_default()
-        );
-        let wrapped_command = build_control_wrapped_command(&command, &control_id);
+        // Use OSC 133 for command completion detection instead of injected markers
+        let mut osc_parser = crate::osc133::Parser::new();
         let user_command = command.clone();
+        let shell_path = {
+            let sessions = self.persistent_shell_sessions.lock().unwrap();
+            sessions
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, session)| session.shell_path().to_string())
+                .ok_or_else(|| {
+                    ColossalErr::Sandbox(SandboxErr::Denied(
+                        -1,
+                        format!("unknown session id {}", session_id.as_str()),
+                        (),
+                    ))
+                })?
+        };
+        let wrapped_command = wrap_command_for_completion(&shell_path, &command);
         let raw_stream = self
             .send_input_to_shell_session(session_id, wrapped_command, None)
             .await?;
@@ -1057,23 +1373,30 @@ impl SessionManager {
 
         tokio::spawn(async move {
             let raw_stream = raw_stream;
-            let mut pending = String::new();
-            let mut command_completed = false;
-            let mut done_exit_code = None;
+            let pending = Vec::new();
+            let mut command_started = false;
+            let mut command_finished = false;
+            let mut exit_code: Option<i32> = None;
 
             loop {
                 match raw_stream.recv().await {
                     Ok(StreamEvent::Stdout(output)) | Ok(StreamEvent::Stderr(output)) => {
-                        let visible = extract_visible_output(
-                            &output,
-                            &mut pending,
-                            &control_id,
-                            &mut command_completed,
-                            &mut done_exit_code,
-                            false,
+                        let events = osc_parser.push(output.as_bytes());
+                        apply_osc133_events(
+                            events,
+                            &mut command_started,
+                            &mut command_finished,
+                            &mut exit_code,
                         );
-                        let mut cleaned = clean_shell_output(&visible, &user_command);
-                        if !cleaned.is_empty() && visible.contains('\n') && !cleaned.ends_with('\n')
+
+                        // Strip OSC 133 escape sequences for display
+                        let visible = crate::osc133::strip_osc133(output.as_bytes());
+                        let visible_str = String::from_utf8_lossy(&visible).to_string();
+
+                        let mut cleaned = clean_shell_output(&visible_str, &user_command);
+                        if !cleaned.is_empty()
+                            && visible_str.contains('\n')
+                            && !cleaned.ends_with('\n')
                         {
                             cleaned.push('\n');
                         }
@@ -1082,11 +1405,12 @@ impl SessionManager {
                         {
                             break;
                         }
-                        if command_completed {
+                        if command_finished {
                             break;
                         }
                     }
                     Ok(StreamEvent::Exit(code)) => {
+                        // Fallback: process exited without OSC 133
                         let _ = tx.send(StreamEvent::Exit(code)).await;
                         return;
                     }
@@ -1098,23 +1422,21 @@ impl SessionManager {
                 }
             }
 
-            let flushed = extract_visible_output(
-                "",
-                &mut pending,
-                &control_id,
-                &mut command_completed,
-                &mut done_exit_code,
-                true,
-            );
-            let mut cleaned = clean_shell_output(&flushed, &user_command);
-            if !cleaned.is_empty() && flushed.contains('\n') && !cleaned.ends_with('\n') {
-                cleaned.push('\n');
-            }
-            if !cleaned.trim().is_empty() {
-                let _ = tx.send(StreamEvent::Stdout(cleaned)).await;
+            // Flush any remaining output
+            if !pending.is_empty() {
+                let visible = crate::osc133::strip_osc133(&pending);
+                let visible_str = String::from_utf8_lossy(&visible).to_string();
+                let mut cleaned = clean_shell_output(&visible_str, &user_command);
+                if !cleaned.is_empty() && visible_str.contains('\n') && !cleaned.ends_with('\n') {
+                    cleaned.push('\n');
+                }
+                if !cleaned.trim().is_empty() {
+                    let _ = tx.send(StreamEvent::Stdout(cleaned)).await;
+                }
             }
 
-            let code = done_exit_code.unwrap_or(if command_completed { 0 } else { -1 });
+            // Use OSC 133 exit code, or fallback to 0 if command started but no explicit exit
+            let code = exit_code.unwrap_or(if command_started { 0 } else { -1 });
             let _ = tx.send(StreamEvent::Exit(code)).await;
         });
 
@@ -1131,6 +1453,67 @@ impl SessionManager {
         ask_for_approval: Option<crate::safety::AskForApproval>,
     ) -> Result<ExecCommandOutput, ColossalErr> {
         let start_time = Instant::now();
+
+        let managed_runtime = {
+            self.managed_nu_sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, runtime)| runtime.clone())
+        };
+        if let Some(runtime) = managed_runtime {
+            let approved_commands: HashSet<Vec<String>> = HashSet::new();
+            let command_parts = shlex::split(&command).unwrap_or_else(|| vec![command.clone()]);
+            let sandbox_policy = {
+                let runtime = runtime.lock().unwrap();
+                runtime.sandbox_policy().clone()
+            };
+            let safety_check = assess_command_safety(
+                &command_parts,
+                ask_for_approval.unwrap_or(crate::safety::yolo_mode()),
+                &sandbox_policy,
+                &approved_commands,
+                false,
+            );
+
+            match safety_check {
+                crate::safety::SafetyCheck::AutoApprove { .. } => {}
+                crate::safety::SafetyCheck::AskUser => {
+                    return Err(ColossalErr::Sandbox(SandboxErr::Denied(
+                        -1,
+                        "User approval required".to_string(),
+                        (),
+                    )));
+                }
+                crate::safety::SafetyCheck::Reject { reason } => {
+                    return Err(ColossalErr::Sandbox(SandboxErr::Denied(-1, reason, ())));
+                }
+            }
+
+            self.update_session_activity(session_id.clone());
+            let maybe_result =
+                run_managed_nu_command_with_timeout(runtime, timeout_ms, move |rt| {
+                    rt.exec_command(command)
+                })
+                .await?;
+
+            if let Some(result) = maybe_result {
+                return Ok(result);
+            }
+
+            // A timed-out managed Nu eval may still be holding the runtime lock in a blocking
+            // worker thread, so retire the session and force callers to rotate.
+            let _ = self.terminate_session(session_id.clone()).await;
+            return Ok(ExecCommandOutput {
+                duration: start_time.elapsed(),
+                exit_status: ExitStatus::Timeout,
+                stdout: String::new(),
+                stderr: String::new(),
+                aggregated_output: String::new(),
+                log_file: None,
+            });
+        }
 
         // Check safety before executing
         {
@@ -1187,28 +1570,10 @@ impl SessionManager {
                     ))
                 })?;
 
-            // Wait up to 10 seconds for shell to be ready
             session.wait_until_ready(Duration::from_secs(10)).await?;
         }
 
-        // First, send Ctrl+C to clear any potentially hung state in the shell
-        let _ = self
-            .send_input_to_shell_session(session_id.clone(), "\x03".to_string(), None)
-            .await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Generate a unique control id for internal command lifecycle markers.
-        let control_id = format!(
-            "__CMD_DONE_{}__",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-
-        // Wrap the command with internal START/HEARTBEAT/DONE control markers.
-        let command_with_marker = build_control_wrapped_command(&command, &control_id);
-
+        // Add command to history
         {
             let sessions = self.persistent_shell_sessions.lock().unwrap();
             if let Some((_, session)) = sessions.iter().find(|(id, _)| *id == session_id) {
@@ -1216,8 +1581,27 @@ impl SessionManager {
             }
         }
 
+        let tracked_env_updates = tracked_env_updates_from_command(&command);
+        let shell_path = {
+            let sessions = self.persistent_shell_sessions.lock().unwrap();
+            sessions
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, session)| session.shell_path().to_string())
+                .ok_or_else(|| {
+                    ColossalErr::Sandbox(crate::error::SandboxErr::Denied(
+                        -1,
+                        format!("unknown session id {}", session_id.as_str()),
+                        (),
+                    ))
+                })?
+        };
+        let wrapped_command = wrap_command_for_completion(&shell_path, &command);
+
+        // Use OSC 133 for command completion detection instead of injected markers
+        let mut osc_parser = crate::osc133::Parser::new();
         let stream_rx = self
-            .send_input_to_shell_session(session_id, command_with_marker, None)
+            .send_input_to_shell_session(session_id.clone(), wrapped_command, None)
             .await?;
 
         let mut stdout_parts = Vec::new();
@@ -1225,12 +1609,13 @@ impl SessionManager {
             .map(Duration::from_millis)
             .unwrap_or(Duration::from_secs(30));
         let deadline = start_time + timeout_duration;
-        let mut command_completed = false;
-        let mut done_exit_code: Option<i32> = None;
-        let mut pending_stdout = String::new();
-        let mut pending_stderr = String::new();
+        let mut command_started = false;
+        let mut command_finished = false;
+        let mut exit_code: Option<i32> = None;
+        let pending_stdout = Vec::new();
+        let pending_stderr = Vec::new();
 
-        // Collect all streaming output until we see the marker
+        // Collect all streaming output until command completes
         while let Ok(event) = tokio::time::timeout(
             deadline.saturating_duration_since(Instant::now()),
             stream_rx.recv(),
@@ -1238,77 +1623,71 @@ impl SessionManager {
         .await
         {
             match event {
-                Ok(StreamEvent::Stdout(output)) => {
-                    let visible = extract_visible_output(
-                        &output,
-                        &mut pending_stdout,
-                        &control_id,
-                        &mut command_completed,
-                        &mut done_exit_code,
-                        false,
+                Ok(StreamEvent::Stdout(output)) | Ok(StreamEvent::Stderr(output)) => {
+                    let events = osc_parser.push(output.as_bytes());
+                    apply_osc133_events(
+                        events,
+                        &mut command_started,
+                        &mut command_finished,
+                        &mut exit_code,
                     );
-                    if !visible.is_empty() {
-                        stdout_parts.push(visible);
+
+                    // Strip OSC 133 escape sequences for display
+                    let visible = crate::osc133::strip_osc133(output.as_bytes());
+                    let visible_str = String::from_utf8_lossy(&visible).to_string();
+
+                    if !visible_str.is_empty() {
+                        stdout_parts.push(visible_str);
                     }
-                    if command_completed {
+                    if command_finished {
                         break;
                     }
                 }
-                Ok(StreamEvent::Stderr(output)) => {
-                    let visible = extract_visible_output(
-                        &output,
-                        &mut pending_stderr,
-                        &control_id,
-                        &mut command_completed,
-                        &mut done_exit_code,
-                        false,
-                    );
-                    if !visible.is_empty() {
-                        stdout_parts.push(visible);
+                Ok(StreamEvent::Exit(code)) => {
+                    // Fallback: process exited without OSC 133
+                    if exit_code.is_none() {
+                        exit_code = Some(code);
                     }
-                    if command_completed {
-                        break;
-                    }
+                    break;
                 }
-                Ok(StreamEvent::Exit(_)) => break,
                 Ok(StreamEvent::Error(_)) => break,
                 Err(_) => break, // Channel closed
             }
         }
 
-        let flushed_stdout = extract_visible_output(
-            "",
-            &mut pending_stdout,
-            &control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            true,
-        );
-        if !flushed_stdout.is_empty() {
-            stdout_parts.push(flushed_stdout);
-        }
-
-        let flushed_stderr = extract_visible_output(
-            "",
-            &mut pending_stderr,
-            &control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            true,
-        );
-        if !flushed_stderr.is_empty() {
-            stdout_parts.push(flushed_stderr);
+        // Strip any pending OSC 133 sequences from stdout
+        for pending in vec![pending_stdout, pending_stderr] {
+            let visible = crate::osc133::strip_osc133(&pending);
+            let visible_str = String::from_utf8_lossy(&visible).to_string();
+            if !visible_str.is_empty() {
+                stdout_parts.push(visible_str);
+            }
         }
 
         let aggregated_output = stdout_parts.join("");
-        let cleaned_output = clean_shell_output(&aggregated_output, &command);
+        let cleaned_output = clean_shell_output(&aggregated_output, &command.clone());
+
+        if !tracked_env_updates.is_empty() {
+            let sessions = self.persistent_shell_sessions.lock().unwrap();
+            if let Some((_, session)) = sessions.iter().find(|(id, _)| *id == session_id) {
+                for (key, value) in tracked_env_updates {
+                    if let Some(value) = value {
+                        session.set_env(key, value);
+                    } else {
+                        session.unset_env(&key);
+                    }
+                }
+            }
+        }
 
         Ok(ExecCommandOutput {
             duration: Instant::now().duration_since(start_time),
-            exit_status: if let Some(code) = done_exit_code {
+            exit_status: if let Some(code) = exit_code {
                 ExitStatus::Completed { code }
-            } else if command_completed {
+            } else if command_started && command_finished {
                 ExitStatus::Completed { code: 0 }
+            } else if command_started {
+                ExitStatus::Killed
             } else if Instant::now() < deadline {
                 ExitStatus::Killed
             } else {
@@ -1319,6 +1698,61 @@ impl SessionManager {
             aggregated_output: cleaned_output,
             log_file: None,
         })
+    }
+
+    /// Execute a command against a **cloned** managed-Nu runtime so the
+    /// original session state is untouched.  Returns `None` if the session is
+    /// not a managed-Nu session (callers should fall back to the existing
+    /// one-shot exec path for POSIX shells).
+    pub async fn fork_eval_in_managed_nu_session(
+        &self,
+        session_id: SessionId,
+        command: String,
+        timeout_ms: Option<u64>,
+        ask_for_approval: Option<crate::safety::AskForApproval>,
+    ) -> Result<Option<ExecCommandOutput>, ColossalErr> {
+        let managed_runtime = {
+            self.managed_nu_sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, runtime)| runtime.clone())
+        };
+        let Some(runtime) = managed_runtime else {
+            return Ok(None);
+        };
+
+        let approved_commands: HashSet<Vec<String>> = HashSet::new();
+        let command_parts = shlex::split(&command).unwrap_or_else(|| vec![command.clone()]);
+        let sandbox_policy = {
+            let rt = runtime.lock().unwrap();
+            rt.sandbox_policy().clone()
+        };
+        let safety_check = assess_command_safety(
+            &command_parts,
+            ask_for_approval.unwrap_or(crate::safety::yolo_mode()),
+            &sandbox_policy,
+            &approved_commands,
+            false,
+        );
+
+        match safety_check {
+            crate::safety::SafetyCheck::AutoApprove { .. } => {}
+            crate::safety::SafetyCheck::AskUser => {
+                return Err(ColossalErr::Sandbox(SandboxErr::Denied(
+                    -1,
+                    "User approval required".to_string(),
+                    (),
+                )));
+            }
+            crate::safety::SafetyCheck::Reject { reason } => {
+                return Err(ColossalErr::Sandbox(SandboxErr::Denied(-1, reason, ())));
+            }
+        }
+
+        run_managed_nu_command_with_timeout(runtime, timeout_ms, move |rt| rt.fork_eval(command))
+            .await
     }
 
     /// Send raw input to a persistent shell session (without automatic newline)
@@ -1457,6 +1891,21 @@ impl SessionManager {
         key: String,
         value: String,
     ) -> Result<(), ColossalErr> {
+        let managed_runtime = {
+            self.managed_nu_sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, runtime)| runtime.clone())
+        };
+        if let Some(runtime) = managed_runtime {
+            let mut runtime = runtime.lock().unwrap();
+            runtime.set_env(key, value);
+            self.update_session_activity(session_id);
+            return Ok(());
+        }
+
         // Store in the session's environment map
         {
             let sessions = self.persistent_shell_sessions.lock().unwrap();
@@ -1476,7 +1925,7 @@ impl SessionManager {
         }
 
         // Also send the export command to the shell
-        let export_command = format!("export {}='{}'", key, value);
+        let export_command = format!("export {}={}", key, shell_single_quote(&value));
         let _ = self
             .exec_command_in_shell_session(
                 session_id,
@@ -1490,12 +1939,214 @@ impl SessionManager {
         Ok(())
     }
 
+    pub async fn set_managed_variable_in_shell_session(
+        &self,
+        session_id: SessionId,
+        variable: NuVariableState,
+    ) -> Result<(), ColossalErr> {
+        let managed_runtime = {
+            self.managed_nu_sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, runtime)| runtime.clone())
+        };
+        let Some(runtime) = managed_runtime else {
+            return Err(ColossalErr::Sandbox(SandboxErr::Denied(
+                -1,
+                format!("unknown managed nu session id {}", session_id.as_str()),
+                (),
+            )));
+        };
+
+        let mut runtime = runtime.lock().unwrap();
+        runtime.restore_persistent_variable(&variable)?;
+        self.update_session_activity(session_id);
+        Ok(())
+    }
+
+    /// Restore a shell session from a captured continuity snapshot.
+    ///
+    /// Managed Nu is restored structurally through the embedded runtime.
+    /// POSIX shells are restored by replaying cwd, env vars, and any tracked
+    /// replay commands into the target session.
+    pub async fn restore_shell_session_from_snapshot(
+        &self,
+        session_id: SessionId,
+        snapshot: &PersistentSessionState,
+    ) -> Result<(), ColossalErr> {
+        let managed_runtime = {
+            self.managed_nu_sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, runtime)| runtime.clone())
+        };
+        if let Some(runtime) = managed_runtime {
+            let mut runtime = runtime.lock().unwrap();
+            runtime.restore(snapshot)?;
+            self.update_session_activity(session_id);
+            return Ok(());
+        }
+
+        if snapshot.current_cwd != snapshot.initial_cwd {
+            self.exec_command_in_shell_session(
+                session_id.clone(),
+                format!(
+                    "cd {}",
+                    shell_escape::escape(snapshot.current_cwd.to_string_lossy())
+                ),
+                Some(5_000),
+                1_000,
+                None,
+            )
+            .await?;
+        }
+
+        for (key, value) in &snapshot.env_vars {
+            self.set_env_in_shell_session(session_id.clone(), key.clone(), value.clone())
+                .await?;
+        }
+
+        for replay_command in &snapshot.replay_commands {
+            self.exec_command_in_shell_session(
+                session_id.clone(),
+                replay_command.clone(),
+                Some(30_000),
+                10_000,
+                None,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Capture continuity state from a persistent shell session so it can be
+    /// replayed into a newly spawned shell under a different sandbox policy.
+    pub async fn snapshot_shell_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<PersistentSessionState, ColossalErr> {
+        let managed_runtime = {
+            let metadata_map = self.session_metadata.lock().unwrap();
+            let created_at = metadata_map
+                .get(&session_id)
+                .map(|metadata| metadata.created_at_system_time)
+                .unwrap_or_else(std::time::SystemTime::now);
+            self.managed_nu_sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, runtime)| (runtime.clone(), created_at))
+        };
+        if let Some((runtime, created_at)) = managed_runtime {
+            let mut runtime = runtime.lock().unwrap();
+            return runtime.snapshot(session_id, created_at);
+        }
+
+        let (shell_path, initial_cwd, env_vars, created_at) = {
+            let metadata_map = self.session_metadata.lock().unwrap();
+            let sessions = self.persistent_shell_sessions.lock().unwrap();
+            let (_, session) = sessions
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .ok_or_else(|| {
+                    ColossalErr::Sandbox(SandboxErr::Denied(
+                        -1,
+                        format!("unknown session id {}", session_id.as_str()),
+                        (),
+                    ))
+                })?;
+
+            (
+                session.shell_path().to_string(),
+                session.initial_cwd(),
+                session.get_all_env(),
+                metadata_map
+                    .get(&session_id)
+                    .map(|metadata| metadata.created_at_system_time)
+                    .unwrap_or_else(std::time::SystemTime::now),
+            )
+        };
+
+        let runtime_state = self
+            .exec_command_in_shell_session(
+                session_id.clone(),
+                if is_managed_nu_shell(&shell_path) {
+                    managed_nu_snapshot_command()
+                } else {
+                    "printf '__NITE_CWD_BEGIN__\n'; pwd; printf '__NITE_CWD_END__\n'".to_string()
+                },
+                Some(5_000),
+                10_000,
+                None,
+            )
+            .await?;
+
+        let (current_cwd, structured_env_json, nu_aliases, nu_custom_commands, env_vars) =
+            if is_managed_nu_shell(&shell_path) {
+                let (current_cwd, structured_env_json, nu_aliases, nu_custom_commands) =
+                    parse_nu_runtime_snapshot(&runtime_state.stdout)?;
+                let structured_value: serde_json::Value =
+                    serde_json::from_str(&structured_env_json).map_err(|err| {
+                        ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+                    })?;
+                (
+                    current_cwd,
+                    Some(structured_env_json),
+                    nu_aliases,
+                    nu_custom_commands,
+                    flatten_json_env_to_string_map(&structured_value),
+                )
+            } else {
+                (
+                    parse_shell_runtime_cwd(&runtime_state.stdout)?,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    env_vars,
+                )
+            };
+
+        Ok(PersistentSessionState {
+            version: SNAPSHOT_FORMAT_VERSION,
+            session_id,
+            shell_path,
+            initial_cwd,
+            env_vars,
+            current_cwd,
+            created_at,
+            structured_env_json,
+            nu_aliases,
+            nu_custom_commands,
+            nu_variables: Vec::new(),
+            nu_replay_commands: Vec::new(),
+            replay_commands: Vec::new(),
+            nu_config: None,
+        })
+    }
+
     /// Get an environment variable from a persistent shell session
     pub fn get_env_from_shell_session(
         &self,
         session_id: SessionId,
         key: &str,
     ) -> Result<Option<String>, ColossalErr> {
+        if let Some((_, runtime)) = self
+            .managed_nu_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(id, _)| *id == session_id)
+        {
+            let runtime = runtime.lock().unwrap();
+            return Ok(runtime.get_env(key));
+        }
+
         let sessions = self.persistent_shell_sessions.lock().unwrap();
         let session = sessions
             .iter()
@@ -1518,6 +2169,17 @@ impl SessionManager {
         session_id: SessionId,
         new_cwd: std::path::PathBuf,
     ) -> Result<(), ColossalErr> {
+        if let Some((_, runtime)) = self
+            .managed_nu_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(id, _)| *id == session_id)
+        {
+            let mut runtime = runtime.lock().unwrap();
+            return runtime.update_cwd(new_cwd);
+        }
+
         let sessions = self.persistent_shell_sessions.lock().unwrap();
         let session = sessions
             .iter()
@@ -1540,6 +2202,17 @@ impl SessionManager {
         &self,
         session_id: SessionId,
     ) -> Result<Vec<String>, ColossalErr> {
+        if let Some((_, runtime)) = self
+            .managed_nu_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(id, _)| *id == session_id)
+        {
+            let runtime = runtime.lock().unwrap();
+            return Ok(runtime.history());
+        }
+
         let sessions = self.persistent_shell_sessions.lock().unwrap();
         let session = sessions
             .iter()
@@ -1831,6 +2504,21 @@ impl SessionManager {
             }
         }
 
+        let managed_nu_sessions = self.managed_nu_sessions.lock().unwrap();
+        for (session_id, runtime) in managed_nu_sessions.iter() {
+            if let Some(metadata) = metadata_map.get(session_id) {
+                let age = Instant::now().duration_since(metadata.created_at);
+                let inactive_time = Instant::now().duration_since(metadata.last_activity);
+                let runtime = runtime.lock().unwrap();
+                session_info.push((
+                    session_id.clone(),
+                    format!("managed-nu:{}", runtime.shell_path()),
+                    age,
+                    inactive_time,
+                ));
+            }
+        }
+
         // Semantic search sessions
         for (session_id, _) in semantic_search_sessions.iter() {
             if let Some(metadata) = metadata_map.get(session_id) {
@@ -1884,6 +2572,23 @@ impl SessionManager {
             }
         }
 
+        {
+            let sessions = self.managed_nu_sessions.lock().unwrap();
+            if let Some((_, runtime)) = sessions.iter().find(|(id, _)| *id == session_id) {
+                if let Some(metadata) = metadata_map.get(&session_id) {
+                    let age = Instant::now().duration_since(metadata.created_at);
+                    let inactive_time = Instant::now().duration_since(metadata.last_activity);
+                    let runtime = runtime.lock().unwrap();
+                    return Some((
+                        "managed-nu".to_string(),
+                        age,
+                        inactive_time,
+                        Some(runtime.current_cwd()),
+                    ));
+                }
+            }
+        }
+
         // Check semantic search sessions
         {
             let sessions = self.semantic_search_sessions.lock().unwrap();
@@ -1928,6 +2633,14 @@ impl SessionManager {
                 if let Err(_e) = session.kill() {
                     // eprintln!("Failed to kill process for session {}: {}", session_id.as_str(), e);
                 }
+                return Ok(());
+            }
+        }
+
+        {
+            let mut sessions = self.managed_nu_sessions.lock().unwrap();
+            if let Some(pos) = sessions.iter().position(|(id, _)| *id == session_id) {
+                let _ = sessions.remove(pos);
                 return Ok(());
             }
         }
@@ -1986,7 +2699,7 @@ impl SessionManager {
         // Format the command as a string
         let formatted_command = params
             .shell
-            .format_default_shell_invocation(params.command.clone(), true)
+            .format_default_shell_invocation(params.command.clone(), false)
             .ok_or_else(|| {
                 ColossalErr::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -2007,6 +2720,7 @@ impl SessionManager {
             false, // login shell
             params.sandbox_policy.clone(),
             params.cwd.clone(),
+            params.env.clone(),
         )
         .await?;
 
@@ -2031,16 +2745,27 @@ impl SessionManager {
             session.subscribe_stream() // Use the enhanced subscription method
         };
         let (tx, rx) = unbounded::<StreamEvent>();
+        let timeout_duration = params.timeout_ms.map(Duration::from_millis);
 
         // Spawn the streaming task with backpressure handling
         tokio::spawn(async move {
             let mut output_rx = output_rx;
             let mut exit_future = Box::pin(exit_rx);
             let mut buffer = String::new(); // Buffer to handle split messages
+            let timeout_sleep = timeout_duration.map(tokio::time::sleep);
+            let mut timeout_sleep = timeout_sleep.map(Box::pin);
 
             loop {
                 select! {
                     biased;
+                    _ = async {
+                        if let Some(sleep) = &mut timeout_sleep {
+                            sleep.as_mut().await;
+                        }
+                    }, if timeout_sleep.is_some() => {
+                        let _ = tx.send(StreamEvent::Error("Command timed out".to_string())).await;
+                        break;
+                    }
                     // Handle process exit
                     exit_result = &mut *exit_future => {
                         match exit_result {
@@ -2177,125 +2902,8 @@ impl SessionManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_shell_output, extract_visible_output};
-
-    #[test]
-    fn extract_visible_output_detects_embedded_done_marker() {
-        let control_id = "abc123";
-        let mut pending = String::new();
-        let mut command_completed = false;
-        let mut done_exit_code = None;
-
-        let visible = extract_visible_output(
-            &format!("prompt __NITE_CTL__{control_id}__DONE__0 next-prompt\nreal output\n"),
-            &mut pending,
-            control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            false,
-        );
-
-        assert!(command_completed);
-        assert_eq!(done_exit_code, Some(0));
-        assert_eq!(visible, "prompt  next-prompt\nreal output\n");
-    }
-
-    #[test]
-    fn extract_visible_output_handles_partial_done_marker_on_flush() {
-        let control_id = "flush123";
-        let mut pending = String::new();
-        let mut command_completed = false;
-        let mut done_exit_code = None;
-
-        let visible = extract_visible_output(
-            &format!("before __NITE_CTL__{control_id}__DONE__17"),
-            &mut pending,
-            control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            true,
-        );
-
-        assert!(command_completed);
-        assert_eq!(done_exit_code, Some(17));
-        assert_eq!(visible, "before ");
-    }
-
-    #[test]
-    fn extract_visible_output_handles_marker_split_across_chunks() {
-        let control_id = "split123";
-        let mut pending = String::new();
-        let mut command_completed = false;
-        let mut done_exit_code = None;
-
-        let visible = extract_visible_output(
-            &format!("hello __NITE_CTL__{control_id}__DO"),
-            &mut pending,
-            control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            false,
-        );
-        assert_eq!(visible, "");
-        assert!(!command_completed);
-
-        let visible = extract_visible_output(
-            "NE__5 world\n",
-            &mut pending,
-            control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            false,
-        );
-
-        assert!(command_completed);
-        assert_eq!(done_exit_code, Some(5));
-        assert_eq!(visible, "hello  world\n");
-    }
-
-    #[test]
-    fn extract_visible_output_strips_start_and_heartbeat_markers() {
-        let control_id = "markers123";
-        let mut pending = String::new();
-        let mut command_completed = false;
-        let mut done_exit_code = None;
-
-        let visible = extract_visible_output(
-            &format!(
-                "before __NITE_CTL__{control_id}__START__123 after\n__NITE_CTL__{control_id}__HEARTBEAT__\n"
-            ),
-            &mut pending,
-            control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            false,
-        );
-
-        assert!(!command_completed);
-        assert_eq!(done_exit_code, None);
-        assert_eq!(visible, "before  after\n");
-    }
-
-    #[test]
-    fn extract_visible_output_ignores_malformed_done_marker() {
-        let control_id = "bad123";
-        let mut pending = String::new();
-        let mut command_completed = false;
-        let mut done_exit_code = None;
-
-        let visible = extract_visible_output(
-            &format!("__NITE_CTL__{control_id}__DONE__oops\n"),
-            &mut pending,
-            control_id,
-            &mut command_completed,
-            &mut done_exit_code,
-            false,
-        );
-
-        assert!(!command_completed);
-        assert_eq!(done_exit_code, None);
-        assert_eq!(visible, format!("__NITE_CTL__{control_id}__DONE__oops\n"));
-    }
+    use super::{apply_osc133_events, clean_shell_output};
+    use crate::osc133::Event;
 
     #[test]
     fn clean_shell_output_removes_prompts_markers_and_wrapper_echoes() {
@@ -2337,5 +2945,170 @@ mod tests {
             clean_shell_output(&raw, command),
             "Hello from persistent shell!"
         );
+    }
+
+    // ── apply_osc133_events ──────────────────────────────────────────────────
+
+    #[test]
+    fn apply_osc133_command_start_sets_started() {
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![Event::CommandStart],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(started);
+        assert!(!finished);
+        assert_eq!(code, None);
+    }
+
+    #[test]
+    fn apply_osc133_command_executed_also_sets_started() {
+        // C marker without B — must still mark started so downstream logic works
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![Event::CommandExecuted],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(started);
+        assert!(!finished);
+    }
+
+    #[test]
+    fn apply_osc133_command_finished_sets_finished_and_captures_code() {
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![Event::CommandFinished {
+                exit_code: Some(42),
+            }],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(finished);
+        assert_eq!(code, Some(42));
+    }
+
+    #[test]
+    fn apply_osc133_command_finished_with_no_exit_code() {
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![Event::CommandFinished { exit_code: None }],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(finished);
+        assert_eq!(code, None);
+    }
+
+    #[test]
+    fn apply_osc133_prompt_start_finishes_command_when_already_started() {
+        // The bug we fixed: A marker after C signals the next prompt = previous command done
+        let (mut started, mut finished, mut code) = (true, false, None);
+        apply_osc133_events(
+            vec![Event::PromptStart],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(
+            finished,
+            "PromptStart after command started should mark finished"
+        );
+    }
+
+    #[test]
+    fn apply_osc133_prompt_start_does_not_finish_before_command_starts() {
+        // Initial A marker (shell is rendering its first prompt) must not trigger completion
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![Event::PromptStart],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(!started);
+        assert!(!finished);
+    }
+
+    #[test]
+    fn apply_osc133_full_sequence_a_b_c_output_d_a() {
+        // Realistic shell lifecycle: A→B→C→D→A
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![
+                Event::PromptStart,                            // A — initial prompt, no-op
+                Event::CommandStart,                           // B — command_started = true
+                Event::CommandExecuted,                        // C — already started
+                Event::CommandFinished { exit_code: Some(0) }, // D — finished, code=0
+                Event::PromptStart,                            // A — next prompt, already finished
+            ],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(started);
+        assert!(finished);
+        assert_eq!(code, Some(0));
+    }
+
+    #[test]
+    fn apply_osc133_a_c_d_sequence_without_b_still_completes() {
+        // Shell skips B marker — C must also mark started
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![
+                Event::PromptStart,                            // A
+                Event::CommandExecuted,                        // C (no B)
+                Event::CommandFinished { exit_code: Some(1) }, // D
+            ],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(started);
+        assert!(finished);
+        assert_eq!(code, Some(1));
+    }
+
+    #[test]
+    fn apply_osc133_prompt_start_instead_of_d_still_completes() {
+        // Shell emits A→B→C→output→A (no D) — PromptStart must trigger completion
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![
+                Event::PromptStart,     // A — no-op (not started yet)
+                Event::CommandStart,    // B
+                Event::CommandExecuted, // C
+                Event::PromptStart,     // A — command started, so this finishes it
+            ],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert!(
+            finished,
+            "PromptStart should substitute for missing D marker"
+        );
+        assert_eq!(code, None); // no exit code from D
+    }
+
+    #[test]
+    fn apply_osc133_negative_exit_code_is_preserved() {
+        // Bash uses -1 for signal-killed processes in some contexts
+        let (mut started, mut finished, mut code) = (false, false, None);
+        apply_osc133_events(
+            vec![Event::CommandFinished {
+                exit_code: Some(-1),
+            }],
+            &mut started,
+            &mut finished,
+            &mut code,
+        );
+        assert_eq!(code, Some(-1));
     }
 }

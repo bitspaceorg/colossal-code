@@ -32,7 +32,8 @@ impl App {
         self.connect.oauth_state.rate_limit_tier = connection.oauth_rate_limit_tier.clone();
         self.connect.oauth_state.organization_id = connection.organization_id.clone();
         self.connect.oauth_state.status = Some(
-            "A saved OAuth-backed connection exists. You can re-authorize or continue.".to_string(),
+            "A saved Claude token exists in your OS keyring. You can re-authorize or continue."
+                .to_string(),
         );
     }
 

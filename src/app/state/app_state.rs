@@ -184,6 +184,7 @@ pub(crate) struct App {
     pub(crate) input_modified: bool,
     pub(crate) mode: Mode,
     pub(crate) status_left: Line<'static>,
+    pub(crate) execution_mode_badge: String,
     pub(crate) phase: Phase,
     pub(crate) title_lines: Vec<Line<'static>>,
     pub(crate) visible_chars: Vec<usize>,
