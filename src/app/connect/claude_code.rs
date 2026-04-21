@@ -6,11 +6,11 @@ use serde::Deserialize;
 use crate::app::App;
 
 #[derive(Debug, Deserialize)]
-struct ClaudeAuthStatus {
+pub(crate) struct ClaudeAuthStatus {
     #[serde(rename = "orgId")]
-    org_id: Option<String>,
+    pub(crate) org_id: Option<String>,
     #[serde(rename = "subscriptionType")]
-    subscription_type: Option<String>,
+    pub(crate) subscription_type: Option<String>,
 }
 
 impl App {
