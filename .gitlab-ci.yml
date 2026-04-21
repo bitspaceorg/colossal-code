@@ -99,4 +99,12 @@ package:nix:
   stage: package
   rules: *rules_first_party
   script:
+    - |
+      if [ -n "${CACHIX_CACHE:-}" ]; then
+        nix shell nixpkgs#cachix -c cachix use "$CACHIX_CACHE"
+      fi
     - nix build --accept-flake-config --print-build-logs .#default
+    - |
+      if [ -n "${CACHIX_CACHE:-}" ] && [ -n "${CACHIX_AUTH_TOKEN:-}" ]; then
+        nix shell nixpkgs#cachix -c sh -lc 'cachix push "$CACHIX_CACHE" $(nix path-info --accept-flake-config .#default)'
+      fi
