@@ -36,6 +36,7 @@
                     rustc
                     cargo
                     clippy
+                    sccache
                     python
                 ];
                 buildInputs = with pkgs; [ openssl ];
