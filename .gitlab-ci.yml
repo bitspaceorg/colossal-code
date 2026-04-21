@@ -19,7 +19,7 @@ variables:
     key:
       files:
         - Cargo.lock
-      prefix: cargo-${CI_COMMIT_REF_SLUG}
+      prefix: cargo-shared
     paths:
       - .cargo/registry/cache
       - .cargo/registry/index
