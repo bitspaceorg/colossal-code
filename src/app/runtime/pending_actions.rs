@@ -2,7 +2,6 @@ use std::time::{Instant, SystemTime};
 
 use agent_core::AgentMessage;
 use arboard::Clipboard;
-use color_eyre::Result;
 
 use crate::app::runtime::agent_stream::AgentStreamOutcome;
 use crate::app::runtime::git_ops;

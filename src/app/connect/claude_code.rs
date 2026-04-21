@@ -54,7 +54,7 @@ impl App {
     }
 }
 
-fn read_claude_auth_status() -> Option<ClaudeAuthStatus> {
+pub(crate) fn read_claude_auth_status() -> Option<ClaudeAuthStatus> {
     let output = Command::new("claude")
         .args(["auth", "status", "--json"])
         .output()
