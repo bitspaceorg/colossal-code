@@ -13,6 +13,16 @@ use crate::app::persistence::auth_store::{
     AuthStore, StoredAuthKind, StoredConnection, current_unix_timestamp, save_auth_store,
 };
 
+fn require_claude_code_access_token(access_token: Option<&str>) -> Result<()> {
+    if access_token.is_some_and(|token| !token.trim().is_empty()) {
+        return Ok(());
+    }
+
+    Err(color_eyre::eyre::eyre!(
+        "Claude Code authorization has not completed yet"
+    ))
+}
+
 impl App {
     pub(crate) fn current_model_provider_id(&self) -> Option<&str> {
         self.active_connection()
@@ -288,6 +298,7 @@ impl App {
                 }
             }
             ConnectAuthMethod::ClaudeCode => {
+                require_claude_code_access_token(self.connect.oauth_state.access_token.as_deref())?;
                 let auth_status = read_claude_auth_status();
                 let subscription_type =
                     self.connect
@@ -299,11 +310,6 @@ impl App {
                                 .as_ref()
                                 .and_then(|s| s.subscription_type.clone())
                         });
-                if subscription_type.is_none() {
-                    return Err(color_eyre::eyre::eyre!(
-                        "Claude Code authorization has not completed yet"
-                    ));
-                }
                 StoredConnection {
                     id: id.clone(),
                     provider_id: provider.id,
@@ -529,5 +535,17 @@ fn default_completions_path_for_provider(provider_id: &str) -> Option<String> {
     match provider_id {
         "openai" => Some("/v1/chat/completions".to_string()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_claude_code_access_token;
+
+    #[test]
+    fn claude_code_save_requires_non_empty_access_token() {
+        assert!(require_claude_code_access_token(Some("token")).is_ok());
+        assert!(require_claude_code_access_token(Some("   ")).is_err());
+        assert!(require_claude_code_access_token(None).is_err());
     }
 }

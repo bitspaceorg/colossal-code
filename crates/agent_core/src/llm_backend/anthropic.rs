@@ -162,10 +162,12 @@ async fn send_anthropic_request(
         ));
     }
 
-    if status.as_u16() == 400
-        && payload.get("tools").is_some()
-        && body.contains("invalid_request_error")
-    {
+    if should_retry_without_tools(
+        status.as_u16(),
+        payload.get("tools").is_some(),
+        &body,
+        backend,
+    ) {
         let mut retry_payload = payload.clone();
         if let Some(object) = retry_payload.as_object_mut() {
             object.remove("tools");
@@ -192,6 +194,18 @@ async fn send_anthropic_request(
         status.as_u16(),
         body
     ))
+}
+
+fn should_retry_without_tools(
+    status: u16,
+    had_tools: bool,
+    body: &str,
+    backend: &HttpBackend,
+) -> bool {
+    status == 400
+        && had_tools
+        && body.contains("invalid_request_error")
+        && !backend.has_claude_auth()
 }
 
 async fn build_anthropic_request(
@@ -759,6 +773,7 @@ fn current_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm_backend::claude_auth::ClaudeCodeAuthState;
     use either::Either;
 
     fn text_message(role: &str, content: &str) -> IndexMap<String, MessageContent> {
@@ -784,5 +799,31 @@ mod tests {
         assert!(system.starts_with(SYSTEM_IDENTITY_PREFIX));
         assert!(system.contains("<system-reminder>\nPlan mode active.\n</system-reminder>"));
         assert!(!system.contains("base system prompt should stay out"));
+    }
+
+    #[test]
+    fn does_not_strip_tools_for_claude_code_requests() {
+        let backend = HttpBackend {
+            client: reqwest::Client::new(),
+            base_url: "https://api.anthropic.com".to_string(),
+            api_key: "token".to_string(),
+            model: Mutex::new("claude-sonnet-4-6".to_string()),
+            completions_path: "/v1/messages".to_string(),
+            requires_model_load: false,
+            supports_thinking_param: false,
+            provider_id: Some("anthropic".to_string()),
+            auth_kind: Some("claude_code".to_string()),
+            chatgpt_account_id: None,
+            openai_auth: None,
+            claude_auth: ClaudeCodeAuthState::from_env("token".to_string()),
+            latest_usage: Arc::new(Mutex::new(None)),
+        };
+
+        assert!(!should_retry_without_tools(
+            400,
+            true,
+            "invalid_request_error",
+            &backend,
+        ));
     }
 }
