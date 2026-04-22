@@ -5,7 +5,7 @@ use crate::sandboxing::{SandboxCommand, SandboxManager};
 use crate::shell::Shell;
 use crate::types::ExecCommandParams;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub async fn exec_command(
     command: Vec<String>,
@@ -118,112 +118,178 @@ pub fn resolve_tools_binary_path() -> Result<PathBuf, ColossalErr> {
 }
 
 fn get_tools_path() -> Result<PathBuf, ColossalErr> {
-    // Look for the tools binary in the same directory as the current executable
-    let exe_path = std::env::current_exe().map_err(|e| ColossalErr::Io(e))?;
-    let exe_dir = exe_path.parent().ok_or_else(|| {
-        ColossalErr::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "Executable directory not found",
-        ))
-    })?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let candidates = candidate_tools_paths(&cwd);
 
-    let tools_path = exe_dir.join("tools");
-
-    // If the tools binary doesn't exist in the same directory, look in common locations
-    if !tools_path.exists() {
-        // The tools binary is in crates/sessionizer/target/{debug,release}/tools
-        // We need to find it relative to the main executable's target directory
-
-        // Try to find the tools binary in crates/sessionizer/target
-        let mut search_path = exe_dir.to_path_buf();
-
-        // Navigate up to find the workspace target directory
-        // Executable might be in target/debug/ or target/debug/examples/
-        while search_path.parent().is_some() {
-            let parent = search_path.parent().unwrap();
-
-            // Check if this is the target directory (has debug/release subdirs)
-            if parent.file_name().and_then(|n| n.to_str()) == Some("target") {
-                // Found target directory, now look for tools binary in various locations
-                let workspace_root = parent.parent().unwrap_or(parent);
-
-                // Try workspace-level target/release/tools first (most common for cargo build --release)
-                let workspace_release = workspace_root.join("target").join("release").join("tools");
-
-                if workspace_release.exists() {
-                    return Ok(workspace_release);
-                }
-
-                // Try workspace-level target/debug/tools
-                let workspace_debug = workspace_root.join("target").join("debug").join("tools");
-
-                if workspace_debug.exists() {
-                    return Ok(workspace_debug);
-                }
-
-                // Try crates/sessionizer/target/release/tools
-                let sessionizer_release = workspace_root
-                    .join("crates")
-                    .join("sessionizer")
-                    .join("target")
-                    .join("release")
-                    .join("tools");
-
-                if sessionizer_release.exists() {
-                    return Ok(sessionizer_release);
-                }
-
-                // Try crates/sessionizer/target/debug/tools
-                let sessionizer_debug = workspace_root
-                    .join("crates")
-                    .join("sessionizer")
-                    .join("target")
-                    .join("debug")
-                    .join("tools");
-
-                if sessionizer_debug.exists() {
-                    return Ok(sessionizer_debug);
-                }
-
-                // Try crates/agent_core/target/release/tools
-                let agent_core_release = workspace_root
-                    .join("crates")
-                    .join("agent_core")
-                    .join("target")
-                    .join("release")
-                    .join("tools");
-
-                if agent_core_release.exists() {
-                    return Ok(agent_core_release);
-                }
-
-                // Try crates/agent_core/target/debug/tools
-                let agent_core_debug = workspace_root
-                    .join("crates")
-                    .join("agent_core")
-                    .join("target")
-                    .join("debug")
-                    .join("tools");
-
-                if agent_core_debug.exists() {
-                    return Ok(agent_core_debug);
-                }
-
-                break;
-            }
-
-            search_path = parent.to_path_buf();
+    for path in &candidates {
+        if path.exists() {
+            return Ok(path.clone());
         }
+    }
 
-        // Fallback: return the default path and let it fail with a clear error
-        Err(ColossalErr::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!(
-                "Tools binary not found. Searched in {} and workspace target/{{debug,release}}/tools, crates/sessionizer/target/{{debug,release}}/tools, crates/agent_core/target/{{debug,release}}/tools",
-                tools_path.display()
-            ),
-        )))
+    if let Some(path) = find_tools_on_path() {
+        return Ok(path);
+    }
+
+    let searched = candidates
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(ColossalErr::Io(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!(
+            "Tools binary not found. Searched: {searched}. Also checked PATH for 'tools' and env override NITE_TOOLS_BINARY"
+        ),
+    )))
+}
+
+fn candidate_tools_paths(cwd: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(path) = env_tools_override(cwd) {
+        push_candidate(&mut candidates, &mut seen, path);
+    }
+
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(exe_dir) = exe_path.parent()
+    {
+        push_candidate(&mut candidates, &mut seen, exe_dir.join("tools"));
+
+        if let Some(workspace_root) = workspace_root_from_exe_dir(exe_dir) {
+            push_repo_workspace_candidates(&mut candidates, &mut seen, &workspace_root);
+        }
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    push_workspace_target_candidates(&mut candidates, &mut seen, &manifest_dir);
+    if let Some(repo_root) = manifest_dir.parent().and_then(|path| path.parent()) {
+        push_repo_workspace_candidates(&mut candidates, &mut seen, repo_root);
+    }
+
+    push_repo_workspace_candidates(&mut candidates, &mut seen, cwd);
+
+    candidates
+}
+
+fn env_tools_override(cwd: &Path) -> Option<PathBuf> {
+    let raw = std::env::var_os("NITE_TOOLS_BINARY")?;
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        Some(path)
     } else {
-        Ok(tools_path)
+        Some(cwd.join(path))
+    }
+}
+
+fn workspace_root_from_exe_dir(exe_dir: &Path) -> Option<PathBuf> {
+    let mut search_path = exe_dir.to_path_buf();
+
+    while let Some(parent) = search_path.parent() {
+        if parent.file_name().and_then(|name| name.to_str()) == Some("target") {
+            return Some(parent.parent().unwrap_or(parent).to_path_buf());
+        }
+        search_path = parent.to_path_buf();
+    }
+
+    None
+}
+
+fn push_repo_workspace_candidates(
+    candidates: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+    workspace_root: &Path,
+) {
+    push_workspace_target_candidates(candidates, seen, workspace_root);
+    push_workspace_target_candidates(
+        candidates,
+        seen,
+        &workspace_root.join("crates").join("sessionizer"),
+    );
+    push_workspace_target_candidates(
+        candidates,
+        seen,
+        &workspace_root.join("crates").join("agent_core"),
+    );
+}
+
+fn push_workspace_target_candidates(
+    candidates: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+    root: &Path,
+) {
+    push_candidate(
+        candidates,
+        seen,
+        root.join("target").join("release").join("tools"),
+    );
+    push_candidate(
+        candidates,
+        seen,
+        root.join("target").join("debug").join("tools"),
+    );
+}
+
+fn push_candidate(candidates: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
+    if seen.insert(path.clone()) {
+        candidates.push(path);
+    }
+}
+
+fn find_tools_on_path() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join("tools"))
+        .find(|candidate| candidate.exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        push_repo_workspace_candidates, push_workspace_target_candidates,
+        workspace_root_from_exe_dir,
+    };
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn derives_workspace_root_from_target_executable_directory() {
+        let exe_dir = Path::new("/tmp/cocode/target/release");
+        assert_eq!(
+            workspace_root_from_exe_dir(exe_dir),
+            Some(PathBuf::from("/tmp/cocode"))
+        );
+    }
+
+    #[test]
+    fn includes_sessionizer_workspace_targets_in_repo_candidates() {
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+        push_repo_workspace_candidates(&mut candidates, &mut seen, Path::new("/repo"));
+
+        assert!(candidates.contains(&PathBuf::from(
+            "/repo/crates/sessionizer/target/release/tools"
+        )));
+        assert!(candidates.contains(&PathBuf::from("/repo/target/debug/tools")));
+    }
+
+    #[test]
+    fn includes_release_and_debug_targets_for_workspace() {
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+        push_workspace_target_candidates(
+            &mut candidates,
+            &mut seen,
+            Path::new("/repo/crates/sessionizer"),
+        );
+
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/repo/crates/sessionizer/target/release/tools"),
+                PathBuf::from("/repo/crates/sessionizer/target/debug/tools"),
+            ]
+        );
     }
 }
