@@ -8,6 +8,8 @@ variables:
   CARGO_TERM_COLOR: always
   NIX_CONFIG: "experimental-features = nix-command flakes"
   CARGO_HOME: ${CI_PROJECT_DIR}/.cargo
+  RUSTC_WRAPPER: sccache
+  SCCACHE_DIR: ${CI_PROJECT_DIR}/.cache/sccache
 
 .nix_rust_template: &nix_rust_template
   image: nixos/nix:2.24.11
@@ -19,11 +21,12 @@ variables:
     key:
       files:
         - Cargo.lock
-      prefix: cargo-${CI_COMMIT_REF_SLUG}
+      prefix: cargo-shared
     paths:
       - .cargo/registry/cache
       - .cargo/registry/index
       - .cargo/git/db
+      - .cache/sccache
       - target/
     policy: pull-push
 
@@ -96,4 +99,12 @@ package:nix:
   stage: package
   rules: *rules_first_party
   script:
+    - |
+      if [ -n "${CACHIX_CACHE:-}" ]; then
+        nix shell nixpkgs#cachix -c cachix use "$CACHIX_CACHE"
+      fi
     - nix build --accept-flake-config --print-build-logs .#default
+    - |
+      if [ -n "${CACHIX_CACHE:-}" ] && [ -n "${CACHIX_AUTH_TOKEN:-}" ]; then
+        nix shell nixpkgs#cachix -c sh -lc 'cachix push "$CACHIX_CACHE" $(nix path-info --accept-flake-config .#default)'
+      fi
