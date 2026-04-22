@@ -49,6 +49,18 @@ struct OpenAiAuthClaim {
     chatgpt_account_id: Option<String>,
 }
 
+pub(crate) fn has_active_openai_device_session(state: &ConnectSubscriptionState) -> bool {
+    state.started
+        && state
+            .device_auth_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        && state
+            .user_code
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+}
+
 impl App {
     pub(crate) fn start_openai_subscription_auth(&mut self) -> Result<()> {
         let client = Client::new();
@@ -207,4 +219,37 @@ fn extract_openai_account_id(token: &str) -> Option<String> {
                 .organizations
                 .and_then(|mut organizations| organizations.pop().map(|org| org.id))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_active_openai_device_session;
+    use crate::app::connect::ConnectSubscriptionState;
+
+    #[test]
+    fn active_openai_device_session_requires_started_id_and_code() {
+        let state = ConnectSubscriptionState {
+            started: true,
+            user_code: Some("user".to_string()),
+            device_auth_id: Some("device".to_string()),
+            ..Default::default()
+        };
+        assert!(has_active_openai_device_session(&state));
+
+        let missing_id = ConnectSubscriptionState {
+            started: true,
+            user_code: Some("user".to_string()),
+            device_auth_id: None,
+            ..Default::default()
+        };
+        assert!(!has_active_openai_device_session(&missing_id));
+
+        let not_started = ConnectSubscriptionState {
+            started: false,
+            user_code: Some("user".to_string()),
+            device_auth_id: Some("device".to_string()),
+            ..Default::default()
+        };
+        assert!(!has_active_openai_device_session(&not_started));
+    }
 }

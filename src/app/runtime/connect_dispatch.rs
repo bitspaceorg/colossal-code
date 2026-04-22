@@ -1,7 +1,7 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::App;
-use crate::app::connect::{ConnectAuthMethod, ConnectModalMode};
+use crate::app::connect::{ConnectAuthMethod, ConnectModalMode, has_active_openai_device_session};
 use crate::app::state::message::{MessageState, MessageType};
 
 impl App {
@@ -337,7 +337,11 @@ impl App {
                     self.push_connect_status(format!(" ⎿ failed to save connection: {}", error));
                 }
             }
-        } else if !self.connect.subscription_state.started {
+        } else if !has_active_openai_device_session(&self.connect.subscription_state) {
+            self.connect.subscription_state.started = false;
+            self.connect.subscription_state.device_auth_id = None;
+            self.connect.subscription_state.user_code = None;
+            self.connect.subscription_state.status = None;
             if let Err(error) = self.start_openai_subscription_auth() {
                 self.push_connect_status(format!(
                     " ⎿ failed to start OpenAI subscription auth: {}",

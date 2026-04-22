@@ -23,6 +23,22 @@ fn require_claude_code_access_token(access_token: Option<&str>) -> Result<()> {
     ))
 }
 
+fn saved_openai_subscription_state(connection: &StoredConnection) -> ConnectSubscriptionState {
+    ConnectSubscriptionState {
+        started: false,
+        verification_url: None,
+        user_code: None,
+        device_auth_id: None,
+        account_id: connection.account_id.clone(),
+        access_token: connection.access_token.clone(),
+        refresh_token: connection.refresh_token.clone(),
+        expires_at: connection.access_expires_at,
+        status: Some(
+            "A saved subscription connection exists. You can re-authorize or continue.".to_string(),
+        ),
+    }
+}
+
 impl App {
     pub(crate) fn current_model_provider_id(&self) -> Option<&str> {
         self.active_connection()
@@ -170,16 +186,7 @@ impl App {
         if let Some(connection) = saved.as_ref()
             && connection.auth_kind == StoredAuthKind::OpenAiSubscription
         {
-            self.connect.subscription_state.started = true;
-            self.connect.subscription_state.user_code = connection.account_id.clone();
-            self.connect.subscription_state.account_id = connection.account_id.clone();
-            self.connect.subscription_state.access_token = connection.access_token.clone();
-            self.connect.subscription_state.refresh_token = connection.refresh_token.clone();
-            self.connect.subscription_state.expires_at = connection.access_expires_at;
-            self.connect.subscription_state.status = Some(
-                "A saved subscription connection exists. You can re-authorize or continue."
-                    .to_string(),
-            );
+            self.connect.subscription_state = saved_openai_subscription_state(connection);
         }
         if let Some(connection) = saved.as_ref()
             && connection.auth_kind == StoredAuthKind::ClaudeCode
@@ -540,12 +547,45 @@ fn default_completions_path_for_provider(provider_id: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::require_claude_code_access_token;
+    use super::{require_claude_code_access_token, saved_openai_subscription_state};
+    use crate::app::persistence::auth_store::{StoredAuthKind, StoredConnection};
 
     #[test]
     fn claude_code_save_requires_non_empty_access_token() {
         assert!(require_claude_code_access_token(Some("token")).is_ok());
         assert!(require_claude_code_access_token(Some("   ")).is_err());
         assert!(require_claude_code_access_token(None).is_err());
+    }
+
+    #[test]
+    fn saved_openai_subscription_does_not_mark_device_flow_started() {
+        let connection = StoredConnection {
+            id: "openai".to_string(),
+            provider_id: "openai".to_string(),
+            provider_name: "OpenAI".to_string(),
+            auth_kind: StoredAuthKind::OpenAiSubscription,
+            api_key: None,
+            model: None,
+            base_url: Some("https://chatgpt.com".to_string()),
+            completions_path: Some("/backend-api/codex/responses".to_string()),
+            account_id: Some("acct".to_string()),
+            access_token: Some("access".to_string()),
+            refresh_token: Some("refresh".to_string()),
+            access_expires_at: Some(123),
+            oauth_scopes: Vec::new(),
+            oauth_subscription_type: None,
+            oauth_rate_limit_tier: None,
+            organization_id: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+
+        let state = saved_openai_subscription_state(&connection);
+        assert!(!state.started);
+        assert_eq!(state.account_id.as_deref(), Some("acct"));
+        assert_eq!(state.user_code, None);
+        assert_eq!(state.device_auth_id, None);
+        assert_eq!(state.access_token.as_deref(), Some("access"));
+        assert_eq!(state.refresh_token.as_deref(), Some("refresh"));
     }
 }
