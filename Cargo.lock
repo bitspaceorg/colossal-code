@@ -236,6 +236,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sessionizer",
+ "sha2",
  "shell-escape",
  "shlex",
  "strum 0.27.2",

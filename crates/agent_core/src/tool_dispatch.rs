@@ -214,7 +214,7 @@ pub(crate) async fn execute_non_exec_tool_call(
             let state = shell_session::global_state().unwrap();
             let args = build_tools_binary_args(name, arguments);
             let sandbox_policy = state.pending_sandbox_policy.lock().await.clone();
-            execute_tool_binary(args, &sandbox_policy, agent.effective_cwd()).await?
+            execute_tool_binary(args, &sandbox_policy, agent.execution_cwd().await?).await?
         }
         "web_search" => {
             let query = arguments["query"].as_str().unwrap_or("");

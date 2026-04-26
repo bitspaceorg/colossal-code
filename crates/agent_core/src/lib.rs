@@ -4,6 +4,7 @@ pub use agent_protocol::types::spec::{
 use agent_protocol::types::task::Task;
 use anyhow::Result;
 use mistralrs::{Model, RequestBuilder, Tool};
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,6 +17,7 @@ pub mod agent_state;
 pub mod config;
 pub mod conversation;
 pub mod exec_command;
+pub(crate) mod execution_env;
 mod llm_backend;
 pub mod message_helpers;
 pub mod message_types;
@@ -77,6 +79,7 @@ pub struct Agent {
     safety_config: Arc<Mutex<safety_config::SafetyConfig>>,
     /// Optional working directory override for orchestration (worktree support)
     working_directory: Option<PathBuf>,
+    execution_environment: Arc<Mutex<Option<execution_env::ExecutionEnvironment>>>,
     /// Display label for the currently loaded model
     model_name: Arc<Mutex<String>>,
 }
@@ -311,6 +314,7 @@ impl Agent {
             thinking_tags: Arc::new(Mutex::new(thinking_tags)),
             safety_config: Arc::new(Mutex::new(safety_config)),
             working_directory: None,
+            execution_environment: Arc::new(Mutex::new(None)),
             model_name: Arc::new(Mutex::new(model_label)),
         }
     }
@@ -329,6 +333,7 @@ impl Agent {
             thinking_tags: self.thinking_tags.clone(),
             safety_config: self.safety_config.clone(),
             working_directory: Some(cwd),
+            execution_environment: Arc::new(Mutex::new(None)),
             model_name: self.model_name.clone(),
         }
     }
@@ -361,6 +366,51 @@ impl Agent {
             .clone()
             .or_else(|| agent_state::workspace_root_override())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    pub(crate) async fn execution_cwd(&self) -> Result<PathBuf> {
+        if let Some(env) = self.ensure_execution_environment().await? {
+            Ok(env.private_workspace().to_path_buf())
+        } else {
+            Ok(self.effective_cwd())
+        }
+    }
+
+    pub(crate) async fn execution_env_overrides(&self) -> Result<HashMap<String, String>> {
+        Ok(self
+            .ensure_execution_environment()
+            .await?
+            .map(|env| env.env_overrides())
+            .unwrap_or_default())
+    }
+
+    pub(crate) async fn checkpoint_execution_after_tool(
+        &self,
+    ) -> Result<Option<execution_env::FsCheckpoint>> {
+        if !execution_env::isolated_execution_enabled() {
+            return Ok(None);
+        }
+        let mut guard = self.execution_environment.lock().await;
+        if let Some(env) = guard.as_mut() {
+            Ok(Some(env.checkpoint_agent_fs()?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn ensure_execution_environment(
+        &self,
+    ) -> Result<Option<execution_env::ExecutionEnvironment>> {
+        if !execution_env::isolated_execution_enabled() {
+            return Ok(None);
+        }
+        let mut guard = self.execution_environment.lock().await;
+        if guard.is_none() {
+            *guard = Some(execution_env::ExecutionEnvironment::initialize(
+                self.effective_cwd(),
+            )?);
+        }
+        Ok(guard.clone())
     }
 
     /// Create a new agent instance (legacy method, uses Local backend)
@@ -628,8 +678,10 @@ impl Agent {
 
         if let Some(state) = shell_session::global_state() {
             let mut policy_guard = state.pending_sandbox_policy.lock().await;
-            *policy_guard =
-                sandbox_policy_from_config_with_workspace(&new_safety_config, self.effective_cwd());
+            *policy_guard = sandbox_policy_from_config_with_workspace(
+                &new_safety_config,
+                self.execution_cwd().await?,
+            );
         }
 
         // Update tools in the agent

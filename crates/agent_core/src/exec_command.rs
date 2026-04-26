@@ -88,7 +88,7 @@ pub async fn execute_tool_call(
 
     if let Some(state) = shell_session::global_state() {
         let safety_cfg = agent.safety_config.lock().await.clone();
-        let workspace_path = agent.effective_cwd();
+        let workspace_path = agent.execution_cwd().await?;
         let refreshed_policy =
             crate::sandbox_policy_from_config_with_workspace(&safety_cfg, workspace_path);
         let mut policy_guard = state.pending_sandbox_policy.lock().await;
@@ -98,17 +98,22 @@ pub async fn execute_tool_call(
     let name = &tool_call.function.name;
     let arguments: Value = serde_json::from_str(&tool_call.function.arguments)?;
 
-    if name != "exec_command"
+    let result = if name != "exec_command"
         && let Some(result) =
             tool_dispatch::execute_non_exec_tool_call(agent, name, &arguments).await?
     {
-        return Ok(result);
-    }
+        Ok(result)
+    } else {
+        match name.as_str() {
+            "exec_command" => execute_exec_command(agent, &arguments, tx).await,
+            _ => Ok(format!("Tool '{}' executed (not fully implemented)", name)),
+        }
+    };
 
-    match name.as_str() {
-        "exec_command" => execute_exec_command(agent, &arguments, tx).await,
-        _ => Ok(format!("Tool '{}' executed (not fully implemented)", name)),
+    if result.is_ok() {
+        agent.checkpoint_execution_after_tool().await?;
     }
+    result
 }
 
 async fn execute_exec_command(
@@ -192,8 +197,11 @@ async fn execute_managed_nu_foreground(
     mut current_approval: Option<colossal_linux_sandbox::safety::AskForApproval>,
     tx: mpsc::UnboundedSender<crate::AgentMessage>,
 ) -> Result<String> {
-    let (manager, session_id) =
-        shell_session::get_or_create_shell_session(Some(agent.effective_cwd())).await?;
+    let (manager, session_id) = shell_session::get_or_create_shell_session(
+        Some(agent.execution_cwd().await?),
+        agent.execution_env_overrides().await?,
+    )
+    .await?;
 
     loop {
         match manager
@@ -268,7 +276,8 @@ async fn execute_isolated_exec(
             command,
             is_background,
             timeout_ms,
-            agent.effective_cwd(),
+            agent.execution_cwd().await?,
+            agent.execution_env_overrides().await?,
             current_approval,
         )
         .await
@@ -336,8 +345,11 @@ async fn execute_replay_state(
     let mut retried_session = false;
 
     loop {
-        let (manager, session_id) =
-            shell_session::get_or_create_shell_session(Some(agent.effective_cwd())).await?;
+        let (manager, session_id) = shell_session::get_or_create_shell_session(
+            Some(agent.execution_cwd().await?),
+            agent.execution_env_overrides().await?,
+        )
+        .await?;
 
         match manager
             .exec_command_in_shell_session(
@@ -438,8 +450,11 @@ async fn execute_generic_exec(
     current_approval: Option<colossal_linux_sandbox::safety::AskForApproval>,
     _tx: mpsc::UnboundedSender<crate::AgentMessage>,
 ) -> Result<String> {
-    let (manager, session_id) =
-        shell_session::get_or_create_shell_session(Some(agent.effective_cwd())).await?;
+    let (manager, session_id) = shell_session::get_or_create_shell_session(
+        Some(agent.execution_cwd().await?),
+        agent.execution_env_overrides().await?,
+    )
+    .await?;
 
     let result = manager
         .exec_command_in_shell_session(

@@ -111,6 +111,7 @@ pub async fn add_writable_root(path: PathBuf) -> Result<()> {
 
 pub(crate) async fn get_or_create_shell_session(
     seed_cwd: Option<PathBuf>,
+    env_overrides: std::collections::HashMap<String, String>,
 ) -> Result<(
     Arc<colossal_linux_sandbox::manager::SessionManager>,
     colossal_linux_sandbox::types::SessionId,
@@ -131,6 +132,7 @@ pub(crate) async fn get_or_create_shell_session(
     let has_background = *state.session_has_background_process.lock().await;
     let pending_policy = state.pending_sandbox_policy.lock().await.clone();
     let mut continuity_state = state.continuity_state.lock().await.clone();
+    continuity_state.env_vars.extend(env_overrides);
 
     if continuity_state.current_cwd == crate::resolve_workspace_root() {
         if let Some(seed_cwd) = seed_cwd.clone() {
@@ -220,12 +222,14 @@ pub(crate) async fn run_isolated_exec_command(
     is_background: bool,
     timeout_ms: u64,
     cwd_hint: PathBuf,
+    env_overrides: std::collections::HashMap<String, String>,
     ask_for_approval: Option<colossal_linux_sandbox::safety::AskForApproval>,
 ) -> std::result::Result<
     colossal_linux_sandbox::types::ExecCommandOutput,
     colossal_linux_sandbox::error::ColossalErr,
 > {
-    let continuity_state = state.continuity_state.lock().await.clone();
+    let mut continuity_state = state.continuity_state.lock().await.clone();
+    continuity_state.env_vars.extend(env_overrides.clone());
     let sandbox_policy = state.pending_sandbox_policy.lock().await.clone();
     let shell_kind = state.shell.kind();
     let cwd = if continuity_state.current_cwd == crate::resolve_workspace_root() {
@@ -265,7 +269,7 @@ pub(crate) async fn run_isolated_exec_command(
                 shell_kind,
                 colossal_linux_sandbox::shell::ShellKind::ManagedNu
             ) {
-                Default::default()
+                env_overrides
             } else {
                 continuity_state.env_vars
             },

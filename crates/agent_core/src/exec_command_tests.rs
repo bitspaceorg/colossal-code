@@ -322,9 +322,10 @@ async fn policy_change_rotates_shell_and_replays_manual_shell_continuity() {
     let agent = build_test_agent(temp.clone());
     let (tx, _rx) = mpsc::unbounded_channel();
 
-    let (manager, session_id) = shell_session::get_or_create_shell_session(None)
-        .await
-        .expect("create initial shell session");
+    let (manager, session_id) =
+        shell_session::get_or_create_shell_session(None, Default::default())
+            .await
+            .expect("create initial shell session");
     manager
         .exec_command_in_shell_session(
             session_id.clone(),
