@@ -47,6 +47,7 @@ pub use thinking_helpers::{
 };
 
 pub use exec_command::{exec_command_output_to_yaml, execute_tool_binary, execute_tool_call};
+pub use execution_env::{ApplyConflict, ApplyResult};
 
 pub(crate) fn resolve_workspace_root() -> PathBuf {
     agent_state::resolve_workspace_root()
@@ -393,6 +394,18 @@ impl Agent {
         let mut guard = self.execution_environment.lock().await;
         if let Some(env) = guard.as_mut() {
             Ok(Some(env.checkpoint_agent_fs()?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn apply_execution_changes(&self) -> Result<Option<ApplyResult>> {
+        if !execution_env::isolated_execution_enabled() {
+            return Ok(None);
+        }
+        let mut guard = self.execution_environment.lock().await;
+        if let Some(env) = guard.as_mut() {
+            Ok(Some(env.apply_to_real_workspace()?))
         } else {
             Ok(None)
         }

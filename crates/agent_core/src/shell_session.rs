@@ -19,6 +19,20 @@ pub(crate) struct GlobalState {
 
 static GLOBAL_STATE: OnceCell<GlobalState> = OnceCell::new();
 
+fn should_seed_cwd(
+    current_cwd: &std::path::Path,
+    seed_cwd: &std::path::Path,
+    env_overrides: &std::collections::HashMap<String, String>,
+) -> bool {
+    let workspace_root = env_overrides
+        .get("NITE_WORKSPACE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(crate::resolve_workspace_root);
+    current_cwd == crate::resolve_workspace_root()
+        || !current_cwd.starts_with(&workspace_root)
+        || !current_cwd.starts_with(seed_cwd)
+}
+
 pub(crate) fn default_continuity_state(
     shell: &colossal_linux_sandbox::shell::Shell,
 ) -> colossal_linux_sandbox::manager::PersistentSessionState {
@@ -134,8 +148,12 @@ pub(crate) async fn get_or_create_shell_session(
     let mut continuity_state = state.continuity_state.lock().await.clone();
     continuity_state.env_vars.extend(env_overrides);
 
-    if continuity_state.current_cwd == crate::resolve_workspace_root() {
-        if let Some(seed_cwd) = seed_cwd.clone() {
+    if let Some(seed_cwd) = seed_cwd.clone() {
+        if should_seed_cwd(
+            &continuity_state.current_cwd,
+            &seed_cwd,
+            &continuity_state.env_vars,
+        ) {
             continuity_state.current_cwd = seed_cwd.clone();
             continuity_state.initial_cwd = seed_cwd;
         }
@@ -232,7 +250,11 @@ pub(crate) async fn run_isolated_exec_command(
     continuity_state.env_vars.extend(env_overrides.clone());
     let sandbox_policy = state.pending_sandbox_policy.lock().await.clone();
     let shell_kind = state.shell.kind();
-    let cwd = if continuity_state.current_cwd == crate::resolve_workspace_root() {
+    let cwd = if should_seed_cwd(
+        &continuity_state.current_cwd,
+        &cwd_hint,
+        &continuity_state.env_vars,
+    ) {
         cwd_hint
     } else {
         continuity_state.current_cwd.clone()

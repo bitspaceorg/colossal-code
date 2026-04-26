@@ -6,7 +6,15 @@ use agent_core::{
 use mistralrs::{CalledFunction, ToolCallResponse, ToolCallType};
 use serde_json::json;
 use std::path::PathBuf;
+use std::sync::{Mutex as StdMutex, OnceLock};
 use tokio::sync::mpsc;
+
+fn isolated_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| StdMutex::new(()))
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+}
 
 struct EnvVarGuard {
     key: &'static str,
@@ -73,6 +81,7 @@ fn make_test_dir(label: &str) -> PathBuf {
 
 #[tokio::test]
 async fn exec_command_isolated_root_keeps_real_workspace_unchanged() {
+    let _guard = isolated_test_lock();
     let _env = EnvVarGuard::set("NITE_ISOLATED_EXECUTION_ROOT", "1");
     let temp = make_test_dir("exec-command");
     let original = temp.join("original.txt");
@@ -98,5 +107,80 @@ async fn exec_command_isolated_root_keeps_real_workspace_unchanged() {
     assert!(
         !temp.join("marker.txt").exists(),
         "real workspace should not receive new file"
+    );
+}
+
+#[tokio::test]
+async fn apply_execution_changes_merges_private_workspace_updates() {
+    let _guard = isolated_test_lock();
+    let _env = EnvVarGuard::set("NITE_ISOLATED_EXECUTION_ROOT", "1");
+    let temp = make_test_dir("apply-success");
+    std::fs::write(temp.join("file.txt"), "before").expect("seed file");
+    set_workspace_root_override(&temp);
+    let agent = build_test_agent(temp.clone());
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    execute_tool_call(
+        &agent,
+        &tool_call(json!({
+            "command": "printf after > file.txt && printf new > created.txt",
+            "replay_state": false
+        })),
+        tx,
+    )
+    .await
+    .expect("execute isolated command");
+
+    let apply = agent
+        .apply_execution_changes()
+        .await
+        .expect("apply changes")
+        .expect("isolated apply result");
+
+    assert!(apply.conflicts.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(temp.join("file.txt")).unwrap(),
+        "after"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.join("created.txt")).unwrap(),
+        "new"
+    );
+}
+
+#[tokio::test]
+async fn apply_execution_changes_reports_drift_conflicts() {
+    let _guard = isolated_test_lock();
+    let _env = EnvVarGuard::set("NITE_ISOLATED_EXECUTION_ROOT", "1");
+    let temp = make_test_dir("apply-conflict");
+    std::fs::write(temp.join("file.txt"), "before").expect("seed file");
+    set_workspace_root_override(&temp);
+    let agent = build_test_agent(temp.clone());
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    execute_tool_call(
+        &agent,
+        &tool_call(json!({
+            "command": "printf agent > file.txt",
+            "replay_state": false
+        })),
+        tx,
+    )
+    .await
+    .expect("execute isolated command");
+
+    std::fs::write(temp.join("file.txt"), "user").expect("modify real file");
+
+    let apply = agent
+        .apply_execution_changes()
+        .await
+        .expect("apply changes")
+        .expect("isolated apply result");
+
+    assert_eq!(apply.conflicts.len(), 1);
+    assert_eq!(apply.conflicts[0].path, PathBuf::from("file.txt"));
+    assert_eq!(
+        std::fs::read_to_string(temp.join("file.txt")).unwrap(),
+        "user"
     );
 }
