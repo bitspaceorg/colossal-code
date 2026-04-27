@@ -225,6 +225,40 @@ impl App {
                 return;
             }
 
+            if self.isolated_changes.prompt_open {
+                let choice = self.input.trim();
+                match choice {
+                    "0" => {
+                        if let Some(tx) = &self.agent_tx {
+                            let _ = tx.send(AgentMessage::ApplyExecutionChanges);
+                        }
+                    }
+                    "1" => {
+                        self.messages.push(
+                            " ⎿ Keeping isolated changes pending until you apply them".to_string(),
+                        );
+                        self.message_types.push(MessageType::Agent);
+                        self.message_states.push(MessageState::Sent);
+                    }
+                    "2" => {
+                        if let Some(tx) = &self.agent_tx {
+                            let _ = tx.send(AgentMessage::DiscardExecutionChanges);
+                        }
+                    }
+                    _ => {
+                        self.input.clear();
+                        self.reset_cursor();
+                        self.input_modified = false;
+                        return;
+                    }
+                }
+                self.input.clear();
+                self.reset_cursor();
+                self.input_modified = false;
+                self.isolated_changes.prompt_open = false;
+                return;
+            }
+
             // Check if we're in sandbox permission prompt mode
             if self.safety_state.show_sandbox_prompt {
                 let choice = self.input.trim();

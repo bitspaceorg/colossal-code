@@ -304,10 +304,18 @@ impl App {
             }
             Mode::Normal => {
                 let (label, color) = self.effective_sandbox_status();
-                vec![Span::styled(
+                let mut spans = vec![Span::styled(
                     format!("{label} "),
                     Style::default().fg(color),
-                )]
+                )];
+                if self.isolated_changes.pending_count > 0 {
+                    spans.push(Span::styled("• ", Style::default().fg(Color::DarkGray)));
+                    spans.push(Span::styled(
+                        format!("ISOLATED {} pending", self.isolated_changes.pending_count),
+                        Style::default().fg(Color::Cyan),
+                    ));
+                }
+                spans
             }
         };
         let center_line = Line::from(center_text);

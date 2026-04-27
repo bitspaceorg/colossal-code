@@ -538,6 +538,67 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                     app.safety_state.show_approval_prompt = true;
                     app.safety_state.approval_prompt_content = content;
                 }
+                AgentMessage::ExecutionState(pending_count) => {
+                    let had_pending = app.isolated_changes.pending_count > 0;
+                    app.isolated_changes.pending_count = pending_count;
+                    if pending_count == 0 {
+                        app.isolated_changes.last_prompted_count = 0;
+                        app.isolated_changes.prompt_open = false;
+                        app.isolated_changes.conflict_paths.clear();
+                        app.isolated_changes.show_conflicts_panel = false;
+                        app.isolated_changes.info_shown = false;
+                    } else if !had_pending && !app.isolated_changes.info_shown {
+                        app.messages.push(
+                            " ⎿ Changes are isolated and won't touch the workspace until applied"
+                                .to_string(),
+                        );
+                        app.message_types.push(MessageType::Agent);
+                        app.message_states.push(MessageState::Sent);
+                        app.isolated_changes.info_shown = true;
+                    }
+                }
+                AgentMessage::ExecutionChangesApplied(result) => {
+                    app.isolated_changes.prompt_open = false;
+                    if result.conflicts.is_empty() {
+                        app.isolated_changes.conflict_paths.clear();
+                        app.isolated_changes.show_conflicts_panel = false;
+                        app.messages.push(format!(
+                            " ⎿ Applied {} isolated change{}",
+                            result.applied_paths.len(),
+                            if result.applied_paths.len() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        ));
+                    } else {
+                        let mut paths: Vec<String> = result
+                            .conflicts
+                            .iter()
+                            .map(|conflict| conflict.path.display().to_string())
+                            .collect();
+                        paths.sort();
+                        paths.dedup();
+                        app.isolated_changes.conflict_paths = paths;
+                        app.isolated_changes.show_conflicts_panel = true;
+                        app.messages.push(format!(
+                            " ⎿ Apply blocked by workspace drift in {} path{}",
+                            result.conflicts.len(),
+                            if result.conflicts.len() == 1 { "" } else { "s" }
+                        ));
+                    }
+                    app.message_types.push(MessageType::Agent);
+                    app.message_states.push(MessageState::Sent);
+                }
+                AgentMessage::ExecutionChangesDiscarded => {
+                    app.isolated_changes.prompt_open = false;
+                    app.isolated_changes.conflict_paths.clear();
+                    app.isolated_changes.show_conflicts_panel = false;
+                    app.messages
+                        .push(" ⎿ Discarded isolated changes".to_string());
+                    app.message_types.push(MessageType::Agent);
+                    app.message_states.push(MessageState::Sent);
+                }
                 AgentMessage::ThinkingComplete(_residual_tokens) => {
                     // Thinking content has stopped streaming, but keep the indicator
                     // active so the user still sees progress while tool calls run.
@@ -637,6 +698,14 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                     app.safety_state.approval_prompt_content.clear();
                     app.safety_state.show_sandbox_prompt = false;
                     app.safety_state.sandbox_blocked_path.clear();
+                    if app.isolated_changes.pending_count > 0
+                        && app.isolated_changes.last_prompted_count
+                            != app.isolated_changes.pending_count
+                    {
+                        app.isolated_changes.prompt_open = true;
+                        app.isolated_changes.last_prompted_count =
+                            app.isolated_changes.pending_count;
+                    }
                     app.thinking_start_time = None;
                     app.thinking_token_count = 0;
                     app.streaming_completion_tokens = 0; // Reset for next turn

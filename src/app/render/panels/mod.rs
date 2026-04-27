@@ -1,6 +1,7 @@
 pub mod background;
 pub mod connect;
 pub mod help;
+pub mod isolated_changes;
 pub mod model;
 pub mod prompts;
 pub mod resume;

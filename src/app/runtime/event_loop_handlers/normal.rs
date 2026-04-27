@@ -183,6 +183,7 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
 
     let prompt_active = app.show_queue_choice
         || app.safety_state.show_approval_prompt
+        || app.isolated_changes.prompt_open
         || app.safety_state.show_sandbox_prompt;
 
     let vim_insert_mode = app.vim_mode_enabled
@@ -370,6 +371,9 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
         KeyCode::Esc if app.phase == Phase::Input && app.autocomplete_active => {
             app.clear_autocomplete();
         }
+        KeyCode::Esc if app.phase == Phase::Input && app.isolated_changes.prompt_open => {
+            app.isolated_changes.prompt_open = false;
+        }
         KeyCode::Tab if app.phase == Phase::Input && app.autocomplete_active => {
             app.apply_autocomplete_selection();
         }
@@ -404,6 +408,26 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
             }
 
             if app.safety_state.show_sandbox_prompt {
+                if app.vim_mode_enabled
+                    && !matches!(app.vim_input_editor.get_mode(), edtui::EditorMode::Insert)
+                {
+                    app.vim_input_editor.handle_event(Event::Key(key));
+                    app.sync_vim_input();
+                    return;
+                }
+
+                if matches!(to_insert, '0' | '1' | '2') {
+                    app.input = to_insert.to_string();
+                    app.character_index = app.input.chars().count();
+                    app.input_modified = true;
+                    if app.vim_mode_enabled {
+                        app.sync_input_to_vim();
+                    }
+                }
+                return;
+            }
+
+            if app.isolated_changes.prompt_open {
                 if app.vim_mode_enabled
                     && !matches!(app.vim_input_editor.get_mode(), edtui::EditorMode::Insert)
                 {

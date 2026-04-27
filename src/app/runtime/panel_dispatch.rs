@@ -13,6 +13,7 @@ impl App {
             || self.handle_resume_panel_key(key)
             || self.handle_history_panel_key(key)
             || self.handle_rewind_panel_key(key)
+            || self.handle_isolated_conflicts_panel_key(key)
             || self.handle_model_selection_panel_key(key)
             || self.handle_normal_mode_global_toggles(key)
     }
@@ -242,6 +243,25 @@ impl App {
                     self.message_types.push(MessageType::Agent);
                     self.message_states.push(MessageState::Sent);
                 }
+            }
+            _ => {}
+        }
+
+        true
+    }
+
+    fn handle_isolated_conflicts_panel_key(&mut self, key: &KeyEvent) -> bool {
+        if !self.isolated_changes.show_conflicts_panel {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.isolated_changes.show_conflicts_panel = false;
+                self.messages
+                    .push(" ⎿ isolated changes conflict dialog dismissed".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
             }
             _ => {}
         }

@@ -12,6 +12,8 @@ impl App {
                 if self.phase == Phase::Input
                     && self.mode == Mode::Normal
                     && !self.show_background_tasks
+                    && !self.isolated_changes.prompt_open
+                    && !self.isolated_changes.show_conflicts_panel
                     && !self.ui_state.show_help
                     && self.viewing_task.is_none() =>
             {
@@ -70,6 +72,7 @@ impl App {
             || self.ui_state.show_help
             || self.ui_state.show_resume
             || self.show_rewind
+            || self.isolated_changes.show_conflicts_panel
             || self.show_todos
             || self.show_model_selection
             || self.should_render_spec_tree(None)

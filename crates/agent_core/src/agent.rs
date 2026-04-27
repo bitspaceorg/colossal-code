@@ -658,6 +658,9 @@ impl Agent {
                                 tool_call.function.name.clone(),
                                 result.clone(),
                             ));
+                            if let Ok(pending_count) = self.pending_execution_change_count().await {
+                                let _ = tx.send(AgentMessage::ExecutionState(pending_count));
+                            }
 
                             if tool_call.function.name == "exec_command" {
                                 if let Ok(parsed) =
@@ -706,6 +709,9 @@ impl Agent {
                                 tool_call.function.name.clone(),
                                 error_yaml.clone(),
                             ));
+                            if let Ok(pending_count) = self.pending_execution_change_count().await {
+                                let _ = tx.send(AgentMessage::ExecutionState(pending_count));
+                            }
 
                             error_yaml
                         }

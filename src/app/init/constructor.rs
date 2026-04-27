@@ -128,6 +128,7 @@ impl App {
             agent_tx: Some(input_tx),
             agent_rx: Some(output_rx),
             agent_state: AgentState::default(),
+            isolated_changes: crate::app::IsolatedChangesState::default(),
             is_thinking: false,
             thinking_indicator_active: false,
             thinking_loader_frame: 0,

@@ -85,6 +85,76 @@ impl App {
                                 agent_clone.handle_approval_response(approved).await;
                             });
                         }
+                        AgentMessage::RefreshExecutionState => {
+                            let agent_clone = agent_clone.clone();
+                            let tx_clone = output_tx_clone.clone();
+                            tokio::task::spawn_local(async move {
+                                match agent_clone.pending_execution_change_count().await {
+                                    Ok(count) => {
+                                        let _ = tx_clone.send(AgentMessage::ExecutionState(count));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx_clone.send(AgentMessage::Error(format!(
+                                            "Failed to refresh isolated change state: {}",
+                                            e
+                                        )));
+                                    }
+                                }
+                            });
+                        }
+                        AgentMessage::ApplyExecutionChanges => {
+                            let agent_clone = agent_clone.clone();
+                            let tx_clone = output_tx_clone.clone();
+                            tokio::task::spawn_local(async move {
+                                match agent_clone.apply_execution_changes().await {
+                                    Ok(Some(result)) => {
+                                        let pending_count = if result.conflicts.is_empty() {
+                                            0
+                                        } else {
+                                            agent_clone
+                                                .pending_execution_change_count()
+                                                .await
+                                                .unwrap_or(0)
+                                        };
+                                        let _ = tx_clone
+                                            .send(AgentMessage::ExecutionChangesApplied(result));
+                                        let _ = tx_clone
+                                            .send(AgentMessage::ExecutionState(pending_count));
+                                    }
+                                    Ok(None) => {
+                                        let _ = tx_clone.send(AgentMessage::ExecutionState(0));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx_clone.send(AgentMessage::Error(format!(
+                                            "Failed to apply isolated changes: {}",
+                                            e
+                                        )));
+                                    }
+                                }
+                            });
+                        }
+                        AgentMessage::DiscardExecutionChanges => {
+                            let agent_clone = agent_clone.clone();
+                            let tx_clone = output_tx_clone.clone();
+                            tokio::task::spawn_local(async move {
+                                match agent_clone.discard_execution_changes().await {
+                                    Ok(true) => {
+                                        let _ =
+                                            tx_clone.send(AgentMessage::ExecutionChangesDiscarded);
+                                        let _ = tx_clone.send(AgentMessage::ExecutionState(0));
+                                    }
+                                    Ok(false) => {
+                                        let _ = tx_clone.send(AgentMessage::ExecutionState(0));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx_clone.send(AgentMessage::Error(format!(
+                                            "Failed to discard isolated changes: {}",
+                                            e
+                                        )));
+                                    }
+                                }
+                            });
+                        }
                         _ => {}
                     }
                 }

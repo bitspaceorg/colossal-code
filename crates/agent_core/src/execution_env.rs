@@ -142,6 +142,11 @@ impl ExecutionEnvironment {
         Ok(checkpoint)
     }
 
+    pub(crate) fn pending_change_count(&self) -> Result<usize> {
+        let private_manifest = FsManifest::scan(&self.private_workspace)?;
+        Ok(self.baseline_manifest.diff(&private_manifest).changes.len())
+    }
+
     pub(crate) fn apply_to_real_workspace(&mut self) -> Result<ApplyResult> {
         let private_manifest = FsManifest::scan(&self.private_workspace)?;
         let real_manifest = FsManifest::scan(&self.real_workspace)?;
@@ -172,6 +177,28 @@ impl ExecutionEnvironment {
             applied_paths,
             conflicts: Vec::new(),
         })
+    }
+
+    pub(crate) fn discard_changes(&mut self) -> Result<()> {
+        let refreshed_baseline = FsManifest::scan(&self.real_workspace)?;
+        if self.private_workspace.exists() {
+            std::fs::remove_dir_all(&self.private_workspace).with_context(|| {
+                format!(
+                    "remove private workspace {}",
+                    self.private_workspace.display()
+                )
+            })?;
+        }
+        std::fs::create_dir_all(&self.private_workspace).with_context(|| {
+            format!(
+                "recreate private workspace {}",
+                self.private_workspace.display()
+            )
+        })?;
+        copy_tree(&self.real_workspace, &self.private_workspace)?;
+        self.baseline_manifest = refreshed_baseline;
+        self.checkpoint_agent_fs()?;
+        Ok(())
     }
 }
 

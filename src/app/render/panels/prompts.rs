@@ -49,9 +49,39 @@ pub fn render_approval_prompt<'a>(approval_prompt_content: &'a str) -> Vec<Line<
     lines
 }
 
+pub fn render_isolated_changes_prompt(pending_count: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let noun = if pending_count == 1 {
+        "change"
+    } else {
+        "changes"
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled("● ", Style::default().fg(Color::Cyan)),
+        Span::raw(format!(
+            "Apply {} isolated {} to the workspace?",
+            pending_count, noun
+        )),
+    ]));
+
+    let option_spans = vec![
+        Span::raw("  "),
+        Span::styled("0: ", Style::default().fg(Color::Yellow)),
+        Span::raw("Apply   "),
+        Span::styled("1: ", Style::default().fg(Color::Yellow)),
+        Span::raw("Keep isolated   "),
+        Span::styled("2: ", Style::default().fg(Color::Yellow)),
+        Span::raw("Discard"),
+    ];
+    lines.push(Line::from(option_spans));
+
+    lines
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{render_approval_prompt, render_sandbox_prompt};
+    use super::{render_approval_prompt, render_isolated_changes_prompt, render_sandbox_prompt};
     use ratatui::style::Color;
 
     #[test]
@@ -80,5 +110,20 @@ mod tests {
         assert_eq!(lines[0].spans[1].content.as_ref(), "Allow `bash` command?");
         assert_eq!(lines[1].spans[2].content.as_ref(), "Approve   ");
         assert_eq!(lines[1].spans[4].content.as_ref(), "Deny   ");
+    }
+
+    #[test]
+    fn isolated_changes_prompt_renders_expected_lines() {
+        let lines = render_isolated_changes_prompt(3);
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(
+            lines[0].spans[1].content.as_ref(),
+            "Apply 3 isolated changes to the workspace?"
+        );
+        assert_eq!(lines[1].spans[2].content.as_ref(), "Apply   ");
+        assert_eq!(lines[1].spans[4].content.as_ref(), "Keep isolated   ");
+        assert_eq!(lines[1].spans[6].content.as_ref(), "Discard");
     }
 }

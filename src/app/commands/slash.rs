@@ -35,6 +35,16 @@ impl App {
         }
 
         match dispatch {
+            SlashCommandDispatch::Apply => {
+                if self.isolated_changes.pending_count == 0 {
+                    self.messages
+                        .push(" ⎿ No isolated changes are pending".to_string());
+                    self.message_types.push(MessageType::Agent);
+                    self.message_states.push(MessageState::Sent);
+                } else {
+                    self.isolated_changes.prompt_open = true;
+                }
+            }
             SlashCommandDispatch::Clear => {
                 // Trigger save before clearing
                 self.persistence_state.save_pending = true;

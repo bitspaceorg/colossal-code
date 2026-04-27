@@ -26,6 +26,7 @@ impl Default for ReviewOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ParsedSlashCommand {
+    Apply,
     Clear,
     Exit,
     Export,
@@ -51,7 +52,9 @@ pub(crate) fn parse_slash_command(command: &str) -> ParsedSlashCommand {
     let command = command.trim();
     let cmd_lower = command.to_lowercase();
 
-    if cmd_lower == "/clear" {
+    if cmd_lower == "/apply" {
+        ParsedSlashCommand::Apply
+    } else if cmd_lower == "/clear" {
         ParsedSlashCommand::Clear
     } else if cmd_lower == "/exit" {
         ParsedSlashCommand::Exit

@@ -29,6 +29,13 @@ impl App {
             );
         }
 
+        if let Some(idx) = area_indices.isolated_changes_prompt_area_idx {
+            frame.render_widget(
+                Paragraph::new(self.render_isolated_changes_prompt_lines()),
+                areas[idx],
+            );
+        }
+
         if let Some(idx) = area_indices.sandbox_prompt_area_idx {
             frame.render_widget(
                 Paragraph::new(self.render_sandbox_prompt_lines()),
@@ -86,6 +93,10 @@ impl App {
 
         if let Some(idx) = area_indices.rewind_area_idx {
             self.render_rewind_panel(frame, areas[idx]);
+        }
+
+        if let Some(idx) = area_indices.isolated_conflicts_area_idx {
+            self.render_isolated_conflicts_panel(frame, areas[idx]);
         }
 
         if let Some(idx) = area_indices.todos_area_idx {

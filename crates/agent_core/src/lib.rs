@@ -411,6 +411,33 @@ impl Agent {
         }
     }
 
+    pub async fn discard_execution_changes(&self) -> Result<bool> {
+        if !execution_env::isolated_execution_enabled() {
+            return Ok(false);
+        }
+        let mut guard = self.execution_environment.lock().await;
+        if let Some(env) = guard.as_mut() {
+            env.discard_changes()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub async fn pending_execution_change_count(&self) -> Result<usize> {
+        if !execution_env::isolated_execution_enabled() {
+            return Ok(0);
+        }
+        let mut guard = self.execution_environment.lock().await;
+        if guard.is_none() {
+            return Ok(0);
+        }
+        Ok(guard
+            .as_mut()
+            .expect("execution environment checked")
+            .pending_change_count()?)
+    }
+
     async fn ensure_execution_environment(
         &self,
     ) -> Result<Option<execution_env::ExecutionEnvironment>> {

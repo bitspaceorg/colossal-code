@@ -3,6 +3,7 @@ use super::parse::{ParsedSlashCommand, parse_slash_command};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SlashCommandDispatch {
+    Apply,
     Clear,
     Exit,
     Export,
@@ -27,6 +28,7 @@ pub(crate) enum SlashCommandDispatch {
 impl From<ParsedSlashCommand> for SlashCommandDispatch {
     fn from(parsed: ParsedSlashCommand) -> Self {
         match parsed {
+            ParsedSlashCommand::Apply => Self::Apply,
             ParsedSlashCommand::Clear => Self::Clear,
             ParsedSlashCommand::Exit => Self::Exit,
             ParsedSlashCommand::Export => Self::Export,

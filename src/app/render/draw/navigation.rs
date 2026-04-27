@@ -5,6 +5,7 @@ pub(crate) struct DrawAreaIndices {
     pub(crate) messages_area_idx: usize,
     pub(crate) queue_choice_area_idx: Option<usize>,
     pub(crate) approval_prompt_area_idx: Option<usize>,
+    pub(crate) isolated_changes_prompt_area_idx: Option<usize>,
     pub(crate) sandbox_prompt_area_idx: Option<usize>,
     pub(crate) survey_area_idx: Option<usize>,
     pub(crate) infobar_area_idx: Option<usize>,
@@ -15,6 +16,7 @@ pub(crate) struct DrawAreaIndices {
     pub(crate) resume_area_idx: Option<usize>,
     pub(crate) history_panel_area_idx: Option<usize>,
     pub(crate) rewind_area_idx: Option<usize>,
+    pub(crate) isolated_conflicts_area_idx: Option<usize>,
     pub(crate) todos_area_idx: Option<usize>,
     pub(crate) model_selection_area_idx: Option<usize>,
     pub(crate) min_areas: usize,
@@ -24,6 +26,7 @@ impl App {
     pub(crate) fn compute_draw_area_indices(
         has_queue_choice: bool,
         has_approval_prompt: bool,
+        has_isolated_changes_prompt: bool,
         has_sandbox_prompt: bool,
         has_survey_or_thanks: bool,
         _has_infobar: bool,
@@ -33,6 +36,7 @@ impl App {
         has_resume_panel: bool,
         has_history_panel: bool,
         has_rewind_panel: bool,
+        has_isolated_conflicts_panel: bool,
         has_todos_panel: bool,
         has_model_selection_panel: bool,
     ) -> DrawAreaIndices {
@@ -50,6 +54,7 @@ impl App {
         let mut idx = messages_area_idx + 1;
         let queue_choice_area_idx = next_idx_if(has_queue_choice, &mut idx);
         let approval_prompt_area_idx = next_idx_if(has_approval_prompt, &mut idx);
+        let isolated_changes_prompt_area_idx = next_idx_if(has_isolated_changes_prompt, &mut idx);
         let sandbox_prompt_area_idx = next_idx_if(has_sandbox_prompt, &mut idx);
         let survey_area_idx = next_idx_if(has_survey_or_thanks, &mut idx);
         let infobar_area_idx = Some(idx);
@@ -62,6 +67,7 @@ impl App {
         let resume_area_idx = next_idx_if(has_resume_panel, &mut idx);
         let history_panel_area_idx = next_idx_if(has_history_panel, &mut idx);
         let rewind_area_idx = next_idx_if(has_rewind_panel, &mut idx);
+        let isolated_conflicts_area_idx = next_idx_if(has_isolated_conflicts_panel, &mut idx);
         let todos_area_idx = next_idx_if(has_todos_panel, &mut idx);
         let model_selection_area_idx = next_idx_if(has_model_selection_panel, &mut idx);
 
@@ -69,6 +75,7 @@ impl App {
             messages_area_idx,
             queue_choice_area_idx,
             approval_prompt_area_idx,
+            isolated_changes_prompt_area_idx,
             sandbox_prompt_area_idx,
             survey_area_idx,
             infobar_area_idx,
@@ -79,6 +86,7 @@ impl App {
             resume_area_idx,
             history_panel_area_idx,
             rewind_area_idx,
+            isolated_conflicts_area_idx,
             todos_area_idx,
             model_selection_area_idx,
             min_areas: idx + 1,
@@ -95,7 +103,7 @@ mod tests {
     fn compute_draw_area_indices_uses_baseline_layout() {
         let indices = App::compute_draw_area_indices(
             false, false, false, false, false, false, false, false, false, false, false, false,
-            false,
+            false, false, false,
         );
 
         assert_eq!(indices.messages_area_idx, 2);
@@ -104,6 +112,7 @@ mod tests {
         assert_eq!(indices.min_areas, 6);
         assert_eq!(indices.queue_choice_area_idx, None);
         assert_eq!(indices.approval_prompt_area_idx, None);
+        assert_eq!(indices.isolated_changes_prompt_area_idx, None);
         assert_eq!(indices.sandbox_prompt_area_idx, None);
         assert_eq!(indices.survey_area_idx, None);
         assert_eq!(indices.autocomplete_area_idx, None);
@@ -112,6 +121,7 @@ mod tests {
         assert_eq!(indices.resume_area_idx, None);
         assert_eq!(indices.history_panel_area_idx, None);
         assert_eq!(indices.rewind_area_idx, None);
+        assert_eq!(indices.isolated_conflicts_area_idx, None);
         assert_eq!(indices.todos_area_idx, None);
         assert_eq!(indices.model_selection_area_idx, None);
     }
@@ -119,24 +129,27 @@ mod tests {
     #[test]
     fn compute_draw_area_indices_orders_optional_sections() {
         let indices = App::compute_draw_area_indices(
-            true, true, true, true, true, true, true, true, true, true, true, true, true,
+            true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+            true,
         );
 
         assert_eq!(indices.queue_choice_area_idx, Some(3));
         assert_eq!(indices.approval_prompt_area_idx, Some(4));
-        assert_eq!(indices.sandbox_prompt_area_idx, Some(5));
-        assert_eq!(indices.survey_area_idx, Some(6));
-        assert_eq!(indices.infobar_area_idx, Some(7));
-        assert_eq!(indices.input_area_idx, 8);
-        assert_eq!(indices.autocomplete_area_idx, Some(9));
-        assert_eq!(indices.background_tasks_area_idx, Some(10));
-        assert_eq!(indices.help_area_idx, Some(11));
-        assert_eq!(indices.resume_area_idx, Some(12));
-        assert_eq!(indices.history_panel_area_idx, Some(13));
-        assert_eq!(indices.rewind_area_idx, Some(14));
-        assert_eq!(indices.todos_area_idx, Some(15));
-        assert_eq!(indices.model_selection_area_idx, Some(16));
-        assert_eq!(indices.min_areas, 18);
+        assert_eq!(indices.isolated_changes_prompt_area_idx, Some(5));
+        assert_eq!(indices.sandbox_prompt_area_idx, Some(6));
+        assert_eq!(indices.survey_area_idx, Some(7));
+        assert_eq!(indices.infobar_area_idx, Some(8));
+        assert_eq!(indices.input_area_idx, 9);
+        assert_eq!(indices.autocomplete_area_idx, Some(10));
+        assert_eq!(indices.background_tasks_area_idx, Some(11));
+        assert_eq!(indices.help_area_idx, Some(12));
+        assert_eq!(indices.resume_area_idx, Some(13));
+        assert_eq!(indices.history_panel_area_idx, Some(14));
+        assert_eq!(indices.rewind_area_idx, Some(15));
+        assert_eq!(indices.isolated_conflicts_area_idx, Some(16));
+        assert_eq!(indices.todos_area_idx, Some(17));
+        assert_eq!(indices.model_selection_area_idx, Some(18));
+        assert_eq!(indices.min_areas, 20);
     }
 
     #[test]
@@ -145,6 +158,7 @@ mod tests {
             messages_area_idx: 2,
             queue_choice_area_idx: Some(3),
             approval_prompt_area_idx: Some(4),
+            isolated_changes_prompt_area_idx: None,
             sandbox_prompt_area_idx: None,
             survey_area_idx: None,
             infobar_area_idx: Some(5),
@@ -155,6 +169,7 @@ mod tests {
             resume_area_idx: None,
             history_panel_area_idx: None,
             rewind_area_idx: None,
+            isolated_conflicts_area_idx: None,
             todos_area_idx: None,
             model_selection_area_idx: None,
             min_areas: 8,

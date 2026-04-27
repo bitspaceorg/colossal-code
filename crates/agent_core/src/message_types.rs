@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::ApplyResult;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecCommandResult {
     pub command: String,
@@ -84,4 +86,10 @@ pub enum AgentMessage {
     ReloadModel(String),
     RequestApproval(String),
     ApprovalResponse(bool),
+    RefreshExecutionState,
+    ExecutionState(usize),
+    ApplyExecutionChanges,
+    ExecutionChangesApplied(ApplyResult),
+    DiscardExecutionChanges,
+    ExecutionChangesDiscarded,
 }

@@ -227,6 +227,7 @@ pub(crate) struct App {
     pub(crate) agent_tx: Option<mpsc::UnboundedSender<AgentMessage>>,
     pub(crate) agent_rx: Option<mpsc::UnboundedReceiver<AgentMessage>>,
     pub(crate) agent_state: AgentState,
+    pub(crate) isolated_changes: crate::app::IsolatedChangesState,
     // Thinking animation state
     pub(crate) is_thinking: bool,
     pub(crate) thinking_indicator_active: bool,

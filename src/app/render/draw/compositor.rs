@@ -47,6 +47,7 @@ impl App {
         let status_area = areas[areas.len() - 1];
         let has_queue_choice = self.show_queue_choice;
         let has_approval_prompt = self.safety_state.show_approval_prompt;
+        let has_isolated_changes_prompt = self.isolated_changes.prompt_open;
         let has_sandbox_prompt = self.safety_state.show_sandbox_prompt;
         let has_survey_or_thanks = self.survey.is_active() || self.survey.has_thank_you();
         let has_infobar = self.ctrl_c_pressed.is_some() || !self.queued_messages.is_empty();
@@ -54,6 +55,7 @@ impl App {
         let area_indices = Self::compute_draw_area_indices(
             has_queue_choice,
             has_approval_prompt,
+            has_isolated_changes_prompt,
             has_sandbox_prompt,
             has_survey_or_thanks,
             has_infobar,
@@ -63,6 +65,7 @@ impl App {
             self.ui_state.show_resume,
             self.show_history_panel,
             self.show_rewind,
+            self.isolated_changes.show_conflicts_panel,
             self.show_todos,
             self.show_model_selection,
         );

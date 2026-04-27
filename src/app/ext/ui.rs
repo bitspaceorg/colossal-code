@@ -119,6 +119,12 @@ impl App {
         app::render::panels::prompts::render_sandbox_prompt(&self.safety_state.sandbox_blocked_path)
     }
 
+    pub(crate) fn render_isolated_changes_prompt_lines(&self) -> Vec<Line<'static>> {
+        app::render::panels::prompts::render_isolated_changes_prompt(
+            self.isolated_changes.pending_count,
+        )
+    }
+
     pub(crate) fn center_horizontal(
         area: ratatui::layout::Rect,
         width: u16,

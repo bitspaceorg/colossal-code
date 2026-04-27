@@ -1,4 +1,5 @@
 pub(crate) const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/apply", "review or apply isolated workspace changes"),
     ("/clear", "clear conversation history and free up context"),
     ("/connect", "connect an OpenAI-compatible provider account"),
     ("/exit", "exit the repl"),

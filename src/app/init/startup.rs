@@ -271,6 +271,11 @@ impl App {
                 } else {
                     0
                 };
+                let isolated_changes_prompt_height = if self.isolated_changes.prompt_open {
+                    2
+                } else {
+                    0
+                };
                 let sandbox_prompt_height = if self.safety_state.show_sandbox_prompt {
                     2
                 } else {
@@ -292,6 +297,11 @@ impl App {
                 let help_height = if self.ui_state.show_help { 25 } else { 0 };
                 let resume_height = if self.ui_state.show_resume { 25 } else { 0 };
                 let rewind_height = if self.show_rewind { 25 } else { 0 };
+                let isolated_conflicts_height = if self.isolated_changes.show_conflicts_panel {
+                    16
+                } else {
+                    0
+                };
                 let todos_height = if self.show_todos {
                     self.todos_panel_height()
                 } else {
@@ -310,6 +320,9 @@ impl App {
                 }
                 if approval_prompt_height > 0 {
                     constraints_vec.push(Constraint::Length(approval_prompt_height));
+                }
+                if isolated_changes_prompt_height > 0 {
+                    constraints_vec.push(Constraint::Length(isolated_changes_prompt_height));
                 }
                 if sandbox_prompt_height > 0 {
                     constraints_vec.push(Constraint::Length(sandbox_prompt_height));
@@ -339,6 +352,10 @@ impl App {
 
                 if rewind_height > 0 {
                     constraints_vec.push(Constraint::Length(rewind_height));
+                }
+
+                if isolated_conflicts_height > 0 {
+                    constraints_vec.push(Constraint::Length(isolated_conflicts_height));
                 }
 
                 if todos_height > 0 {

@@ -492,6 +492,16 @@ impl Default for SafetyState {
 }
 
 #[derive(Clone, Default)]
+pub(crate) struct IsolatedChangesState {
+    pub(crate) pending_count: usize,
+    pub(crate) last_prompted_count: usize,
+    pub(crate) prompt_open: bool,
+    pub(crate) info_shown: bool,
+    pub(crate) conflict_paths: Vec<String>,
+    pub(crate) show_conflicts_panel: bool,
+}
+
+#[derive(Clone, Default)]
 pub(crate) struct PersistenceState {
     pub(crate) save_pending: bool,
     pub(crate) current_conversation_id: Option<String>,
