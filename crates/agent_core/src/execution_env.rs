@@ -83,6 +83,13 @@ pub struct ApplyResult {
     pub conflicts: Vec<ApplyConflict>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ExecutionReviewEntry {
+    pub path: PathBuf,
+    pub old_string: String,
+    pub new_string: String,
+}
+
 pub(crate) fn isolated_execution_enabled() -> bool {
     std::env::var("NITE_ISOLATED_EXECUTION_ROOT")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
@@ -145,6 +152,31 @@ impl ExecutionEnvironment {
     pub(crate) fn pending_change_count(&self) -> Result<usize> {
         let private_manifest = FsManifest::scan(&self.private_workspace)?;
         Ok(self.baseline_manifest.diff(&private_manifest).changes.len())
+    }
+
+    pub(crate) fn review_entries(&self) -> Result<Vec<ExecutionReviewEntry>> {
+        let private_manifest = FsManifest::scan(&self.private_workspace)?;
+        let delta = self.baseline_manifest.diff(&private_manifest);
+        let mut entries = Vec::new();
+
+        for change in &delta.changes {
+            entries.push(ExecutionReviewEntry {
+                path: change.path().to_path_buf(),
+                old_string: entry_snapshot_for_change(
+                    change.before_entry(),
+                    &self.real_workspace,
+                    change.path(),
+                )?,
+                new_string: entry_snapshot_for_change(
+                    change.after_entry(),
+                    &self.private_workspace,
+                    change.path(),
+                )?,
+            });
+        }
+
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(entries)
     }
 
     pub(crate) fn apply_to_real_workspace(&mut self) -> Result<ApplyResult> {
@@ -269,6 +301,44 @@ impl FsChange {
             | FsChange::Deleted { path, .. }
             | FsChange::TypeChanged { path, .. } => path,
         }
+    }
+
+    fn before_entry(&self) -> Option<&FsEntry> {
+        match self {
+            FsChange::Created { .. } => None,
+            FsChange::Modified { before, .. }
+            | FsChange::Deleted { before, .. }
+            | FsChange::TypeChanged { before, .. } => Some(before),
+        }
+    }
+
+    fn after_entry(&self) -> Option<&FsEntry> {
+        match self {
+            FsChange::Deleted { .. } => None,
+            FsChange::Created { entry, .. } => Some(entry),
+            FsChange::Modified { after, .. } | FsChange::TypeChanged { after, .. } => Some(after),
+        }
+    }
+}
+
+fn entry_snapshot_for_change(
+    entry: Option<&FsEntry>,
+    root: &Path,
+    relative: &Path,
+) -> Result<String> {
+    match entry {
+        None => Ok(String::new()),
+        Some(entry) => render_entry_snapshot(entry, &root.join(relative)),
+    }
+}
+
+fn render_entry_snapshot(entry: &FsEntry, path: &Path) -> Result<String> {
+    match &entry.kind {
+        FsEntryKind::File => Ok(std::fs::read_to_string(path).unwrap_or_else(|_| {
+            String::from_utf8_lossy(&std::fs::read(path).unwrap_or_default()).into_owned()
+        })),
+        FsEntryKind::Directory => Ok("[directory]\n".to_string()),
+        FsEntryKind::Symlink { target } => Ok(format!("[symlink -> {}]\n", target.display())),
     }
 }
 

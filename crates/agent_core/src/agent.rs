@@ -661,6 +661,9 @@ impl Agent {
                             if let Ok(pending_count) = self.pending_execution_change_count().await {
                                 let _ = tx.send(AgentMessage::ExecutionState(pending_count));
                             }
+                            if let Ok(entries) = self.execution_review_entries().await {
+                                let _ = tx.send(AgentMessage::ExecutionReviewEntries(entries));
+                            }
 
                             if tool_call.function.name == "exec_command" {
                                 if let Ok(parsed) =
@@ -711,6 +714,9 @@ impl Agent {
                             ));
                             if let Ok(pending_count) = self.pending_execution_change_count().await {
                                 let _ = tx.send(AgentMessage::ExecutionState(pending_count));
+                            }
+                            if let Ok(entries) = self.execution_review_entries().await {
+                                let _ = tx.send(AgentMessage::ExecutionReviewEntries(entries));
                             }
 
                             error_yaml

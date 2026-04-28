@@ -72,6 +72,12 @@ mod tests {
     }
 
     #[test]
+    fn dispatches_apply_command() {
+        let dispatch = dispatch_slash_command("/apply");
+        assert!(matches!(dispatch, SlashCommandDispatch::Apply));
+    }
+
+    #[test]
     fn dispatches_shells_command() {
         let dispatch = dispatch_slash_command("/shells");
         assert!(matches!(dispatch, SlashCommandDispatch::Shells));

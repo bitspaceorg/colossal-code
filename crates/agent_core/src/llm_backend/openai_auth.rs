@@ -1,4 +1,5 @@
 use anyhow::Result;
+use keyring::{Entry, Error as KeyringError};
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
@@ -9,6 +10,7 @@ use super::HttpBackend;
 
 const OPENAI_AUTH_ISSUER: &str = "https://auth.openai.com";
 const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const KEYRING_SERVICE: &str = "cocode";
 
 #[derive(Debug)]
 pub(super) struct OpenAiAuthState {
@@ -16,6 +18,7 @@ pub(super) struct OpenAiAuthState {
     refresh_token: Mutex<Option<String>>,
     access_expires_at: Mutex<Option<u64>>,
     account_id: Mutex<Option<String>>,
+    needs_initial_refresh: Mutex<bool>,
     auth_file: Option<PathBuf>,
     active_connection_id: Option<String>,
 }
@@ -83,6 +86,7 @@ impl OpenAiAuthState {
             refresh_token: Mutex::new(refresh_token),
             access_expires_at: Mutex::new(access_expires_at),
             account_id: Mutex::new(account_id),
+            needs_initial_refresh: Mutex::new(true),
             auth_file,
             active_connection_id,
         })
@@ -103,8 +107,9 @@ impl OpenAiAuthState {
 
     pub(super) async fn ensure_fresh(&self, client: &reqwest::Client) -> Result<()> {
         let now = current_timestamp();
+        let initial_refresh_pending = *self.needs_initial_refresh.lock().await;
         let expires_at = *self.access_expires_at.lock().await;
-        if !expires_at.is_some_and(|value| value <= now + 60) {
+        if !initial_refresh_pending && !expires_at.is_some_and(|value| value <= now + 60) {
             return Ok(());
         }
 
@@ -138,6 +143,7 @@ impl OpenAiAuthState {
         *self.access_token.lock().await = refreshed.access_token.clone();
         *self.refresh_token.lock().await = Some(new_refresh.clone());
         *self.access_expires_at.lock().await = Some(expires_at);
+        *self.needs_initial_refresh.lock().await = false;
         persist_refreshed_tokens(
             self.auth_file.clone(),
             self.active_connection_id.clone(),
@@ -185,10 +191,14 @@ fn persist_refreshed_tokens(
     expires_at: u64,
     account_id: Option<String>,
 ) -> Result<()> {
-    let Some(path) = auth_file else {
+    let Some(connection_id) = active_connection_id else {
         return Ok(());
     };
-    let Some(connection_id) = active_connection_id else {
+
+    persist_secret(&connection_id, "access_token", &access_token)?;
+    persist_secret(&connection_id, "refresh_token", &refresh_token)?;
+
+    let Some(path) = auth_file else {
         return Ok(());
     };
     if !path.exists() {
@@ -205,7 +215,7 @@ fn persist_refreshed_tokens(
         return Ok(());
     };
 
-    connection.access_token = Some(access_token);
+    connection.access_token = None;
     connection.refresh_token = Some(refresh_token);
     connection.access_expires_at = Some(expires_at);
     if account_id.is_some() {
@@ -219,6 +229,18 @@ fn persist_refreshed_tokens(
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
+}
+
+fn persist_secret(connection_id: &str, field: &str, value: &str) -> Result<()> {
+    let entry = Entry::new(
+        KEYRING_SERVICE,
+        &format!("connection:{connection_id}:{field}"),
+    )?;
+    match entry.set_password(value) {
+        Ok(()) => Ok(()),
+        Err(KeyringError::NoStorageAccess(_)) => Ok(()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 fn current_timestamp() -> u64 {

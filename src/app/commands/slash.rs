@@ -42,7 +42,10 @@ impl App {
                     self.message_types.push(MessageType::Agent);
                     self.message_states.push(MessageState::Sent);
                 } else {
-                    self.isolated_changes.prompt_open = true;
+                    if let Some(tx) = &self.agent_tx {
+                        let _ = tx.send(AgentMessage::RefreshExecutionState);
+                    }
+                    self.isolated_changes.show_review_panel = true;
                 }
             }
             SlashCommandDispatch::Clear => {

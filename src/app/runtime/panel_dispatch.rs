@@ -1,3 +1,4 @@
+use agent_core::AgentMessage;
 use std::time::SystemTime;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -13,7 +14,7 @@ impl App {
             || self.handle_resume_panel_key(key)
             || self.handle_history_panel_key(key)
             || self.handle_rewind_panel_key(key)
-            || self.handle_isolated_conflicts_panel_key(key)
+            || self.handle_isolated_review_panel_key(key)
             || self.handle_model_selection_panel_key(key)
             || self.handle_normal_mode_global_toggles(key)
     }
@@ -250,18 +251,40 @@ impl App {
         true
     }
 
-    fn handle_isolated_conflicts_panel_key(&mut self, key: &KeyEvent) -> bool {
-        if !self.isolated_changes.show_conflicts_panel {
+    fn handle_isolated_review_panel_key(&mut self, key: &KeyEvent) -> bool {
+        if !self.isolated_changes.show_review_panel {
             return false;
         }
 
         match key.code {
             KeyCode::Esc => {
-                self.isolated_changes.show_conflicts_panel = false;
+                self.isolated_changes.show_review_panel = false;
                 self.messages
-                    .push(" ⎿ isolated changes conflict dialog dismissed".to_string());
+                    .push(" ⎿ isolated changes review dismissed".to_string());
                 self.message_types.push(MessageType::Agent);
                 self.message_states.push(MessageState::Sent);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.isolated_changes.review_selected > 0 {
+                    self.isolated_changes.review_selected -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.isolated_changes.review_selected + 1
+                    < self.isolated_changes.review_entries.len()
+                {
+                    self.isolated_changes.review_selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(tx) = &self.agent_tx {
+                    let _ = tx.send(AgentMessage::ApplyExecutionChanges);
+                }
+            }
+            KeyCode::Char('d') => {
+                if let Some(tx) = &self.agent_tx {
+                    let _ = tx.send(AgentMessage::DiscardExecutionChanges);
+                }
             }
             _ => {}
         }

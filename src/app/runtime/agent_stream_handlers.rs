@@ -543,9 +543,10 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                     app.isolated_changes.pending_count = pending_count;
                     if pending_count == 0 {
                         app.isolated_changes.last_prompted_count = 0;
-                        app.isolated_changes.prompt_open = false;
                         app.isolated_changes.conflict_paths.clear();
-                        app.isolated_changes.show_conflicts_panel = false;
+                        app.isolated_changes.review_entries.clear();
+                        app.isolated_changes.review_selected = 0;
+                        app.isolated_changes.show_review_panel = false;
                         app.isolated_changes.info_shown = false;
                     } else if !had_pending && !app.isolated_changes.info_shown {
                         app.messages.push(
@@ -557,11 +558,19 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                         app.isolated_changes.info_shown = true;
                     }
                 }
+                AgentMessage::ExecutionReviewEntries(entries) => {
+                    app.isolated_changes.review_entries = entries;
+                    if app.isolated_changes.review_selected
+                        >= app.isolated_changes.review_entries.len()
+                    {
+                        app.isolated_changes.review_selected =
+                            app.isolated_changes.review_entries.len().saturating_sub(1);
+                    }
+                }
                 AgentMessage::ExecutionChangesApplied(result) => {
-                    app.isolated_changes.prompt_open = false;
                     if result.conflicts.is_empty() {
                         app.isolated_changes.conflict_paths.clear();
-                        app.isolated_changes.show_conflicts_panel = false;
+                        app.isolated_changes.show_review_panel = false;
                         app.messages.push(format!(
                             " ⎿ Applied {} isolated change{}",
                             result.applied_paths.len(),
@@ -580,7 +589,7 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                         paths.sort();
                         paths.dedup();
                         app.isolated_changes.conflict_paths = paths;
-                        app.isolated_changes.show_conflicts_panel = true;
+                        app.isolated_changes.show_review_panel = true;
                         app.messages.push(format!(
                             " ⎿ Apply blocked by workspace drift in {} path{}",
                             result.conflicts.len(),
@@ -591,9 +600,10 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                     app.message_states.push(MessageState::Sent);
                 }
                 AgentMessage::ExecutionChangesDiscarded => {
-                    app.isolated_changes.prompt_open = false;
                     app.isolated_changes.conflict_paths.clear();
-                    app.isolated_changes.show_conflicts_panel = false;
+                    app.isolated_changes.review_entries.clear();
+                    app.isolated_changes.review_selected = 0;
+                    app.isolated_changes.show_review_panel = false;
                     app.messages
                         .push(" ⎿ Discarded isolated changes".to_string());
                     app.message_types.push(MessageType::Agent);
@@ -702,7 +712,7 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                         && app.isolated_changes.last_prompted_count
                             != app.isolated_changes.pending_count
                     {
-                        app.isolated_changes.prompt_open = true;
+                        app.isolated_changes.show_review_panel = true;
                         app.isolated_changes.last_prompted_count =
                             app.isolated_changes.pending_count;
                     }

@@ -214,7 +214,11 @@ fn scrub_store_secrets(store: &mut AuthStore) {
             match field {
                 "api_key" => connection.api_key = None,
                 "access_token" => connection.access_token = None,
-                "refresh_token" => connection.refresh_token = None,
+                "refresh_token" => {
+                    if connection.auth_kind != StoredAuthKind::OpenAiSubscription {
+                        connection.refresh_token = None;
+                    }
+                }
                 _ => {}
             }
         }

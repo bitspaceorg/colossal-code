@@ -47,7 +47,7 @@ pub use thinking_helpers::{
 };
 
 pub use exec_command::{exec_command_output_to_yaml, execute_tool_binary, execute_tool_call};
-pub use execution_env::{ApplyConflict, ApplyResult};
+pub use execution_env::{ApplyConflict, ApplyResult, ExecutionReviewEntry};
 
 pub(crate) fn resolve_workspace_root() -> PathBuf {
     agent_state::resolve_workspace_root()
@@ -436,6 +436,20 @@ impl Agent {
             .as_mut()
             .expect("execution environment checked")
             .pending_change_count()?)
+    }
+
+    pub async fn execution_review_entries(&self) -> Result<Vec<ExecutionReviewEntry>> {
+        if !execution_env::isolated_execution_enabled() {
+            return Ok(Vec::new());
+        }
+        let mut guard = self.execution_environment.lock().await;
+        if guard.is_none() {
+            return Ok(Vec::new());
+        }
+        Ok(guard
+            .as_mut()
+            .expect("execution environment checked")
+            .review_entries()?)
     }
 
     async fn ensure_execution_environment(

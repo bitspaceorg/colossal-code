@@ -92,6 +92,12 @@ impl App {
                                 match agent_clone.pending_execution_change_count().await {
                                     Ok(count) => {
                                         let _ = tx_clone.send(AgentMessage::ExecutionState(count));
+                                        let entries = agent_clone
+                                            .execution_review_entries()
+                                            .await
+                                            .unwrap_or_default();
+                                        let _ = tx_clone
+                                            .send(AgentMessage::ExecutionReviewEntries(entries));
                                     }
                                     Err(e) => {
                                         let _ = tx_clone.send(AgentMessage::Error(format!(
@@ -120,9 +126,17 @@ impl App {
                                             .send(AgentMessage::ExecutionChangesApplied(result));
                                         let _ = tx_clone
                                             .send(AgentMessage::ExecutionState(pending_count));
+                                        let entries = agent_clone
+                                            .execution_review_entries()
+                                            .await
+                                            .unwrap_or_default();
+                                        let _ = tx_clone
+                                            .send(AgentMessage::ExecutionReviewEntries(entries));
                                     }
                                     Ok(None) => {
                                         let _ = tx_clone.send(AgentMessage::ExecutionState(0));
+                                        let _ = tx_clone
+                                            .send(AgentMessage::ExecutionReviewEntries(Vec::new()));
                                     }
                                     Err(e) => {
                                         let _ = tx_clone.send(AgentMessage::Error(format!(
@@ -142,9 +156,13 @@ impl App {
                                         let _ =
                                             tx_clone.send(AgentMessage::ExecutionChangesDiscarded);
                                         let _ = tx_clone.send(AgentMessage::ExecutionState(0));
+                                        let _ = tx_clone
+                                            .send(AgentMessage::ExecutionReviewEntries(Vec::new()));
                                     }
                                     Ok(false) => {
                                         let _ = tx_clone.send(AgentMessage::ExecutionState(0));
+                                        let _ = tx_clone
+                                            .send(AgentMessage::ExecutionReviewEntries(Vec::new()));
                                     }
                                     Err(e) => {
                                         let _ = tx_clone.send(AgentMessage::Error(format!(

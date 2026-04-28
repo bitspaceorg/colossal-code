@@ -225,6 +225,7 @@ dependencies = [
  "globset",
  "html2text 0.12.5",
  "indexmap 2.13.0",
+ "keyring",
  "mistralrs",
  "mistralrs-core",
  "once_cell",

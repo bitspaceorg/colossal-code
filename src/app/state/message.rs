@@ -495,10 +495,11 @@ impl Default for SafetyState {
 pub(crate) struct IsolatedChangesState {
     pub(crate) pending_count: usize,
     pub(crate) last_prompted_count: usize,
-    pub(crate) prompt_open: bool,
     pub(crate) info_shown: bool,
     pub(crate) conflict_paths: Vec<String>,
-    pub(crate) show_conflicts_panel: bool,
+    pub(crate) review_entries: Vec<agent_core::ExecutionReviewEntry>,
+    pub(crate) review_selected: usize,
+    pub(crate) show_review_panel: bool,
 }
 
 #[derive(Clone, Default)]

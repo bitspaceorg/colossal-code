@@ -43,6 +43,7 @@ indexmap = "2.12.1"
 agent_protocol = { path = "../agent_protocol" }
 tracing = "0.1"
 sha2 = "0.10"
+keyring = "3.6"
 
 [features]
 default = []
