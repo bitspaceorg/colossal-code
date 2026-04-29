@@ -127,6 +127,15 @@ impl ExecutionEnvironment {
         &self.private_workspace
     }
 
+    pub(crate) fn remap_workspace_path(&self, path: &Path) -> PathBuf {
+        if path.is_absolute()
+            && let Ok(relative) = path.strip_prefix(&self.real_workspace)
+        {
+            return self.private_workspace.join(relative);
+        }
+        path.to_path_buf()
+    }
+
     pub(crate) fn env_overrides(&self) -> HashMap<String, String> {
         let mut env = HashMap::new();
         let workspace = self.private_workspace.to_string_lossy().to_string();

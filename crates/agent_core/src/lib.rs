@@ -385,6 +385,19 @@ impl Agent {
             .unwrap_or_default())
     }
 
+    pub(crate) async fn remap_tool_arguments_for_execution(
+        &self,
+        arguments: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let Some(env) = self.ensure_execution_environment().await? else {
+            return Ok(arguments.clone());
+        };
+
+        let mut remapped = arguments.clone();
+        remap_tool_argument_paths(&mut remapped, &env);
+        Ok(remapped)
+    }
+
     pub(crate) async fn checkpoint_execution_after_tool(
         &self,
     ) -> Result<Option<execution_env::FsCheckpoint>> {
@@ -936,6 +949,37 @@ impl Agent {
 
     pub async fn close_task_channel(&self, _task_id: &str) -> Result<()> {
         Ok(())
+    }
+}
+
+fn remap_tool_argument_paths(
+    value: &mut serde_json::Value,
+    env: &execution_env::ExecutionEnvironment,
+) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+
+    for key in ["path", "file_path"] {
+        if let Some(raw) = object
+            .get_mut(key)
+            .and_then(|v| v.as_str().map(str::to_string))
+        {
+            let remapped = env.remap_workspace_path(std::path::Path::new(&raw));
+            object.insert(
+                key.to_string(),
+                serde_json::Value::String(remapped.to_string_lossy().to_string()),
+            );
+        }
+    }
+
+    if let Some(paths) = object.get_mut("paths").and_then(|v| v.as_array_mut()) {
+        for path in paths {
+            if let Some(raw) = path.as_str() {
+                let remapped = env.remap_workspace_path(std::path::Path::new(raw));
+                *path = serde_json::Value::String(remapped.to_string_lossy().to_string());
+            }
+        }
     }
 }
 

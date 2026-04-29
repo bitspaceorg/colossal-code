@@ -585,8 +585,9 @@ fn build_rendered_pairs(
     rendered_pairs
 }
 
-fn diff_pane_content_width(line_number_width: usize) -> usize {
-    let block_area = Rect::new(0, 0, 120, 3);
+fn diff_pane_content_width(total_width: usize, line_number_width: usize) -> usize {
+    let block_width = total_width.max(20) as u16;
+    let block_area = Rect::new(0, 0, block_width, 3);
     let inner_area = Rect::new(
         block_area.x + 1,
         block_area.y + 1,
@@ -603,9 +604,14 @@ fn diff_pane_content_width(line_number_width: usize) -> usize {
     pane_width.saturating_sub(gutter_width)
 }
 
-fn render_diff_buffer(rendered_pairs: &[RenderedPair], has_collapsed_groups: bool) -> Buffer {
+fn render_diff_buffer(
+    rendered_pairs: &[RenderedPair],
+    has_collapsed_groups: bool,
+    total_width: usize,
+) -> Buffer {
     let border_color = Color::DarkGray;
     let max_visible_lines = 30usize;
+    let block_width = total_width.max(20) as u16;
     let viewport_height = if has_collapsed_groups {
         rendered_pairs.len().min(max_visible_lines).max(1)
     } else {
@@ -613,8 +619,8 @@ fn render_diff_buffer(rendered_pairs: &[RenderedPair], has_collapsed_groups: boo
     };
     let box_height = viewport_height as u16 + 2;
     let total_height = box_height + if has_collapsed_groups { 1 } else { 0 };
-    let area = Rect::new(0, 0, 120, total_height);
-    let box_area = Rect::new(0, 0, 120, box_height);
+    let area = Rect::new(0, 0, block_width, total_height);
+    let box_area = Rect::new(0, 0, block_width, box_height);
     let mut buffer = Buffer::empty(area);
 
     let diff_block = Block::default()
@@ -646,7 +652,7 @@ fn render_diff_buffer(rendered_pairs: &[RenderedPair], has_collapsed_groups: boo
 
     if has_collapsed_groups {
         let hidden_lines = rendered_pairs.len().saturating_sub(max_visible_lines);
-        let info_area = Rect::new(0, box_height, 120, 1);
+        let info_area = Rect::new(0, box_height, block_width, 1);
         let info_msg = format!(
             "... {} more lines hidden. Press Ctrl+r to expand",
             hidden_lines
@@ -725,15 +731,15 @@ pub(crate) fn build_edit_file_diff(
         all_rows.extend(group_rows);
     }
 
-    let _ = max_width;
-    let cell_content_width = diff_pane_content_width(app.line_number_width);
+    let total_width = max_width.max(20);
+    let cell_content_width = diff_pane_content_width(total_width, app.line_number_width);
 
     let rendered_pairs = build_rendered_pairs(&app, &all_rows, cell_content_width);
     let has_collapsed_groups = app.has_collapsed_groups && !expanded;
     let buffer = if expanded {
-        render_diff_buffer(&rendered_pairs, false)
+        render_diff_buffer(&rendered_pairs, false, total_width)
     } else {
-        render_diff_buffer(&rendered_pairs, has_collapsed_groups)
+        render_diff_buffer(&rendered_pairs, has_collapsed_groups, total_width)
     };
 
     let lines = (buffer.area.top()..buffer.area.bottom())
@@ -806,7 +812,7 @@ mod tests {
         );
 
         assert_eq!(lines.len(), 33);
-        assert_eq!(lines[31].to_string(), format!("└{}┘", "─".repeat(118)));
+        assert_eq!(lines[31].to_string(), format!("└{}┘", "─".repeat(98)));
         assert_eq!(
             lines[32].to_string().trim_end(),
             "... 10 more lines hidden. Press Ctrl+r to expand"
@@ -856,8 +862,8 @@ mod tests {
             render_edit_file_diff_lines("", "line 1\nline 2\n", "src/main.rs", 100, Span::raw(""));
 
         assert_eq!(lines.len(), 4);
-        assert_eq!(lines[0].to_string(), format!("┌{}┐", "─".repeat(118)));
-        assert_eq!(lines[3].to_string(), format!("└{}┘", "─".repeat(118)));
+        assert_eq!(lines[0].to_string(), format!("┌{}┐", "─".repeat(98)));
+        assert_eq!(lines[3].to_string(), format!("└{}┘", "─".repeat(98)));
     }
 
     #[test]
@@ -881,25 +887,33 @@ mod tests {
 
     #[test]
     fn buffer_render_matches_widget_row_fill_behavior() {
+        let total_width = 100;
         let app = DiffRenderApp::new_from_content("", "new\n", "src/main.rs", None);
         let rows = DiffRenderApp::build_rows(&app.diff_groups[0].lines);
-        let rendered_pairs =
-            build_rendered_pairs(&app, &rows, diff_pane_content_width(app.line_number_width));
-        let buffer = render_diff_buffer(&rendered_pairs, app.has_collapsed_groups);
+        let rendered_pairs = build_rendered_pairs(
+            &app,
+            &rows,
+            diff_pane_content_width(total_width, app.line_number_width),
+        );
+        let buffer = render_diff_buffer(&rendered_pairs, app.has_collapsed_groups, total_width);
 
         assert_eq!(buffer[(2, 1)].bg, Color::Reset);
-        assert_ne!(buffer[(61, 1)].bg, Color::Reset);
+        assert_ne!(buffer[(51, 1)].bg, Color::Reset);
     }
 
     #[test]
     fn blank_side_has_no_background_fill() {
+        let total_width = 100;
         let app = DiffRenderApp::new_from_content("", "new\n", "src/main.rs", None);
         let rows = DiffRenderApp::build_rows(&app.diff_groups[0].lines);
-        let rendered_pairs =
-            build_rendered_pairs(&app, &rows, diff_pane_content_width(app.line_number_width));
-        let buffer = render_diff_buffer(&rendered_pairs, app.has_collapsed_groups);
+        let rendered_pairs = build_rendered_pairs(
+            &app,
+            &rows,
+            diff_pane_content_width(total_width, app.line_number_width),
+        );
+        let buffer = render_diff_buffer(&rendered_pairs, app.has_collapsed_groups, total_width);
 
-        let left_blank_cells = (1..59)
+        let left_blank_cells = (1..49)
             .map(|x| buffer[(x, 1)].clone())
             .collect::<Vec<Cell>>();
         assert!(left_blank_cells.iter().all(|cell| cell.bg == Color::Reset));

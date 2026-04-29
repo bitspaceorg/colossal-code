@@ -59,6 +59,39 @@ impl App {
                 continue;
             }
 
+            if is_agent
+                && let Some(UiMessageEvent::ToolCallCompleted {
+                    tool_name,
+                    args,
+                    result,
+                    raw_arguments,
+                }) = UiMessageEvent::parse(message)
+                && let Some(next_message) = entries.get(idx + 1).map(|next| next.content)
+                && next_message.trim()
+                    == "⎿ Changes are isolated and won't touch the workspace until applied"
+            {
+                lines.extend(
+                    self.render_tool_call_completed_with_note(
+                        &tool_name,
+                        &args,
+                        &result,
+                        raw_arguments.as_deref(),
+                        max_width,
+                        connector,
+                        Some("Isolated until applied"),
+                    )
+                    .lines,
+                );
+                if Self::should_insert_primary_agent_block_gap(
+                    message,
+                    entries.get(idx + 2).map(|next| next.content),
+                ) {
+                    lines.push(Line::from(""));
+                }
+                idx += 2;
+                continue;
+            }
+
             lines.extend(
                 self.render_message_with_max_width(message, max_width, None, is_agent, connector)
                     .lines,

@@ -55,13 +55,13 @@ fn build_test_agent(cwd: PathBuf) -> Agent {
     .with_working_directory(cwd)
 }
 
-fn tool_call(arguments: serde_json::Value) -> ToolCallResponse {
+fn tool_call(name: &str, arguments: serde_json::Value) -> ToolCallResponse {
     ToolCallResponse {
         index: 0,
         id: "call-1".to_string(),
         tp: ToolCallType::Function,
         function: CalledFunction {
-            name: "exec_command".to_string(),
+            name: name.to_string(),
             arguments: arguments.to_string(),
         },
     }
@@ -92,10 +92,13 @@ async fn exec_command_isolated_root_keeps_real_workspace_unchanged() {
 
     let result = execute_tool_call(
         &agent,
-        &tool_call(json!({
-            "command": "rm original.txt && printf isolated > marker.txt && pwd",
-            "replay_state": false
-        })),
+        &tool_call(
+            "exec_command",
+            json!({
+                "command": "rm original.txt && printf isolated > marker.txt && pwd",
+                "replay_state": false
+            }),
+        ),
         tx,
     )
     .await
@@ -122,10 +125,13 @@ async fn apply_execution_changes_merges_private_workspace_updates() {
 
     execute_tool_call(
         &agent,
-        &tool_call(json!({
-            "command": "printf after > file.txt && printf new > created.txt",
-            "replay_state": false
-        })),
+        &tool_call(
+            "exec_command",
+            json!({
+                "command": "printf after > file.txt && printf new > created.txt",
+                "replay_state": false
+            }),
+        ),
         tx,
     )
     .await
@@ -160,10 +166,13 @@ async fn apply_execution_changes_reports_drift_conflicts() {
 
     execute_tool_call(
         &agent,
-        &tool_call(json!({
-            "command": "printf agent > file.txt",
-            "replay_state": false
-        })),
+        &tool_call(
+            "exec_command",
+            json!({
+                "command": "printf agent > file.txt",
+                "replay_state": false
+            }),
+        ),
         tx,
     )
     .await
@@ -182,5 +191,49 @@ async fn apply_execution_changes_reports_drift_conflicts() {
     assert_eq!(
         std::fs::read_to_string(temp.join("file.txt")).unwrap(),
         "user"
+    );
+}
+
+#[tokio::test]
+async fn edit_file_remaps_absolute_workspace_paths_under_isolation() {
+    let _guard = isolated_test_lock();
+    let _env = EnvVarGuard::set("NITE_ISOLATED_EXECUTION_ROOT", "1");
+    let temp = make_test_dir("absolute-tool-path");
+    set_workspace_root_override(&temp);
+    let agent = build_test_agent(temp.clone());
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let absolute = temp.join("pizza-pref.txt");
+
+    let result = execute_tool_call(
+        &agent,
+        &tool_call(
+            "edit_file",
+            json!({
+                "path": absolute.display().to_string(),
+                "old_string": "",
+                "new_string": "I like pineapples on my pizza."
+            }),
+        ),
+        tx,
+    )
+    .await
+    .expect("execute edit_file");
+
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&result).expect("yaml result");
+    assert_eq!(parsed["status"].as_str(), Some("Success"), "{result}");
+    assert!(
+        !absolute.exists(),
+        "real workspace should not be changed before apply"
+    );
+
+    let apply = agent
+        .apply_execution_changes()
+        .await
+        .expect("apply changes")
+        .expect("isolated apply result");
+    assert!(apply.conflicts.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(absolute).unwrap(),
+        "I like pineapples on my pizza."
     );
 }

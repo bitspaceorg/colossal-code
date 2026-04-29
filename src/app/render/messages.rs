@@ -64,6 +64,9 @@ impl App {
         match message.trim() {
             "⎿ Approved" => Some("Approved"),
             "⎿ Denied" => Some("Denied"),
+            "⎿ Changes are isolated and won't touch the workspace until applied" => {
+                Some("Isolated until applied")
+            }
             _ => None,
         }
     }
