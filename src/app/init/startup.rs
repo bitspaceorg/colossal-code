@@ -291,7 +291,6 @@ impl App {
                 };
                 let help_height = if self.ui_state.show_help { 25 } else { 0 };
                 let resume_height = if self.ui_state.show_resume { 25 } else { 0 };
-                let rewind_height = if self.show_rewind { 25 } else { 0 };
                 let isolated_review_height = if self.isolated_changes.show_review_panel {
                     24
                 } else {
@@ -340,10 +339,6 @@ impl App {
 
                 if resume_height > 0 {
                     constraints_vec.push(Constraint::Length(resume_height));
-                }
-
-                if rewind_height > 0 {
-                    constraints_vec.push(Constraint::Length(rewind_height));
                 }
 
                 if isolated_review_height > 0 {

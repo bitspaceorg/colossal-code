@@ -84,10 +84,6 @@ impl App {
             self.render_history_panel(frame, areas[idx]);
         }
 
-        if let Some(idx) = area_indices.rewind_area_idx {
-            self.render_rewind_panel(frame, areas[idx]);
-        }
-
         if let Some(idx) = area_indices.isolated_review_area_idx {
             self.render_isolated_changes_panel(frame, areas[idx]);
         }
@@ -100,6 +96,7 @@ impl App {
             self.render_model_selection_panel(frame, areas[idx]);
         }
 
+        self.render_rewind_modal(frame);
         self.render_connect_modal(frame);
     }
 }

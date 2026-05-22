@@ -116,6 +116,21 @@ pub async fn execute_tool_call(
     result
 }
 
+async fn remap_command_for_execution(agent: &Agent, command: &str) -> Result<String> {
+    let env_overrides = agent.execution_env_overrides().await?;
+    let Some(private_workspace_root) = env_overrides.get("NITE_WORKSPACE_ROOT") else {
+        return Ok(command.to_string());
+    };
+
+    let real_workspace_root = crate::resolve_workspace_root();
+    let real = real_workspace_root.to_string_lossy();
+    if real == private_workspace_root.as_str() {
+        return Ok(command.to_string());
+    }
+
+    Ok(command.replace(real.as_ref(), private_workspace_root))
+}
+
 async fn execute_exec_command(
     agent: &Agent,
     arguments: &Value,
@@ -197,6 +212,7 @@ async fn execute_managed_nu_foreground(
     mut current_approval: Option<colossal_linux_sandbox::safety::AskForApproval>,
     tx: mpsc::UnboundedSender<crate::AgentMessage>,
 ) -> Result<String> {
+    let command = remap_command_for_execution(agent, command).await?;
     let (manager, session_id) = shell_session::get_or_create_shell_session(
         Some(agent.execution_cwd().await?),
         agent.execution_env_overrides().await?,
@@ -207,13 +223,13 @@ async fn execute_managed_nu_foreground(
         match manager
             .fork_eval_in_managed_nu_session(
                 session_id.clone(),
-                command.to_string(),
+                command.clone(),
                 Some(timeout_ms),
                 current_approval,
             )
             .await
         {
-            Ok(Some(result)) => return exec_command_output_to_yaml(command, result),
+            Ok(Some(result)) => return exec_command_output_to_yaml(&command, result),
             Ok(None) => {
                 break;
             }
@@ -258,7 +274,7 @@ async fn execute_managed_nu_foreground(
         }
     }
 
-    execute_generic_exec(state, agent, command, false, 600_000, current_approval, tx).await
+    execute_generic_exec(state, agent, &command, false, 600_000, current_approval, tx).await
 }
 
 async fn execute_isolated_exec(
@@ -270,10 +286,11 @@ async fn execute_isolated_exec(
     mut current_approval: Option<colossal_linux_sandbox::safety::AskForApproval>,
     tx: mpsc::UnboundedSender<crate::AgentMessage>,
 ) -> Result<String> {
+    let command = remap_command_for_execution(agent, command).await?;
     loop {
         match shell_session::run_isolated_exec_command(
             state,
-            command,
+            &command,
             is_background,
             timeout_ms,
             agent.execution_cwd().await?,
@@ -282,7 +299,7 @@ async fn execute_isolated_exec(
         )
         .await
         {
-            Ok(result) => return exec_command_output_to_yaml(command, result),
+            Ok(result) => return exec_command_output_to_yaml(&command, result),
             Err(e) => {
                 if let colossal_linux_sandbox::error::ColossalErr::Sandbox(
                     colossal_linux_sandbox::error::SandboxErr::Denied(_, reason, _),
@@ -342,6 +359,7 @@ async fn execute_replay_state(
     mut current_approval: Option<colossal_linux_sandbox::safety::AskForApproval>,
     tx: mpsc::UnboundedSender<crate::AgentMessage>,
 ) -> Result<String> {
+    let command = remap_command_for_execution(agent, command).await?;
     let mut retried_session = false;
 
     loop {
@@ -354,7 +372,7 @@ async fn execute_replay_state(
         match manager
             .exec_command_in_shell_session(
                 session_id.clone(),
-                command.to_string(),
+                command.clone(),
                 Some(timeout_ms),
                 1000,
                 current_approval,
@@ -365,7 +383,7 @@ async fn execute_replay_state(
                 if let Err(err) = shell_session::sync_continuity_state_from_session(
                     state,
                     session_id.clone(),
-                    replay_state.then_some(command),
+                    replay_state.then_some(command.as_str()),
                 )
                 .await
                 {
@@ -375,11 +393,11 @@ async fn execute_replay_state(
                         if session_id_lock.as_ref() == Some(&session_id) {
                             *session_id_lock = None;
                         }
-                        return exec_command_output_to_yaml(command, result);
+                        return exec_command_output_to_yaml(&command, result);
                     }
                     return Err(err);
                 }
-                return exec_command_output_to_yaml(command, result);
+                return exec_command_output_to_yaml(&command, result);
             }
             Err(e) => {
                 if matches!(
@@ -450,6 +468,7 @@ async fn execute_generic_exec(
     current_approval: Option<colossal_linux_sandbox::safety::AskForApproval>,
     _tx: mpsc::UnboundedSender<crate::AgentMessage>,
 ) -> Result<String> {
+    let command = remap_command_for_execution(agent, command).await?;
     let (manager, session_id) = shell_session::get_or_create_shell_session(
         Some(agent.execution_cwd().await?),
         agent.execution_env_overrides().await?,
@@ -459,7 +478,7 @@ async fn execute_generic_exec(
     let result = manager
         .exec_command_in_shell_session(
             session_id.clone(),
-            command.to_string(),
+            command.clone(),
             Some(timeout_ms),
             1000,
             current_approval,
@@ -468,5 +487,5 @@ async fn execute_generic_exec(
 
     shell_session::sync_continuity_state_from_session(state, session_id, None).await?;
 
-    exec_command_output_to_yaml(command, result)
+    exec_command_output_to_yaml(&command, result)
 }

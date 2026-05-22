@@ -32,6 +32,7 @@ pub mod utils;
 pub(crate) mod vendored_bwrap;
 #[cfg(target_os = "windows")]
 pub mod windows_sandbox;
+pub mod workspace;
 
 /// Execute tools binary with the given sandbox policy applied
 pub async fn execute_tools_with_sandbox(

@@ -49,6 +49,7 @@ impl App {
                         updated_at: conv.updated_at,
                         git_branch: conv.git_branch,
                         message_count: conv.message_count,
+                        title: conv.title,
                         preview: conv.preview,
                         file_path: path.clone(),
                         forked_from: conv.forked_from,
@@ -60,6 +61,7 @@ impl App {
                         updated_at: conv.updated_at,
                         git_branch: conv.git_branch,
                         message_count: conv.message_count,
+                        title: conv.title,
                         preview: conv.preview,
                         file_path: path.clone(),
                         forked_from: conv.forked_from,
@@ -76,5 +78,71 @@ impl App {
     pub(crate) fn delete_conversation(&mut self, metadata: &ConversationMetadata) -> Result<()> {
         persistence::conversations::remove_conversation_file(&metadata.file_path)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{EnhancedSavedConversation, SavedConversation};
+    use std::time::SystemTime;
+
+    #[test]
+    fn conversation_metadata_supports_title_and_preview_fallback() {
+        let now = SystemTime::now();
+        let new_conv = EnhancedSavedConversation {
+            id: "new".to_string(),
+            created_at: now,
+            updated_at: now,
+            git_branch: None,
+            working_directory: "/tmp".to_string(),
+            message_count: 2,
+            title: Some("Generated Title".to_string()),
+            preview: "first user message".to_string(),
+            ui_messages: Vec::new(),
+            agent_conversation: None,
+            forked_from: None,
+            forked_at: None,
+        };
+        let old_conv = SavedConversation {
+            id: "old".to_string(),
+            created_at: now,
+            updated_at: now,
+            git_branch: None,
+            working_directory: "/tmp".to_string(),
+            message_count: 1,
+            title: None,
+            preview: "legacy preview".to_string(),
+            messages: Vec::new(),
+            forked_from: None,
+            forked_at: None,
+        };
+
+        let new_meta = ConversationMetadata {
+            time_ago_str: ConversationMetadata::calculate_time_ago(new_conv.updated_at),
+            id: new_conv.id,
+            updated_at: new_conv.updated_at,
+            git_branch: new_conv.git_branch,
+            message_count: new_conv.message_count,
+            title: new_conv.title,
+            preview: new_conv.preview,
+            file_path: "/tmp/new.json".into(),
+            forked_from: new_conv.forked_from,
+        };
+        let old_meta = ConversationMetadata {
+            time_ago_str: ConversationMetadata::calculate_time_ago(old_conv.updated_at),
+            id: old_conv.id,
+            updated_at: old_conv.updated_at,
+            git_branch: old_conv.git_branch,
+            message_count: old_conv.message_count,
+            title: old_conv.title,
+            preview: old_conv.preview,
+            file_path: "/tmp/old.json".into(),
+            forked_from: old_conv.forked_from,
+        };
+
+        assert_eq!(new_meta.title.as_deref(), Some("Generated Title"));
+        assert_eq!(old_meta.title, None);
+        assert_eq!(old_meta.preview, "legacy preview");
     }
 }

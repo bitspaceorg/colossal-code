@@ -155,8 +155,11 @@ fn build_tools_binary_args(name: &str, arguments: &Value) -> Vec<String> {
         }
         "delete_many" => {
             if let Some(paths) = arguments.get("paths").and_then(|v| v.as_array()) {
-                let paths_json = serde_json::to_string(paths).unwrap_or_else(|_| "[]".to_string());
-                args.push(paths_json);
+                for path in paths {
+                    if let Some(raw) = path.as_str() {
+                        args.push(raw.to_string());
+                    }
+                }
             }
         }
         _ => {}

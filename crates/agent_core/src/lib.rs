@@ -17,7 +17,6 @@ pub mod agent_state;
 pub mod config;
 pub mod conversation;
 pub mod exec_command;
-pub(crate) mod execution_env;
 mod llm_backend;
 pub mod message_helpers;
 pub mod message_types;
@@ -46,8 +45,10 @@ pub use thinking_helpers::{
     thinking_debug_enabled, thinking_debug_log,
 };
 
+pub use colossal_linux_sandbox::workspace::{
+    ApplyConflict, ApplyResult, ExecutionReviewEntry, FsCheckpoint, FsCheckpointId,
+};
 pub use exec_command::{exec_command_output_to_yaml, execute_tool_binary, execute_tool_call};
-pub use execution_env::{ApplyConflict, ApplyResult, ExecutionReviewEntry};
 
 pub(crate) fn resolve_workspace_root() -> PathBuf {
     agent_state::resolve_workspace_root()
@@ -61,6 +62,74 @@ pub use agent_state::sandbox_policy_from_config;
 pub use agent_state::sandbox_policy_from_config_with_workspace;
 pub use agent_state::set_workspace_root_override;
 pub use shell_session::execution_mode_badge;
+
+async fn collect_response_text(
+    backend: &Arc<Box<dyn LLMBackend>>,
+    request: RequestBuilder,
+) -> Result<String> {
+    use futures::StreamExt;
+    use mistralrs::Response;
+
+    let mut stream = backend.stream_chat_request(request).await?;
+    let mut out = String::new();
+    let mut last = String::new();
+    while let Some(response) = stream.next().await {
+        match response {
+            Response::Chunk(chunk) => {
+                if let Some(choice) = chunk.choices.first()
+                    && let Some(content) = &choice.delta.content
+                {
+                    merge_streamed_text(&mut out, &mut last, content);
+                }
+            }
+            Response::Done(done) => {
+                if let Some(choice) = done.choices.first()
+                    && let Some(content) = choice.message.content.as_ref()
+                {
+                    out = content.clone();
+                }
+            }
+            Response::InternalError(err) => return Err(anyhow::anyhow!(err.to_string())),
+            Response::ValidationError(err) => return Err(anyhow::anyhow!(err.to_string())),
+            Response::ModelError(msg, _) => return Err(anyhow::anyhow!(msg)),
+            _ => {}
+        }
+    }
+    Ok(out.trim().to_string())
+}
+
+#[cfg(test)]
+mod title_stream_tests {
+    use super::merge_streamed_text;
+
+    #[test]
+    fn merge_streamed_text_handles_delta_and_cumulative_chunks() {
+        let mut out = String::new();
+        let mut last = String::new();
+        merge_streamed_text(&mut out, &mut last, "Confirming ");
+        merge_streamed_text(&mut out, &mut last, "Deletion");
+        assert_eq!(out, "Confirming Deletion");
+
+        let mut out = String::new();
+        let mut last = String::new();
+        merge_streamed_text(&mut out, &mut last, "Confirming Deletion");
+        merge_streamed_text(
+            &mut out,
+            &mut last,
+            "Confirming Deletion of Current Directory Contents",
+        );
+        assert_eq!(out, "Confirming Deletion of Current Directory Contents");
+    }
+}
+
+fn merge_streamed_text(out: &mut String, last: &mut String, content: &str) {
+    if !last.is_empty() && content.starts_with(last.as_str()) {
+        let prefix_len = out.len().saturating_sub(last.len());
+        out.truncate(prefix_len);
+    }
+    out.push_str(content);
+    *last = content.to_string();
+}
 
 /// Agent instance that can be used from the TUI
 #[derive(Clone)]
@@ -80,7 +149,7 @@ pub struct Agent {
     safety_config: Arc<Mutex<safety_config::SafetyConfig>>,
     /// Optional working directory override for orchestration (worktree support)
     working_directory: Option<PathBuf>,
-    execution_environment: Arc<Mutex<Option<execution_env::ExecutionEnvironment>>>,
+    workspace_session_id: Arc<Mutex<Option<colossal_linux_sandbox::workspace::WorkspaceSessionId>>>,
     /// Display label for the currently loaded model
     model_name: Arc<Mutex<String>>,
 }
@@ -315,7 +384,7 @@ impl Agent {
             thinking_tags: Arc::new(Mutex::new(thinking_tags)),
             safety_config: Arc::new(Mutex::new(safety_config)),
             working_directory: None,
-            execution_environment: Arc::new(Mutex::new(None)),
+            workspace_session_id: Arc::new(Mutex::new(None)),
             model_name: Arc::new(Mutex::new(model_label)),
         }
     }
@@ -334,7 +403,7 @@ impl Agent {
             thinking_tags: self.thinking_tags.clone(),
             safety_config: self.safety_config.clone(),
             working_directory: Some(cwd),
-            execution_environment: Arc::new(Mutex::new(None)),
+            workspace_session_id: Arc::new(Mutex::new(None)),
             model_name: self.model_name.clone(),
         }
     }
@@ -370,114 +439,172 @@ impl Agent {
     }
 
     pub(crate) async fn execution_cwd(&self) -> Result<PathBuf> {
-        if let Some(env) = self.ensure_execution_environment().await? {
-            Ok(env.private_workspace().to_path_buf())
+        if let Some(workspace_id) = self.ensure_execution_environment().await? {
+            let manager = self.workspace_manager().await?;
+            Ok(manager.workspace_private_root(&workspace_id)?)
         } else {
             Ok(self.effective_cwd())
         }
     }
 
+    pub async fn execution_private_root(&self) -> Result<Option<PathBuf>> {
+        if !colossal_linux_sandbox::workspace::isolated_execution_enabled() {
+            return Ok(None);
+        }
+        let Some(workspace_id) = self.ensure_execution_environment().await? else {
+            return Ok(None);
+        };
+        let manager = self.workspace_manager().await?;
+        Ok(Some(manager.workspace_private_root(&workspace_id)?))
+    }
+
     pub(crate) async fn execution_env_overrides(&self) -> Result<HashMap<String, String>> {
-        Ok(self
-            .ensure_execution_environment()
-            .await?
-            .map(|env| env.env_overrides())
-            .unwrap_or_default())
+        if let Some(workspace_id) = self.ensure_execution_environment().await? {
+            let manager = self.workspace_manager().await?;
+            Ok(manager.workspace_env_overrides(&workspace_id)?)
+        } else {
+            Ok(HashMap::new())
+        }
     }
 
     pub(crate) async fn remap_tool_arguments_for_execution(
         &self,
         arguments: &serde_json::Value,
     ) -> Result<serde_json::Value> {
-        let Some(env) = self.ensure_execution_environment().await? else {
+        let Some(workspace_id) = self.ensure_execution_environment().await? else {
             return Ok(arguments.clone());
         };
 
         let mut remapped = arguments.clone();
-        remap_tool_argument_paths(&mut remapped, &env);
+        let manager = self.workspace_manager().await?;
+        remap_tool_argument_paths(&mut remapped, &manager, &workspace_id)?;
         Ok(remapped)
     }
 
     pub(crate) async fn checkpoint_execution_after_tool(
         &self,
-    ) -> Result<Option<execution_env::FsCheckpoint>> {
-        if !execution_env::isolated_execution_enabled() {
+    ) -> Result<Option<colossal_linux_sandbox::workspace::FsCheckpoint>> {
+        if !colossal_linux_sandbox::workspace::isolated_execution_enabled() {
             return Ok(None);
         }
-        let mut guard = self.execution_environment.lock().await;
-        if let Some(env) = guard.as_mut() {
-            Ok(Some(env.checkpoint_agent_fs()?))
-        } else {
-            Ok(None)
+        let Some(workspace_id) = self.ensure_execution_environment().await? else {
+            return Ok(None);
+        };
+        let manager = self.workspace_manager().await?;
+        Ok(Some(manager.workspace_checkpoint(&workspace_id)?))
+    }
+
+    pub async fn capture_execution_checkpoint(
+        &self,
+    ) -> Result<Option<colossal_linux_sandbox::workspace::FsCheckpoint>> {
+        self.checkpoint_execution_after_tool().await
+    }
+
+    pub async fn current_execution_checkpoint(
+        &self,
+    ) -> Result<Option<colossal_linux_sandbox::workspace::FsCheckpoint>> {
+        if !colossal_linux_sandbox::workspace::isolated_execution_enabled() {
+            return Ok(None);
         }
+        let Some(workspace_id) = self.ensure_execution_environment().await? else {
+            return Ok(None);
+        };
+        let manager = self.workspace_manager().await?;
+        Ok(manager.workspace_current_checkpoint(&workspace_id)?)
+    }
+
+    pub async fn restore_execution_checkpoint(
+        &self,
+        checkpoint_id: &colossal_linux_sandbox::workspace::FsCheckpointId,
+    ) -> Result<Option<colossal_linux_sandbox::workspace::FsCheckpoint>> {
+        if !colossal_linux_sandbox::workspace::isolated_execution_enabled() {
+            return Ok(None);
+        }
+        let Some(workspace_id) = self.ensure_execution_environment().await? else {
+            return Ok(None);
+        };
+        let manager = self.workspace_manager().await?;
+        let checkpoint = manager.restore_workspace_checkpoint(&workspace_id, checkpoint_id)?;
+        shell_session::reset_current_shell_session().await?;
+        Ok(Some(checkpoint))
     }
 
     pub async fn apply_execution_changes(&self) -> Result<Option<ApplyResult>> {
-        if !execution_env::isolated_execution_enabled() {
+        if !colossal_linux_sandbox::workspace::isolated_execution_enabled() {
             return Ok(None);
         }
-        let mut guard = self.execution_environment.lock().await;
-        if let Some(env) = guard.as_mut() {
-            Ok(Some(env.apply_to_real_workspace()?))
-        } else {
-            Ok(None)
-        }
+        let Some(workspace_id) = self.ensure_execution_environment().await? else {
+            return Ok(None);
+        };
+        let manager = self.workspace_manager().await?;
+        Ok(Some(manager.commit_workspace_session(&workspace_id)?))
     }
 
     pub async fn discard_execution_changes(&self) -> Result<bool> {
-        if !execution_env::isolated_execution_enabled() {
+        if !colossal_linux_sandbox::workspace::isolated_execution_enabled() {
             return Ok(false);
         }
-        let mut guard = self.execution_environment.lock().await;
-        if let Some(env) = guard.as_mut() {
-            env.discard_changes()?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        let Some(workspace_id) = self.ensure_execution_environment().await? else {
+            return Ok(false);
+        };
+        let manager = self.workspace_manager().await?;
+        manager.discard_workspace_session(&workspace_id)?;
+        shell_session::reset_current_shell_session().await?;
+        Ok(true)
     }
 
     pub async fn pending_execution_change_count(&self) -> Result<usize> {
-        if !execution_env::isolated_execution_enabled() {
+        if !colossal_linux_sandbox::workspace::isolated_execution_enabled() {
             return Ok(0);
         }
-        let mut guard = self.execution_environment.lock().await;
-        if guard.is_none() {
+        let Some(workspace_id) = self.ensure_execution_environment().await? else {
             return Ok(0);
-        }
-        Ok(guard
-            .as_mut()
-            .expect("execution environment checked")
-            .pending_change_count()?)
+        };
+        let manager = self.workspace_manager().await?;
+        Ok(manager.workspace_pending_change_count(&workspace_id)?)
     }
 
     pub async fn execution_review_entries(&self) -> Result<Vec<ExecutionReviewEntry>> {
-        if !execution_env::isolated_execution_enabled() {
+        if !colossal_linux_sandbox::workspace::isolated_execution_enabled() {
             return Ok(Vec::new());
         }
-        let mut guard = self.execution_environment.lock().await;
-        if guard.is_none() {
+        let Some(workspace_id) = self.ensure_execution_environment().await? else {
             return Ok(Vec::new());
-        }
-        Ok(guard
-            .as_mut()
-            .expect("execution environment checked")
-            .review_entries()?)
+        };
+        let manager = self.workspace_manager().await?;
+        Ok(manager.workspace_review_entries(&workspace_id)?)
     }
 
     async fn ensure_execution_environment(
         &self,
-    ) -> Result<Option<execution_env::ExecutionEnvironment>> {
-        if !execution_env::isolated_execution_enabled() {
+    ) -> Result<Option<colossal_linux_sandbox::workspace::WorkspaceSessionId>> {
+        if !colossal_linux_sandbox::workspace::isolated_execution_enabled() {
             return Ok(None);
         }
-        let mut guard = self.execution_environment.lock().await;
+        {
+            let guard = self.workspace_session_id.lock().await;
+            if guard.is_some() {
+                return Ok(guard.clone());
+            }
+        }
+
+        let manager = self.workspace_manager().await?;
+        let workspace_id = manager.create_workspace_session(self.effective_cwd())?;
+
+        let mut guard = self.workspace_session_id.lock().await;
         if guard.is_none() {
-            *guard = Some(execution_env::ExecutionEnvironment::initialize(
-                self.effective_cwd(),
-            )?);
+            *guard = Some(workspace_id.clone());
         }
         Ok(guard.clone())
+    }
+
+    async fn workspace_manager(
+        &self,
+    ) -> Result<std::sync::Arc<colossal_linux_sandbox::manager::SessionManager>> {
+        shell_session::ensure_global_state_initialized().await;
+        let state = shell_session::global_state()
+            .ok_or_else(|| anyhow::anyhow!("Global shell state not initialized"))?;
+        Ok(state.manager.clone())
     }
 
     /// Create a new agent instance (legacy method, uses Local backend)
@@ -635,6 +762,35 @@ impl Agent {
     /// Ensure backend has loaded the active model
     pub async fn initialize_backend(&self) -> Result<()> {
         self.backend.load_model().await
+    }
+
+    pub async fn generate_conversation_title(&self, summary: &str) -> Result<Option<String>> {
+        if self.backend_kind == BackendKind::None {
+            return Ok(None);
+        }
+
+        let request = RequestBuilder::new()
+            .add_message(
+                mistralrs::TextMessageRole::System,
+                "Generate a concise conversation title in 3 to 7 words. Return only the title, no quotes, no punctuation beyond what belongs inside the title.",
+            )
+            .add_message(
+                mistralrs::TextMessageRole::User,
+                &format!("Conversation summary:\n{}", summary),
+            )
+            .enable_thinking(false);
+        let raw = collect_response_text(&self.backend, request).await?;
+        let title = raw
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_matches('"')
+            .trim();
+        if title.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(title.chars().take(80).collect()))
     }
 
     /// Get the model from backend (if supported)
@@ -954,10 +1110,11 @@ impl Agent {
 
 fn remap_tool_argument_paths(
     value: &mut serde_json::Value,
-    env: &execution_env::ExecutionEnvironment,
-) {
+    manager: &colossal_linux_sandbox::manager::SessionManager,
+    workspace_id: &colossal_linux_sandbox::workspace::WorkspaceSessionId,
+) -> Result<()> {
     let Some(object) = value.as_object_mut() else {
-        return;
+        return Ok(());
     };
 
     for key in ["path", "file_path"] {
@@ -965,7 +1122,8 @@ fn remap_tool_argument_paths(
             .get_mut(key)
             .and_then(|v| v.as_str().map(str::to_string))
         {
-            let remapped = env.remap_workspace_path(std::path::Path::new(&raw));
+            let remapped =
+                manager.remap_workspace_path(workspace_id, std::path::Path::new(&raw))?;
             object.insert(
                 key.to_string(),
                 serde_json::Value::String(remapped.to_string_lossy().to_string()),
@@ -976,11 +1134,14 @@ fn remap_tool_argument_paths(
     if let Some(paths) = object.get_mut("paths").and_then(|v| v.as_array_mut()) {
         for path in paths {
             if let Some(raw) = path.as_str() {
-                let remapped = env.remap_workspace_path(std::path::Path::new(raw));
+                let remapped =
+                    manager.remap_workspace_path(workspace_id, std::path::Path::new(raw))?;
                 *path = serde_json::Value::String(remapped.to_string_lossy().to_string());
             }
         }
     }
+
+    Ok(())
 }
 
 /// Helper function to create a simple chat session

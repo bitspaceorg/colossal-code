@@ -3,7 +3,7 @@ use std::time::SystemTime;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
-use crate::app::state::message::{MessageState, MessageType};
+use crate::app::state::message::{MessageState, MessageType, RewindFocus};
 use crate::app::{App, SLASH_COMMANDS};
 
 impl App {
@@ -216,33 +216,76 @@ impl App {
                 self.message_types.push(MessageType::Agent);
                 self.message_states.push(MessageState::Sent);
             }
-            KeyCode::Up => {
-                if self.rewind_selected > 0 {
-                    self.rewind_selected -= 1;
-                }
+            KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+                self.rewind_focus = match self.rewind_focus {
+                    RewindFocus::Points => RewindFocus::Scope,
+                    RewindFocus::Scope => RewindFocus::Points,
+                };
             }
-            KeyCode::Down => {
-                if self.rewind_selected < self.rewind_points.len().saturating_sub(1) {
-                    self.rewind_selected += 1;
+            KeyCode::Up | KeyCode::Char('k') => match self.rewind_focus {
+                RewindFocus::Points => {
+                    if self.rewind_selected > 0 {
+                        self.rewind_selected -= 1;
+                    }
                 }
-            }
+                RewindFocus::Scope => {
+                    self.rewind_restore_scope = self.rewind_restore_scope.prev();
+                }
+            },
+            KeyCode::Down | KeyCode::Char('j') => match self.rewind_focus {
+                RewindFocus::Points => {
+                    if self.rewind_selected < self.rewind_points.len().saturating_sub(1) {
+                        self.rewind_selected += 1;
+                    }
+                }
+                RewindFocus::Scope => {
+                    self.rewind_restore_scope = self.rewind_restore_scope.next();
+                }
+            },
             KeyCode::Enter => {
                 if self.rewind_selected < self.rewind_points.len() {
                     let point = self.rewind_points[self.rewind_selected].clone();
+                    let restore_scope = self.rewind_restore_scope;
 
-                    self.messages = point.messages;
-                    self.message_types = point.message_types;
-                    self.message_states = point.message_states;
-                    self.message_metadata = point.message_metadata;
-                    self.message_timestamps = point.message_timestamps;
+                    if restore_scope.restores_conversation() {
+                        self.messages = point.messages;
+                        self.message_types = point.message_types;
+                        self.message_states = point.message_states;
+                        self.message_metadata = point.message_metadata;
+                        self.message_timestamps = point.message_timestamps;
+                    }
 
                     self.rewind_points.truncate(self.rewind_selected + 1);
                     self.show_rewind = false;
 
-                    self.messages
-                        .push(format!(" ⏮ Rewound to: {}", point.preview));
+                    self.messages.push(format!(
+                        " ⏮ Rewound to: {} ({})",
+                        point.preview,
+                        restore_scope.label()
+                    ));
                     self.message_types.push(MessageType::Agent);
                     self.message_states.push(MessageState::Sent);
+                    self.message_metadata.push(None);
+                    self.message_timestamps.push(SystemTime::now());
+
+                    if restore_scope.restores_code() {
+                        match (&self.agent_tx, point.fs_checkpoint_id.clone()) {
+                            (Some(tx), Some(checkpoint_id)) => {
+                                let _ = tx
+                                    .send(AgentMessage::RestoreExecutionCheckpoint(checkpoint_id));
+                            }
+                            _ => {
+                                self.messages.push(
+                                    " ⎿ No filesystem checkpoint was available for that rewind point"
+                                        .to_string(),
+                                );
+                                self.message_types.push(MessageType::Agent);
+                                self.message_states.push(MessageState::Sent);
+                                self.message_metadata.push(None);
+                                self.message_timestamps.push(SystemTime::now());
+                            }
+                        }
+                    }
                 }
             }
             _ => {}

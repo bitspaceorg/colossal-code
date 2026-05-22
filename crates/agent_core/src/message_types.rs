@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::{ApplyResult, ExecutionReviewEntry};
+use crate::{ApplyResult, ExecutionReviewEntry, FsCheckpointId};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecCommandResult {
@@ -88,9 +88,13 @@ pub enum AgentMessage {
     ApprovalResponse(bool),
     RefreshExecutionState,
     ExecutionState(usize),
+    ExecutionCheckpoint(Option<FsCheckpointId>),
     ExecutionReviewEntries(Vec<ExecutionReviewEntry>),
     ApplyExecutionChanges,
     ExecutionChangesApplied(ApplyResult),
     DiscardExecutionChanges,
     ExecutionChangesDiscarded,
+    RestoreExecutionCheckpoint(FsCheckpointId),
+    GenerateConversationTitle(String),
+    ConversationTitleGenerated(String),
 }

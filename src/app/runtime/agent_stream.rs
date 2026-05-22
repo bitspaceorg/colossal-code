@@ -8,6 +8,7 @@ pub(crate) struct AgentStreamOutcome {
     pub pending_todos: Option<Vec<TodoItem>>,
     pub create_rewind: bool,
     pub pending_file_change: Option<(String, String, String)>,
+    pub generate_title: bool,
     pub check_auto_summarize: bool,
     pub trigger_mid_stream_auto_summarize: bool,
     pub schedule_resume_prompt: bool,
@@ -21,6 +22,7 @@ impl AgentStreamOutcome {
             pending_todos: None,
             create_rewind: false,
             pending_file_change: None,
+            generate_title: false,
             check_auto_summarize: false,
             trigger_mid_stream_auto_summarize: false,
             schedule_resume_prompt: false,
@@ -49,6 +51,7 @@ mod tests {
         assert!(outcome.pending_todos.is_none());
         assert!(!outcome.create_rewind);
         assert!(outcome.pending_file_change.is_none());
+        assert!(!outcome.generate_title);
         assert!(!outcome.check_auto_summarize);
         assert!(!outcome.trigger_mid_stream_auto_summarize);
         assert!(!outcome.schedule_resume_prompt);

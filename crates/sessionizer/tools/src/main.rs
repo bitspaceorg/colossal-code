@@ -137,9 +137,37 @@ fn workspace_root() -> Result<PathBuf, String> {
         .map_err(|e| format!("Failed to resolve workspace root {}: {}", root.display(), e))
 }
 
+fn resolve_nonexistent_path(path: &Path) -> Result<PathBuf, String> {
+    let mut suffix = Vec::new();
+    let mut probe = path.to_path_buf();
+
+    while !probe.exists() {
+        let Some(name) = probe.file_name() else {
+            return Err(format!(
+                "Failed to resolve parent {}: No such file or directory",
+                path.display()
+            ));
+        };
+        suffix.push(name.to_os_string());
+        probe = probe.parent().map(Path::to_path_buf).ok_or_else(|| {
+            format!(
+                "Failed to resolve parent {}: No such file or directory",
+                path.display()
+            )
+        })?;
+    }
+
+    let mut resolved = probe
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve parent {}: {}", probe.display(), e))?;
+    for component in suffix.iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
 fn checked_path(path: &Path, must_exist: bool) -> Result<PathBuf, String> {
     let root = workspace_root()?;
-    let is_absolute_input = path.is_absolute();
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -150,21 +178,11 @@ fn checked_path(path: &Path, must_exist: bool) -> Result<PathBuf, String> {
         absolute
             .canonicalize()
             .map_err(|e| format!("Failed to resolve path {}: {}", absolute.display(), e))?
-    } else if let Some(parent) = absolute.parent() {
-        let parent_resolved = parent
-            .canonicalize()
-            .map_err(|e| format!("Failed to resolve parent {}: {}", parent.display(), e))?;
-        match absolute.file_name() {
-            Some(name) => parent_resolved.join(name),
-            None => parent_resolved,
-        }
     } else {
-        absolute
+        resolve_nonexistent_path(&absolute)?
     };
 
-    // Absolute paths are allowed here; sandbox policy enforces read/write boundaries.
-    // Relative paths remain confined to the workspace root.
-    if is_absolute_input || resolved.starts_with(&root) {
+    if resolved.starts_with(&root) {
         Ok(resolved)
     } else {
         Err(format!(

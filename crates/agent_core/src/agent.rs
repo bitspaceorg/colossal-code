@@ -661,6 +661,11 @@ impl Agent {
                             if let Ok(pending_count) = self.pending_execution_change_count().await {
                                 let _ = tx.send(AgentMessage::ExecutionState(pending_count));
                             }
+                            if let Ok(checkpoint) = self.current_execution_checkpoint().await {
+                                let _ = tx.send(AgentMessage::ExecutionCheckpoint(
+                                    checkpoint.map(|checkpoint| checkpoint.id),
+                                ));
+                            }
                             if let Ok(entries) = self.execution_review_entries().await {
                                 let _ = tx.send(AgentMessage::ExecutionReviewEntries(entries));
                             }
@@ -714,6 +719,11 @@ impl Agent {
                             ));
                             if let Ok(pending_count) = self.pending_execution_change_count().await {
                                 let _ = tx.send(AgentMessage::ExecutionState(pending_count));
+                            }
+                            if let Ok(checkpoint) = self.current_execution_checkpoint().await {
+                                let _ = tx.send(AgentMessage::ExecutionCheckpoint(
+                                    checkpoint.map(|checkpoint| checkpoint.id),
+                                ));
                             }
                             if let Ok(entries) = self.execution_review_entries().await {
                                 let _ = tx.send(AgentMessage::ExecutionReviewEntries(entries));

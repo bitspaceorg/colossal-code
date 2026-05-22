@@ -428,6 +428,57 @@ pub(crate) struct RewindPoint {
     pub(crate) preview: String, // Description of this rewind point
     pub(crate) message_count: usize,
     pub(crate) file_changes: Vec<FileChange>, // Files modified in this rewind point
+    pub(crate) fs_checkpoint_id: Option<agent_core::FsCheckpointId>,
+    pub(crate) review_entries: Vec<agent_core::ExecutionReviewEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum RewindRestoreScope {
+    #[default]
+    CodeAndConversation,
+    ConversationOnly,
+    CodeOnly,
+}
+
+impl RewindRestoreScope {
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::CodeAndConversation => Self::ConversationOnly,
+            Self::ConversationOnly => Self::CodeOnly,
+            Self::CodeOnly => Self::CodeAndConversation,
+        }
+    }
+
+    pub(crate) fn prev(self) -> Self {
+        match self {
+            Self::CodeAndConversation => Self::CodeOnly,
+            Self::ConversationOnly => Self::CodeAndConversation,
+            Self::CodeOnly => Self::ConversationOnly,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::CodeAndConversation => "code + conversation",
+            Self::ConversationOnly => "conversation only",
+            Self::CodeOnly => "code only",
+        }
+    }
+
+    pub(crate) fn restores_conversation(self) -> bool {
+        matches!(self, Self::CodeAndConversation | Self::ConversationOnly)
+    }
+
+    pub(crate) fn restores_code(self) -> bool {
+        matches!(self, Self::CodeAndConversation | Self::CodeOnly)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum RewindFocus {
+    #[default]
+    Points,
+    Scope,
 }
 
 #[derive(Clone)]
@@ -507,6 +558,8 @@ pub(crate) struct PersistenceState {
     pub(crate) save_pending: bool,
     pub(crate) current_conversation_id: Option<String>,
     pub(crate) current_conversation_path: Option<std::path::PathBuf>,
+    pub(crate) current_conversation_title: Option<String>,
     pub(crate) current_forked_from: Option<String>,
     pub(crate) current_forked_at: Option<SystemTime>,
+    pub(crate) title_generation_in_flight: bool,
 }

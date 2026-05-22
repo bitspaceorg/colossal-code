@@ -82,7 +82,7 @@ impl App {
             && auth_store.active_connection_id.is_none()
             && auth_store.connections.is_empty();
 
-        Ok(Self {
+        let app = Self {
             input: String::new(),
             messages: Vec::new(),
             message_types: Vec::new(),
@@ -339,6 +339,9 @@ impl App {
             show_rewind: false,
             rewind_points: Vec::new(),
             rewind_selected: 0,
+            rewind_restore_scope: crate::app::state::message::RewindRestoreScope::default(),
+            rewind_focus: crate::app::state::message::RewindFocus::default(),
+            current_execution_checkpoint_id: None,
             current_file_changes: Vec::new(),
             last_tool_args: None,
             current_model,
@@ -369,7 +372,9 @@ impl App {
             mode_before_sub_agent: None,
             rendering_sub_agent_view: false,
             rendering_sub_agent_prefix: None,
-        })
+        };
+
+        Ok(app)
     }
 }
 

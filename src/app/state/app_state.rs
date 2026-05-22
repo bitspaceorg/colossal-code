@@ -1,5 +1,6 @@
 use agent_core::{
-    Agent, AgentMessage, GenerationStats as AgentGenerationStats, SpecSheet, TaskSummary,
+    Agent, AgentMessage, FsCheckpointId, GenerationStats as AgentGenerationStats, SpecSheet,
+    TaskSummary,
     orchestrator::{OrchestratorControl, OrchestratorEvent},
 };
 use ratatui::{
@@ -21,8 +22,9 @@ use crate::app::input::vim_sync::RichEditor;
 use crate::app::render::panels::survey::Survey;
 use crate::app::{
     AgentState, AppSnapshot, CompactOptions, CompactionEntry, ConversationMetadata, FileChange,
-    MessageState, MessageType, ModelInfo, PersistenceState, RewindPoint, SafetyState,
-    SessionManager, StepToolCallEntry, SubAgentContext, UIMessageMetadata,
+    MessageState, MessageType, ModelInfo, PersistenceState, RewindFocus, RewindPoint,
+    RewindRestoreScope, SafetyState, SessionManager, StepToolCallEntry, SubAgentContext,
+    UIMessageMetadata,
 };
 
 /// Todo item for tracking tasks (supports nesting)
@@ -318,6 +320,9 @@ pub(crate) struct App {
     pub(crate) show_rewind: bool,
     pub(crate) rewind_points: Vec<RewindPoint>,
     pub(crate) rewind_selected: usize,
+    pub(crate) rewind_restore_scope: RewindRestoreScope,
+    pub(crate) rewind_focus: RewindFocus,
+    pub(crate) current_execution_checkpoint_id: Option<FsCheckpointId>,
     pub(crate) current_file_changes: Vec<FileChange>, // Track file changes since last rewind point
     pub(crate) last_tool_args: Option<(String, String)>, // (tool_name, arguments) for tracking file changes
     // Spec workflow state

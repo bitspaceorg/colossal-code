@@ -75,6 +75,8 @@ impl App {
             &self.message_metadata,
             &self.message_timestamps,
             &self.current_file_changes,
+            &self.isolated_changes.review_entries,
+            self.current_execution_checkpoint_id.clone(),
         ) {
             self.rewind_points.push(rewind_point);
             self.current_file_changes.clear();
@@ -91,6 +93,8 @@ impl App {
         message_metadata: &[Option<UIMessageMetadata>],
         message_timestamps: &[SystemTime],
         current_file_changes: &[FileChange],
+        review_entries: &[agent_core::ExecutionReviewEntry],
+        fs_checkpoint_id: Option<agent_core::FsCheckpointId>,
     ) -> Option<RewindPoint> {
         if messages.is_empty() {
             return None;
@@ -114,6 +118,8 @@ impl App {
             preview,
             message_count: messages.len(),
             file_changes: current_file_changes.to_vec(),
+            fs_checkpoint_id,
+            review_entries: review_entries.to_vec(),
         })
     }
 
@@ -309,6 +315,8 @@ mod tests {
             &message_metadata,
             &message_timestamps,
             &[],
+            &[],
+            None,
         )
         .expect("rewind point");
 
@@ -318,7 +326,7 @@ mod tests {
 
     #[test]
     fn snapshot_rewind_point_returns_none_for_empty_messages() {
-        let point = App::snapshot_rewind_point(&[], &[], &[], &[], &[], &[]);
+        let point = App::snapshot_rewind_point(&[], &[], &[], &[], &[], &[], &[], None);
         assert!(point.is_none());
     }
 }

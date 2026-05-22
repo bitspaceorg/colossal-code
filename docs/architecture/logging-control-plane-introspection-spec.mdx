@@ -1,0 +1,801 @@
+---
+title: "Logging And Control Plane Introspection"
+description: "Implementation spec for structured logs, runtime projection, and control-plane introspection"
+slug: "architecture-logging-control-plane-introspection-spec"
+author: "OpenCode"
+date: "22 MAY 2026"
+tags: ["architecture", "observability", "control-plane", "logging"]
+---
+
+# Logs And Control Plane Introspection Spec
+
+## Status
+
+- Audience: implementation subagent
+- Scope: Linux-first architecture and observability design for `cocode`
+- Priority: before broader PTY automation, before cross-platform parity work
+- Non-goals in this phase:
+    - cross-platform implementation parity
+    - remote collaborative control plane
+    - DB-backed historical lineage replacement for the current conversation JSON store
+
+## Problem Statement
+
+`cocode` currently has strong in-process runtime semantics for isolated execution, checkpoints, rewind, apply/discard, and background tasks, but weak external observability.
+
+Today:
+
+- runtime truth is spread across `App`, `AgentMessage`, sessionizer state, and transcript strings
+- many rich events are flattened into UI strings through `UiMessageEvent`
+- there is no stable external introspection surface for sessions, checkpoints, rewind, tool lifecycle, or background tasks
+- PTY verification is still necessary for terminal UX, but state and logic debugging should not require invasive product-only test hooks
+
+We need a combined **logs + control-plane introspection** architecture that:
+
+1. makes state and logic easy to debug without modifying product behavior for tests
+2. exposes session/checkpoint/rewind/background-task state in a structured way
+3. gives future PTY automation a real external surface to seed, inspect, and validate behavior
+4. evolves toward a snapshot-first history model without throwing away the current Linux-first isolated-workspace design
+
+## Design Principles
+
+### 1. Product architecture must be externally verifiable
+
+Do not add hidden runtime branches, fixture env vars, or fake-only codepaths just for tests.
+
+Prefer:
+
+- real persisted inputs
+- real HTTP/SSE introspection
+- real user input paths
+- real checkpoint/session state on disk
+
+### 2. Separate runtime projection from render projection
+
+The TUI should render from a structured runtime/session projection.
+
+Do not treat transcript strings as the system of record.
+
+### 3. Logs explain decisions, PTY proves user-visible behavior
+
+Use logs and control-plane inspection for:
+
+- state transitions
+- routing decisions
+- checkpoint lifecycle
+- apply/discard/rewrite semantics
+- shell/tool isolation semantics
+
+Use PTY for:
+
+- layout
+- clipping
+- cursor/focus behavior
+- key handling quirks
+- raw/alternate-screen/shutdown behavior
+
+### 4. Snapshot-first history direction
+
+Long-term history and restore should be driven by durable snapshot lineage, not by replaying old text diffs against the current workspace.
+
+This spec does not require full DB-backed lineage now, but every control-plane decision should move toward that model.
+
+### 5. Linux-first
+
+The design must first expose and stabilize Linux behavior.
+
+Cross-platform parity comes later.
+
+## Goals
+
+### Primary Goals
+
+1. Provide structured runtime introspection for the currently active app/session
+2. Expose isolated-workspace state, checkpoints, rewind points, apply/discard status, conflicts, and audit events
+3. Expose background tasks and shell log state
+4. Emit a structured event stream suitable for:
+    - manual debugging
+    - test harnesses
+    - future external tooling
+5. Require no product-only testing codepaths
+
+### Secondary Goals
+
+1. Make future `/undo`, `/redo`, and `/rewind` easier to verify through real state seeding
+2. Create a clean boundary where persistent rewind lineage can later move into a DB
+3. Support future PTY automation by giving it a way to inspect state before and after key presses
+
+## Non-Goals
+
+1. Full remote multi-user collaboration
+2. Replacing the TUI with a web client
+3. Solving all persistence/DB lineage work in this phase
+4. Cross-platform daemon behavior in this phase
+
+## Proposed Product Model
+
+Introduce an optional **local control-plane daemon** mode, launched explicitly by the user.
+
+Command shape:
+
+```bash
+cocode --serve
+```
+
+This process runs as the control-plane host for:
+
+- runtime/session projection
+- logs
+- event streaming
+- optional TUI attachment or TUI sibling process
+
+The TUI can either:
+
+1. run standalone as it does today
+2. or connect to the daemon-backed runtime when launched in a served project environment
+
+Phase 1 does **not** require changing the default product entrypoint. It only requires a daemon mode and a shared internal runtime model.
+
+## High-Level Architecture
+
+Add four new layers.
+
+### Layer 1: Typed Runtime Events
+
+Create a typed event vocabulary that becomes the source for both logs and SSE.
+
+Suggested crate/module:
+
+- `src/app/runtime/events.rs` or `crates/app_runtime_protocol`
+
+This layer models facts such as:
+
+- session started
+- session idle/busy
+- user prompt submitted
+- assistant response chunk/finalized
+- tool call started/completed/failed
+- shell background task started/exited
+- checkpoint created/restored
+- rewind point created/restored
+- isolated changes pending count updated
+- review entries updated
+- apply succeeded/blocked
+- discard completed
+- approval requested/responded
+- title generation started/completed/failed
+
+### Layer 2: Runtime Projection
+
+Create a structured in-memory projection owned independently from direct TUI rendering.
+
+Suggested module:
+
+- `src/app/runtime/projection.rs`
+
+This projection should be updated from typed events and provide the current externally inspectable truth.
+
+It should include:
+
+- active session id
+- conversation title/preview metadata
+- busy/idle status
+- current mode-like state for agent execution
+- latest checkpoint id
+- rewind points metadata
+- current rewind/restore state
+- pending isolated change count
+- current review entry list
+- conflict paths
+- background tasks list
+- current approval prompt state
+- title generation state
+
+This projection is not the same thing as the full TUI `App` struct. It is the externalized semantic state.
+
+### Layer 3: Structured Logging
+
+Use `tracing` and `tracing-subscriber` for all runtime event emission.
+
+Recommended logging shape:
+
+- human-readable logs for local dev
+- JSON logs for daemon/control-plane mode
+
+Recommended sinks:
+
+1. stderr for interactive dev runs
+2. rolling file logs under a stable app directory
+3. in-memory ring buffer for recent event inspection through HTTP
+
+Each event should carry:
+
+- timestamp
+- level
+- subsystem/service
+- session_id if applicable
+- workspace_session_id if applicable
+- message_id/rewind_id/checkpoint_id if applicable
+- event kind
+- event payload
+
+### Layer 4: HTTP + SSE Control Plane
+
+Expose the projection and control actions over HTTP and SSE.
+
+The important part is stable structured surfaces, not a specific framework.
+
+## API Surface
+
+The control plane should be split into:
+
+1. read APIs
+2. control APIs
+3. event stream APIs
+
+## Read APIs
+
+### `GET /health`
+
+Returns:
+
+- daemon running
+- version
+- platform
+- workspace root
+
+### `GET /sessions/current`
+
+Returns current runtime projection summary:
+
+- session id
+- working directory
+- title
+- preview
+- busy/idle
+- active model/backend label
+- latest checkpoint id
+- pending isolated change count
+- review panel/conflict summary
+
+### `GET /sessions/current/messages`
+
+Returns typed session messages / transcript projection:
+
+- message id
+- role
+- text
+- timestamps
+- associated structured parts/events
+
+Do not rely on parsing raw transcript strings.
+
+### `GET /sessions/current/checkpoints`
+
+Returns checkpoint metadata:
+
+- checkpoint id
+- created_at
+- source kind (`tool`, `exec`, `apply`, `discard`, `rewind`, etc.)
+- short summary if available
+
+### `GET /sessions/current/checkpoints/:id`
+
+Returns detailed checkpoint metadata:
+
+- manifest summary
+- file counts
+- maybe first N changed files
+
+### `GET /sessions/current/rewind`
+
+Returns rewind-point metadata:
+
+- rewind id
+- timestamp
+- preview/message anchor
+- message_count
+- fs_checkpoint_id
+- restoreability flags
+- summary diff counts
+
+### `GET /sessions/current/review`
+
+Returns current isolated review state:
+
+- pending_count
+- review entries
+- selected checkpoint if relevant
+- conflict paths
+
+### `GET /sessions/current/background`
+
+Returns background task list:
+
+- session_id
+- command
+- cwd
+- log_file
+- start time
+- state
+
+### `GET /sessions/current/background/:id/log`
+
+Returns current full or partial background log text.
+
+Support:
+
+- `offset`
+- `limit`
+- maybe `follow=false` read mode
+
+### `GET /sessions/current/audit`
+
+Returns sessionizer audit log:
+
+- backend selection
+- workspace prepared
+- checkpoint created
+- file events observed
+- commit applied/blocked
+- discarded
+- restored checkpoint
+
+## Control APIs
+
+### `POST /sessions/current/apply`
+
+Applies isolated changes.
+
+Returns:
+
+- applied paths
+- conflicts
+- new checkpoint state
+
+### `POST /sessions/current/discard`
+
+Discards isolated changes.
+
+Returns:
+
+- new checkpoint id
+- pending count
+
+### `POST /sessions/current/checkpoints/:id/restore`
+
+Restores the isolated workspace to the selected checkpoint.
+
+Returns:
+
+- restored checkpoint id
+- new pending count
+- review entries summary
+
+### `POST /sessions/current/cancel`
+
+Cancels current generation.
+
+### `POST /sessions/current/rewind/:id/restore`
+
+Request shape:
+
+```json
+{
+  "scope": "code_and_conversation" | "conversation_only" | "code_only"
+}
+```
+
+Returns:
+
+- restore result summary
+- fork metadata if applicable
+- resulting checkpoint id
+- resulting pending isolated state
+
+This endpoint should map onto the same semantics as the `/rewind` modal.
+
+### `POST /sessions/current/title/generate`
+
+Optional helper for manual retriggering title generation.
+
+Not required for baseline UX but useful for debugging.
+
+### `POST /sessions/current/background/:id/kill`
+
+Kills a background task.
+
+## Event Stream APIs
+
+### `GET /events`
+
+Server-sent events stream of typed runtime events.
+
+Include:
+
+- heartbeat
+- runtime event payload
+- monotonic sequence number
+
+Recommended event categories:
+
+- `session.status`
+- `session.message`
+- `tool.started`
+- `tool.completed`
+- `checkpoint.created`
+- `checkpoint.restored`
+- `rewind.created`
+- `rewind.restored`
+- `review.updated`
+- `apply.completed`
+- `discard.completed`
+- `background.started`
+- `background.exited`
+- `approval.requested`
+- `approval.responded`
+- `title.generated`
+
+This SSE stream is the key bridge between logs, automation, and UI observability.
+
+## Typed Event Model
+
+The event model should be explicit.
+
+Suggested event enum families:
+
+### Session events
+
+- `SessionStarted`
+- `SessionLoaded`
+- `SessionForked`
+- `SessionSaved`
+- `SessionStatusChanged { busy: bool }`
+
+### Conversation events
+
+- `UserPromptSubmitted`
+- `AssistantResponseStarted`
+- `AssistantResponseChunk`
+- `AssistantResponseCompleted`
+- `ThinkingSummaryUpdated`
+- `ConversationTitleGenerationStarted`
+- `ConversationTitleGenerated`
+- `ConversationTitleGenerationFailed`
+
+### Tool events
+
+- `ToolCallStarted`
+- `ToolCallCompleted`
+- `ToolCallFailed`
+
+### Execution/workspace events
+
+- `ExecutionStateUpdated`
+- `ExecutionCheckpointCreated`
+- `ExecutionCheckpointRestored`
+- `ExecutionReviewEntriesUpdated`
+- `ExecutionChangesApplied`
+- `ExecutionChangesDiscarded`
+- `ExecutionApplyBlocked`
+
+### Rewind events
+
+- `RewindPointCreated`
+- `RewindRestoreRequested`
+- `RewindRestored`
+
+### Background task events
+
+- `BackgroundTaskStarted`
+- `BackgroundTaskOutputUpdated`
+- `BackgroundTaskExited`
+- `BackgroundTaskKilled`
+
+### Approval/safety events
+
+- `ApprovalRequested`
+- `ApprovalResponded`
+- `SandboxBlocked`
+
+### UI-introspection events (optional)
+
+Only add these once the control plane is useful; they should not become the main truth too early.
+
+- `PanelOpened { panel }`
+- `PanelClosed { panel }`
+- `SelectionChanged { surface, index }`
+
+These are useful for PTY correlation but should stay lower priority than semantic/runtime events.
+
+## Logging Spec
+
+## Log Levels
+
+Use conventional `tracing` levels:
+
+- `ERROR`
+- `WARN`
+- `INFO`
+- `DEBUG`
+- `TRACE`
+
+## Required Log Fields
+
+Every structured event log should include, where applicable:
+
+- `ts`
+- `level`
+- `service`
+- `event`
+- `session_id`
+- `workspace_session_id`
+- `checkpoint_id`
+- `rewind_id`
+- `message_id`
+- `background_session_id`
+- `path`
+- `scope`
+- `status`
+- `pending_count`
+
+## Services / Subsystems
+
+Use stable subsystem names, for example:
+
+- `app.runtime`
+- `app.persistence`
+- `app.rewind`
+- `app.resume`
+- `agent`
+- `agent.exec`
+- `agent.tools`
+- `sessionizer.workspace`
+- `sessionizer.manager`
+- `background`
+- `control_plane`
+
+## Logging Requirements By Area
+
+### Title generation
+
+Log:
+
+- title generation requested
+- title generation skipped because existing title exists
+- title generation succeeded
+- title generation failed
+
+Do **not** log full sensitive conversation text by default.
+
+Log summary metadata such as:
+
+- summary length
+- first user message id
+- model/backend label
+
+### Checkpoint lifecycle
+
+Log:
+
+- checkpoint created
+- checkpoint restored
+- checkpoint restore requested
+- checkpoint restore failed
+
+### Apply/discard
+
+Log:
+
+- apply requested
+- apply completed
+- apply blocked with conflicts
+- discard requested
+- discard completed
+
+### Rewind restore
+
+Log:
+
+- rewind restore requested
+- rewind restore scope
+- associated checkpoint id
+- whether conversation changed
+- whether code changed
+
+### Background tasks
+
+Log:
+
+- task start
+- task exit code
+- task kill
+- log file path
+
+## Persistence Spec
+
+Phase 1 persistence additions should stay modest.
+
+### Conversation JSON
+
+Persist:
+
+- `title: Option<String>`
+
+Keep:
+
+- `preview`
+
+Reason:
+
+- `title` is the curated/generated label
+- `preview` remains backward-compatible fallback and user-message anchor
+
+### Do not add yet
+
+- full event store in the existing conversation JSON files
+- checkpoint blobs in conversation JSON
+- full rewind stack persistence inside conversation JSON
+
+That should wait for the DB phase.
+
+## Runtime Projection Spec
+
+Add a projection object independent from `App` rendering.
+
+Suggested shape:
+
+```rust
+struct RuntimeProjection {
+    session_id: Option<String>,
+    title: Option<String>,
+    preview: Option<String>,
+    busy: bool,
+    model_label: String,
+    latest_checkpoint_id: Option<String>,
+    rewind_points: Vec<RewindPointProjection>,
+    pending_isolated_count: usize,
+    review_entries: Vec<ReviewEntryProjection>,
+    conflict_paths: Vec<String>,
+    background_tasks: Vec<BackgroundTaskProjection>,
+    approval: Option<ApprovalProjection>,
+}
+```
+
+This projection should be updated from typed events and serve both:
+
+- HTTP GET handlers
+- SSE event context
+
+## Minimal Implementation Plan
+
+### Phase A: Internal event/projection cleanup
+
+1. Define typed runtime events
+2. Create runtime projection object
+3. Feed it from existing agent/sessionizer/app transitions
+4. Keep TUI rendering unchanged for now
+
+### Phase B: Logging
+
+1. Introduce `tracing`
+2. Add JSON log sink in daemon mode
+3. Add rotating file sink
+4. Log checkpoint/rewind/apply/discard/background/title lifecycle
+
+### Phase C: Read-only control plane
+
+Implement:
+
+- `GET /health`
+- `GET /sessions/current`
+- `GET /sessions/current/checkpoints`
+- `GET /sessions/current/rewind`
+- `GET /sessions/current/review`
+- `GET /sessions/current/background`
+- `GET /sessions/current/audit`
+- `GET /events`
+
+### Phase D: Safe control actions
+
+Implement:
+
+- `POST /sessions/current/apply`
+- `POST /sessions/current/discard`
+- `POST /sessions/current/checkpoints/:id/restore`
+- `POST /sessions/current/cancel`
+
+### Phase E: Rewind/undo/redo alignment
+
+Once item 4 and item 5 are settled:
+
+- `POST /sessions/current/rewind/:id/restore`
+- explicit restore scopes
+- eventually `/undo` and `/redo` modeled through the same control plane
+
+## Verification Requirements
+
+## Logic/state verification through logs/control plane
+
+Must be sufficient to answer:
+
+1. What checkpoint is active right now?
+2. What rewind points exist?
+3. What restore scope was chosen?
+4. What pending isolated changes currently exist?
+5. Why was apply blocked?
+6. Did title generation run, succeed, or fail?
+7. What background tasks are alive?
+
+## PTY still required for
+
+1. modal layout and centering
+2. clipping and wrapping
+3. visible focus state
+4. cursor placement
+5. key recognition in real terminal conditions
+6. startup/shutdown terminal cleanliness
+
+Logs cannot replace PTY for those.
+
+## Security / Safety Considerations
+
+1. Control plane should bind locally by default
+2. No unauthenticated remote exposure in phase 1
+3. Logs should avoid full sensitive prompt dumps by default
+4. If raw content inspection is needed, gate it behind explicit debug mode
+
+## Backward Compatibility
+
+Required compatibility rules:
+
+1. old conversation files without `title` must still load
+2. `/resume` must fall back to `preview`
+3. no change to existing save/load semantics besides optional `title`
+4. daemon mode must be opt-in, not default
+
+## Risks
+
+### Risk: duplicating state
+
+Mitigation:
+
+- projection is derived from typed events
+- do not mutate projection and TUI state independently without a clear source of truth plan
+
+### Risk: too much product complexity too early
+
+Mitigation:
+
+- phase read-only introspection first
+- action endpoints second
+- persistence/DB lineage later
+
+### Risk: logging turns into transcript dumping
+
+Mitigation:
+
+- log event metadata first
+- raw content only in opt-in debug mode
+
+## Deliverables For The Implementing Subagent
+
+1. Typed event schema for runtime/session/workspace/background/title lifecycle
+2. Runtime projection struct + reducer/update path
+3. `tracing` setup with JSON/file sinks
+4. Local HTTP read endpoints
+5. SSE `/events` endpoint
+6. Safe apply/discard/restore control endpoints
+7. Documentation for endpoint shapes and log fields
+8. Targeted tests for:
+    - projection updates
+    - checkpoint state exposure
+    - rewind exposure
+    - background task exposure
+    - title generation lifecycle events
+
+## Final Recommendation
+
+Do not build verifier-only hooks.
+
+Build a real local control plane and structured runtime projection.

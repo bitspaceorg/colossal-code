@@ -135,6 +135,9 @@ impl App {
                 } else {
                     self.show_rewind = true;
                     self.rewind_selected = self.rewind_points.len().saturating_sub(1); // Start at most recent
+                    self.rewind_restore_scope =
+                        crate::app::state::message::RewindRestoreScope::default();
+                    self.rewind_focus = crate::app::state::message::RewindFocus::default();
                 }
             }
             SlashCommandDispatch::Fork => {

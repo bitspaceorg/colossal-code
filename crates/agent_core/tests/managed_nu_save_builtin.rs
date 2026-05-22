@@ -410,3 +410,65 @@ async fn managed_nu_exec_command_persists_module_overlay_and_source_state() {
         std::env::remove_var("NITE_MANAGED_SHELL");
     }
 }
+
+#[tokio::test]
+async fn managed_nu_exec_command_remaps_absolute_workspace_paths_under_isolation() {
+    let _guard = managed_nu_env_lock();
+    if std::process::Command::new("sh")
+        .arg("-lc")
+        .arg("command -v nu >/dev/null 2>&1")
+        .status()
+        .map(|status| !status.success())
+        .unwrap_or(true)
+    {
+        return;
+    }
+
+    unsafe {
+        std::env::set_var("NITE_MANAGED_SHELL", "nu");
+        std::env::set_var("NITE_ISOLATED_EXECUTION_ROOT", "1");
+        std::env::set_var("NITE_WORKSPACE_BACKEND", "copy");
+    }
+
+    let temp = make_test_dir("absolute-path-remap");
+    let absolute = temp.join("file.txt");
+    std::fs::write(&absolute, "before").expect("seed file");
+    set_workspace_root_override(&temp);
+    let agent = build_test_agent(temp.clone());
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    let result = execute_tool_call(
+        &agent,
+        &tool_call(json!({
+            "command": format!("'isolated' | save -f \"{}\"; open \"{}\"", absolute.display(), absolute.display()),
+            "replay_state": false
+        })),
+        tx,
+    )
+    .await
+    .expect("managed nu absolute-path exec result");
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&result).expect("yaml result");
+    assert_eq!(parsed["status"].as_str(), Some("Success"), "{result}");
+    assert!(
+        parsed["cmd_out"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("isolated"),
+        "{result}"
+    );
+    assert_eq!(std::fs::read_to_string(&absolute).unwrap(), "before");
+
+    let apply = agent
+        .apply_execution_changes()
+        .await
+        .expect("apply changes")
+        .expect("isolated apply result");
+    assert!(apply.conflicts.is_empty());
+    assert_eq!(std::fs::read_to_string(&absolute).unwrap(), "isolated");
+
+    unsafe {
+        std::env::remove_var("NITE_MANAGED_SHELL");
+        std::env::remove_var("NITE_ISOLATED_EXECUTION_ROOT");
+        std::env::remove_var("NITE_WORKSPACE_BACKEND");
+    }
+}

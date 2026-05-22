@@ -33,6 +33,20 @@ fn should_seed_cwd(
         || !current_cwd.starts_with(seed_cwd)
 }
 
+fn remap_workspace_absolute_paths_for_isolation(
+    command: &str,
+    private_workspace_root: &std::path::Path,
+) -> String {
+    let real_workspace_root = crate::resolve_workspace_root();
+    if real_workspace_root == private_workspace_root {
+        return command.to_string();
+    }
+
+    let real = real_workspace_root.to_string_lossy();
+    let private = private_workspace_root.to_string_lossy();
+    command.replace(real.as_ref(), private.as_ref())
+}
+
 pub(crate) fn default_continuity_state(
     shell: &colossal_linux_sandbox::shell::Shell,
 ) -> colossal_linux_sandbox::manager::PersistentSessionState {
@@ -121,6 +135,30 @@ pub async fn add_writable_root(path: PathBuf) -> Result<()> {
             "Cannot add writable root in read-only mode"
         )),
     }
+}
+
+pub(crate) async fn reset_current_shell_session() -> Result<()> {
+    ensure_global_state_initialized().await;
+
+    let Some(state) = GLOBAL_STATE.get() else {
+        return Ok(());
+    };
+
+    let existing = {
+        let mut session_id_lock = state.shell_session_id.lock().await;
+        session_id_lock.take()
+    };
+
+    if let Some(session_id) = existing {
+        let _ = state.manager.terminate_session(session_id).await;
+    }
+
+    {
+        let mut background = state.session_has_background_process.lock().await;
+        *background = false;
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn get_or_create_shell_session(
@@ -255,10 +293,15 @@ pub(crate) async fn run_isolated_exec_command(
         &cwd_hint,
         &continuity_state.env_vars,
     ) {
-        cwd_hint
+        cwd_hint.clone()
     } else {
         continuity_state.current_cwd.clone()
     };
+    let private_workspace_root = env_overrides
+        .get("NITE_WORKSPACE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cwd_hint.clone());
+    let command = remap_workspace_absolute_paths_for_isolation(command, &private_workspace_root);
 
     if matches!(
         shell_kind,
@@ -276,7 +319,7 @@ pub(crate) async fn run_isolated_exec_command(
         runtime.update_cwd(cwd).map_err(|err| {
             colossal_linux_sandbox::error::ColossalErr::Io(std::io::Error::other(err.to_string()))
         })?;
-        return runtime.fork_eval(command.to_string()).map_err(|err| {
+        return runtime.fork_eval(command).map_err(|err| {
             colossal_linux_sandbox::error::ColossalErr::Io(std::io::Error::other(err.to_string()))
         });
     }
@@ -284,7 +327,7 @@ pub(crate) async fn run_isolated_exec_command(
     state
         .manager
         .handle_exec_command_request(colossal_linux_sandbox::types::ExecCommandParams {
-            command: vec![command.to_string()],
+            command: vec![command],
             shell: state.shell.clone(),
             cwd,
             env: if matches!(

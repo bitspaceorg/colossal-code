@@ -4,8 +4,60 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, Paragraph},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::App;
+use crate::app::{App, ConversationMetadata};
+
+fn trim_title(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if text.width() <= max_width {
+        return text.to_string();
+    }
+    if max_width <= 3 {
+        return text.chars().take(max_width).collect();
+    }
+
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1);
+        if width + ch_width + 3 > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out.push_str("...");
+    out
+}
+
+fn title_line(conv: &ConversationMetadata, selected: bool, max_width: usize) -> Line<'static> {
+    let title = trim_title(conv.display_title(), max_width);
+    if selected {
+        if conv.forked_from.is_some() {
+            return Line::from(vec![
+                Span::styled("> ⎇ ", Style::default().fg(Color::Green)),
+                Span::styled(title, Style::default().fg(Color::Green)),
+            ]);
+        }
+        return Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Green)),
+            Span::styled(title, Style::default().fg(Color::Green)),
+        ]);
+    }
+    if conv.forked_from.is_some() {
+        return Line::from(vec![
+            Span::raw("  ⎇ "),
+            Span::styled(title, Style::default().fg(Color::White)),
+        ]);
+    }
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(title, Style::default().fg(Color::White)),
+    ])
+}
 
 impl App {
     pub(crate) fn render_resume_panel(
@@ -95,31 +147,8 @@ impl App {
             .map(|(local_idx, conv)| {
                 let actual_idx = scroll_offset + local_idx;
                 let is_selected = actual_idx == self.resume_selected;
-                let is_fork = conv.forked_from.is_some();
-
-                let title_line = if is_selected {
-                    if is_fork {
-                        Line::from(vec![
-                            Span::styled("> ⎇ ", Style::default().fg(Color::Green)),
-                            Span::styled(&conv.preview, Style::default().fg(Color::Green)),
-                        ])
-                    } else {
-                        Line::from(vec![
-                            Span::styled("> ", Style::default().fg(Color::Green)),
-                            Span::styled(&conv.preview, Style::default().fg(Color::Green)),
-                        ])
-                    }
-                } else if is_fork {
-                    Line::from(vec![
-                        Span::raw("  ⎇ "),
-                        Span::styled(&conv.preview, Style::default().fg(Color::White)),
-                    ])
-                } else {
-                    Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(&conv.preview, Style::default().fg(Color::White)),
-                    ])
-                };
+                let title_line =
+                    title_line(conv, is_selected, inner.width.saturating_sub(6) as usize);
 
                 let msg_count = format!("{} msgs", conv.message_count);
                 let branch_str = conv
@@ -147,5 +176,53 @@ impl App {
             height: inner.height.saturating_sub(2),
         };
         frame.render_widget(List::new(items), list_area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{title_line, trim_title};
+    use crate::app::ConversationMetadata;
+    use unicode_width::UnicodeWidthStr;
+
+    fn metadata(title: Option<&str>, preview: &str) -> ConversationMetadata {
+        ConversationMetadata {
+            id: "1".to_string(),
+            updated_at: std::time::SystemTime::now(),
+            git_branch: None,
+            message_count: 1,
+            title: title.map(str::to_string),
+            preview: preview.to_string(),
+            file_path: "/tmp/test.json".into(),
+            time_ago_str: "1m ago".to_string(),
+            forked_from: None,
+        }
+    }
+
+    #[test]
+    fn trim_title_clips_without_duplication() {
+        let text = "Confirming Deletion of Current Directory Contents";
+        let trimmed = trim_title(text, 24);
+        assert_eq!(trimmed, "Confirming Deletion o...");
+        assert!(trimmed.width() <= 24);
+    }
+
+    #[test]
+    fn title_line_uses_title_once() {
+        let line = title_line(
+            &metadata(
+                Some("Confirming Deletion of Current Directory Contents"),
+                "preview",
+            ),
+            true,
+            24,
+        );
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(rendered, "> Confirming Deletion o...");
+        assert_eq!(rendered.matches("Confirming").count(), 1);
     }
 }

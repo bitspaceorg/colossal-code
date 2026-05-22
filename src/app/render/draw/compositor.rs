@@ -62,7 +62,7 @@ impl App {
             self.ui_state.show_help,
             self.ui_state.show_resume,
             self.show_history_panel,
-            self.show_rewind,
+            false,
             self.isolated_changes.show_review_panel,
             self.show_todos,
             self.show_model_selection,

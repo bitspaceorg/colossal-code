@@ -92,6 +92,14 @@ impl App {
                                 match agent_clone.pending_execution_change_count().await {
                                     Ok(count) => {
                                         let _ = tx_clone.send(AgentMessage::ExecutionState(count));
+                                        let checkpoint = agent_clone
+                                            .current_execution_checkpoint()
+                                            .await
+                                            .ok()
+                                            .flatten()
+                                            .map(|checkpoint| checkpoint.id);
+                                        let _ = tx_clone
+                                            .send(AgentMessage::ExecutionCheckpoint(checkpoint));
                                         let entries = agent_clone
                                             .execution_review_entries()
                                             .await
@@ -126,6 +134,14 @@ impl App {
                                             .send(AgentMessage::ExecutionChangesApplied(result));
                                         let _ = tx_clone
                                             .send(AgentMessage::ExecutionState(pending_count));
+                                        let checkpoint = agent_clone
+                                            .current_execution_checkpoint()
+                                            .await
+                                            .ok()
+                                            .flatten()
+                                            .map(|checkpoint| checkpoint.id);
+                                        let _ = tx_clone
+                                            .send(AgentMessage::ExecutionCheckpoint(checkpoint));
                                         let entries = agent_clone
                                             .execution_review_entries()
                                             .await
@@ -135,6 +151,8 @@ impl App {
                                     }
                                     Ok(None) => {
                                         let _ = tx_clone.send(AgentMessage::ExecutionState(0));
+                                        let _ =
+                                            tx_clone.send(AgentMessage::ExecutionCheckpoint(None));
                                         let _ = tx_clone
                                             .send(AgentMessage::ExecutionReviewEntries(Vec::new()));
                                     }
@@ -156,11 +174,21 @@ impl App {
                                         let _ =
                                             tx_clone.send(AgentMessage::ExecutionChangesDiscarded);
                                         let _ = tx_clone.send(AgentMessage::ExecutionState(0));
+                                        let checkpoint = agent_clone
+                                            .current_execution_checkpoint()
+                                            .await
+                                            .ok()
+                                            .flatten()
+                                            .map(|checkpoint| checkpoint.id);
+                                        let _ = tx_clone
+                                            .send(AgentMessage::ExecutionCheckpoint(checkpoint));
                                         let _ = tx_clone
                                             .send(AgentMessage::ExecutionReviewEntries(Vec::new()));
                                     }
                                     Ok(false) => {
                                         let _ = tx_clone.send(AgentMessage::ExecutionState(0));
+                                        let _ =
+                                            tx_clone.send(AgentMessage::ExecutionCheckpoint(None));
                                         let _ = tx_clone
                                             .send(AgentMessage::ExecutionReviewEntries(Vec::new()));
                                     }
@@ -170,6 +198,58 @@ impl App {
                                             e
                                         )));
                                     }
+                                }
+                            });
+                        }
+                        AgentMessage::RestoreExecutionCheckpoint(checkpoint_id) => {
+                            let agent_clone = agent_clone.clone();
+                            let tx_clone = output_tx_clone.clone();
+                            tokio::task::spawn_local(async move {
+                                match agent_clone
+                                    .restore_execution_checkpoint(&checkpoint_id)
+                                    .await
+                                {
+                                    Ok(Some(checkpoint)) => {
+                                        let pending_count = agent_clone
+                                            .pending_execution_change_count()
+                                            .await
+                                            .unwrap_or(0);
+                                        let _ = tx_clone.send(AgentMessage::ExecutionCheckpoint(
+                                            Some(checkpoint.id),
+                                        ));
+                                        let _ = tx_clone
+                                            .send(AgentMessage::ExecutionState(pending_count));
+                                        let entries = agent_clone
+                                            .execution_review_entries()
+                                            .await
+                                            .unwrap_or_default();
+                                        let _ = tx_clone
+                                            .send(AgentMessage::ExecutionReviewEntries(entries));
+                                    }
+                                    Ok(None) => {
+                                        let _ =
+                                            tx_clone.send(AgentMessage::ExecutionCheckpoint(None));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx_clone.send(AgentMessage::Error(format!(
+                                            "Failed to restore isolated checkpoint: {}",
+                                            e
+                                        )));
+                                    }
+                                }
+                            });
+                        }
+                        AgentMessage::GenerateConversationTitle(summary) => {
+                            let agent_clone = agent_clone.clone();
+                            let tx_clone = output_tx_clone.clone();
+                            tokio::task::spawn_local(async move {
+                                match agent_clone.generate_conversation_title(&summary).await {
+                                    Ok(Some(title)) if !title.trim().is_empty() => {
+                                        let _ = tx_clone
+                                            .send(AgentMessage::ConversationTitleGenerated(title));
+                                    }
+                                    Ok(_) => {}
+                                    Err(_) => {}
                                 }
                             });
                         }

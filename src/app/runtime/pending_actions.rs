@@ -17,6 +17,7 @@ impl App {
             pending_todos,
             create_rewind,
             pending_file_change,
+            generate_title,
             check_auto_summarize,
             trigger_mid_stream_auto_summarize,
             mut schedule_resume_prompt,
@@ -67,6 +68,19 @@ impl App {
         // Track file change after rx borrow is dropped
         if let Some((tool_name, args, result)) = pending_file_change {
             self.track_file_change(&tool_name, &args, &result);
+        }
+
+        if generate_title
+            && self.persistence_state.current_conversation_title.is_none()
+            && !self.persistence_state.title_generation_in_flight
+        {
+            let summary = self.build_title_summary();
+            if !summary.is_empty()
+                && let Some(tx) = &self.agent_tx
+            {
+                self.persistence_state.title_generation_in_flight = true;
+                let _ = tx.send(AgentMessage::GenerateConversationTitle(summary));
+            }
         }
 
         // Create rewind point after rx borrow is dropped

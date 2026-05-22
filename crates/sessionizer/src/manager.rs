@@ -7,6 +7,10 @@ use crate::types::{
     ExecCommandOutput, ExecCommandParams, ExitStatus, SessionId, StreamEvent, WriteStdinParams,
 };
 use crate::utils::truncate_output;
+use crate::workspace::{
+    ApplyResult, ExecutionReviewEntry, FsCheckpoint, SessionWorkspace, WorkspaceAuditEvent,
+    WorkspaceSessionId,
+};
 use anyhow::Result;
 use async_channel::{Receiver, unbounded};
 use qdrant_client::Qdrant;
@@ -531,6 +535,7 @@ pub struct SessionManager {
     pub managed_nu_sessions: Mutex<Vec<(SessionId, Arc<Mutex<ManagedNuRuntime>>)>>,
     pub semantic_search_sessions: Mutex<Vec<(SessionId, SemanticSearchSession)>>,
     session_metadata: Mutex<HashMap<SessionId, SessionMetadata>>,
+    workspace_sessions: Mutex<HashMap<WorkspaceSessionId, SessionWorkspace>>,
 }
 
 impl Default for SessionManager {
@@ -543,11 +548,16 @@ impl Default for SessionManager {
             managed_nu_sessions: Mutex::new(Vec::new()),
             semantic_search_sessions: Mutex::new(Vec::new()),
             session_metadata: Mutex::new(HashMap::new()),
+            workspace_sessions: Mutex::new(HashMap::new()),
         }
     }
 }
 
 impl SessionManager {
+    fn generate_workspace_session_id(&self) -> WorkspaceSessionId {
+        WorkspaceSessionId(format!("ws_{}_{}", self.process_id, uuid::Uuid::new_v4()))
+    }
+
     /// Generate a globally unique session ID across all process instances
     /// Format: {pid}_{counter} where pid ensures uniqueness across processes
     fn generate_unique_session_id(&self) -> SessionId {
@@ -602,6 +612,233 @@ impl SessionManager {
             .unwrap()
             .get(&session_id)
             .map(|metadata| Instant::now().duration_since(metadata.last_activity))
+    }
+
+    pub fn create_workspace_session(
+        &self,
+        base_workspace: PathBuf,
+    ) -> Result<WorkspaceSessionId, ColossalErr> {
+        let workspace = SessionWorkspace::initialize(base_workspace)
+            .map_err(|e| ColossalErr::Io(std::io::Error::other(e.to_string())))?;
+        let workspace_id = self.generate_workspace_session_id();
+        self.workspace_sessions
+            .lock()
+            .unwrap()
+            .insert(workspace_id.clone(), workspace);
+        Ok(workspace_id)
+    }
+
+    pub fn workspace_private_root(
+        &self,
+        workspace_id: &WorkspaceSessionId,
+    ) -> Result<PathBuf, ColossalErr> {
+        let workspaces = self.workspace_sessions.lock().unwrap();
+        let workspace = workspaces.get(workspace_id).ok_or_else(|| {
+            ColossalErr::Sandbox(SandboxErr::Denied(
+                -1,
+                format!("unknown workspace session {}", workspace_id.0),
+                (),
+            ))
+        })?;
+        Ok(workspace.private_workspace().to_path_buf())
+    }
+
+    pub fn workspace_env_overrides(
+        &self,
+        workspace_id: &WorkspaceSessionId,
+    ) -> Result<HashMap<String, String>, ColossalErr> {
+        let workspaces = self.workspace_sessions.lock().unwrap();
+        let workspace = workspaces.get(workspace_id).ok_or_else(|| {
+            ColossalErr::Sandbox(SandboxErr::Denied(
+                -1,
+                format!("unknown workspace session {}", workspace_id.0),
+                (),
+            ))
+        })?;
+        Ok(workspace.env_overrides())
+    }
+
+    pub fn workspace_backend_name(
+        &self,
+        workspace_id: &WorkspaceSessionId,
+    ) -> Result<&'static str, ColossalErr> {
+        let workspaces = self.workspace_sessions.lock().unwrap();
+        let workspace = workspaces.get(workspace_id).ok_or_else(|| {
+            ColossalErr::Sandbox(SandboxErr::Denied(
+                -1,
+                format!("unknown workspace session {}", workspace_id.0),
+                (),
+            ))
+        })?;
+        Ok(workspace.backend_name())
+    }
+
+    pub fn workspace_audit_log(
+        &self,
+        workspace_id: &WorkspaceSessionId,
+    ) -> Result<Vec<WorkspaceAuditEvent>, ColossalErr> {
+        let mut workspaces = self.workspace_sessions.lock().unwrap();
+        let workspace = workspaces.get_mut(workspace_id).ok_or_else(|| {
+            ColossalErr::Sandbox(SandboxErr::Denied(
+                -1,
+                format!("unknown workspace session {}", workspace_id.0),
+                (),
+            ))
+        })?;
+        Ok(workspace.audit_log().to_vec())
+    }
+
+    pub fn remap_workspace_path(
+        &self,
+        workspace_id: &WorkspaceSessionId,
+        path: &std::path::Path,
+    ) -> Result<PathBuf, ColossalErr> {
+        let workspaces = self.workspace_sessions.lock().unwrap();
+        let workspace = workspaces.get(workspace_id).ok_or_else(|| {
+            ColossalErr::Sandbox(SandboxErr::Denied(
+                -1,
+                format!("unknown workspace session {}", workspace_id.0),
+                (),
+            ))
+        })?;
+        Ok(workspace.remap_workspace_path(path))
+    }
+
+    pub fn workspace_checkpoint(
+        &self,
+        workspace_id: &WorkspaceSessionId,
+    ) -> Result<FsCheckpoint, ColossalErr> {
+        let mut workspaces = self.workspace_sessions.lock().unwrap();
+        let workspace = workspaces.get_mut(workspace_id).ok_or_else(|| {
+            ColossalErr::Sandbox(SandboxErr::Denied(
+                -1,
+                format!("unknown workspace session {}", workspace_id.0),
+                (),
+            ))
+        })?;
+        workspace
+            .checkpoint_agent_fs()
+            .map_err(|e| ColossalErr::Io(std::io::Error::other(e.to_string())))
+    }
+
+    pub fn workspace_current_checkpoint(
+        &self,
+        workspace_id: &WorkspaceSessionId,
+    ) -> Result<Option<FsCheckpoint>, ColossalErr> {
+        let workspaces = self.workspace_sessions.lock().unwrap();
+        let workspace = workspaces.get(workspace_id).ok_or_else(|| {
+            ColossalErr::Sandbox(SandboxErr::Denied(
+                -1,
+                format!("unknown workspace session {}", workspace_id.0),
+                (),
+            ))
+        })?;
+        Ok(workspace.current_checkpoint().cloned())
+    }
+
+    pub fn restore_workspace_checkpoint(
+        &self,
+        workspace_id: &WorkspaceSessionId,
+        checkpoint_id: &crate::workspace::FsCheckpointId,
+    ) -> Result<FsCheckpoint, ColossalErr> {
+        let mut workspaces = self.workspace_sessions.lock().unwrap();
+        let workspace = workspaces.get_mut(workspace_id).ok_or_else(|| {
+            ColossalErr::Sandbox(SandboxErr::Denied(
+                -1,
+                format!("unknown workspace session {}", workspace_id.0),
+                (),
+            ))
+        })?;
+        workspace
+            .restore_checkpoint(checkpoint_id)
+            .map_err(|e| ColossalErr::Io(std::io::Error::other(e.to_string())))
+    }
+
+    pub fn workspace_pending_change_count(
+        &self,
+        workspace_id: &WorkspaceSessionId,
+    ) -> Result<usize, ColossalErr> {
+        let mut workspaces = self.workspace_sessions.lock().unwrap();
+        let workspace = workspaces.get_mut(workspace_id).ok_or_else(|| {
+            ColossalErr::Sandbox(SandboxErr::Denied(
+                -1,
+                format!("unknown workspace session {}", workspace_id.0),
+                (),
+            ))
+        })?;
+        workspace
+            .pending_change_count()
+            .map_err(|e| ColossalErr::Io(std::io::Error::other(e.to_string())))
+    }
+
+    pub fn workspace_review_entries(
+        &self,
+        workspace_id: &WorkspaceSessionId,
+    ) -> Result<Vec<ExecutionReviewEntry>, ColossalErr> {
+        let mut workspaces = self.workspace_sessions.lock().unwrap();
+        let workspace = workspaces.get_mut(workspace_id).ok_or_else(|| {
+            ColossalErr::Sandbox(SandboxErr::Denied(
+                -1,
+                format!("unknown workspace session {}", workspace_id.0),
+                (),
+            ))
+        })?;
+        workspace
+            .review_entries()
+            .map_err(|e| ColossalErr::Io(std::io::Error::other(e.to_string())))
+    }
+
+    pub fn commit_workspace_session(
+        &self,
+        workspace_id: &WorkspaceSessionId,
+    ) -> Result<ApplyResult, ColossalErr> {
+        let mut workspaces = self.workspace_sessions.lock().unwrap();
+        let workspace = workspaces.get_mut(workspace_id).ok_or_else(|| {
+            ColossalErr::Sandbox(SandboxErr::Denied(
+                -1,
+                format!("unknown workspace session {}", workspace_id.0),
+                (),
+            ))
+        })?;
+        workspace
+            .apply_to_real_workspace()
+            .map_err(|e| ColossalErr::Io(std::io::Error::other(e.to_string())))
+    }
+
+    pub fn discard_workspace_session(
+        &self,
+        workspace_id: &WorkspaceSessionId,
+    ) -> Result<(), ColossalErr> {
+        let mut workspaces = self.workspace_sessions.lock().unwrap();
+        let workspace = workspaces.get_mut(workspace_id).ok_or_else(|| {
+            ColossalErr::Sandbox(SandboxErr::Denied(
+                -1,
+                format!("unknown workspace session {}", workspace_id.0),
+                (),
+            ))
+        })?;
+        workspace
+            .discard_changes()
+            .map_err(|e| ColossalErr::Io(std::io::Error::other(e.to_string())))
+    }
+
+    pub fn destroy_workspace_session(
+        &self,
+        workspace_id: &WorkspaceSessionId,
+    ) -> Result<(), ColossalErr> {
+        let removed = self.workspace_sessions.lock().unwrap().remove(workspace_id);
+        if let Some(workspace) = removed {
+            workspace
+                .destroy()
+                .map_err(|e| ColossalErr::Io(std::io::Error::other(e.to_string())))?;
+            Ok(())
+        } else {
+            Err(ColossalErr::Sandbox(SandboxErr::Denied(
+                -1,
+                format!("unknown workspace session {}", workspace_id.0),
+                (),
+            )))
+        }
     }
 
     /// Cleanup timed out sessions
@@ -1640,6 +1877,39 @@ impl SessionManager {
                         stdout_parts.push(visible_str);
                     }
                     if command_finished {
+                        let drain_deadline = Instant::now() + Duration::from_millis(100);
+                        while Instant::now() < drain_deadline {
+                            match stream_rx.try_recv() {
+                                Ok(StreamEvent::Stdout(output))
+                                | Ok(StreamEvent::Stderr(output)) => {
+                                    let events = osc_parser.push(output.as_bytes());
+                                    apply_osc133_events(
+                                        events,
+                                        &mut command_started,
+                                        &mut command_finished,
+                                        &mut exit_code,
+                                    );
+                                    let visible = crate::osc133::strip_osc133(output.as_bytes());
+                                    let visible_str = String::from_utf8_lossy(&visible).to_string();
+                                    if !visible_str.is_empty() {
+                                        stdout_parts.push(visible_str);
+                                    }
+                                }
+                                Ok(StreamEvent::Exit(code)) => {
+                                    if exit_code.is_none() {
+                                        exit_code = Some(code);
+                                    }
+                                    break;
+                                }
+                                Ok(StreamEvent::Error(_)) => break,
+                                Err(async_channel::TryRecvError::Empty) => {
+                                    std::thread::sleep(Duration::from_millis(10));
+                                }
+                                Err(async_channel::TryRecvError::Closed) => {
+                                    break;
+                                }
+                            }
+                        }
                         break;
                     }
                 }
@@ -2897,6 +3167,351 @@ impl SessionManager {
             // eprintln!("Enhanced streaming task for session {} terminated", session_id.as_str());
         });
         Ok((session_id, rx))
+    }
+}
+
+#[cfg(test)]
+mod workspace_manager_tests {
+    use super::SessionManager;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(previous) = &self.previous {
+                    std::env::set_var(self.key, previous);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    fn make_test_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sessionizer-manager-workspace-{label}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    #[test]
+    fn workspace_session_lifecycle_round_trips() {
+        let manager = SessionManager::default();
+        let temp = make_test_dir("lifecycle");
+        std::fs::write(temp.join("file.txt"), "before").expect("seed file");
+
+        let workspace_id = manager
+            .create_workspace_session(temp.clone())
+            .expect("create workspace session");
+        let private_root = manager
+            .workspace_private_root(&workspace_id)
+            .expect("get private root");
+
+        std::fs::write(private_root.join("file.txt"), "after").expect("modify private file");
+        assert_eq!(
+            manager
+                .workspace_pending_change_count(&workspace_id)
+                .expect("pending change count"),
+            1
+        );
+
+        let result = manager
+            .commit_workspace_session(&workspace_id)
+            .expect("commit workspace session");
+        assert!(result.conflicts.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(temp.join("file.txt")).unwrap(),
+            "after"
+        );
+
+        manager
+            .destroy_workspace_session(&workspace_id)
+            .expect("destroy workspace session");
+    }
+
+    #[test]
+    fn workspace_session_reports_backend_name() {
+        let _env_lock = crate::workspace::workspace_env_test_lock();
+        let _guard = EnvVarGuard::set("NITE_WORKSPACE_BACKEND", "copy");
+        let manager = SessionManager::default();
+        let temp = make_test_dir("backend-name");
+
+        let workspace_id = manager
+            .create_workspace_session(temp)
+            .expect("create workspace session");
+
+        assert_eq!(
+            manager
+                .workspace_backend_name(&workspace_id)
+                .expect("workspace backend name"),
+            "copy"
+        );
+
+        manager
+            .destroy_workspace_session(&workspace_id)
+            .expect("destroy workspace session");
+    }
+
+    #[test]
+    fn workspace_session_exposes_audit_log() {
+        let _env_lock = crate::workspace::workspace_env_test_lock();
+        let _guard = EnvVarGuard::set("NITE_WORKSPACE_BACKEND", "copy");
+        let manager = SessionManager::default();
+        let temp = make_test_dir("audit-log");
+
+        let workspace_id = manager
+            .create_workspace_session(temp)
+            .expect("create workspace session");
+
+        let audit_log = manager
+            .workspace_audit_log(&workspace_id)
+            .expect("workspace audit log");
+        assert!(audit_log.len() >= 3);
+
+        manager
+            .destroy_workspace_session(&workspace_id)
+            .expect("destroy workspace session");
+    }
+
+    #[test]
+    fn workspace_session_checkpoint_tracks_latest_private_state() {
+        let _env_lock = crate::workspace::workspace_env_test_lock();
+        let _guard = EnvVarGuard::set("NITE_WORKSPACE_BACKEND", "copy");
+        let manager = SessionManager::default();
+        let temp = make_test_dir("checkpoint-state");
+        std::fs::write(temp.join("file.txt"), "before").expect("seed file");
+
+        let workspace_id = manager
+            .create_workspace_session(temp.clone())
+            .expect("create workspace session");
+        let private_root = manager
+            .workspace_private_root(&workspace_id)
+            .expect("workspace private root");
+        std::fs::write(private_root.join("file.txt"), "after").expect("modify private file");
+
+        let checkpoint = manager
+            .workspace_checkpoint(&workspace_id)
+            .expect("workspace checkpoint");
+        let file_entry = checkpoint
+            .manifest
+            .entries
+            .get(&std::path::PathBuf::from("file.txt"))
+            .expect("checkpoint file entry");
+        assert_eq!(file_entry.size, 5);
+
+        let apply = manager
+            .commit_workspace_session(&workspace_id)
+            .expect("commit workspace session");
+        assert!(apply.conflicts.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(temp.join("file.txt")).unwrap(),
+            "after"
+        );
+
+        let audit_log = manager
+            .workspace_audit_log(&workspace_id)
+            .expect("workspace audit log");
+        assert!(audit_log.iter().any(|event| {
+            event.kind == crate::workspace::WorkspaceAuditEventKind::CheckpointCreated
+        }));
+
+        manager
+            .destroy_workspace_session(&workspace_id)
+            .expect("destroy workspace session");
+    }
+
+    #[test]
+    fn workspace_session_can_restore_prior_checkpoint() {
+        let _env_lock = crate::workspace::workspace_env_test_lock();
+        let _guard = EnvVarGuard::set("NITE_WORKSPACE_BACKEND", "copy");
+        let manager = SessionManager::default();
+        let temp = make_test_dir("restore-checkpoint");
+        std::fs::write(temp.join("file.txt"), "base").expect("seed file");
+
+        let workspace_id = manager
+            .create_workspace_session(temp.clone())
+            .expect("create workspace session");
+        let private_root = manager
+            .workspace_private_root(&workspace_id)
+            .expect("workspace private root");
+        std::fs::write(private_root.join("file.txt"), "first").expect("first change");
+        let first_checkpoint = manager
+            .workspace_checkpoint(&workspace_id)
+            .expect("first checkpoint");
+
+        std::fs::write(private_root.join("file.txt"), "second").expect("second change");
+        manager
+            .workspace_checkpoint(&workspace_id)
+            .expect("second checkpoint");
+        std::fs::write(temp.join("file.txt"), "real").expect("modify real file");
+
+        manager
+            .restore_workspace_checkpoint(&workspace_id, &first_checkpoint.id)
+            .expect("restore checkpoint");
+        let private_root = manager
+            .workspace_private_root(&workspace_id)
+            .expect("workspace private root after restore");
+        assert_eq!(
+            std::fs::read_to_string(private_root.join("file.txt")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            manager
+                .workspace_pending_change_count(&workspace_id)
+                .expect("pending change count"),
+            1
+        );
+
+        manager
+            .destroy_workspace_session(&workspace_id)
+            .expect("destroy workspace session");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn workspace_session_manager_records_linux_file_events() {
+        let _env_lock = crate::workspace::workspace_env_test_lock();
+        let _guard = EnvVarGuard::set("NITE_WORKSPACE_BACKEND", "copy");
+        let manager = SessionManager::default();
+        let temp = make_test_dir("linux-file-events");
+
+        let workspace_id = manager
+            .create_workspace_session(temp)
+            .expect("create workspace session");
+        let private_root = manager
+            .workspace_private_root(&workspace_id)
+            .expect("workspace private root");
+
+        std::fs::write(private_root.join("manager-watch.txt"), "hello")
+            .expect("write watched file");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let _ = manager
+            .workspace_pending_change_count(&workspace_id)
+            .expect("drain watcher");
+        let audit_log = manager
+            .workspace_audit_log(&workspace_id)
+            .expect("workspace audit log");
+        assert!(audit_log.iter().any(|event| {
+            event.kind == crate::workspace::WorkspaceAuditEventKind::FileEventObserved
+                && event.message.contains("manager-watch.txt")
+        }));
+
+        manager
+            .destroy_workspace_session(&workspace_id)
+            .expect("destroy workspace session");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn workspace_session_manager_restarts_linux_watcher_after_discard() {
+        let _env_lock = crate::workspace::workspace_env_test_lock();
+        let _guard = EnvVarGuard::set("NITE_WORKSPACE_BACKEND", "copy");
+        let manager = SessionManager::default();
+        let temp = make_test_dir("linux-file-events-discard");
+
+        let workspace_id = manager
+            .create_workspace_session(temp)
+            .expect("create workspace session");
+        let private_root = manager
+            .workspace_private_root(&workspace_id)
+            .expect("workspace private root");
+
+        std::fs::write(private_root.join("before-discard.txt"), "hello")
+            .expect("write first watched file");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let _ = manager
+            .workspace_pending_change_count(&workspace_id)
+            .expect("drain watcher");
+
+        manager
+            .discard_workspace_session(&workspace_id)
+            .expect("discard workspace session");
+        assert_eq!(
+            manager
+                .workspace_pending_change_count(&workspace_id)
+                .expect("pending changes after discard"),
+            0
+        );
+
+        let private_root = manager
+            .workspace_private_root(&workspace_id)
+            .expect("workspace private root after discard");
+        std::fs::write(private_root.join("after-discard.txt"), "world")
+            .expect("write second watched file");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let _ = manager
+            .workspace_pending_change_count(&workspace_id)
+            .expect("drain restarted watcher");
+
+        let audit_log = manager
+            .workspace_audit_log(&workspace_id)
+            .expect("workspace audit log");
+        assert!(audit_log.iter().any(|event| {
+            event.kind == crate::workspace::WorkspaceAuditEventKind::FileEventObserved
+                && event.message.contains("before-discard.txt")
+        }));
+        assert!(audit_log.iter().any(|event| {
+            event.kind == crate::workspace::WorkspaceAuditEventKind::FileEventObserved
+                && event.message.contains("after-discard.txt")
+        }));
+        assert!(
+            audit_log.iter().any(|event| {
+                event.kind == crate::workspace::WorkspaceAuditEventKind::Discarded
+            })
+        );
+
+        manager
+            .destroy_workspace_session(&workspace_id)
+            .expect("destroy workspace session");
+    }
+
+    #[test]
+    fn destroy_workspace_session_removes_private_root_and_rejects_future_access() {
+        let _env_lock = crate::workspace::workspace_env_test_lock();
+        let _guard = EnvVarGuard::set("NITE_WORKSPACE_BACKEND", "copy");
+        let manager = SessionManager::default();
+        let temp = make_test_dir("destroy-cleanup");
+
+        let workspace_id = manager
+            .create_workspace_session(temp)
+            .expect("create workspace session");
+        let private_root = manager
+            .workspace_private_root(&workspace_id)
+            .expect("workspace private root");
+        let session_root = private_root.parent().expect("session root").to_path_buf();
+        assert!(private_root.exists());
+        assert!(session_root.exists());
+
+        manager
+            .destroy_workspace_session(&workspace_id)
+            .expect("destroy workspace session");
+
+        assert!(!private_root.exists());
+        assert!(!session_root.exists());
+        let err = manager
+            .workspace_private_root(&workspace_id)
+            .expect_err("destroyed workspace should be unknown");
+        assert!(err.to_string().contains("unknown workspace session"));
     }
 }
 

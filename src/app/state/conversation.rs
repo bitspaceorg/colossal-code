@@ -12,6 +12,8 @@ pub(crate) struct SavedConversation {
     pub(crate) git_branch: Option<String>,
     pub(crate) working_directory: String,
     pub(crate) message_count: usize,
+    #[serde(default)]
+    pub(crate) title: Option<String>,
     pub(crate) preview: String,
     pub(crate) messages: Vec<ConversationMessage>,
     #[serde(default)]
@@ -36,6 +38,8 @@ pub(crate) struct EnhancedSavedConversation {
     pub(crate) git_branch: Option<String>,
     pub(crate) working_directory: String,
     pub(crate) message_count: usize,
+    #[serde(default)]
+    pub(crate) title: Option<String>,
     pub(crate) preview: String,
     pub(crate) ui_messages: Vec<SavedUIMessage>,
     pub(crate) agent_conversation: Option<String>,
@@ -62,6 +66,7 @@ pub(crate) struct ConversationMetadata {
     pub(crate) updated_at: SystemTime,
     pub(crate) git_branch: Option<String>,
     pub(crate) message_count: usize,
+    pub(crate) title: Option<String>,
     pub(crate) preview: String,
     pub(crate) file_path: std::path::PathBuf,
     pub(crate) time_ago_str: String,
@@ -69,6 +74,10 @@ pub(crate) struct ConversationMetadata {
 }
 
 impl ConversationMetadata {
+    pub(crate) fn display_title(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.preview)
+    }
+
     pub(crate) fn calculate_time_ago(updated_at: SystemTime) -> String {
         let elapsed = updated_at.elapsed().unwrap_or(Duration::from_secs(0));
         let secs = elapsed.as_secs();
@@ -88,5 +97,40 @@ impl ConversationMetadata {
         } else {
             format!("{}y ago", secs / 31536000)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConversationMetadata;
+    use std::time::SystemTime;
+
+    #[test]
+    fn display_title_prefers_generated_title_and_falls_back_to_preview() {
+        let titled = ConversationMetadata {
+            id: "1".to_string(),
+            updated_at: SystemTime::now(),
+            git_branch: None,
+            message_count: 1,
+            title: Some("Generated Title".to_string()),
+            preview: "preview text".to_string(),
+            file_path: "/tmp/one.json".into(),
+            time_ago_str: "1m ago".to_string(),
+            forked_from: None,
+        };
+        let legacy = ConversationMetadata {
+            id: "2".to_string(),
+            updated_at: SystemTime::now(),
+            git_branch: None,
+            message_count: 1,
+            title: None,
+            preview: "legacy preview".to_string(),
+            file_path: "/tmp/two.json".into(),
+            time_ago_str: "1m ago".to_string(),
+            forked_from: None,
+        };
+
+        assert_eq!(titled.display_title(), "Generated Title");
+        assert_eq!(legacy.display_title(), "legacy preview");
     }
 }

@@ -9,6 +9,43 @@ use crate::app::{
 };
 
 impl App {
+    pub(crate) fn build_title_summary(&self) -> String {
+        self.messages
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                matches!(
+                    self.message_types.get(*i),
+                    Some(MessageType::User | MessageType::Agent)
+                )
+            })
+            .take(6)
+            .map(|(i, msg)| {
+                let role = if matches!(self.message_types.get(i), Some(MessageType::User)) {
+                    "User"
+                } else {
+                    "Assistant"
+                };
+                format!("{}: {}", role, msg.replace('\n', " "))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    async fn conversation_title_or_fallback(&self, preview: &str) -> String {
+        let summary = self.build_title_summary();
+        if summary.is_empty() {
+            return preview.to_string();
+        }
+        let Some(agent) = &self.agent else {
+            return preview.to_string();
+        };
+        match agent.generate_conversation_title(&summary).await {
+            Ok(Some(title)) if !title.trim().is_empty() => title,
+            _ => preview.to_string(),
+        }
+    }
+
     pub(crate) fn initialize_conversations_dir() -> Result<()> {
         persistence::conversations::initialize_conversations_dir()
     }
@@ -67,13 +104,13 @@ impl App {
             .unwrap_or_else(|| "No preview available".to_string());
 
         // Check if we're updating existing conversation or creating new one
-        let (conversation_id, created_at, file_path, forked_from, forked_at) =
+        let (conversation_id, created_at, file_path, forked_from, forked_at, existing_title) =
             if let (Some(id), Some(path)) = (
                 &self.persistence_state.current_conversation_id,
                 &self.persistence_state.current_conversation_path,
             ) {
                 // UPDATE EXISTING - preserve ID, created_at, and fork metadata
-                let (existing_created_at, existing_forked_from, existing_forked_at) =
+                let (existing_created_at, existing_forked_from, existing_forked_at, existing_title) =
                     if let Ok(content) = persistence::conversations::read_conversation_file(path) {
                         if let Ok(existing) =
                             serde_json::from_str::<EnhancedSavedConversation>(&content)
@@ -82,12 +119,13 @@ impl App {
                                 existing.created_at,
                                 existing.forked_from,
                                 existing.forked_at,
+                                existing.title,
                             )
                         } else {
-                            (SystemTime::now(), None, None)
+                            (SystemTime::now(), None, None, None)
                         }
                     } else {
-                        (SystemTime::now(), None, None)
+                        (SystemTime::now(), None, None, None)
                     };
 
                 (
@@ -96,6 +134,7 @@ impl App {
                     path.clone(),
                     existing_forked_from,
                     existing_forked_at,
+                    existing_title,
                 )
             } else {
                 // CREATE NEW - generate new ID
@@ -112,11 +151,18 @@ impl App {
                     new_path,
                     self.persistence_state.current_forked_from.clone(),
                     self.persistence_state.current_forked_at,
+                    None,
                 )
             };
 
         // Create/update conversation
         let now = SystemTime::now();
+        let title = self
+            .persistence_state
+            .current_conversation_title
+            .clone()
+            .or(existing_title)
+            .filter(|title| !title.trim().is_empty());
         let conversation = EnhancedSavedConversation {
             id: conversation_id.clone(),
             created_at,
@@ -127,6 +173,7 @@ impl App {
                 .and_then(|p| p.to_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| String::from("unknown")),
             message_count: ui_messages.len(),
+            title: title.clone(),
             preview,
             ui_messages,
             agent_conversation,
@@ -144,6 +191,7 @@ impl App {
         // Track this conversation for future updates
         self.persistence_state.current_conversation_id = Some(conversation_id);
         self.persistence_state.current_conversation_path = Some(file_path);
+        self.persistence_state.current_conversation_title = title;
 
         Ok(())
     }
@@ -156,9 +204,13 @@ impl App {
         let content = persistence::conversations::read_conversation_file(&metadata.file_path)?;
 
         // Try to load as enhanced format first, fall back to old format
-        let (ui_messages, agent_conversation) =
+        let (ui_messages, agent_conversation, title) =
             if let Ok(enhanced) = serde_json::from_str::<EnhancedSavedConversation>(&content) {
-                (enhanced.ui_messages, enhanced.agent_conversation)
+                (
+                    enhanced.ui_messages,
+                    enhanced.agent_conversation,
+                    enhanced.title,
+                )
             } else if let Ok(old_conv) = serde_json::from_str::<SavedConversation>(&content) {
                 // Convert old format to UI messages (basic conversion)
                 let ui_msgs: Vec<SavedUIMessage> = old_conv
@@ -189,7 +241,7 @@ impl App {
                     .collect();
                 let agent_json = serde_json::to_string(&messages).ok();
 
-                (ui_msgs, agent_json)
+                (ui_msgs, agent_json, old_conv.title)
             } else {
                 return Err(color_eyre::eyre::eyre!("Failed to parse conversation file"));
             };
@@ -232,6 +284,7 @@ impl App {
             // Fork metadata is already set in the 'f' key handler
             self.persistence_state.current_conversation_id = None;
             self.persistence_state.current_conversation_path = None;
+            self.persistence_state.current_conversation_title = title;
             // Reset fork mode flag
             self.is_fork_mode = false;
 
@@ -249,6 +302,7 @@ impl App {
         } else {
             self.persistence_state.current_conversation_id = Some(metadata.id.clone());
             self.persistence_state.current_conversation_path = Some(metadata.file_path.clone());
+            self.persistence_state.current_conversation_title = title;
         }
 
         Ok(())

@@ -558,6 +558,14 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                         app.isolated_changes.info_shown = true;
                     }
                 }
+                AgentMessage::ExecutionCheckpoint(checkpoint_id) => {
+                    app.current_execution_checkpoint_id = checkpoint_id;
+                }
+                AgentMessage::ConversationTitleGenerated(title) => {
+                    app.persistence_state.current_conversation_title = Some(title);
+                    app.persistence_state.title_generation_in_flight = false;
+                    app.persistence_state.save_pending = true;
+                }
                 AgentMessage::ExecutionReviewEntries(entries) => {
                     app.isolated_changes.review_entries = entries;
                     if app.isolated_changes.review_selected
@@ -721,6 +729,18 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                     app.streaming_completion_tokens = 0; // Reset for next turn
                     app.agent_state.agent_response_started = false;
 
+                    if app.persistence_state.current_conversation_title.is_none()
+                        && !app.persistence_state.title_generation_in_flight
+                        && app.messages.iter().enumerate().any(|(i, _)| {
+                            matches!(app.message_types.get(i), Some(MessageType::User))
+                        })
+                        && app.messages.iter().enumerate().any(|(i, _)| {
+                            matches!(app.message_types.get(i), Some(MessageType::Agent))
+                        })
+                    {
+                        outcome.generate_title = true;
+                    }
+
                     // Handle compaction completion
                     if app.agent_state.is_compacting {
                         let was_auto_summarize = app.is_auto_summarize;
@@ -765,6 +785,8 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                             &app.message_metadata,
                             &app.message_timestamps,
                             &app.current_file_changes,
+                            &app.isolated_changes.review_entries,
+                            app.current_execution_checkpoint_id.clone(),
                         ) {
                             app.rewind_points.push(rewind_point);
                             app.current_file_changes.clear();
