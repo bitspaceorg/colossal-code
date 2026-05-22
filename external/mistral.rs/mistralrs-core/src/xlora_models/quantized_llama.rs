@@ -13,7 +13,6 @@ use candle_core::quantized::QMatMul;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::{Embedding, Module};
 use mistralrs_quant::{MatMul, ShardedVarBuilder};
-use tqdm::Iter;
 use tracing::info;
 
 use crate::device_map::{DeviceMappedMask, DeviceMapper};
@@ -405,7 +404,7 @@ impl ModelConfig::FromAdapterGGML for ModelWeights {
         if xlora_config.is_none() && preload_adapters.is_none() {
             // We are now a LoRA model so we must merge the weights
             info!("Merging LoRA adapters.");
-            for layer in layers.iter_mut().tqdm() {
+            for layer in layers.iter_mut() {
                 layer.attention_wk.merge_weights()?;
                 layer.attention_wo.merge_weights()?;
                 layer.attention_wq.merge_weights()?;
@@ -707,7 +706,7 @@ impl ModelConfig::FromAdapterGGUF for ModelWeights {
         if xlora_config.is_none() && preload_adapters.is_none() {
             // We are now a LoRA model so we must merge the weights
             info!("Merging LoRA adapters.");
-            for layer in layers.iter_mut().tqdm() {
+            for layer in layers.iter_mut() {
                 layer.attention_wk.merge_weights()?;
                 layer.attention_wo.merge_weights()?;
                 layer.attention_wq.merge_weights()?;

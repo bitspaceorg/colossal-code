@@ -23,7 +23,6 @@ use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use candle_nn::Embedding;
 use mistralrs_quant::ShardedVarBuilder;
-use tqdm::Iter;
 use tracing::info;
 
 use super::classifier::XLoraClassifier;
@@ -346,7 +345,7 @@ impl ModelConfig::FromAdapterGGUF for ModelWeights {
         if xlora_config.is_none() {
             // We are now a LoRA model so we must merge the weights
             info!("Merging LoRA adapters.");
-            for layer in layers.iter_mut().tqdm() {
+            for layer in layers.iter_mut() {
                 layer.attn_qkv.merge_weights()?;
                 layer.attn_output.merge_weights()?;
                 layer.mlp.ffn_down.merge_weights()?;
