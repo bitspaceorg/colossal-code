@@ -103,7 +103,19 @@ package:nix:
       if [ -n "${CACHIX_CACHE:-}" ]; then
         nix shell nixpkgs#cachix -c cachix use "$CACHIX_CACHE"
       fi
-    - nix build --accept-flake-config --print-build-logs .#default
+    - |
+      attempt=1
+      max_attempts=3
+      while [ "$attempt" -le "$max_attempts" ]; do
+        if nix build --accept-flake-config --print-build-logs .#default; then
+          break
+        fi
+        if [ "$attempt" -eq "$max_attempts" ]; then
+          exit 1
+        fi
+        echo "nix build failed on attempt $attempt/$max_attempts, retrying..."
+        attempt=$((attempt + 1))
+      done
     - |
       if [ -n "${CACHIX_CACHE:-}" ] && [ -n "${CACHIX_AUTH_TOKEN:-}" ]; then
         nix shell nixpkgs#cachix -c sh -lc 'cachix push "$CACHIX_CACHE" $(nix path-info --accept-flake-config .#default)'
