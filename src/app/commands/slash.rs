@@ -7,16 +7,18 @@ use crate::app::runtime::r#loop::{apply_command_runtime_route, route_command_run
 use crate::app::{App, AssistantMode, HelpTab, MessageState, MessageType, UiMessageEvent};
 
 impl App {
-    pub(crate) fn handle_slash_command(&mut self) {
+    pub(crate) fn handle_slash_command(&mut self, record_message: bool) {
         let command = self.input.trim().to_string();
 
         // Reset streaming tokens for new message (keep generation_stats for context tracking)
         self.streaming_completion_tokens = 0;
 
-        // Add command to messages as user message
-        self.messages.push(command.clone());
-        self.message_types.push(MessageType::User);
-        self.message_states.push(MessageState::Sent);
+        if record_message {
+            // Add command to messages as user message
+            self.messages.push(command.clone());
+            self.message_types.push(MessageType::User);
+            self.message_states.push(MessageState::Sent);
+        }
 
         // Clear input
         self.input.clear();
@@ -51,6 +53,7 @@ impl App {
             SlashCommandDispatch::Clear => {
                 // Trigger save before clearing
                 self.persistence_state.save_pending = true;
+                self.clear_rewind_state();
 
                 // Clear all messages except the command itself
                 let command_msg = self.messages.pop().unwrap();
@@ -211,12 +214,9 @@ impl App {
             }
             SlashCommandDispatch::Safety { args } => {
                 if args.is_empty() {
-                    // No args - show current status (no UI spam)
+                    // No args - show current status in the below-input infobar
                     if let Ok(config) = agent_core::safety_config::SafetyConfig::load() {
-                        self.messages
-                            .push(format!("[SAFETY] {}", config.status_string()));
-                        self.message_types.push(MessageType::Agent);
-                        self.message_states.push(MessageState::Sent);
+                        self.status_message = Some(format!("[SAFETY] {}", config.status_string()));
                     }
                 } else {
                     let mut config_changed = false;
@@ -306,8 +306,48 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    use std::time::SystemTime;
+
+    use agent_core::FsCheckpointId;
+
     use crate::app::commands::{SlashCommandDispatch, dispatch_slash_command};
     use crate::app::runtime::r#loop::route_command_runtime;
+    use crate::app::{App, MessageState, MessageType, RewindPoint};
+
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(()))
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(previous) = &self.previous {
+                    std::env::set_var(self.key, previous);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
 
     #[test]
     fn slash_dispatch_clear_routes_to_none() {
@@ -393,5 +433,47 @@ mod tests {
             }
             _ => panic!("expected spec route"),
         }
+    }
+
+    #[tokio::test]
+    async fn clear_clears_rewind_points_and_execution_checkpoint_state() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.rewind_points.push(RewindPoint {
+            messages: vec!["old convo".to_string()],
+            message_types: vec![MessageType::User],
+            message_states: vec![MessageState::Sent],
+            message_metadata: vec![None],
+            message_timestamps: vec![SystemTime::UNIX_EPOCH],
+            timestamp: SystemTime::UNIX_EPOCH,
+            preview: "old convo".to_string(),
+            message_count: 1,
+            file_changes: Vec::new(),
+            fs_checkpoint_id: Some(FsCheckpointId("checkpoint-1".to_string())),
+            review_entries: Vec::new(),
+        });
+        app.current_execution_checkpoint_id = Some(FsCheckpointId("checkpoint-1".to_string()));
+        app.current_file_changes.push(crate::app::FileChange {
+            path: "file.txt".to_string(),
+            insertions: 1,
+            deletions: 0,
+        });
+        app.input = "/clear".to_string();
+
+        app.handle_slash_command(true);
+
+        assert!(
+            app.rewind_points.is_empty(),
+            "rewind points should be cleared"
+        );
+        assert!(
+            app.current_execution_checkpoint_id.is_none(),
+            "execution checkpoint should be cleared"
+        );
+        assert!(
+            app.current_file_changes.is_empty(),
+            "tracked file changes should be cleared"
+        );
     }
 }

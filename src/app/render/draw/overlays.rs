@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Clear, Paragraph},
 };
 
 use crate::app::App;
@@ -50,6 +50,8 @@ impl App {
                 )
             } else if self.ctrl_c_pressed.is_some() {
                 "Press Ctrl+C again to quit".to_string()
+            } else if let Some(status_message) = self.status_message.as_ref() {
+                status_message.clone()
             } else {
                 String::new()
             };
@@ -65,6 +67,7 @@ impl App {
         }
 
         if let Some(idx) = area_indices.background_tasks_area_idx {
+            frame.render_widget(Clear, areas[idx]);
             if self.viewing_task.is_some() {
                 self.render_task_viewer(frame, areas[idx]);
             } else {

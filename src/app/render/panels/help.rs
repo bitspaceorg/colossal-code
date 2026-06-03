@@ -7,7 +7,170 @@ use ratatui::{
 
 use crate::app::{App, HelpTab, SLASH_COMMANDS};
 
+fn clean_task_viewer_shell_output(raw: &str, command: &str) -> String {
+    fn strip_prompt_prefix(line: &str) -> &str {
+        for marker in ['%', '$', '#'] {
+            if let Some(idx) = line.rfind(marker) {
+                let remainder = &line[idx + marker.len_utf8()..];
+                if remainder.starts_with(' ') {
+                    return remainder.trim_start();
+                }
+            }
+        }
+        line
+    }
+
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let without_ansi = strip_ansi_escapes::strip_str(&normalized);
+    let lines: Vec<&str> = without_ansi.lines().collect();
+    let mut cleaned_lines = Vec::new();
+    let normalized_command: String = command
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '\'' && *ch != '"')
+        .collect();
+    let mut skipped_command_echo = false;
+    let mut skipping_wrapped_internal_line = false;
+
+    for line in &lines {
+        let trimmed = line.trim();
+        let candidate = strip_prompt_prefix(trimmed).trim();
+        let normalized_candidate: String = candidate
+            .chars()
+            .filter(|ch| !ch.is_whitespace() && *ch != '\'' && *ch != '"')
+            .collect();
+
+        if skipping_wrapped_internal_line {
+            if trimmed.is_empty()
+                || trimmed == "$"
+                || trimmed == "#"
+                || trimmed == ">"
+                || trimmed == "%"
+                || trimmed.len() <= 4
+            {
+                continue;
+            }
+
+            if !normalized_candidate.is_empty()
+                && (normalized_command == normalized_candidate
+                    || normalized_command.contains(&normalized_candidate)
+                    || normalized_candidate.contains(&normalized_command))
+            {
+                skipping_wrapped_internal_line = false;
+                skipped_command_echo = true;
+                continue;
+            }
+
+            skipping_wrapped_internal_line = false;
+        }
+
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == "$" || trimmed == "#" || trimmed == ">" || trimmed == "%" {
+            continue;
+        }
+        let looks_like_prompt_prefix = trimmed.contains('@')
+            || trimmed.contains('~')
+            || trimmed.starts_with('/')
+            || trimmed.starts_with("~/");
+        if looks_like_prompt_prefix
+            && (trimmed.ends_with('$') || trimmed.ends_with('#') || trimmed.ends_with('%'))
+        {
+            continue;
+        }
+        if trimmed == ">" || trimmed == ">>" {
+            continue;
+        }
+        if trimmed.contains("__nite_cmd")
+            || trimmed.contains("__nite_code")
+            || trimmed.contains("__SHELL_READY__")
+            || trimmed.contains("stty -echo -echoctl")
+            || trimmed.contains("__START__")
+            || trimmed.contains("__DONE__")
+            || trimmed.contains("__NITE_CTL__")
+            || trimmed.contains("CMD_DONE_")
+            || trimmed.contains("export NITE_WORKSPACE_ROOT=")
+            || trimmed.contains("export TEMP=")
+            || trimmed.contains("export TMP=")
+            || trimmed.contains("export TMPDIR=")
+            || trimmed.starts_with("{ export ")
+            || (trimmed.contains("printf") && trimmed.contains("__CMD_DONE_"))
+            || (trimmed.starts_with('<')
+                && (trimmed.contains("printf")
+                    || trimmed.contains("__nite")
+                    || trimmed.contains("__START__")
+                    || trimmed.contains("__DONE__")))
+        {
+            skipping_wrapped_internal_line = trimmed.starts_with("{ export ")
+                || trimmed.contains("export NITE_WORKSPACE_ROOT=")
+                || trimmed.contains("export TEMP=")
+                || trimmed.contains("export TMP=")
+                || trimmed.contains("export TMPDIR=");
+            continue;
+        }
+        if !skipped_command_echo && (trimmed == command.trim() || candidate == command.trim()) {
+            skipped_command_echo = true;
+            continue;
+        }
+        if !skipped_command_echo
+            && !normalized_candidate.is_empty()
+            && (normalized_command == normalized_candidate
+                || normalized_command.contains(&normalized_candidate)
+                || normalized_candidate.contains(&normalized_command))
+        {
+            skipped_command_echo = true;
+            continue;
+        }
+        if trimmed.starts_with('<') {
+            let normalized_fragment: String = trimmed
+                .trim_start_matches('<')
+                .chars()
+                .filter(|ch| !ch.is_whitespace() && *ch != '\'' && *ch != '"')
+                .collect();
+            if !normalized_fragment.is_empty() && normalized_command.contains(&normalized_fragment)
+            {
+                continue;
+            }
+        }
+
+        cleaned_lines.push(candidate);
+    }
+
+    cleaned_lines.join("\n")
+}
+
 impl App {
+    pub(crate) fn task_viewer_output_text(
+        &self,
+        session_id: &str,
+        command: &str,
+        log_file: &str,
+    ) -> String {
+        use std::process::Command;
+
+        if !log_file.is_empty() {
+            if let Some(output) = Command::new("tail")
+                .arg("-n")
+                .arg("10")
+                .arg(log_file)
+                .output()
+                .ok()
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+            {
+                let cleaned = clean_task_viewer_shell_output(&output, command);
+                if !cleaned.trim().is_empty() {
+                    return cleaned;
+                }
+            }
+        }
+
+        let output = futures::executor::block_on(agent_core::read_shell_session_output(
+            session_id.to_string(),
+        ))
+        .unwrap_or_else(|_| String::from("(no output yet)"));
+        clean_task_viewer_shell_output(&output, command)
+    }
+
     pub(crate) fn render_model_selection_panel(
         &self,
         frame: &mut Frame,
@@ -374,15 +537,7 @@ impl App {
             let output_inner = output_block.inner(output_area);
             frame.render_widget(output_block, output_area);
 
-            use std::process::Command;
-            let log_content = Command::new("tail")
-                .arg("-n")
-                .arg("10")
-                .arg(log_file)
-                .output()
-                .ok()
-                .and_then(|output| String::from_utf8(output.stdout).ok())
-                .unwrap_or_else(|| String::from("(no output yet)"));
+            let log_content = self.task_viewer_output_text(session_id, command, log_file);
             let lines: Vec<String> = log_content.lines().map(str::to_owned).collect();
 
             let mut all_lines: Vec<Line<'static>> = lines
@@ -412,5 +567,29 @@ impl App {
             };
             frame.render_widget(Paragraph::new(bottom_line), bottom_area);
         }
+    }
+}
+
+#[cfg(test)]
+mod output_cleaning_tests {
+    use super::clean_task_viewer_shell_output;
+
+    #[test]
+    fn task_viewer_output_cleaning_removes_shell_bootstrap_and_wrapper_noise() {
+        let raw = "fedora% stty -echo -echoctl 2>/dev/null; echo '__SHELL_READY__'\n__SHELL_READY__\nfedora% { export TMPDIR='/tmp/x'; __nite_cmd_status=$?; printf '\\033]133;D;%s\\007\\033]133;A\\007\\033]133;B\\007' \"$__nite_cmd_status\"; unset __nite_cmd_status; }\nfedora% while true { print 'looping'; sleep 1sec }\nlooping\nlooping\n";
+
+        let cleaned =
+            clean_task_viewer_shell_output(raw, "while true { print 'looping'; sleep 1sec }");
+
+        assert_eq!(cleaned, "looping\nlooping");
+    }
+
+    #[test]
+    fn task_viewer_output_cleaning_strips_ansi_and_fragmented_wrapper_exports() {
+        let raw = "%\x1b]133;A\x07─────────╯\n%\n{ export NITE_WORKSPACE_ROOT='/tmp/nite-exec-root'; }\n3\n%\n{ export TEMP='/tmp/nite-exec-root/tmp'; }\n7\n% while true { }\nlooping\n";
+
+        let cleaned = clean_task_viewer_shell_output(raw, "while true { }");
+
+        assert_eq!(cleaned, "looping");
     }
 }

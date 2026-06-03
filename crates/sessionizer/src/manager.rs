@@ -233,6 +233,20 @@ fn apply_osc133_events(
     }
 }
 
+fn shell_recovered_from_osc133(command_finished: bool, zone: crate::osc133::Zone) -> bool {
+    command_finished
+        && matches!(
+            zone,
+            crate::osc133::Zone::Prompt | crate::osc133::Zone::Input
+        )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptResult {
+    Recovered,
+    TimedOut,
+}
+
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -1128,6 +1142,23 @@ impl SessionManager {
             })
         } else {
             // Foreground execution: original behavior
+            let log_file_path = background_log_path(&session_id);
+            if let Some(parent) = log_file_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ =
+                        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+                }
+            }
+            let mut log_file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&log_file_path)
+                .await
+                .ok();
             let cap_bytes = params.max_output_tokens.saturating_mul(4) as usize;
             let mut stdout_buf = Vec::with_capacity(8192.min(cap_bytes));
             let stderr_buf = Vec::with_capacity(8192.min(cap_bytes));
@@ -1161,6 +1192,14 @@ impl SessionManager {
                                 Ok(chunk) => {
                                     stdout_buf.extend_from_slice(&chunk);
                                     aggregated_buf.extend_from_slice(&chunk);
+                                    if let Some(file) = log_file.as_mut() {
+                                        use tokio::io::AsyncWriteExt;
+                                        if file.write_all(&chunk).await.is_err()
+                                            || file.flush().await.is_err()
+                                        {
+                                            log_file = None;
+                                        }
+                                    }
                                 }
                                 Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
                                 Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
@@ -1173,6 +1212,14 @@ impl SessionManager {
                         if let Ok(Ok(chunk)) = chunk {
                             stdout_buf.extend_from_slice(&chunk);
                             aggregated_buf.extend_from_slice(&chunk);
+                            if let Some(file) = log_file.as_mut() {
+                                use tokio::io::AsyncWriteExt;
+                                if file.write_all(&chunk).await.is_err()
+                                    || file.flush().await.is_err()
+                                {
+                                    log_file = None;
+                                }
+                            }
                         }
                     }
                 }
@@ -1208,7 +1255,7 @@ impl SessionManager {
                 stdout: stdout_cleaned,
                 stderr: stderr_cleaned,
                 aggregated_output,
-                log_file: None,
+                log_file: Some(log_file_path),
             })
         }
     }
@@ -1244,6 +1291,25 @@ impl SessionManager {
         }
 
         Ok(contents)
+    }
+
+    pub fn read_persistent_shell_output(
+        &self,
+        session_id: SessionId,
+    ) -> Result<String, ColossalErr> {
+        let sessions = self.persistent_shell_sessions.lock().unwrap();
+        let session = sessions
+            .iter()
+            .find(|(id, _)| *id == session_id)
+            .map(|(_, session)| session)
+            .ok_or_else(|| {
+                ColossalErr::Sandbox(SandboxErr::Denied(
+                    -1,
+                    format!("unknown session id {}", session_id.as_str()),
+                    (),
+                ))
+            })?;
+        Ok(session.recent_output_snapshot())
     }
 
     pub async fn handle_write_stdin_request(
@@ -1436,10 +1502,6 @@ impl SessionManager {
                                             if raw_output.contains("read ") && raw_output.contains(" bytes from pty") {
                                                 continue; // Skip PTY debug messages with different spacing
                                             }
-                                            if raw_output.trim().chars().all(|c| c.is_digit(10) || c.is_whitespace()) && !raw_output.trim().is_empty() {
-                                                continue; // Skip pure numeric output (likely debug fragments)
-                                            }
-
                                             // Only process non-empty output
                                             if raw_output.trim().is_empty() {
                                                 continue;
@@ -1480,10 +1542,6 @@ impl SessionManager {
                                 if raw_output.contains("read ") && raw_output.contains(" bytes from pty") {
                                     continue; // Skip PTY debug messages with different spacing
                                 }
-                                if raw_output.trim().chars().all(|c| c.is_digit(10) || c.is_whitespace()) && !raw_output.trim().is_empty() {
-                                    continue; // Skip pure numeric output (likely debug fragments)
-                                }
-
                                 // Only process non-empty output
                                 if raw_output.trim().is_empty() {
                                     continue;
@@ -1970,6 +2028,97 @@ impl SessionManager {
         })
     }
 
+    pub async fn interrupt_shell_session_and_wait(
+        &self,
+        session_id: SessionId,
+        timeout: Duration,
+    ) -> Result<InterruptResult, ColossalErr> {
+        let (writer_tx, output_rx) = {
+            let sessions = self.persistent_shell_sessions.lock().unwrap();
+            let session = sessions
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, session)| session)
+                .ok_or_else(|| {
+                    ColossalErr::Sandbox(SandboxErr::Denied(
+                        -1,
+                        format!("unknown session id {}", session_id.as_str()),
+                        (),
+                    ))
+                })?;
+            (session.writer_sender(), session.output_receiver())
+        };
+
+        writer_tx.send(vec![0x03]).await.map_err(|_| {
+            ColossalErr::Io(std::io::Error::other("failed to send interrupt to shell"))
+        })?;
+
+        let deadline = Instant::now() + timeout;
+        let mut output_rx = output_rx;
+        let mut osc_parser = crate::osc133::Parser::new();
+        let mut command_started = false;
+        let mut command_finished = false;
+        let mut exit_code = None;
+
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = match tokio::time::timeout(remaining, output_rx.recv()).await {
+                Ok(Ok(chunk)) => chunk,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                    return Ok(InterruptResult::TimedOut);
+                }
+                Err(_) => return Ok(InterruptResult::TimedOut),
+            };
+
+            let events = osc_parser.push(&event);
+            apply_osc133_events(
+                events,
+                &mut command_started,
+                &mut command_finished,
+                &mut exit_code,
+            );
+
+            if shell_recovered_from_osc133(command_finished, osc_parser.zone()) {
+                return Ok(InterruptResult::Recovered);
+            }
+
+            if command_finished {
+                let settle_deadline = Instant::now() + Duration::from_millis(150);
+                while Instant::now() < settle_deadline {
+                    match output_rx.try_recv() {
+                        Ok(chunk) => {
+                            let events = osc_parser.push(&chunk);
+                            apply_osc133_events(
+                                events,
+                                &mut command_started,
+                                &mut command_finished,
+                                &mut exit_code,
+                            );
+                            if matches!(osc_parser.zone(), crate::osc133::Zone::Input) {
+                                return Ok(InterruptResult::Recovered);
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                            return Ok(InterruptResult::TimedOut);
+                        }
+                    }
+                }
+                return Ok(InterruptResult::Recovered);
+            }
+
+            if matches!(osc_parser.zone(), crate::osc133::Zone::Input) {
+                return Ok(InterruptResult::Recovered);
+            }
+        }
+
+        Ok(InterruptResult::TimedOut)
+    }
+
     /// Execute a command against a **cloned** managed-Nu runtime so the
     /// original session state is untouched.  Returns `None` if the session is
     /// not a managed-Nu session (callers should fall back to the existing
@@ -2127,15 +2276,6 @@ impl SessionManager {
                         if raw_output.contains("read ") && raw_output.contains(" bytes from pty") {
                             continue; // Skip PTY debug messages with different spacing
                         }
-                        if raw_output
-                            .trim()
-                            .chars()
-                            .all(|c| c.is_digit(10) || c.is_whitespace())
-                            && !raw_output.trim().is_empty()
-                        {
-                            continue; // Skip pure numeric output (likely debug fragments)
-                        }
-
                         // Only process non-empty output
                         if raw_output.trim().is_empty() {
                             continue;
@@ -2146,7 +2286,8 @@ impl SessionManager {
                             break;
                         }
                     }
-                    Err(_) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
@@ -3066,10 +3207,6 @@ impl SessionManager {
                                                 if line.contains("read ") && line.contains(" bytes from pty") {
                                                     continue; // Skip PTY debug messages with different spacing
                                                 }
-                                                if line.trim().chars().all(|c| c.is_digit(10) || c.is_whitespace()) && !line.trim().is_empty() {
-                                                    continue; // Skip pure numeric output (likely debug fragments)
-                                                }
-
                                                 // Only process non-empty output
                                                 if line.trim().is_empty() {
                                                     continue;
@@ -3119,10 +3256,6 @@ impl SessionManager {
                                     if line.contains("read ") && line.contains(" bytes from pty") {
                                         continue; // Skip PTY debug messages with different spacing
                                     }
-                                    if line.trim().chars().all(|c| c.is_digit(10) || c.is_whitespace()) && !line.trim().is_empty() {
-                                        continue; // Skip pure numeric output (likely debug fragments)
-                                    }
-
                                     // Only process non-empty output
                                     if line.trim().is_empty() {
                                         continue;
@@ -3173,6 +3306,7 @@ impl SessionManager {
 #[cfg(test)]
 mod workspace_manager_tests {
     use super::SessionManager;
+    use std::sync::Arc;
 
     struct EnvVarGuard {
         key: &'static str,
@@ -3485,6 +3619,98 @@ mod workspace_manager_tests {
             .expect("destroy workspace session");
     }
 
+    #[tokio::test]
+    async fn persistent_shell_output_reader_returns_live_foreground_output() {
+        let manager = SessionManager::default();
+        let shared_state = Arc::new(crate::session::SharedSessionState::new(
+            std::env::current_dir().expect("cwd"),
+        ));
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let session_id = manager
+            .create_persistent_shell_session(
+                shell,
+                false,
+                crate::protocol::SandboxPolicy::DangerFullAccess,
+                shared_state,
+                None,
+            )
+            .await
+            .expect("create persistent shell session");
+
+        let _ = manager
+            .send_input_to_shell_session(
+                session_id.clone(),
+                "printf foreground-view".to_string(),
+                None,
+            )
+            .await
+            .expect("send foreground command");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let output = manager
+            .read_persistent_shell_output(session_id.clone())
+            .expect("read persistent shell output");
+
+        assert!(
+            output.contains("foreground-view"),
+            "expected live foreground output, got: {output:?}"
+        );
+
+        manager
+            .terminate_session(session_id)
+            .await
+            .expect("terminate session");
+    }
+
+    #[tokio::test]
+    async fn persistent_shell_output_reader_cleans_foreground_shell_noise() {
+        let manager = SessionManager::default();
+        let shared_state = Arc::new(crate::session::SharedSessionState::new(
+            std::env::current_dir().expect("cwd"),
+        ));
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let session_id = manager
+            .create_persistent_shell_session(
+                shell,
+                false,
+                crate::protocol::SandboxPolicy::DangerFullAccess,
+                shared_state,
+                None,
+            )
+            .await
+            .expect("create persistent shell session");
+
+        let command = "while true { print 'looping'; sleep 1sec }";
+        let noisy = concat!(
+            "fedora% stty -echo -echoctl 2>/dev/null; echo '__SHELL_READY__'\n",
+            "__SHELL_READY__\n",
+            "fedora% while true { print 'looping'; sleep 1sec }\n",
+            "looping\n",
+            "looping\n"
+        );
+
+        {
+            let sessions = manager.persistent_shell_sessions.lock().unwrap();
+            let session = sessions
+                .iter()
+                .find(|(id, _)| *id == session_id)
+                .map(|(_, session)| session)
+                .expect("session exists");
+            session.replace_recent_output_for_test(noisy.as_bytes());
+        }
+
+        let output = manager
+            .read_persistent_shell_output(session_id.clone())
+            .expect("read persistent shell output");
+
+        assert_eq!(output, "looping\nlooping");
+
+        manager
+            .terminate_session(session_id)
+            .await
+            .expect("terminate session");
+    }
+
     #[test]
     fn destroy_workspace_session_removes_private_root_and_rejects_future_access() {
         let _env_lock = crate::workspace::workspace_env_test_lock();
@@ -3517,8 +3743,8 @@ mod workspace_manager_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_osc133_events, clean_shell_output};
-    use crate::osc133::Event;
+    use super::{apply_osc133_events, clean_shell_output, shell_recovered_from_osc133};
+    use crate::osc133::{Event, Zone};
 
     #[test]
     fn clean_shell_output_removes_prompts_markers_and_wrapper_echoes() {
@@ -3725,5 +3951,18 @@ mod tests {
             &mut code,
         );
         assert_eq!(code, Some(-1));
+    }
+
+    #[test]
+    fn shell_recovery_requires_command_to_finish() {
+        assert!(!shell_recovered_from_osc133(false, Zone::Prompt));
+        assert!(!shell_recovered_from_osc133(false, Zone::Input));
+    }
+
+    #[test]
+    fn shell_recovery_accepts_prompt_or_input_after_finish() {
+        assert!(shell_recovered_from_osc133(true, Zone::Prompt));
+        assert!(shell_recovered_from_osc133(true, Zone::Input));
+        assert!(!shell_recovered_from_osc133(true, Zone::Output));
     }
 }

@@ -6,7 +6,39 @@ use colossal_linux_sandbox::types::ExitStatus;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::sync::mpsc;
+
+struct ForegroundShellGuard {
+    tx: mpsc::UnboundedSender<crate::AgentMessage>,
+    session_id: String,
+}
+
+impl ForegroundShellGuard {
+    fn start(
+        tx: &mpsc::UnboundedSender<crate::AgentMessage>,
+        session_id: &colossal_linux_sandbox::types::SessionId,
+        command: &str,
+    ) -> Self {
+        let session_id_str = session_id.as_str().to_string();
+        let _ = tx.send(crate::AgentMessage::ForegroundShellStarted(
+            session_id_str.clone(),
+            command.to_string(),
+        ));
+        Self {
+            tx: tx.clone(),
+            session_id: session_id_str,
+        }
+    }
+}
+
+impl Drop for ForegroundShellGuard {
+    fn drop(&mut self) {
+        let _ = self.tx.send(crate::AgentMessage::ForegroundShellFinished(
+            self.session_id.clone(),
+        ));
+    }
+}
 
 pub async fn execute_tool_binary(
     args: Vec<String>,
@@ -79,12 +111,21 @@ pub fn exec_command_output_to_yaml(
     }
 }
 
+fn cancelled_exec_command_yaml(command: &str, message: &str) -> Result<String> {
+    Ok(serde_yaml::to_string(&json!({
+        "status": "Failure",
+        "command": command,
+        "message": message,
+    }))?)
+}
+
 pub async fn execute_tool_call(
     agent: &Agent,
     tool_call: &mistralrs::ToolCallResponse,
     tx: mpsc::UnboundedSender<crate::AgentMessage>,
 ) -> Result<String> {
     shell_session::ensure_global_state_initialized().await;
+    agent.reset_cancel();
 
     if let Some(state) = shell_session::global_state() {
         let safety_cfg = agent.safety_config.lock().await.clone();
@@ -150,8 +191,15 @@ async fn execute_exec_command(
         .get("timeout")
         .and_then(|v| v.as_u64())
         .unwrap_or(600_000);
+    let require_user_approval = arguments
+        .get("require_user_approval")
+        .and_then(|v| v.as_bool());
 
-    let requires_approval = { agent.safety_config.lock().await.ask_permission };
+    let requires_approval = if let Some(require_user_approval) = require_user_approval {
+        require_user_approval
+    } else {
+        agent.safety_config.lock().await.ask_permission
+    };
     let safety_mode = if requires_approval {
         colossal_linux_sandbox::safety::AskForApproval::OnRequest
     } else {
@@ -218,6 +266,7 @@ async fn execute_managed_nu_foreground(
         agent.execution_env_overrides().await?,
     )
     .await?;
+    let _foreground_shell = ForegroundShellGuard::start(&tx, &session_id, &command);
 
     loop {
         match manager
@@ -248,6 +297,7 @@ async fn execute_managed_nu_foreground(
                         let _ = tx.send(crate::AgentMessage::RequestApproval(request_msg));
                         match approval_rx.await {
                             Ok(true) => {
+                                agent.reset_cancel();
                                 current_approval =
                                     Some(colossal_linux_sandbox::safety::AskForApproval::Never);
                                 continue;
@@ -321,6 +371,7 @@ async fn execute_isolated_exec(
 
                         match approval_rx.await {
                             Ok(true) => {
+                                agent.reset_cancel();
                                 current_approval =
                                     Some(colossal_linux_sandbox::safety::AskForApproval::Never);
                                 continue;
@@ -368,17 +419,56 @@ async fn execute_replay_state(
             agent.execution_env_overrides().await?,
         )
         .await?;
+        let _foreground_shell = ForegroundShellGuard::start(&tx, &session_id, &command);
 
-        match manager
-            .exec_command_in_shell_session(
-                session_id.clone(),
-                command.clone(),
-                Some(timeout_ms),
-                1000,
-                current_approval,
-            )
-            .await
-        {
+        let exec_future = manager.exec_command_in_shell_session(
+            session_id.clone(),
+            command.clone(),
+            Some(timeout_ms),
+            1000,
+            current_approval,
+        );
+        tokio::pin!(exec_future);
+
+        let exec_result = loop {
+            tokio::select! {
+                result = &mut exec_future => break result,
+                _ = tokio::time::sleep(Duration::from_millis(25)) => {
+                    if !agent.is_cancel_requested() {
+                        continue;
+                    }
+
+                    let interrupt_result = shell_session::interrupt_current_shell_session_and_wait(
+                        Duration::from_secs(2),
+                    ).await?;
+
+                    match interrupt_result {
+                        Some(colossal_linux_sandbox::manager::InterruptResult::Recovered) => {
+                            shell_session::sync_continuity_state_from_session(
+                                state,
+                                session_id.clone(),
+                                replay_state.then_some(command.as_str()),
+                            ).await?;
+                            return cancelled_exec_command_yaml(&command, "Command interrupted by user");
+                        }
+                        Some(colossal_linux_sandbox::manager::InterruptResult::TimedOut) => {
+                            return cancelled_exec_command_yaml(
+                                &command,
+                                "Interrupt requested, but the shell did not recover before timeout",
+                            );
+                        }
+                        None => {
+                            return cancelled_exec_command_yaml(
+                                &command,
+                                "Interrupt requested, but no active shell session was available",
+                            );
+                        }
+                    }
+                }
+            }
+        };
+
+        match exec_result {
             Ok(result) => {
                 if let Err(err) = shell_session::sync_continuity_state_from_session(
                     state,
@@ -431,6 +521,7 @@ async fn execute_replay_state(
 
                         match approval_rx.await {
                             Ok(true) => {
+                                agent.reset_cancel();
                                 current_approval =
                                     Some(colossal_linux_sandbox::safety::AskForApproval::Never);
                                 continue;

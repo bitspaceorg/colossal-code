@@ -9,6 +9,7 @@ use crate::app::{App, SLASH_COMMANDS};
 impl App {
     pub(crate) fn handle_panel_dispatch_key(&mut self, key: &KeyEvent) -> bool {
         self.handle_connect_modal_key(key)
+            || self.handle_shell_overlay_key(key)
             || self.handle_summary_history_panel_key(key)
             || self.handle_help_panel_key(key)
             || self.handle_resume_panel_key(key)
@@ -17,6 +18,99 @@ impl App {
             || self.handle_isolated_review_panel_key(key)
             || self.handle_model_selection_panel_key(key)
             || self.handle_normal_mode_global_toggles(key)
+    }
+
+    fn handle_shell_overlay_key(&mut self, key: &KeyEvent) -> bool {
+        if self.viewing_task.is_some() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.viewing_task = None;
+                    self.messages.push(" ⎿ shell viewer dismissed".to_string());
+                    self.message_types.push(MessageType::Agent);
+                    self.message_states.push(MessageState::Sent);
+                }
+                KeyCode::Char('k') => {
+                    if let Some((session_id, _, _, _)) = self.viewing_task.take() {
+                        self.background_tasks
+                            .retain(|(sid, _, _, _)| sid != &session_id);
+                        if self
+                            .active_foreground_shell
+                            .as_ref()
+                            .map(|(sid, _, _)| sid == &session_id)
+                            .unwrap_or(false)
+                        {
+                            self.active_foreground_shell = None;
+                        }
+                        kill_shell_session_async(session_id);
+                    }
+                }
+                _ => return true,
+            }
+
+            return true;
+        }
+
+        if !self.show_background_tasks {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.show_background_tasks = false;
+                self.messages.push(" ⎿ shells dialog dismissed".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
+            KeyCode::Up => {
+                if !self.shell_panel_entries().is_empty() && self.background_tasks_selected > 0 {
+                    self.background_tasks_selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                let shell_count = self.shell_panel_entries().len();
+                if shell_count > 0 && self.background_tasks_selected < shell_count - 1 {
+                    self.background_tasks_selected += 1;
+                }
+            }
+            KeyCode::Char('k') => {
+                let shell_entries = self.shell_panel_entries();
+                if !shell_entries.is_empty() && self.background_tasks_selected < shell_entries.len()
+                {
+                    let (session_id, _command, _log_file, _start_time) =
+                        shell_entries[self.background_tasks_selected].clone();
+                    self.background_tasks
+                        .retain(|(sid, _, _, _)| sid != &session_id);
+                    if self
+                        .active_foreground_shell
+                        .as_ref()
+                        .map(|(sid, _, _)| sid == &session_id)
+                        .unwrap_or(false)
+                    {
+                        self.active_foreground_shell = None;
+                    }
+                    let remaining_count = self.shell_panel_entries().len();
+                    if self.background_tasks_selected >= remaining_count
+                        && self.background_tasks_selected > 0
+                    {
+                        self.background_tasks_selected -= 1;
+                    }
+                    kill_shell_session_async(session_id);
+                }
+            }
+            KeyCode::Enter => {
+                let shell_entries = self.shell_panel_entries();
+                if !shell_entries.is_empty() && self.background_tasks_selected < shell_entries.len()
+                {
+                    let task = &shell_entries[self.background_tasks_selected];
+                    self.viewing_task =
+                        Some((task.0.clone(), task.1.clone(), task.2.clone(), task.3));
+                    self.show_background_tasks = false;
+                }
+            }
+            _ => return true,
+        }
+
+        true
     }
 
     fn handle_summary_history_panel_key(&mut self, key: &KeyEvent) -> bool {
@@ -360,21 +454,19 @@ impl App {
             }
             KeyCode::Enter => {
                 if self.model_selected_index < self.available_models.len() {
-                    let selected_model = &self.available_models[self.model_selected_index];
-                    let selected_filename = selected_model.filename.clone();
-                    let selected_display = selected_model.display_name.clone();
-                    let connection_id = selected_model.connection_id.clone();
+                    let selected_model = self.available_models[self.model_selected_index].clone();
                     self.show_model_selection = false;
 
-                    let result = if let Some(connection_id) = connection_id.as_deref() {
-                        self.select_connected_model(connection_id, selected_filename.clone())
-                            .map(|provider_name| {
-                                format!(" ⎿ switched to {} via {}", selected_display, provider_name)
-                            })
-                    } else {
-                        self.activate_local_model(selected_filename.clone())
-                            .map(|_| format!(" ⎿ switched to {}", selected_display))
-                    };
+                    let result =
+                        if self.agent_state.agent_processing || self.thinking_indicator_active {
+                            self.pending_model_switch = Some(selected_model.clone());
+                            Ok(format!(
+                                " ⎿ model switch to {} will apply after the current response",
+                                selected_model.display_name
+                            ))
+                        } else {
+                            self.activate_model_info(&selected_model)
+                        };
 
                     match result {
                         Ok(message) => {
@@ -395,5 +487,91 @@ impl App {
         }
 
         true
+    }
+}
+
+fn kill_shell_session_async(session_id: String) {
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let _ = agent_core::kill_shell_session(session_id).await;
+        });
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+
+    use ratatui::crossterm::event::{KeyCode, KeyEvent};
+
+    use crate::app::{App, ModelInfo};
+
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(()))
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(previous) = &self.previous {
+                    std::env::set_var(self.key, previous);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_model_selection_defers_switch_until_idle() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.agent_state.agent_processing = true;
+        app.show_model_selection = true;
+        app.available_models = vec![ModelInfo {
+            filename: "demo.gguf".to_string(),
+            display_name: "Demo Model".to_string(),
+            connection_id: None,
+            provider_name: None,
+            size_mb: 0.0,
+            quantization: None,
+            architecture: None,
+            parameter_count: None,
+            file_hash: None,
+            author: None,
+            version: None,
+            context_length: None,
+            supported_effort_levels: Vec::new(),
+        }];
+
+        assert!(app.handle_model_selection_panel_key(&KeyEvent::from(KeyCode::Enter)));
+
+        assert!(!app.show_model_selection);
+        assert_eq!(
+            app.pending_model_switch
+                .as_ref()
+                .map(|model| model.display_name.as_str()),
+            Some("Demo Model")
+        );
     }
 }

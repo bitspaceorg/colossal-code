@@ -1352,6 +1352,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "similar",
+ "strip-ansi-escapes",
  "syntect",
  "tokio",
  "unicode-width 0.1.14",

@@ -29,7 +29,7 @@ impl App {
             if interrupt_msg.trim().starts_with('/') {
                 // Execute command
                 self.input = interrupt_msg.clone();
-                self.handle_slash_command();
+                self.handle_slash_command(false);
             } else {
                 // Add interrupt message
                 let user_message = interrupt_msg.clone();
@@ -136,6 +136,8 @@ impl App {
             self.maybe_send_compaction_resume_prompt();
         }
 
+        self.maybe_apply_pending_model_switch();
+
         // Process queued message after rx borrow is dropped
         // Block queue processing while context sync is pending
         if process_queued && !self.context_sync_pending {
@@ -150,7 +152,7 @@ impl App {
                 if queued_msg.trim().starts_with('/') {
                     // Execute command
                     self.input = queued_msg;
-                    self.handle_slash_command();
+                    self.handle_slash_command(false);
                 } else {
                     // Preserve context tokens from previous turn before clearing stats
                     if let Some(stats) = &self.generation_stats {

@@ -155,7 +155,7 @@ pub struct Agent {
 }
 
 impl Agent {
-    fn prompt_context() -> (String, String) {
+    fn prompt_context() -> (String, String, String) {
         let os_info = std::env::consts::OS;
         let os_version = if os_info == "linux" {
             std::fs::read_to_string("/etc/os-release")
@@ -175,25 +175,54 @@ impl Agent {
             os_info.to_string()
         };
         let workspace_path = resolve_workspace_root().display().to_string();
-        (os_version, workspace_path)
+        let execution_shell = Self::execution_shell_prompt_context();
+        (os_version, workspace_path, execution_shell)
+    }
+
+    fn execution_shell_prompt_context() -> String {
+        if colossal_linux_sandbox::bundled_nu::managed_nu_requested() {
+            let nu_path = colossal_linux_sandbox::bundled_nu::resolve_nu_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| "nu".to_string());
+            format!("the first-party managed Nushell runtime ({nu_path})")
+        } else {
+            let shell_path = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+            let shell_name = std::path::Path::new(&shell_path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("shell");
+            format!("the user's PTY shell from $SHELL: {shell_name} ({shell_path})")
+        }
+    }
+
+    fn managed_nu_prompt_appendix() -> Option<&'static str> {
+        colossal_linux_sandbox::bundled_nu::managed_nu_requested().then_some(
+            "\n\nManaged Nushell execution notes:\n- When running under the managed Nushell shell, use Nushell syntax for shell commands.\n- replay_state should be true only when the command intentionally changes shell state that later commands must observe, such as cd/load-env/hide-env/def/alias/$env.X assignments. Use replay_state false for ordinary commands.\n- In the managed Nushell environment: exec_command already routes every command through the embedded Nu runtime. Never prefix commands with `nu -c` or `nu -e`; write plain Nu expressions directly.\n- In managed Nu, the following state is automatically preserved across session rotations: environment variables (load-env, hide-env, $env.X = val), working directory (cd), custom commands (def), aliases (alias), top-level session variables (let/mut and mut reassignment), and config ($env.config.X = val, $env.config = {...}). Block-local or def-local let/mut bindings do not survive rotation.\n- `export def` and `export alias` work identically to `def`/`alias` and survive rotation. Module commands (module, use, source, source-env, export use, export module, export extern, export const) are not supported. External/system commands (^cmd, run-external) are not available in the embedded runtime; route them through the exec_command tool instead. Config mutations and overlay commands are also restricted as documented by the runtime.",
+        )
     }
 
     fn render_system_prompt(
         template: &str,
         os_version: &str,
         workspace_path: &str,
+        execution_shell: &str,
         model_label: &str,
         safety_mode: Option<safety_config::SafetyMode>,
     ) -> String {
         let mut result = template
             .replace("{os_version}", os_version)
             .replace("{workspace_path}", workspace_path)
+            .replace("{execution_shell}", execution_shell)
             .replace("{model_name}", model_label);
 
         if let Some(mode) = safety_mode {
             if mode == safety_config::SafetyMode::ReadOnly {
                 result = Self::filter_readonly_sections(&result);
             }
+        }
+
+        if let Some(managed_nu_appendix) = Self::managed_nu_prompt_appendix() {
+            result.push_str(managed_nu_appendix);
         }
 
         result
@@ -249,7 +278,7 @@ impl Agent {
     }
 
     async fn regenerate_system_prompt(&self, suffix: Option<String>) -> Result<()> {
-        let (os_version, workspace_path) = Self::prompt_context();
+        let (os_version, workspace_path, execution_shell) = Self::prompt_context();
         let system_prompt_template =
             read_system_prompt().unwrap_or_else(|_e| get_default_niterules());
         let model_label = { self.model_name.lock().await.clone() };
@@ -261,6 +290,7 @@ impl Agent {
             &system_prompt_template,
             &os_version,
             &workspace_path,
+            &execution_shell,
             &model_label,
             Some(safety_mode),
         );
@@ -523,9 +553,11 @@ impl Agent {
         let Some(workspace_id) = self.ensure_execution_environment().await? else {
             return Ok(None);
         };
+        // The current PTY session may still have its cwd or open fds inside the mounted
+        // overlay workspace. Drop it before rebuilding the isolated root during restore.
+        shell_session::reset_current_shell_session().await?;
         let manager = self.workspace_manager().await?;
         let checkpoint = manager.restore_workspace_checkpoint(&workspace_id, checkpoint_id)?;
-        shell_session::reset_current_shell_session().await?;
         Ok(Some(checkpoint))
     }
 
@@ -547,9 +579,11 @@ impl Agent {
         let Some(workspace_id) = self.ensure_execution_environment().await? else {
             return Ok(false);
         };
+        // Discard rebuilds the isolated workspace, so release any shell session pinned inside
+        // the current mount before the backend teardown runs.
+        shell_session::reset_current_shell_session().await?;
         let manager = self.workspace_manager().await?;
         manager.discard_workspace_session(&workspace_id)?;
-        shell_session::reset_current_shell_session().await?;
         Ok(true)
     }
 
@@ -665,6 +699,7 @@ impl Agent {
             os_info.to_string()
         };
         let workspace_path = resolve_workspace_root().display().to_string();
+        let execution_shell = Self::execution_shell_prompt_context();
 
         // Load safety configuration
         let safety_config = safety_config::SafetyConfig::load().unwrap_or_default();
@@ -742,6 +777,7 @@ impl Agent {
             &system_prompt_template,
             &os_version,
             &workspace_path,
+            &execution_shell,
             &model_label,
             Some(safety_config.mode),
         );
@@ -1188,4 +1224,18 @@ pub async fn kill_shell_session(session_id: String) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub async fn read_shell_session_output(session_id: String) -> Result<String> {
+    shell_session::ensure_global_state_initialized().await;
+    let state = shell_session::global_state().unwrap();
+    let session_id_obj = colossal_linux_sandbox::types::SessionId::new(session_id);
+    Ok(state.manager.read_persistent_shell_output(session_id_obj)?)
+}
+
+pub fn shell_session_log_path(session_id: &str) -> String {
+    let session_id_obj = colossal_linux_sandbox::types::SessionId::new(session_id.to_string());
+    colossal_linux_sandbox::manager::background_log_path(&session_id_obj)
+        .to_string_lossy()
+        .to_string()
 }

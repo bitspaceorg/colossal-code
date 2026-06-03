@@ -1,6 +1,7 @@
 use agent_core::AgentMessage;
 use color_eyre::Result;
 
+use crate::app::commands::BusySlashCommandBehavior;
 use crate::app::render::panels::survey::SurveyQuestion;
 use crate::app::state::ui_message_event::UiMessageEvent;
 use crate::app::{App, MessageState, MessageType, persistence};
@@ -10,6 +11,124 @@ pub(crate) enum QueueChoiceAction {
     Queue,
     Interrupt,
     Cancel,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+
+    use super::App;
+
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(()))
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(previous) = &self.previous {
+                    std::env::set_var(self.key, previous);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_help_runs_immediately_without_queue_prompt() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.agent_state.agent_processing = true;
+        app.input = "/help".to_string();
+
+        app.submit_message();
+
+        assert!(app.ui_state.show_help);
+        assert!(!app.show_queue_choice);
+    }
+
+    #[tokio::test]
+    async fn busy_resume_still_uses_queue_prompt() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.agent_state.agent_processing = true;
+        app.input = "/resume".to_string();
+
+        app.submit_message();
+
+        assert!(app.show_queue_choice);
+        assert_eq!(app.queue_choice_input, "/resume");
+        assert!(!app.ui_state.show_resume);
+    }
+
+    #[tokio::test]
+    async fn busy_model_opens_panel_without_queue_prompt() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.agent_state.agent_processing = true;
+        app.input = "/model".to_string();
+
+        app.submit_message();
+
+        assert!(app.show_model_selection);
+        assert!(!app.show_queue_choice);
+    }
+
+    #[tokio::test]
+    async fn busy_shells_runs_without_adding_slash_message() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.agent_state.agent_processing = true;
+        app.input = "/shells".to_string();
+
+        app.submit_message();
+
+        assert!(app.show_background_tasks);
+        assert!(!app.show_queue_choice);
+        assert!(app.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn busy_safety_status_runs_immediately_without_queue_prompt() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.agent_state.agent_processing = true;
+        app.input = "/safety".to_string();
+
+        app.submit_message();
+
+        assert!(!app.show_queue_choice);
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("[SAFETY]")
+        );
+    }
 }
 
 pub(crate) fn parse_queue_choice(choice: &str) -> Option<QueueChoiceAction> {
@@ -68,6 +187,8 @@ impl App {
         if !self.input.is_empty() {
             // Check if input is a slash command
             let is_slash_command = self.input.trim().starts_with('/');
+            let slash_dispatch = is_slash_command
+                .then(|| crate::app::commands::dispatch_slash_command(self.input.trim()));
 
             // Check if we're editing a queued message
             if let Some(idx) = self.editing_queue_index.take() {
@@ -335,23 +456,46 @@ impl App {
                     self.survey.show_thank_you();
                 }
             } else if self.agent_state.agent_processing || self.thinking_indicator_active {
-                // Agent is currently processing - show queue options popup
-                let user_message = self.input.clone();
+                if let Some(dispatch) = slash_dispatch.as_ref() {
+                    match dispatch.busy_behavior() {
+                        BusySlashCommandBehavior::RunImmediately
+                        | BusySlashCommandBehavior::DeferModelSelection => {
+                            self.handle_slash_command(false);
+                        }
+                        BusySlashCommandBehavior::QueueChoice => {
+                            let user_message = self.input.clone();
 
-                // Store message and show queue choice - don't add to messages yet
-                self.queue_choice_input = user_message;
-                self.show_queue_choice = true;
+                            // Store message and show queue choice - don't add to messages yet
+                            self.queue_choice_input = user_message;
+                            self.show_queue_choice = true;
 
-                self.input.clear();
-                self.reset_cursor();
-                self.input_modified = false;
-                // Sync clear to vim editor if vim mode is enabled
-                if self.vim_mode_enabled {
-                    self.sync_input_to_vim();
+                            self.input.clear();
+                            self.reset_cursor();
+                            self.input_modified = false;
+                            if self.vim_mode_enabled {
+                                self.sync_input_to_vim();
+                            }
+                        }
+                    }
+                } else {
+                    // Agent is currently processing - show queue options popup
+                    let user_message = self.input.clone();
+
+                    // Store message and show queue choice - don't add to messages yet
+                    self.queue_choice_input = user_message;
+                    self.show_queue_choice = true;
+
+                    self.input.clear();
+                    self.reset_cursor();
+                    self.input_modified = false;
+                    // Sync clear to vim editor if vim mode is enabled
+                    if self.vim_mode_enabled {
+                        self.sync_input_to_vim();
+                    }
                 }
             } else if is_slash_command {
                 // Execute command immediately if agent is not processing
-                self.handle_slash_command();
+                self.handle_slash_command(true);
             } else {
                 // Normal message submission - agent is not processing
                 let user_message = self.input.clone();
