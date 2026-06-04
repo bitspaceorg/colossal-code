@@ -1,14 +1,81 @@
+use ansi_to_tui::IntoText as _;
 use ratatui::{
     Frame,
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap},
+};
+use ratatui_core::{
+    style::{Color as CoreColor, Modifier as CoreModifier, Style as CoreStyle},
+    text::{Line as CoreLine, Span as CoreSpan, Text as CoreText},
 };
 
 use crate::app::{App, HelpTab, SLASH_COMMANDS};
 
+fn strip_osc_sequences(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+
+    while idx < bytes.len() {
+        if bytes[idx] == 0x1B && idx + 1 < bytes.len() && bytes[idx + 1] == b']' {
+            idx += 2;
+            while idx < bytes.len() {
+                if bytes[idx] == 0x07 {
+                    idx += 1;
+                    break;
+                }
+                if bytes[idx] == 0x1B && idx + 1 < bytes.len() && bytes[idx + 1] == b'\\' {
+                    idx += 2;
+                    break;
+                }
+                idx += 1;
+            }
+            continue;
+        }
+
+        result.push(bytes[idx]);
+        idx += 1;
+    }
+
+    String::from_utf8_lossy(&result).into_owned()
+}
+
+fn plain_shell_text(line: &str) -> String {
+    strip_ansi_escapes::strip_str(strip_osc_sequences(line))
+}
+
+fn safe_task_viewer_command_text(command: &str) -> String {
+    plain_shell_text(command)
+        .chars()
+        .map(|ch| {
+            if ch.is_control() && ch != '\n' && ch != '\t' {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect::<String>()
+        .replace('\n', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn clean_task_viewer_shell_output(raw: &str, command: &str) -> String {
     fn strip_prompt_prefix(line: &str) -> &str {
+        if let Some((prefix, remainder)) = line.rsplit_once("> ") {
+            let prefix = prefix.trim_end();
+            if prefix.ends_with("heredoc")
+                || prefix.ends_with("quote")
+                || prefix.ends_with("dquote")
+                || prefix.ends_with("bquote")
+                || prefix.ends_with("cmdsubst")
+            {
+                return remainder.trim_start();
+            }
+        }
+
         for marker in ['%', '$', '#'] {
             if let Some(idx) = line.rfind(marker) {
                 let remainder = &line[idx + marker.len_utf8()..];
@@ -20,11 +87,40 @@ fn clean_task_viewer_shell_output(raw: &str, command: &str) -> String {
         line
     }
 
+    fn is_prompt_artifact(line: &str) -> bool {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed
+            .strip_prefix('%')
+            .or_else(|| trimmed.strip_prefix('$'))
+            .or_else(|| trimmed.strip_prefix('#'))
+        else {
+            return false;
+        };
+
+        let artifact = rest.trim();
+        !artifact.is_empty()
+            && artifact
+                .chars()
+                .all(|ch| ch.is_whitespace() || matches!(ch, '\u{2500}'..='\u{257F}'))
+    }
+
+    fn is_shell_input_prompt_echo(line: &str) -> bool {
+        line.rsplit_once("> ")
+            .map(|(prefix, _)| {
+                let prefix = prefix.trim_end();
+                prefix.ends_with("heredoc")
+                    || prefix.ends_with("quote")
+                    || prefix.ends_with("dquote")
+                    || prefix.ends_with("bquote")
+                    || prefix.ends_with("cmdsubst")
+            })
+            .unwrap_or(false)
+    }
+
     let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
-    let without_ansi = strip_ansi_escapes::strip_str(&normalized);
-    let lines: Vec<&str> = without_ansi.lines().collect();
+    let lines: Vec<&str> = normalized.lines().collect();
     let mut cleaned_lines = Vec::new();
-    let normalized_command: String = command
+    let normalized_command: String = plain_shell_text(command)
         .chars()
         .filter(|ch| !ch.is_whitespace() && *ch != '\'' && *ch != '"')
         .collect();
@@ -32,7 +128,8 @@ fn clean_task_viewer_shell_output(raw: &str, command: &str) -> String {
     let mut skipping_wrapped_internal_line = false;
 
     for line in &lines {
-        let trimmed = line.trim();
+        let plain_line = plain_shell_text(line);
+        let trimmed = plain_line.trim();
         let candidate = strip_prompt_prefix(trimmed).trim();
         let normalized_candidate: String = candidate
             .chars()
@@ -67,6 +164,12 @@ fn clean_task_viewer_shell_output(raw: &str, command: &str) -> String {
             continue;
         }
         if trimmed == "$" || trimmed == "#" || trimmed == ">" || trimmed == "%" {
+            continue;
+        }
+        if is_shell_input_prompt_echo(trimmed) {
+            continue;
+        }
+        if is_prompt_artifact(trimmed) {
             continue;
         }
         let looks_like_prompt_prefix = trimmed.contains('@')
@@ -133,10 +236,118 @@ fn clean_task_viewer_shell_output(raw: &str, command: &str) -> String {
             }
         }
 
-        cleaned_lines.push(candidate);
+        cleaned_lines.push(strip_osc_sequences(line).trim().to_string());
     }
 
     cleaned_lines.join("\n")
+}
+
+fn tui_color_from_core(color: CoreColor) -> Color {
+    match color {
+        CoreColor::Reset => Color::Reset,
+        CoreColor::Black => Color::Black,
+        CoreColor::Red => Color::Red,
+        CoreColor::Green => Color::Green,
+        CoreColor::Yellow => Color::Yellow,
+        CoreColor::Blue => Color::Blue,
+        CoreColor::Magenta => Color::Magenta,
+        CoreColor::Cyan => Color::Cyan,
+        CoreColor::Gray => Color::Gray,
+        CoreColor::DarkGray => Color::DarkGray,
+        CoreColor::LightRed => Color::LightRed,
+        CoreColor::LightGreen => Color::LightGreen,
+        CoreColor::LightYellow => Color::LightYellow,
+        CoreColor::LightBlue => Color::LightBlue,
+        CoreColor::LightMagenta => Color::LightMagenta,
+        CoreColor::LightCyan => Color::LightCyan,
+        CoreColor::White => Color::White,
+        CoreColor::Rgb(r, g, b) => Color::Rgb(r, g, b),
+        CoreColor::Indexed(idx) => Color::Indexed(idx),
+    }
+}
+
+fn tui_modifier_from_core(modifier: CoreModifier) -> Modifier {
+    let mut result = Modifier::empty();
+    if modifier.contains(CoreModifier::BOLD) {
+        result |= Modifier::BOLD;
+    }
+    if modifier.contains(CoreModifier::DIM) {
+        result |= Modifier::DIM;
+    }
+    if modifier.contains(CoreModifier::ITALIC) {
+        result |= Modifier::ITALIC;
+    }
+    if modifier.contains(CoreModifier::UNDERLINED) {
+        result |= Modifier::UNDERLINED;
+    }
+    if modifier.contains(CoreModifier::SLOW_BLINK) {
+        result |= Modifier::SLOW_BLINK;
+    }
+    if modifier.contains(CoreModifier::RAPID_BLINK) {
+        result |= Modifier::RAPID_BLINK;
+    }
+    if modifier.contains(CoreModifier::REVERSED) {
+        result |= Modifier::REVERSED;
+    }
+    if modifier.contains(CoreModifier::HIDDEN) {
+        result |= Modifier::HIDDEN;
+    }
+    if modifier.contains(CoreModifier::CROSSED_OUT) {
+        result |= Modifier::CROSSED_OUT;
+    }
+    result
+}
+
+fn tui_style_from_core(style: CoreStyle) -> Style {
+    let mut result = Style::default();
+    if let Some(fg) = style.fg {
+        result = result.fg(tui_color_from_core(fg));
+    }
+    if let Some(bg) = style.bg {
+        result = result.bg(tui_color_from_core(bg));
+    }
+    result
+        .add_modifier(tui_modifier_from_core(style.add_modifier))
+        .remove_modifier(tui_modifier_from_core(style.sub_modifier))
+}
+
+fn tui_span_from_core(span: CoreSpan<'static>) -> Span<'static> {
+    Span::styled(span.content.into_owned(), tui_style_from_core(span.style))
+}
+
+fn tui_line_from_core(line: CoreLine<'static>) -> Line<'static> {
+    let mut tui_line = Line::from(
+        line.spans
+            .into_iter()
+            .map(tui_span_from_core)
+            .collect::<Vec<_>>(),
+    );
+    tui_line.style = tui_style_from_core(line.style);
+    tui_line.alignment = line.alignment.map(|alignment| match alignment {
+        ratatui_core::layout::Alignment::Left => ratatui::layout::Alignment::Left,
+        ratatui_core::layout::Alignment::Center => ratatui::layout::Alignment::Center,
+        ratatui_core::layout::Alignment::Right => ratatui::layout::Alignment::Right,
+    });
+    tui_line
+}
+
+fn tui_text_from_ansi(content: &str) -> Text<'static> {
+    match content.into_text() {
+        Ok(CoreText {
+            alignment,
+            style,
+            lines,
+        }) => Text {
+            alignment: alignment.map(|alignment| match alignment {
+                ratatui_core::layout::Alignment::Left => ratatui::layout::Alignment::Left,
+                ratatui_core::layout::Alignment::Center => ratatui::layout::Alignment::Center,
+                ratatui_core::layout::Alignment::Right => ratatui::layout::Alignment::Right,
+            }),
+            style: tui_style_from_core(style),
+            lines: lines.into_iter().map(tui_line_from_core).collect(),
+        },
+        Err(_) => Text::from(content.to_string()),
+    }
 }
 
 impl App {
@@ -510,8 +721,10 @@ impl App {
             frame.render_widget(outer_block, area);
 
             let runtime_line = Line::from(vec![Span::raw("runtime: "), Span::raw(runtime_str)]);
-            let command_line =
-                Line::from(vec![Span::raw("command: "), Span::raw(command.as_str())]);
+            let command_line = Line::from(vec![
+                Span::raw("command: "),
+                Span::raw(safe_task_viewer_command_text(command)),
+            ]);
             let header_area = ratatui::layout::Rect {
                 x: outer_inner.x,
                 y: outer_inner.y,
@@ -538,16 +751,10 @@ impl App {
             frame.render_widget(output_block, output_area);
 
             let log_content = self.task_viewer_output_text(session_id, command, log_file);
-            let lines: Vec<String> = log_content.lines().map(str::to_owned).collect();
-
-            let mut all_lines: Vec<Line<'static>> = lines
-                .iter()
-                .map(|line| {
-                    Line::from(Span::styled(line.clone(), Style::default().fg(Color::Gray)))
-                })
-                .collect();
+            let line_count = log_content.lines().count();
+            let mut all_lines = tui_text_from_ansi(&log_content).lines;
             all_lines.push(Line::from(Span::styled(
-                format!("...Showing {} lines", lines.len()),
+                format!("...Showing {} lines", line_count),
                 Style::default()
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::ITALIC),
@@ -572,7 +779,7 @@ impl App {
 
 #[cfg(test)]
 mod output_cleaning_tests {
-    use super::clean_task_viewer_shell_output;
+    use super::{clean_task_viewer_shell_output, safe_task_viewer_command_text};
 
     #[test]
     fn task_viewer_output_cleaning_removes_shell_bootstrap_and_wrapper_noise() {
@@ -591,5 +798,43 @@ mod output_cleaning_tests {
         let cleaned = clean_task_viewer_shell_output(raw, "while true { }");
 
         assert_eq!(cleaned, "looping");
+    }
+
+    #[test]
+    fn task_viewer_output_cleaning_preserves_sgr_color_sequences() {
+        let raw = "prompt% printf '\x1b[31mred\x1b[0m\\n'\n\x1b[31mred\x1b[0m\n";
+
+        let cleaned = clean_task_viewer_shell_output(raw, "printf '\x1b[31mred\x1b[0m\\n'");
+
+        assert_eq!(cleaned, "\x1b[31mred\x1b[0m");
+    }
+
+    #[test]
+    fn task_viewer_output_cleaning_removes_shell_heredoc_prompt_echoes() {
+        let raw = "cursh heredoc> print('Starting foreground color test.', flush=True)\ncursh heredoc> while True:\n[color-test] tick=0001 color=red\n";
+
+        let cleaned = clean_task_viewer_shell_output(
+            raw,
+            "python3 -u - <<'PY'\nprint('Starting foreground color test.', flush=True)\nwhile True:\nPY",
+        );
+
+        assert_eq!(cleaned, "[color-test] tick=0001 color=red");
+    }
+
+    #[test]
+    fn task_viewer_command_text_removes_terminal_control_sequences() {
+        let command = "printf '\x1b[31mred\x1b[0m\n'\x1b]0;bad title\x07";
+
+        let safe = safe_task_viewer_command_text(command);
+
+        assert!(!safe.contains('\x1b'), "unsafe escape survived: {safe:?}");
+        assert!(
+            safe.contains("red"),
+            "printable command text lost: {safe:?}"
+        );
+        assert!(
+            !safe.contains("bad title"),
+            "OSC payload survived: {safe:?}"
+        );
     }
 }

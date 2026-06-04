@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt;
 use tokio::select;
 
 async fn run_managed_nu_command_with_timeout<F>(
@@ -85,6 +86,23 @@ fn background_log_dir() -> PathBuf {
 
 pub fn background_log_path(session_id: &SessionId) -> PathBuf {
     background_log_dir().join(format!("{}.log", session_id.as_str()))
+}
+
+async fn create_command_log_file(session_id: &SessionId) -> Option<tokio::fs::File> {
+    let log_file_path = background_log_path(session_id);
+    if let Some(parent) = log_file_path.parent()
+        && tokio::fs::create_dir_all(parent).await.is_err()
+    {
+        return None;
+    }
+
+    tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(log_file_path)
+        .await
+        .ok()
 }
 
 /// Clean shell output by removing prompts and command echoes
@@ -199,7 +217,7 @@ fn wrap_command_for_completion(shell_path: &str, command: &str) -> String {
     }
 
     format!(
-        "{{ {command}; __nite_cmd_status=$?; printf '\\033]133;D;%s\\007\\033]133;A\\007\\033]133;B\\007' \"$__nite_cmd_status\"; unset __nite_cmd_status; }}"
+        "{{\n{command}\n__nite_cmd_status=$?\nprintf '\\033]133;D;%s\\007\\033]133;A\\007\\033]133;B\\007' \"$__nite_cmd_status\"\nunset __nite_cmd_status\n}}"
     )
 }
 
@@ -1794,6 +1812,11 @@ impl SessionManager {
                 .await?;
 
             if let Some(result) = maybe_result {
+                if let Some(mut command_log_file) = create_command_log_file(&session_id).await {
+                    let _ = command_log_file
+                        .write_all(result.aggregated_output.as_bytes())
+                        .await;
+                }
                 return Ok(result);
             }
 
@@ -1892,6 +1915,7 @@ impl SessionManager {
                 })?
         };
         let wrapped_command = wrap_command_for_completion(&shell_path, &command);
+        let mut command_log_file = create_command_log_file(&session_id).await;
 
         // Use OSC 133 for command completion detection instead of injected markers
         let mut osc_parser = crate::osc133::Parser::new();
@@ -1932,6 +1956,11 @@ impl SessionManager {
                     let visible_str = String::from_utf8_lossy(&visible).to_string();
 
                     if !visible_str.is_empty() {
+                        if let Some(file) = command_log_file.as_mut()
+                            && file.write_all(&visible).await.is_err()
+                        {
+                            command_log_file = None;
+                        }
                         stdout_parts.push(visible_str);
                     }
                     if command_finished {
@@ -1950,6 +1979,11 @@ impl SessionManager {
                                     let visible = crate::osc133::strip_osc133(output.as_bytes());
                                     let visible_str = String::from_utf8_lossy(&visible).to_string();
                                     if !visible_str.is_empty() {
+                                        if let Some(file) = command_log_file.as_mut()
+                                            && file.write_all(&visible).await.is_err()
+                                        {
+                                            command_log_file = None;
+                                        }
                                         stdout_parts.push(visible_str);
                                     }
                                 }
@@ -1988,6 +2022,11 @@ impl SessionManager {
             let visible = crate::osc133::strip_osc133(&pending);
             let visible_str = String::from_utf8_lossy(&visible).to_string();
             if !visible_str.is_empty() {
+                if let Some(file) = command_log_file.as_mut()
+                    && file.write_all(&visible).await.is_err()
+                {
+                    command_log_file = None;
+                }
                 stdout_parts.push(visible_str);
             }
         }
@@ -3743,7 +3782,10 @@ mod workspace_manager_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_osc133_events, clean_shell_output, shell_recovered_from_osc133};
+    use super::{
+        apply_osc133_events, clean_shell_output, shell_recovered_from_osc133,
+        wrap_command_for_completion,
+    };
     use crate::osc133::{Event, Zone};
 
     #[test]
@@ -3785,6 +3827,22 @@ mod tests {
         assert_eq!(
             clean_shell_output(&raw, command),
             "Hello from persistent shell!"
+        );
+    }
+
+    #[test]
+    fn completion_wrapper_preserves_heredoc_terminator_line() {
+        let command = "python3 -u - <<'PY'\nprint('hi')\nPY";
+
+        let wrapped = wrap_command_for_completion("/bin/sh", command);
+
+        assert!(
+            wrapped.contains("\nPY\n__nite_cmd_status="),
+            "heredoc terminator must be followed by a newline before bookkeeping: {wrapped:?}"
+        );
+        assert!(
+            !wrapped.contains("PY; __nite_cmd_status="),
+            "bookkeeping must not be glued to heredoc terminator: {wrapped:?}"
         );
     }
 

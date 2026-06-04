@@ -105,6 +105,39 @@ async fn shell_session_preserves_cwd_and_environment_across_commands()
 }
 
 #[tokio::test]
+async fn foreground_heredoc_command_completes_in_persistent_shell()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = shell_test_lock();
+    let temp = tempfile::tempdir()?;
+    let (manager, session_id) = create_shell_session(
+        temp.path(),
+        deterministic_shell_path(),
+        SandboxPolicy::DangerFullAccess,
+    )
+    .await?;
+
+    let result = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "cat <<'EOF'\nhello from heredoc\nEOF".to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+
+    assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
+    assert!(
+        result.stdout.contains("hello from heredoc"),
+        "heredoc output missing: {:?}",
+        result.stdout
+    );
+
+    manager.terminate_session(session_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn timeout_does_not_prevent_next_command_from_running()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = shell_test_lock();

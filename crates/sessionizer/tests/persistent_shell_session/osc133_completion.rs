@@ -5,6 +5,7 @@
 /// because the D marker is what triggers the completion signal.  Tests are skipped when
 /// bash is not available on the host.
 use super::*;
+use colossal_linux_sandbox::manager::background_log_path;
 use std::time::Duration;
 
 fn bash_path() -> Option<String> {
@@ -16,6 +17,33 @@ fn bash_path() -> Option<String> {
 
 fn has_osc_sequences(s: &str) -> bool {
     s.contains("\x1b]")
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &std::path::Path) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 }
 
 /// Create a bash session pre-configured to emit OSC 133 markers.
@@ -163,6 +191,54 @@ async fn exec_sequential_commands_all_complete() -> Result<(), Box<dyn std::erro
             result.stdout
         );
     }
+
+    manager.terminate_session(session_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn foreground_command_log_is_reset_per_command() -> Result<(), Box<dyn std::error::Error>> {
+    if bash_path().is_none() {
+        eprintln!("skipping: bash not found");
+        return Ok(());
+    }
+    let _guard = shell_test_lock();
+    let temp = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let (manager, session_id) = create_osc133_bash_session(temp.path()).await?;
+
+    manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "printf 'first\\n'".into(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+
+    manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "printf 'second\\n'".into(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+
+    let log_contents = tokio::fs::read_to_string(background_log_path(&session_id)).await?;
+
+    assert!(
+        log_contents.contains("second"),
+        "expected latest command output in log: {:?}",
+        log_contents
+    );
+    assert!(
+        !log_contents.contains("first"),
+        "stale command output leaked into foreground log: {:?}",
+        log_contents
+    );
 
     manager.terminate_session(session_id).await?;
     Ok(())
