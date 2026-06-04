@@ -33,6 +33,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use qdrant_client::Payload;
 use qdrant_client::Qdrant;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -180,6 +181,7 @@ pub struct PersistentShellSession {
     sandbox_policy: SandboxPolicy,
     // Ready state - tracks whether shell is initialized and ready to accept commands
     ready: Arc<tokio::sync::RwLock<bool>>,
+    recent_output: Arc<Mutex<VecDeque<u8>>>,
 }
 
 pub struct SemanticSearchSession {
@@ -287,6 +289,7 @@ impl PersistentShellSession {
         initial_cwd: PathBuf,
         shared_state: Arc<SharedSessionState>,
         sandbox_policy: SandboxPolicy,
+        recent_output: Arc<Mutex<VecDeque<u8>>>,
     ) -> Self {
         Self {
             writer_tx,
@@ -302,6 +305,7 @@ impl PersistentShellSession {
             history_position: Arc::new(Mutex::new(0)),
             sandbox_policy,
             ready: Arc::new(tokio::sync::RwLock::new(false)),
+            recent_output,
         }
     }
 
@@ -333,6 +337,24 @@ impl PersistentShellSession {
 
     pub fn output_receiver(&self) -> broadcast::Receiver<Vec<u8>> {
         self.output_tx.subscribe()
+    }
+
+    pub fn recent_output_snapshot(&self) -> String {
+        let bytes = self
+            .recent_output
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    #[cfg(test)]
+    pub fn replace_recent_output_for_test(&self, bytes: &[u8]) {
+        let mut recent = self.recent_output.lock().unwrap();
+        recent.clear();
+        recent.extend(bytes);
     }
 
     pub fn wait_handle(&self) -> &JoinHandle<Result<i32, std::io::Error>> {
@@ -1200,6 +1222,7 @@ pub async fn create_sandboxed_exec_session(
     let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<u8>>(128);
     // Broadcast for streaming PTY output to readers: subscribers receive from subscription time.
     let (output_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(256);
+    let recent_output = Arc::new(StdMutex::new(VecDeque::<u8>::with_capacity(64 * 1024)));
 
     // Reader task: drain PTY and forward chunks to output channel.
     let mut reader = pair
@@ -1207,12 +1230,19 @@ pub async fn create_sandboxed_exec_session(
         .try_clone_reader()
         .map_err(|e| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
     let output_tx_clone = output_tx.clone();
+    let recent_output_clone = recent_output.clone();
     let reader_handle = tokio::task::spawn_blocking(move || {
         let mut buf = [0u8; 8192];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
+                    if let Ok(mut recent) = recent_output_clone.lock() {
+                        recent.extend(&buf[..n]);
+                        while recent.len() > 64 * 1024 {
+                            recent.pop_front();
+                        }
+                    }
                     // Forward to broadcast; best-effort if there are subscribers.
                     // Don't stop if send fails - just means no active subscribers right now
                     let _ = output_tx_clone.send(buf[..n].to_vec());
@@ -1580,6 +1610,7 @@ pub async fn create_persistent_shell_session(
     let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<u8>>(128);
     // Broadcast for streaming PTY output to readers: subscribers receive from subscription time.
     let (output_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(256);
+    let recent_output = Arc::new(StdMutex::new(VecDeque::<u8>::with_capacity(64 * 1024)));
 
     // Reader task: drain PTY and forward chunks to output channel.
     let mut reader = pair
@@ -1587,12 +1618,19 @@ pub async fn create_persistent_shell_session(
         .try_clone_reader()
         .map_err(|e| ColossalErr::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
     let output_tx_clone = output_tx.clone();
+    let recent_output_clone = recent_output.clone();
     let reader_handle = tokio::task::spawn_blocking(move || {
         let mut buf = [0u8; 8192];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
+                    if let Ok(mut recent) = recent_output_clone.lock() {
+                        recent.extend(&buf[..n]);
+                        while recent.len() > 64 * 1024 {
+                            recent.pop_front();
+                        }
+                    }
                     // Forward to broadcast; best-effort if there are subscribers.
                     // Don't stop if send fails - just means no active subscribers right now
                     let _ = output_tx_clone.send(buf[..n].to_vec());
@@ -1673,6 +1711,7 @@ pub async fn create_persistent_shell_session(
         initial_cwd,
         shared_state,
         sandbox_policy,
+        recent_output,
     );
 
     // Spawn a task to detect shell readiness by sending a test command
