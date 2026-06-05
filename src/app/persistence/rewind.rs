@@ -7,6 +7,14 @@ use crate::app::{
 };
 
 impl App {
+    pub(crate) fn clear_rewind_state(&mut self) {
+        self.show_rewind = false;
+        self.rewind_points.clear();
+        self.rewind_selected = 0;
+        self.current_execution_checkpoint_id = None;
+        self.current_file_changes.clear();
+    }
+
     pub(crate) fn track_file_change(&mut self, tool_name: &str, arguments: &str, _result: &str) {
         let is_write = matches!(tool_name, "Write" | "write_file");
         let is_edit = matches!(tool_name, "Edit" | "edit_file");

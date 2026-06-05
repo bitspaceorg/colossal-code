@@ -101,6 +101,14 @@ pub fn sandbox_policy_from_config_with_workspace(
 
     match safety_config.mode {
         safety_config::SafetyMode::ReadOnly => SandboxPolicy::ReadOnly,
+        _ if colossal_linux_sandbox::workspace::isolated_execution_enabled() => {
+            SandboxPolicy::WorkspaceWrite {
+                writable_roots,
+                network_access: colossal_linux_sandbox::protocol::NetworkAccess::Enabled,
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: false,
+            }
+        }
         safety_config::SafetyMode::Regular => {
             if safety_config.sandbox_enabled || std::env::var("SAFE_MODE").is_ok() {
                 SandboxPolicy::WorkspaceWrite {

@@ -3,27 +3,128 @@ use std::time::SystemTime;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
+use crate::app::commands::QueueChoiceAction;
 use crate::app::state::message::{MessageState, MessageType, RewindFocus};
-use crate::app::{App, SLASH_COMMANDS};
+use crate::app::{App, SLASH_COMMANDS, UiFocus};
 
 impl App {
+    pub(crate) fn focused_ui(&self) -> UiFocus {
+        if self.connect.show_connect_modal {
+            UiFocus::ConnectModal
+        } else if self.show_queue_choice {
+            UiFocus::QueueChoice
+        } else if self.safety_state.show_approval_prompt {
+            UiFocus::ApprovalPrompt
+        } else if self.safety_state.show_sandbox_prompt {
+            UiFocus::SandboxPrompt
+        } else if self.show_summary_history {
+            UiFocus::SummaryHistory
+        } else if self.viewing_task.is_some() {
+            UiFocus::ShellViewer
+        } else if self.show_background_tasks {
+            UiFocus::ShellList
+        } else if self.ui_state.show_help {
+            UiFocus::Help
+        } else if self.ui_state.show_resume {
+            UiFocus::Resume
+        } else if self.show_history_panel {
+            UiFocus::History
+        } else if self.show_rewind {
+            UiFocus::Rewind
+        } else if self.isolated_changes.show_review_panel {
+            UiFocus::IsolatedReview
+        } else if self.show_model_selection {
+            UiFocus::ModelSelection
+        } else if self.show_todos {
+            UiFocus::Todos
+        } else {
+            UiFocus::Input
+        }
+    }
+
     pub(crate) fn handle_panel_dispatch_key(&mut self, key: &KeyEvent) -> bool {
-        self.handle_connect_modal_key(key)
-            || self.handle_shell_overlay_key(key)
-            || self.handle_summary_history_panel_key(key)
-            || self.handle_help_panel_key(key)
-            || self.handle_resume_panel_key(key)
-            || self.handle_history_panel_key(key)
-            || self.handle_rewind_panel_key(key)
-            || self.handle_isolated_review_panel_key(key)
-            || self.handle_model_selection_panel_key(key)
-            || self.handle_normal_mode_global_toggles(key)
+        match self.focused_ui() {
+            UiFocus::ConnectModal => self.handle_connect_modal_key(key),
+            UiFocus::QueueChoice => self.handle_queue_choice_key(key),
+            UiFocus::ApprovalPrompt => self.handle_approval_prompt_key(key),
+            UiFocus::SandboxPrompt => self.handle_sandbox_prompt_key(key),
+            UiFocus::SummaryHistory => self.handle_summary_history_panel_key(key),
+            UiFocus::ShellViewer | UiFocus::ShellList => self.handle_shell_overlay_key(key),
+            UiFocus::Help => self.handle_help_panel_key(key),
+            UiFocus::Resume => self.handle_resume_panel_key(key),
+            UiFocus::History => self.handle_history_panel_key(key),
+            UiFocus::Rewind => self.handle_rewind_panel_key(key),
+            UiFocus::IsolatedReview => self.handle_isolated_review_panel_key(key),
+            UiFocus::ModelSelection => self.handle_model_selection_panel_key(key),
+            UiFocus::Todos => self.handle_todos_panel_key(key),
+            UiFocus::Input => self.handle_normal_mode_global_toggles(key),
+        }
+    }
+
+    fn handle_queue_choice_key(&mut self, key: &KeyEvent) -> bool {
+        if !self.show_queue_choice {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Char('1') => self.apply_queue_choice_action(QueueChoiceAction::Queue),
+            KeyCode::Char('2') => self.apply_queue_choice_action(QueueChoiceAction::Interrupt),
+            KeyCode::Char('3') | KeyCode::Esc if !is_ctrl_c(key) => {
+                self.apply_queue_choice_action(QueueChoiceAction::Cancel)
+            }
+            _ if is_ctrl_c(key) => self.apply_queue_choice_action(QueueChoiceAction::Cancel),
+            _ => {}
+        }
+
+        true
+    }
+
+    fn handle_approval_prompt_key(&mut self, key: &KeyEvent) -> bool {
+        if !self.safety_state.show_approval_prompt {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Char('0') => self.apply_approval_prompt_choice(true, false),
+            KeyCode::Char('1') => self.apply_approval_prompt_choice(false, false),
+            KeyCode::Char('2') | KeyCode::Esc if !is_ctrl_c(key) => {
+                self.apply_approval_prompt_choice(false, true)
+            }
+            _ if is_ctrl_c(key) => self.apply_approval_prompt_choice(false, true),
+            _ => {}
+        }
+
+        true
+    }
+
+    fn handle_sandbox_prompt_key(&mut self, key: &KeyEvent) -> bool {
+        if !self.safety_state.show_sandbox_prompt {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Char('0') => self.apply_sandbox_prompt_choice(0),
+            KeyCode::Char('1') => self.apply_sandbox_prompt_choice(1),
+            KeyCode::Char('2') | KeyCode::Esc if !is_ctrl_c(key) => {
+                self.apply_sandbox_prompt_choice(2)
+            }
+            _ if is_ctrl_c(key) => self.apply_sandbox_prompt_choice(2),
+            _ => {}
+        }
+
+        true
     }
 
     fn handle_shell_overlay_key(&mut self, key: &KeyEvent) -> bool {
         if self.viewing_task.is_some() {
             match key.code {
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') if !is_ctrl_c(key) => {
+                    self.viewing_task = None;
+                    self.messages.push(" ⎿ shell viewer dismissed".to_string());
+                    self.message_types.push(MessageType::Agent);
+                    self.message_states.push(MessageState::Sent);
+                }
+                _ if is_ctrl_c(key) => {
                     self.viewing_task = None;
                     self.messages.push(" ⎿ shell viewer dismissed".to_string());
                     self.message_types.push(MessageType::Agent);
@@ -55,7 +156,13 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Esc => {
+            KeyCode::Esc if !is_ctrl_c(key) => {
+                self.show_background_tasks = false;
+                self.messages.push(" ⎿ shells dialog dismissed".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
+            _ if is_ctrl_c(key) => {
                 self.show_background_tasks = false;
                 self.messages.push(" ⎿ shells dialog dismissed".to_string());
                 self.message_types.push(MessageType::Agent);
@@ -128,7 +235,16 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Esc => {
+            KeyCode::Esc if !is_ctrl_c(key) => {
+                self.show_summary_history = false;
+                self.messages
+                    .push(" ⎿ summary history dismissed".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+                self.message_metadata.push(None);
+                self.message_timestamps.push(SystemTime::now());
+            }
+            _ if is_ctrl_c(key) => {
                 self.show_summary_history = false;
                 self.messages
                     .push(" ⎿ summary history dismissed".to_string());
@@ -181,7 +297,13 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Esc => {
+            KeyCode::Esc if !is_ctrl_c(key) => {
+                self.ui_state.show_help = false;
+                self.messages.push(" ⎿ help dialog dismissed".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
+            _ if is_ctrl_c(key) => {
                 self.ui_state.show_help = false;
                 self.messages.push(" ⎿ help dialog dismissed".to_string());
                 self.message_types.push(MessageType::Agent);
@@ -213,7 +335,13 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Esc => {
+            KeyCode::Esc if !is_ctrl_c(key) => {
+                self.ui_state.show_resume = false;
+                self.messages.push(" ⎿ resume dialog dismissed".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
+            _ if is_ctrl_c(key) => {
                 self.ui_state.show_resume = false;
                 self.messages.push(" ⎿ resume dialog dismissed".to_string());
                 self.message_types.push(MessageType::Agent);
@@ -279,7 +407,10 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Esc => {
+            KeyCode::Esc if !is_ctrl_c(key) => {
+                self.show_history_panel = false;
+            }
+            _ if is_ctrl_c(key) => {
                 self.show_history_panel = false;
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -304,7 +435,13 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Esc => {
+            KeyCode::Esc if !is_ctrl_c(key) => {
+                self.show_rewind = false;
+                self.messages.push(" ⎿ rewind dialog dismissed".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
+            _ if is_ctrl_c(key) => {
                 self.show_rewind = false;
                 self.messages.push(" ⎿ rewind dialog dismissed".to_string());
                 self.message_types.push(MessageType::Agent);
@@ -394,7 +531,14 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Esc => {
+            KeyCode::Esc if !is_ctrl_c(key) => {
+                self.isolated_changes.show_review_panel = false;
+                self.messages
+                    .push(" ⎿ isolated changes review dismissed".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
+            _ if is_ctrl_c(key) => {
                 self.isolated_changes.show_review_panel = false;
                 self.messages
                     .push(" ⎿ isolated changes review dismissed".to_string());
@@ -435,7 +579,14 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Esc => {
+            KeyCode::Esc if !is_ctrl_c(key) => {
+                self.show_model_selection = false;
+                self.messages
+                    .push(" ⎿ model selection dismissed".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
+            _ if is_ctrl_c(key) => {
                 self.show_model_selection = false;
                 self.messages
                     .push(" ⎿ model selection dismissed".to_string());
@@ -488,6 +639,28 @@ impl App {
 
         true
     }
+
+    fn handle_todos_panel_key(&mut self, key: &KeyEvent) -> bool {
+        if !self.show_todos {
+            return false;
+        }
+
+        if matches!(key.code, KeyCode::Esc) || is_ctrl_c(key) {
+            self.show_todos = false;
+            self.messages.push(" ⎿ todos dialog dismissed".to_string());
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+        }
+
+        true
+    }
+}
+
+fn is_ctrl_c(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('c')
+        && key
+            .modifiers
+            .contains(ratatui::crossterm::event::KeyModifiers::CONTROL)
 }
 
 fn kill_shell_session_async(session_id: String) {
@@ -503,9 +676,9 @@ fn kill_shell_session_async(session_id: String) {
 mod tests {
     use std::sync::{Mutex as StdMutex, OnceLock};
 
-    use ratatui::crossterm::event::{KeyCode, KeyEvent};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use crate::app::{App, ModelInfo};
+    use crate::app::{App, ModelInfo, UiFocus};
 
     fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
@@ -573,5 +746,161 @@ mod tests {
                 .map(|model| model.display_name.as_str()),
             Some("Demo Model")
         );
+    }
+
+    #[tokio::test]
+    async fn focused_ui_prefers_prompts_over_shell_panels() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.show_background_tasks = true;
+        app.safety_state.show_approval_prompt = true;
+
+        assert_eq!(app.focused_ui(), UiFocus::ApprovalPrompt);
+    }
+
+    #[tokio::test]
+    async fn approval_prompt_keys_do_not_fall_through_to_input() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.safety_state.show_approval_prompt = true;
+
+        assert!(app.handle_panel_dispatch_key(&KeyEvent::from(KeyCode::Char('x'))));
+        assert!(app.input.is_empty());
+    }
+
+    #[tokio::test]
+    async fn focused_ui_prefers_shell_viewer_over_shell_list() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.show_background_tasks = true;
+        app.viewing_task = Some((
+            "shell-1".to_string(),
+            "sleep 10".to_string(),
+            "/tmp/shell.log".to_string(),
+            std::time::Instant::now(),
+        ));
+
+        assert_eq!(app.focused_ui(), UiFocus::ShellViewer);
+    }
+
+    #[tokio::test]
+    async fn queue_choice_keys_do_not_touch_input_buffer() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.show_queue_choice = true;
+        app.queue_choice_input = "queued message".to_string();
+
+        assert!(app.handle_panel_dispatch_key(&KeyEvent::from(KeyCode::Char('1'))));
+        assert!(app.input.is_empty());
+        assert_eq!(app.queued_messages, vec!["queued message".to_string()]);
+        assert!(!app.show_queue_choice);
+    }
+
+    #[tokio::test]
+    async fn todos_focus_consumes_escape_without_input_mutation() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.show_todos = true;
+        app.input = "should stay".to_string();
+
+        assert!(app.handle_panel_dispatch_key(&KeyEvent::from(KeyCode::Esc)));
+        assert!(!app.show_todos);
+        assert_eq!(app.input, "should stay");
+    }
+
+    #[tokio::test]
+    async fn help_focus_consumes_ctrl_c_before_input_handler() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.ui_state.show_help = true;
+        app.input = "preserve".to_string();
+
+        assert!(
+            app.handle_panel_dispatch_key(&KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            ))
+        );
+        assert!(!app.ui_state.show_help);
+        assert_eq!(app.input, "preserve");
+    }
+
+    #[tokio::test]
+    async fn queue_choice_ctrl_c_cancels_prompt_without_touching_input() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.show_queue_choice = true;
+        app.queue_choice_input = "queued".to_string();
+        app.input = "stay".to_string();
+
+        assert!(
+            app.handle_panel_dispatch_key(&KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            ))
+        );
+        assert!(!app.show_queue_choice);
+        assert!(app.queued_messages.is_empty());
+        assert_eq!(app.input, "");
+    }
+
+    #[tokio::test]
+    async fn focused_ui_prefers_connect_modal_over_other_panels() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.show_model_selection = true;
+        app.connect.show_connect_modal = true;
+
+        assert_eq!(app.focused_ui(), UiFocus::ConnectModal);
+    }
+
+    #[tokio::test]
+    async fn focused_ui_prefers_rewind_over_model_selection() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.show_model_selection = true;
+        app.show_rewind = true;
+
+        assert_eq!(app.focused_ui(), UiFocus::Rewind);
+    }
+
+    #[tokio::test]
+    async fn resume_focus_consumes_escape_without_touching_input() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.ui_state.show_resume = true;
+        app.input = "keep me".to_string();
+
+        assert!(app.handle_panel_dispatch_key(&KeyEvent::from(KeyCode::Esc)));
+        assert!(!app.ui_state.show_resume);
+        assert_eq!(app.input, "keep me");
+    }
+
+    #[tokio::test]
+    async fn rewind_focus_consumes_ctrl_c_without_touching_input() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.show_rewind = true;
+        app.input = "keep me".to_string();
+
+        assert!(
+            app.handle_panel_dispatch_key(&KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            ))
+        );
+        assert!(!app.show_rewind);
+        assert_eq!(app.input, "keep me");
     }
 }

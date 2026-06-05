@@ -57,6 +57,9 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
     }
 
     if key.code == KeyCode::Esc
+        && !app.show_background_tasks
+        && app.viewing_task.is_none()
+        && !app.show_todos
         && (app.agent_state.agent_processing || app.thinking_indicator_active)
     {
         let removed_thinking =
@@ -308,65 +311,6 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
                 }
             }
         }
-        KeyCode::Esc if app.phase == Phase::Input && app.viewing_task.is_some() => {
-            dismiss_task_viewer(app);
-        }
-        KeyCode::Enter if app.phase == Phase::Input && app.viewing_task.is_some() => {
-            dismiss_task_viewer(app);
-        }
-        KeyCode::Char(' ') if app.phase == Phase::Input && app.viewing_task.is_some() => {
-            dismiss_task_viewer(app);
-        }
-        KeyCode::Char('k') if app.phase == Phase::Input && app.viewing_task.is_some() => {
-            if let Some((session_id, _, _, _)) = app.viewing_task.take() {
-                app.background_tasks
-                    .retain(|(sid, _, _, _)| sid != &session_id);
-                kill_shell_session_async(session_id);
-            }
-        }
-        KeyCode::Esc if app.phase == Phase::Input && app.show_todos => {
-            app.show_todos = false;
-            push_agent_notice(app, " ⎿ todos dialog dismissed");
-        }
-        KeyCode::Esc if app.phase == Phase::Input && app.show_background_tasks => {
-            app.show_background_tasks = false;
-            push_agent_notice(app, " ⎿ shells dialog dismissed");
-        }
-        KeyCode::Up if app.phase == Phase::Input && app.show_background_tasks => {
-            if !app.background_tasks.is_empty() && app.background_tasks_selected > 0 {
-                app.background_tasks_selected -= 1;
-            }
-        }
-        KeyCode::Down if app.phase == Phase::Input && app.show_background_tasks => {
-            if !app.background_tasks.is_empty()
-                && app.background_tasks_selected < app.background_tasks.len() - 1
-            {
-                app.background_tasks_selected += 1;
-            }
-        }
-        KeyCode::Char('k') if app.phase == Phase::Input && app.show_background_tasks => {
-            if !app.background_tasks.is_empty()
-                && app.background_tasks_selected < app.background_tasks.len()
-            {
-                let (session_id, _command, _log_file, _start_time) =
-                    app.background_tasks.remove(app.background_tasks_selected);
-                if app.background_tasks_selected >= app.background_tasks.len()
-                    && app.background_tasks_selected > 0
-                {
-                    app.background_tasks_selected -= 1;
-                }
-                kill_shell_session_async(session_id);
-            }
-        }
-        KeyCode::Enter if app.phase == Phase::Input && app.show_background_tasks => {
-            if !app.background_tasks.is_empty()
-                && app.background_tasks_selected < app.background_tasks.len()
-            {
-                let task = &app.background_tasks[app.background_tasks_selected];
-                app.viewing_task = Some((task.0.clone(), task.1.clone(), task.2.clone(), task.3));
-                app.show_background_tasks = false;
-            }
-        }
         KeyCode::Esc if app.phase == Phase::Input && app.autocomplete_active => {
             app.clear_autocomplete();
         }
@@ -383,66 +327,6 @@ pub(crate) fn handle_runtime_key_normal(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char(to_insert) if app.phase == Phase::Input && !app.show_background_tasks => {
-            if app.safety_state.show_approval_prompt {
-                if app.vim_mode_enabled
-                    && !matches!(app.vim_input_editor.get_mode(), edtui::EditorMode::Insert)
-                {
-                    app.vim_input_editor.handle_event(Event::Key(key));
-                    app.sync_vim_input();
-                    return;
-                }
-
-                if matches!(to_insert, '0' | '1' | '2') {
-                    app.input = to_insert.to_string();
-                    app.character_index = app.input.chars().count();
-                    app.input_modified = true;
-                    if app.vim_mode_enabled {
-                        app.sync_input_to_vim();
-                    }
-                }
-                return;
-            }
-
-            if app.safety_state.show_sandbox_prompt {
-                if app.vim_mode_enabled
-                    && !matches!(app.vim_input_editor.get_mode(), edtui::EditorMode::Insert)
-                {
-                    app.vim_input_editor.handle_event(Event::Key(key));
-                    app.sync_vim_input();
-                    return;
-                }
-
-                if matches!(to_insert, '0' | '1' | '2') {
-                    app.input = to_insert.to_string();
-                    app.character_index = app.input.chars().count();
-                    app.input_modified = true;
-                    if app.vim_mode_enabled {
-                        app.sync_input_to_vim();
-                    }
-                }
-                return;
-            }
-
-            if app.show_queue_choice {
-                if app.vim_mode_enabled
-                    && !matches!(app.vim_input_editor.get_mode(), edtui::EditorMode::Insert)
-                {
-                    app.vim_input_editor.handle_event(Event::Key(key));
-                    app.sync_vim_input();
-                    return;
-                }
-
-                if matches!(to_insert, '1' | '2' | '3') {
-                    app.input = to_insert.to_string();
-                    app.character_index = app.input.chars().count();
-                    app.input_modified = true;
-                    if app.vim_mode_enabled {
-                        app.sync_input_to_vim();
-                    }
-                }
-                return;
-            }
-
             app.handle_input_char_key(key, to_insert);
         }
         KeyCode::Backspace if app.phase == Phase::Input && !app.show_background_tasks => {
@@ -479,11 +363,64 @@ fn dismiss_task_viewer(app: &mut App) {
     push_agent_notice(app, " ⎿ shell viewer dismissed");
 }
 
-fn kill_shell_session_async(session_id: String) {
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let _ = agent_core::kill_shell_session(session_id).await;
-        });
-    });
+#[cfg(test)]
+mod tests {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::handle_runtime_key_normal;
+    use crate::app::{App, Phase};
+
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(()))
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(previous) = &self.previous {
+                    std::env::set_var(self.key, previous);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn esc_closes_shells_panel_before_interrupting_generation() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.phase = Phase::Input;
+        app.show_background_tasks = true;
+        app.agent_state.agent_processing = true;
+
+        handle_runtime_key_normal(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(!app.show_background_tasks, "Esc should close /shells first");
+        assert!(
+            !app.agent_state.agent_interrupted,
+            "closing /shells should not interrupt generation"
+        );
+    }
 }

@@ -452,6 +452,13 @@ async fn execute_replay_state(
                             return cancelled_exec_command_yaml(&command, "Command interrupted by user");
                         }
                         Some(colossal_linux_sandbox::manager::InterruptResult::TimedOut) => {
+                            let _ = state.manager.terminate_session(session_id.clone()).await;
+                            let mut session_id_lock = state.shell_session_id.lock().await;
+                            if session_id_lock.as_ref() == Some(&session_id) {
+                                *session_id_lock = None;
+                            }
+                            let mut background = state.session_has_background_process.lock().await;
+                            *background = false;
                             return cancelled_exec_command_yaml(
                                 &command,
                                 "Interrupt requested, but the shell did not recover before timeout",

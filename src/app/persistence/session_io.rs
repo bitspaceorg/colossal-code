@@ -254,6 +254,7 @@ impl App {
         }
 
         // Clear current UI state
+        self.clear_rewind_state();
         self.messages.clear();
         self.message_types.clear();
         self.message_states.clear();

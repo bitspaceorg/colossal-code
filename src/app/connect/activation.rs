@@ -8,8 +8,49 @@ use tokio::sync::mpsc;
 use crate::app::App;
 use crate::app::init::constructor_backend::BackendConfig;
 use crate::app::persistence::auth_store::{AuthStore, StoredConnection, save_auth_store};
+use crate::app::state::message::ModelInfo;
 
 impl App {
+    pub(crate) fn activate_model_info(&mut self, selected_model: &ModelInfo) -> Result<String> {
+        let selected_filename = selected_model.filename.clone();
+        let selected_display = selected_model.display_name.clone();
+        let connection_id = selected_model.connection_id.clone();
+
+        if let Some(connection_id) = connection_id.as_deref() {
+            self.select_connected_model(connection_id, selected_filename)
+                .map(|provider_name| {
+                    format!(" ⎿ switched to {} via {}", selected_display, provider_name)
+                })
+        } else {
+            self.activate_local_model(selected_filename)
+                .map(|_| format!(" ⎿ switched to {}", selected_display))
+        }
+    }
+
+    pub(crate) fn maybe_apply_pending_model_switch(&mut self) {
+        let Some(model) = self.pending_model_switch.clone() else {
+            return;
+        };
+        if self.agent_state.agent_processing || self.thinking_indicator_active {
+            return;
+        }
+
+        self.pending_model_switch = None;
+        match self.activate_model_info(&model) {
+            Ok(message) => {
+                self.messages.push(message);
+                self.message_types.push(crate::app::MessageType::Agent);
+                self.message_states.push(crate::app::MessageState::Sent);
+            }
+            Err(e) => {
+                self.messages
+                    .push(format!(" ⚠ Failed to switch model: {}", e));
+                self.message_types.push(crate::app::MessageType::Agent);
+                self.message_states.push(crate::app::MessageState::Sent);
+            }
+        }
+    }
+
     pub(crate) fn activate_connection(&mut self, connection: &StoredConnection) -> Result<()> {
         let env = BackendConfig::from_connection(connection).ok_or_else(|| {
             color_eyre::eyre::eyre!(

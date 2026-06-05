@@ -229,6 +229,9 @@ impl App {
                                     Ok(None) => {
                                         let _ =
                                             tx_clone.send(AgentMessage::ExecutionCheckpoint(None));
+                                        let _ = tx_clone.send(AgentMessage::ExecutionState(0));
+                                        let _ = tx_clone
+                                            .send(AgentMessage::ExecutionReviewEntries(Vec::new()));
                                     }
                                     Err(e) => {
                                         let _ = tx_clone.send(AgentMessage::Error(format!(

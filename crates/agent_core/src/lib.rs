@@ -17,6 +17,8 @@ pub mod agent_state;
 pub mod config;
 pub mod conversation;
 pub mod exec_command;
+#[cfg(test)]
+mod isolated_execution_tests;
 mod llm_backend;
 pub mod message_helpers;
 pub mod message_types;

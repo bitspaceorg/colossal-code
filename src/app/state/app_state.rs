@@ -64,6 +64,25 @@ pub(crate) enum HelpTab {
     CustomCommands,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UiFocus {
+    Input,
+    ConnectModal,
+    QueueChoice,
+    ApprovalPrompt,
+    SandboxPrompt,
+    SummaryHistory,
+    ShellViewer,
+    ShellList,
+    Help,
+    Resume,
+    History,
+    Rewind,
+    IsolatedReview,
+    ModelSelection,
+    Todos,
+}
+
 impl HelpTab {
     pub(crate) fn next(&self) -> Self {
         match self {
@@ -294,6 +313,7 @@ pub(crate) struct App {
     // Background tasks panel
     pub(crate) show_background_tasks: bool,
     pub(crate) background_tasks: Vec<(String, String, String, std::time::Instant)>, // (session_id, command, log_file, start_time)
+    pub(crate) active_foreground_shell: Option<(String, String, std::time::Instant)>,
     pub(crate) background_tasks_selected: usize,
     // Background task viewer
     pub(crate) viewing_task: Option<(String, String, String, std::time::Instant)>, // (session_id, command, log_file, start_time)
@@ -314,6 +334,7 @@ pub(crate) struct App {
     pub(crate) show_model_selection: bool,
     pub(crate) available_models: Vec<ModelInfo>,
     pub(crate) model_selected_index: usize,
+    pub(crate) pending_model_switch: Option<ModelInfo>,
     pub(crate) current_model: Option<String>,
     pub(crate) current_context_tokens: Option<usize>,
     // Rewind panel state

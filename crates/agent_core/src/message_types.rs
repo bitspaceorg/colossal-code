@@ -80,6 +80,8 @@ pub enum AgentMessage {
     ContextCleared,
     ContextInjected,
     BackgroundTaskStarted(String, String, String),
+    ForegroundShellStarted(String, String),
+    ForegroundShellFinished(String),
     Done,
     ModelLoaded,
     GenerationStats(GenerationStats),

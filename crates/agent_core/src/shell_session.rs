@@ -161,6 +161,32 @@ pub(crate) async fn reset_current_shell_session() -> Result<()> {
     Ok(())
 }
 
+pub(crate) async fn interrupt_current_shell_session_and_wait(
+    timeout: std::time::Duration,
+) -> Result<Option<colossal_linux_sandbox::manager::InterruptResult>> {
+    ensure_global_state_initialized().await;
+
+    let Some(state) = GLOBAL_STATE.get() else {
+        return Ok(None);
+    };
+
+    let session_id = {
+        let session_id_lock = state.shell_session_id.lock().await;
+        session_id_lock.clone()
+    };
+
+    let Some(session_id) = session_id else {
+        return Ok(None);
+    };
+
+    Ok(Some(
+        state
+            .manager
+            .interrupt_shell_session_and_wait(session_id, timeout)
+            .await?,
+    ))
+}
+
 pub(crate) async fn get_or_create_shell_session(
     seed_cwd: Option<PathBuf>,
     env_overrides: std::collections::HashMap<String, String>,

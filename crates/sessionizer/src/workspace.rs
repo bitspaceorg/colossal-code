@@ -710,10 +710,26 @@ impl SessionWorkspace {
     }
 
     fn read_checkpoint_metadata(&self, checkpoint_id: &FsCheckpointId) -> Result<FsCheckpoint> {
-        let bytes = std::fs::read(self.checkpoint_metadata_path(checkpoint_id))
-            .with_context(|| format!("read checkpoint metadata {}", checkpoint_id.0))?;
-        serde_json::from_slice(&bytes)
-            .with_context(|| format!("parse checkpoint metadata {}", checkpoint_id.0))
+        let metadata_path = self.checkpoint_metadata_path(checkpoint_id);
+        match std::fs::read(&metadata_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .with_context(|| format!("parse checkpoint metadata {}", checkpoint_id.0)),
+            Err(read_err) => {
+                let snapshot_root = self.checkpoint_snapshot_root(checkpoint_id);
+                if snapshot_root.exists() {
+                    let manifest = FsManifest::scan(&snapshot_root)?;
+                    return Ok(FsCheckpoint {
+                        id: checkpoint_id.clone(),
+                        manifest,
+                        created_at: std::fs::metadata(&snapshot_root)
+                            .and_then(|meta| meta.modified())
+                            .unwrap_or_else(|_| SystemTime::now()),
+                    });
+                }
+                Err(read_err)
+                    .with_context(|| format!("read checkpoint metadata {}", checkpoint_id.0))
+            }
+        }
     }
 
     fn teardown_backend(&mut self) -> Result<()> {
@@ -1547,6 +1563,38 @@ mod tests {
         let review = workspace.review_entries().expect("review entries");
         assert_eq!(review[0].old_string, "real-now");
         assert_eq!(review[0].new_string, "first");
+    }
+
+    #[test]
+    fn restore_checkpoint_recovers_when_metadata_is_missing_but_snapshot_exists() {
+        let _env_lock = workspace_env_test_lock();
+        let _guard = EnvVarGuard::set("NITE_WORKSPACE_BACKEND", "copy");
+        let temp = make_test_dir("restore-checkpoint-metadata-missing");
+        std::fs::write(temp.join("file.txt"), "base").expect("seed file");
+        let mut workspace = SessionWorkspace::initialize(temp.clone()).expect("init workspace");
+
+        std::fs::write(workspace.private_workspace().join("file.txt"), "first")
+            .expect("first change");
+        let checkpoint = workspace.checkpoint_agent_fs().expect("checkpoint");
+        let snapshot_root = workspace.checkpoint_snapshot_root(&checkpoint.id);
+        assert!(snapshot_root.exists(), "snapshot root should exist");
+        std::fs::remove_file(workspace.checkpoint_metadata_path(&checkpoint.id))
+            .expect("remove checkpoint metadata");
+
+        std::fs::write(temp.join("file.txt"), "real-now").expect("modify real file");
+
+        let restored = workspace
+            .restore_checkpoint(&checkpoint.id)
+            .expect("restore should recover from missing metadata");
+        assert_eq!(restored.id, checkpoint.id);
+        assert_eq!(
+            std::fs::read_to_string(workspace.private_workspace().join("file.txt")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.join("file.txt")).unwrap(),
+            "real-now"
+        );
     }
 
     #[test]

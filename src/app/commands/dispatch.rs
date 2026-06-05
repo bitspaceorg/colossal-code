@@ -25,6 +25,31 @@ pub(crate) enum SlashCommandDispatch {
     Unknown { command: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BusySlashCommandBehavior {
+    RunImmediately,
+    DeferModelSelection,
+    QueueChoice,
+}
+
+impl SlashCommandDispatch {
+    pub(crate) fn busy_behavior(&self) -> BusySlashCommandBehavior {
+        match self {
+            SlashCommandDispatch::Help
+            | SlashCommandDispatch::Connect
+            | SlashCommandDispatch::Vim
+            | SlashCommandDispatch::Todos
+            | SlashCommandDispatch::Shells
+            | SlashCommandDispatch::Apply => BusySlashCommandBehavior::RunImmediately,
+            SlashCommandDispatch::Safety { args } if args.is_empty() => {
+                BusySlashCommandBehavior::RunImmediately
+            }
+            SlashCommandDispatch::Model => BusySlashCommandBehavior::DeferModelSelection,
+            _ => BusySlashCommandBehavior::QueueChoice,
+        }
+    }
+}
+
 impl From<ParsedSlashCommand> for SlashCommandDispatch {
     fn from(parsed: ParsedSlashCommand) -> Self {
         match parsed {

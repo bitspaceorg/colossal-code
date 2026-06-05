@@ -675,6 +675,20 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                         std::time::Instant::now(),
                     ));
                 }
+                AgentMessage::ForegroundShellStarted(session_id, command) => {
+                    app.active_foreground_shell =
+                        Some((session_id, command, std::time::Instant::now()));
+                }
+                AgentMessage::ForegroundShellFinished(session_id) => {
+                    if app
+                        .active_foreground_shell
+                        .as_ref()
+                        .map(|(active_id, _, _)| active_id == &session_id)
+                        .unwrap_or(false)
+                    {
+                        app.active_foreground_shell = None;
+                    }
+                }
                 AgentMessage::ContextCleared => {
                     // Context cleared - if no inject expected, sync is complete
                     if !app.context_inject_expected {

@@ -781,6 +781,78 @@ async fn restore_execution_checkpoint_restores_prior_private_workspace_state() {
     assert_eq!(agent.pending_execution_change_count().await.unwrap(), 1);
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn restore_execution_checkpoint_succeeds_with_live_persistent_pty_session() {
+    let _guard = isolated_test_lock();
+    let _env = EnvVarGuard::set("NITE_ISOLATED_EXECUTION_ROOT", "1");
+    let temp = make_test_dir("restore-live-pty-session");
+    std::fs::write(temp.join("file.txt"), "base").expect("seed file");
+    set_workspace_root_override(&temp);
+    let agent = build_test_agent(temp.clone());
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    execute_tool_call(
+        &agent,
+        &tool_call(
+            "exec_command",
+            json!({
+                "command": "pwd >/dev/null && printf first > file.txt",
+                "replay_state": true
+            }),
+        ),
+        tx.clone(),
+    )
+    .await
+    .expect("create checkpoint state through persistent pty session");
+    let checkpoint = agent
+        .current_execution_checkpoint()
+        .await
+        .expect("current checkpoint")
+        .expect("checkpoint present");
+
+    execute_tool_call(
+        &agent,
+        &tool_call(
+            "exec_command",
+            json!({
+                "command": "printf second > file.txt",
+                "replay_state": true
+            }),
+        ),
+        tx.clone(),
+    )
+    .await
+    .expect("advance isolated state");
+
+    let restored = agent
+        .restore_execution_checkpoint(&checkpoint.id)
+        .await
+        .expect("restore execution checkpoint with live pty session")
+        .expect("restored checkpoint");
+    assert_eq!(restored.id, checkpoint.id);
+
+    let read_result = execute_tool_call(
+        &agent,
+        &tool_call(
+            "read_file",
+            json!({
+                "path": "file.txt",
+                "should_read_entire_file": true
+            }),
+        ),
+        tx,
+    )
+    .await
+    .expect("read restored private file after pty reset");
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&read_result).expect("yaml result");
+    assert_eq!(parsed["content"].as_str(), Some("first"), "{read_result}");
+    assert_eq!(
+        std::fs::read_to_string(temp.join("file.txt")).unwrap(),
+        "base"
+    );
+}
+
 #[tokio::test]
 async fn exec_command_background_absolute_workspace_path_stays_isolated_until_apply() {
     let _guard = isolated_test_lock();

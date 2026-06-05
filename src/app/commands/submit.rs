@@ -141,6 +141,179 @@ pub(crate) fn parse_queue_choice(choice: &str) -> Option<QueueChoiceAction> {
 }
 
 impl App {
+    pub(crate) fn apply_queue_choice_action(&mut self, action: QueueChoiceAction) {
+        match action {
+            QueueChoiceAction::Queue => {
+                let user_message = self.queue_choice_input.clone();
+                self.save_to_history(&user_message);
+                self.queued_messages.push(user_message);
+            }
+            QueueChoiceAction::Interrupt => {
+                if let Some(tx) = &self.agent_tx {
+                    let _ = tx.send(AgentMessage::Cancel);
+                }
+
+                self.agent_state.interrupt_pending = Some(self.queue_choice_input.clone());
+
+                if let Some(last_msg) = self.messages.last()
+                    && matches!(
+                        UiMessageEvent::parse(last_msg),
+                        Some(UiMessageEvent::ThinkingAnimation)
+                    )
+                {
+                    self.messages.pop();
+                    self.message_types.pop();
+                    self.message_states.pop();
+                    self.thinking_indicator_active = false;
+                }
+
+                self.is_thinking = false;
+                self.thinking_indicator_active = false;
+                self.thinking_start_time = None;
+                self.thinking_token_count = 0;
+                self.thinking_current_summary = None;
+                self.thinking_position = 0;
+                self.thinking_raw_content.clear();
+            }
+            QueueChoiceAction::Cancel => {}
+        }
+
+        self.input.clear();
+        self.reset_cursor();
+        self.input_modified = false;
+        self.show_queue_choice = false;
+        self.queue_choice_input.clear();
+        if self.vim_mode_enabled {
+            self.sync_input_to_vim();
+        }
+    }
+
+    pub(crate) fn apply_approval_prompt_choice(&mut self, approved: bool, interrupt: bool) {
+        if interrupt {
+            if let Some(tx) = &self.agent_tx {
+                let _ = tx.send(AgentMessage::ApprovalResponse(false));
+                let _ = tx.send(AgentMessage::Cancel);
+            }
+            App::remove_thinking_animation_placeholder(&mut self.messages, &mut self.message_types);
+            self.thinking_indicator_active = false;
+            self.is_thinking = false;
+            self.messages
+                .push(" ⎿ Interrupted. What should Nite do instead?".to_string());
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+        } else {
+            if let Some(tx) = &self.agent_tx {
+                let _ = tx.send(AgentMessage::ApprovalResponse(approved));
+            }
+
+            let had_thinking_placeholder = App::remove_thinking_animation_placeholder(
+                &mut self.messages,
+                &mut self.message_types,
+            );
+            self.messages.push(if approved {
+                " ⎿ Approved".to_string()
+            } else {
+                " ⎿ Denied".to_string()
+            });
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+
+            if had_thinking_placeholder {
+                App::ensure_thinking_animation_placeholder(
+                    &mut self.messages,
+                    &mut self.message_types,
+                    self.thinking_indicator_active,
+                );
+            }
+        }
+
+        self.input.clear();
+        self.reset_cursor();
+        self.input_modified = false;
+        self.safety_state.show_approval_prompt = false;
+        self.safety_state.approval_prompt_content.clear();
+        if self.vim_mode_enabled {
+            self.sync_input_to_vim();
+        }
+    }
+
+    pub(crate) fn apply_sandbox_prompt_choice(&mut self, choice: u8) {
+        match choice {
+            0 => {
+                let path = std::path::PathBuf::from(&self.safety_state.sandbox_blocked_path);
+                let path_display = self.safety_state.sandbox_blocked_path.clone();
+
+                tokio::spawn(async move {
+                    let _ = agent_core::add_writable_root(path).await;
+                });
+
+                let had_thinking_placeholder = App::remove_thinking_animation_placeholder(
+                    &mut self.messages,
+                    &mut self.message_types,
+                );
+
+                self.messages
+                    .push(format!(" ⎿ Added '{}' to writable roots", path_display));
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+                self.messages
+                    .push(" ⎿ The agent can now write to this path. Continuing...".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+
+                if had_thinking_placeholder {
+                    App::ensure_thinking_animation_placeholder(
+                        &mut self.messages,
+                        &mut self.message_types,
+                        self.thinking_indicator_active,
+                    );
+                }
+            }
+            1 => {
+                let had_thinking_placeholder = App::remove_thinking_animation_placeholder(
+                    &mut self.messages,
+                    &mut self.message_types,
+                );
+                self.messages.push(" ⎿ Sandbox access denied".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+
+                if had_thinking_placeholder {
+                    App::ensure_thinking_animation_placeholder(
+                        &mut self.messages,
+                        &mut self.message_types,
+                        self.thinking_indicator_active,
+                    );
+                }
+            }
+            2 => {
+                if let Some(tx) = &self.agent_tx {
+                    let _ = tx.send(AgentMessage::Cancel);
+                }
+                App::remove_thinking_animation_placeholder(
+                    &mut self.messages,
+                    &mut self.message_types,
+                );
+                self.thinking_indicator_active = false;
+                self.is_thinking = false;
+                self.messages
+                    .push(" ⎿ Interrupted. What should Nite do instead?".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
+            _ => return,
+        }
+
+        self.input.clear();
+        self.reset_cursor();
+        self.input_modified = false;
+        self.safety_state.show_sandbox_prompt = false;
+        self.safety_state.sandbox_blocked_path.clear();
+        if self.vim_mode_enabled {
+            self.sync_input_to_vim();
+        }
+    }
+
     pub(crate) fn save_to_history(&mut self, command: &str) {
         if command.trim().is_empty() {
             return;
@@ -209,46 +382,7 @@ impl App {
             // Check if we're in queue choice mode
             if self.show_queue_choice {
                 match parse_queue_choice(&self.input) {
-                    Some(QueueChoiceAction::Queue) => {
-                        // Queue message - add to queue
-                        let user_message = self.queue_choice_input.clone();
-                        self.save_to_history(&user_message); // Save to file history
-                        self.queued_messages.push(user_message);
-                    }
-                    Some(QueueChoiceAction::Interrupt) => {
-                        // Interrupt & send new message
-                        // Send cancel message to agent first
-                        if let Some(tx) = &self.agent_tx {
-                            let _ = tx.send(AgentMessage::Cancel);
-                        }
-
-                        // Store message to send after cancel completes
-                        self.agent_state.interrupt_pending = Some(self.queue_choice_input.clone());
-
-                        // Clear UI state immediately
-                        if let Some(last_msg) = self.messages.last() {
-                            if matches!(
-                                UiMessageEvent::parse(last_msg),
-                                Some(UiMessageEvent::ThinkingAnimation)
-                            ) {
-                                self.messages.pop();
-                                self.message_types.pop();
-                                self.message_states.pop();
-                                self.thinking_indicator_active = false;
-                            }
-                        }
-
-                        self.is_thinking = false;
-                        self.thinking_indicator_active = false;
-                        self.thinking_start_time = None;
-                        self.thinking_token_count = 0;
-                        self.thinking_current_summary = None;
-                        self.thinking_position = 0;
-                        self.thinking_raw_content.clear();
-                    }
-                    Some(QueueChoiceAction::Cancel) => {
-                        // Cancel - discard message
-                    }
+                    Some(action) => self.apply_queue_choice_action(action),
                     None => {
                         // Invalid choice, keep the popup
                         self.input.clear();
@@ -257,11 +391,6 @@ impl App {
                         return;
                     }
                 }
-                self.input.clear();
-                self.reset_cursor();
-                self.input_modified = false;
-                self.show_queue_choice = false;
-                self.queue_choice_input.clear();
                 return;
             }
 
@@ -269,67 +398,9 @@ impl App {
             if self.safety_state.show_approval_prompt {
                 let choice = self.input.trim();
                 match choice {
-                    "0" => {
-                        // Approve
-                        if let Some(tx) = &self.agent_tx {
-                            let _ = tx.send(AgentMessage::ApprovalResponse(true));
-                        }
-
-                        let had_thinking_placeholder = App::remove_thinking_animation_placeholder(
-                            &mut self.messages,
-                            &mut self.message_types,
-                        );
-                        self.messages.push(" ⎿ Approved".to_string());
-                        self.message_types.push(MessageType::Agent);
-                        self.message_states.push(MessageState::Sent);
-
-                        if had_thinking_placeholder {
-                            App::ensure_thinking_animation_placeholder(
-                                &mut self.messages,
-                                &mut self.message_types,
-                                self.thinking_indicator_active,
-                            );
-                        }
-                    }
-                    "1" => {
-                        // Deny
-                        if let Some(tx) = &self.agent_tx {
-                            let _ = tx.send(AgentMessage::ApprovalResponse(false));
-                        }
-
-                        let had_thinking_placeholder = App::remove_thinking_animation_placeholder(
-                            &mut self.messages,
-                            &mut self.message_types,
-                        );
-                        self.messages.push(" ⎿ Denied".to_string());
-                        self.message_types.push(MessageType::Agent);
-                        self.message_states.push(MessageState::Sent);
-
-                        if had_thinking_placeholder {
-                            App::ensure_thinking_animation_placeholder(
-                                &mut self.messages,
-                                &mut self.message_types,
-                                self.thinking_indicator_active,
-                            );
-                        }
-                    }
-                    "2" => {
-                        // Interrupt - deny and interrupt
-                        if let Some(tx) = &self.agent_tx {
-                            let _ = tx.send(AgentMessage::ApprovalResponse(false));
-                            let _ = tx.send(AgentMessage::Cancel);
-                        }
-                        App::remove_thinking_animation_placeholder(
-                            &mut self.messages,
-                            &mut self.message_types,
-                        );
-                        self.thinking_indicator_active = false;
-                        self.is_thinking = false;
-                        self.messages
-                            .push(" ⎿ Interrupted. What should Nite do instead?".to_string());
-                        self.message_types.push(MessageType::Agent);
-                        self.message_states.push(MessageState::Sent);
-                    }
+                    "0" => self.apply_approval_prompt_choice(true, false),
+                    "1" => self.apply_approval_prompt_choice(false, false),
+                    "2" => self.apply_approval_prompt_choice(false, true),
                     _ => {
                         // Invalid choice, keep the popup
                         self.input.clear();
@@ -338,11 +409,6 @@ impl App {
                         return;
                     }
                 }
-                self.input.clear();
-                self.reset_cursor();
-                self.input_modified = false;
-                self.safety_state.show_approval_prompt = false;
-                self.safety_state.approval_prompt_content.clear();
                 return;
             }
 
@@ -350,77 +416,9 @@ impl App {
             if self.safety_state.show_sandbox_prompt {
                 let choice = self.input.trim();
                 match choice {
-                    "0" => {
-                        // Accept - add path to writable roots dynamically
-                        let path =
-                            std::path::PathBuf::from(&self.safety_state.sandbox_blocked_path);
-                        let path_display = self.safety_state.sandbox_blocked_path.clone();
-
-                        // Add the root in an async context
-                        tokio::spawn(async move {
-                            if let Err(_e) = agent_core::add_writable_root(path).await {
-                                // eprintln!("Failed to add writable root: {}", e);
-                            }
-                        });
-
-                        let had_thinking_placeholder = App::remove_thinking_animation_placeholder(
-                            &mut self.messages,
-                            &mut self.message_types,
-                        );
-
-                        self.messages
-                            .push(format!(" ⎿ Added '{}' to writable roots", path_display));
-                        self.message_types.push(MessageType::Agent);
-                        self.message_states.push(MessageState::Sent);
-                        self.messages.push(
-                            " ⎿ The agent can now write to this path. Continuing...".to_string(),
-                        );
-                        self.message_types.push(MessageType::Agent);
-                        self.message_states.push(MessageState::Sent);
-
-                        if had_thinking_placeholder {
-                            App::ensure_thinking_animation_placeholder(
-                                &mut self.messages,
-                                &mut self.message_types,
-                                self.thinking_indicator_active,
-                            );
-                        }
-                    }
-                    "1" => {
-                        // Deny - just close the prompt
-                        let had_thinking_placeholder = App::remove_thinking_animation_placeholder(
-                            &mut self.messages,
-                            &mut self.message_types,
-                        );
-                        self.messages.push(" ⎿ Sandbox access denied".to_string());
-                        self.message_types.push(MessageType::Agent);
-                        self.message_states.push(MessageState::Sent);
-
-                        if had_thinking_placeholder {
-                            App::ensure_thinking_animation_placeholder(
-                                &mut self.messages,
-                                &mut self.message_types,
-                                self.thinking_indicator_active,
-                            );
-                        }
-                    }
-                    "2" => {
-                        // Interrupt - let user tell Nite what to do instead
-                        if let Some(tx) = &self.agent_tx {
-                            let _ = tx.send(AgentMessage::Cancel);
-                        }
-                        App::remove_thinking_animation_placeholder(
-                            &mut self.messages,
-                            &mut self.message_types,
-                        );
-                        self.thinking_indicator_active = false;
-                        self.is_thinking = false;
-                        // Agent will be interrupted, user can type their message
-                        self.messages
-                            .push(" ⎿ Interrupted. What should Nite do instead?".to_string());
-                        self.message_types.push(MessageType::Agent);
-                        self.message_states.push(MessageState::Sent);
-                    }
+                    "0" => self.apply_sandbox_prompt_choice(0),
+                    "1" => self.apply_sandbox_prompt_choice(1),
+                    "2" => self.apply_sandbox_prompt_choice(2),
                     _ => {
                         // Invalid choice, keep the popup
                         self.input.clear();
@@ -429,11 +427,6 @@ impl App {
                         return;
                     }
                 }
-                self.input.clear();
-                self.reset_cursor();
-                self.input_modified = false;
-                self.safety_state.show_sandbox_prompt = false;
-                self.safety_state.sandbox_blocked_path.clear();
                 return;
             }
 
