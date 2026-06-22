@@ -340,14 +340,21 @@ pub async fn process_sse_stream(
                 return Ok(());
             }
 
-            let parsed: openai_wire::OpenAiStreamResponse = match serde_json::from_str(&data) {
+            let raw_value: serde_json::Value = match serde_json::from_str(&data) {
                 Ok(value) => value,
                 Err(err) => {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
-                        if let Some(error) = value.get("error") {
-                            return Err(anyhow::anyhow!("Remote error: {}", error));
-                        }
-                    }
+                    return Err(anyhow::anyhow!("Failed to parse stream chunk: {}", err));
+                }
+            };
+
+            if let Some(error) = raw_value.get("error") {
+                return Err(anyhow::anyhow!("Remote error: {}", error));
+            }
+
+            let parsed: openai_wire::OpenAiStreamResponse = match serde_json::from_value(raw_value)
+            {
+                Ok(value) => value,
+                Err(err) => {
                     return Err(anyhow::anyhow!("Failed to parse stream chunk: {}", err));
                 }
             };
@@ -403,6 +410,7 @@ pub async fn process_sse_stream(
 
                 let OpenAiStreamDelta {
                     content,
+                    reasoning_content,
                     role,
                     tool_calls,
                 } = choice.delta;
@@ -416,15 +424,27 @@ pub async fn process_sse_stream(
                 }
 
                 let mut delta_content = None;
-                if let Some(content_value) = content {
-                    let text = content_value.to_text();
-                    if !text.is_empty() {
-                        accumulated_content.push_str(&text);
-                        if first_token_time.is_none() {
-                            first_token_time = Some(Instant::now());
-                        }
-                        estimated_tokens += estimate_tokens(&text);
+                let mut delta_reasoning_content = None;
+                let content_text = content
+                    .as_ref()
+                    .map(|content| content.to_text())
+                    .filter(|text| !text.is_empty());
+                let reasoning_text = reasoning_content
+                    .as_ref()
+                    .map(|content| content.to_text())
+                    .filter(|text| !text.is_empty());
+                let delta_text = content_text.clone().or_else(|| reasoning_text.clone());
+
+                if let Some(text) = delta_text {
+                    accumulated_content.push_str(&text);
+                    if first_token_time.is_none() {
+                        first_token_time = Some(Instant::now());
+                    }
+                    estimated_tokens += estimate_tokens(&text);
+                    if content_text.is_some() {
                         delta_content = Some(text);
+                    } else {
+                        delta_reasoning_content = Some(text);
                     }
                 }
 
@@ -448,7 +468,7 @@ pub async fn process_sse_stream(
                     } else {
                         Some(delta_tool_calls.clone())
                     },
-                    reasoning_content: None,
+                    reasoning_content: delta_reasoning_content,
                 };
 
                 let chunk_choice = ChunkChoice {

@@ -11,6 +11,8 @@ pub struct OpenAiUsage {
 pub struct OpenAiChatMessage {
     #[serde(default)]
     pub content: Option<OpenAiChatMessageContent>,
+    #[serde(default, alias = "reasoning")]
+    pub reasoning_content: Option<OpenAiChatMessageContent>,
     pub role: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<OpenAiStreamToolCall>>,
@@ -62,7 +64,21 @@ impl OpenAiChatMessageContent {
 
 impl OpenAiChatMessage {
     pub fn content_text(&self) -> String {
-        self.content
+        let content = self
+            .content
+            .as_ref()
+            .map(|content| content.to_text())
+            .unwrap_or_default();
+
+        if content.is_empty() {
+            self.reasoning_text()
+        } else {
+            content
+        }
+    }
+
+    pub fn reasoning_text(&self) -> String {
+        self.reasoning_content
             .as_ref()
             .map(|content| content.to_text())
             .unwrap_or_default()
@@ -82,6 +98,7 @@ pub struct OpenAiChatResponse {
     pub created: Option<u64>,
     pub system_fingerprint: Option<String>,
     pub object: Option<String>,
+    #[serde(default)]
     pub choices: Vec<OpenAiChatChoice>,
     pub usage: Option<OpenAiUsage>,
 }
@@ -93,6 +110,7 @@ pub struct OpenAiStreamResponse {
     pub created: Option<u64>,
     pub system_fingerprint: Option<String>,
     pub object: Option<String>,
+    #[serde(default)]
     pub choices: Vec<OpenAiStreamChoice>,
     pub usage: Option<OpenAiUsage>,
 }
@@ -108,6 +126,8 @@ pub struct OpenAiStreamChoice {
 pub struct OpenAiStreamDelta {
     #[serde(default)]
     pub content: Option<OpenAiChatMessageContent>,
+    #[serde(default, alias = "reasoning")]
+    pub reasoning_content: Option<OpenAiChatMessageContent>,
     #[serde(default)]
     pub role: Option<String>,
     #[serde(default)]
@@ -125,4 +145,19 @@ pub fn current_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OpenAiChatMessage;
+
+    #[test]
+    fn chat_message_falls_back_to_reasoning_text() {
+        let parsed: OpenAiChatMessage =
+            serde_json::from_str(r#"{"content":null,"reasoning":"hello","role":"assistant"}"#)
+                .unwrap();
+
+        assert_eq!(parsed.content_text(), "hello");
+        assert_eq!(parsed.reasoning_text(), "hello");
+    }
 }

@@ -33,14 +33,7 @@ pub(super) async fn stream_responses_request(
     let payload = build_responses_payload(backend, &mut request_builder, &model_name);
 
     let request_start = Instant::now();
-    let mut request = backend
-        .client
-        .post(format!(
-            "{}/{}",
-            backend.base_url,
-            backend.completions_path.trim_start_matches('/')
-        ))
-        .json(&payload);
+    let mut request = backend.client.post(backend.endpoint_url()).json(&payload);
 
     if let Some(header) = backend.openai_auth_header().await {
         request = request.header("Authorization", header);
@@ -56,14 +49,7 @@ pub(super) async fn stream_responses_request(
 
         if status.as_u16() == 401 && backend.has_openai_auth() {
             backend.ensure_fresh_openai_auth().await?;
-            let mut retry_request = backend
-                .client
-                .post(format!(
-                    "{}/{}",
-                    backend.base_url,
-                    backend.completions_path.trim_start_matches('/')
-                ))
-                .json(&payload);
+            let mut retry_request = backend.client.post(backend.endpoint_url()).json(&payload);
             if let Some(header) = backend.openai_auth_header().await {
                 retry_request = retry_request.header("Authorization", header);
             }

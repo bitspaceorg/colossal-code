@@ -215,11 +215,7 @@ async fn build_anthropic_request(
 ) -> reqwest::RequestBuilder {
     let mut request = backend
         .client
-        .post(format!(
-            "{}/{}",
-            backend.base_url,
-            backend.completions_path.trim_start_matches('/')
-        ))
+        .post(backend.endpoint_url())
         .header("anthropic-version", ANTHROPIC_VERSION)
         .json(payload);
 

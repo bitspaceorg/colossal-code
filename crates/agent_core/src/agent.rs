@@ -188,10 +188,19 @@ impl Agent {
                         if let Some(choice) = choices.first() {
                             match &choice.delta {
                                 Delta {
-                                    content: Some(content),
+                                    content,
+                                    reasoning_content,
                                     tool_calls: None,
                                     ..
                                 } => {
+                                    let Some(content) = content
+                                        .as_ref()
+                                        .filter(|content| !content.is_empty())
+                                        .or(reasoning_content.as_ref())
+                                    else {
+                                        continue;
+                                    };
+
                                     if content.is_empty() {
                                         continue;
                                     }
@@ -545,7 +554,6 @@ impl Agent {
                                         }
                                     }
                                 }
-                                _ => {}
                             }
                         }
                     }

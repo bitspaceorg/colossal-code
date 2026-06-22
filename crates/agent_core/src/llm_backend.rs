@@ -292,6 +292,10 @@ impl HttpBackend {
         Some((host, port))
     }
 
+    fn endpoint_url(&self) -> String {
+        build_endpoint_url(&self.base_url, &self.completions_path)
+    }
+
     fn host_matches_allowlist(host: &str, port: Option<u16>) -> bool {
         let Ok(entries) = std::env::var("NITE_HTTP_ENABLE_THINKING_HOSTS") else {
             return false;
@@ -459,8 +463,17 @@ impl HttpBackend {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
-        let chat_response: OpenAiChatResponse = serde_json::from_str(&body)
-            .map_err(|e| anyhow::anyhow!("Failed to parse response JSON ({}): {}", status, e))?;
+        let chat_response: OpenAiChatResponse = serde_json::from_str(&body).map_err(|e| {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
+                if let Some(error) = val.get("error") {
+                    anyhow::anyhow!("API error ({}): {}", status, error)
+                } else {
+                    anyhow::anyhow!("Failed to parse response JSON ({}): {}", status, e)
+                }
+            } else {
+                anyhow::anyhow!("Failed to parse response JSON ({}): {}", status, e)
+            }
+        })?;
         let id = chat_response
             .id
             .clone()
@@ -476,6 +489,11 @@ impl HttpBackend {
             .get(0)
             .map(|choice| choice.message.content_text())
             .unwrap_or_default();
+        let reasoning_content = chat_response
+            .choices
+            .get(0)
+            .map(|choice| choice.message.reasoning_text())
+            .filter(|text| !text.is_empty());
         let role = chat_response
             .choices
             .get(0)
@@ -499,7 +517,7 @@ impl HttpBackend {
                 content: Some(content.clone()),
                 role: role.clone(),
                 tool_calls: tool_calls.clone(),
-                reasoning_content: None,
+                reasoning_content: reasoning_content.clone(),
             },
             logprobs: None,
         };
@@ -540,7 +558,7 @@ impl HttpBackend {
                 content: Some(content.clone()),
                 role,
                 tool_calls,
-                reasoning_content: None,
+                reasoning_content,
             },
             logprobs: None,
         };
@@ -686,19 +704,13 @@ impl LLMBackend for HttpBackend {
         }
 
         http_debug_log(format!(
-            "Dispatching HTTP request to {}{} with payload {}",
-            self.base_url, self.completions_path, payload
+            "Dispatching HTTP request to {} with payload {}",
+            self.endpoint_url(),
+            payload
         ));
         let request_start = Instant::now();
 
-        let mut request = self
-            .client
-            .post(format!(
-                "{}/{}",
-                self.base_url,
-                self.completions_path.trim_start_matches('/')
-            ))
-            .json(&payload);
+        let mut request = self.client.post(self.endpoint_url()).json(&payload);
 
         if let Some(header) = self.auth_header() {
             request = request.header("Authorization", header);
@@ -789,6 +801,57 @@ impl LLMBackend for HttpBackend {
 
     async fn get_latest_usage(&self) -> Option<Usage> {
         self.latest_usage.lock().await.take()
+    }
+}
+
+fn build_endpoint_url(base_url: &str, completions_path: &str) -> String {
+    let normalized_path = if completions_path.starts_with('/') {
+        completions_path.to_string()
+    } else {
+        format!("/{completions_path}")
+    };
+
+    let Ok(mut url) = Url::parse(base_url).or_else(|_| Url::parse(&format!("http://{base_url}")))
+    else {
+        return format!(
+            "{}/{}",
+            base_url.trim_end_matches('/'),
+            normalized_path.trim_start_matches('/')
+        );
+    };
+
+    let base_path = url.path().trim_end_matches('/');
+    let final_path = if base_path.is_empty() || base_path == "/" {
+        normalized_path
+    } else if normalized_path == base_path || normalized_path.starts_with(&format!("{base_path}/"))
+    {
+        normalized_path
+    } else {
+        format!("{base_path}{normalized_path}")
+    };
+
+    url.set_path(&final_path);
+    url.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_endpoint_url;
+
+    #[test]
+    fn endpoint_url_avoids_duplicate_version_prefix() {
+        assert_eq!(
+            build_endpoint_url("http://localhost:1234/v1", "/v1/chat/completions"),
+            "http://localhost:1234/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn endpoint_url_preserves_base_prefix_when_path_is_relative() {
+        assert_eq!(
+            build_endpoint_url("https://openrouter.ai/api/v1", "chat/completions"),
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
     }
 }
 
