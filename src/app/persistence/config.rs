@@ -6,7 +6,7 @@ pub fn config_dir() -> Result<PathBuf> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| color_eyre::eyre::eyre!("Could not determine home directory"))?;
-    Ok(Path::new(&home).join(".config").join(".nite"))
+    Ok(Path::new(&home).join(".config").join("cocode"))
 }
 
 pub fn config_file_path() -> Result<PathBuf> {

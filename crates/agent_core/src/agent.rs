@@ -42,7 +42,16 @@ impl Agent {
         };
         drop(conversation_guard);
 
-        self.run_generation(request_builder, tx).await
+        if let Err(err) = self.run_generation(request_builder.clone(), tx).await {
+            let mut conversation_guard = self.conversation.lock().await;
+            if conversation_guard.is_none() {
+                *conversation_guard = Some(request_builder);
+            }
+            drop(conversation_guard);
+            return Err(err);
+        }
+
+        Ok(())
     }
 
     async fn run_generation(
@@ -655,6 +664,10 @@ impl Agent {
 
             if accumulated_tool_calls.is_empty() {
                 _final_accumulated_content = accumulated_content.clone();
+                if !accumulated_content.is_empty() {
+                    current_request_builder = current_request_builder
+                        .add_message(TextMessageRole::Assistant, &accumulated_content);
+                }
             }
 
             if !accumulated_tool_calls.is_empty() {
@@ -762,5 +775,207 @@ impl Agent {
 
     fn estimate_tokens_heuristic(text: &str) -> usize {
         text.len() / 4
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BackendKind, LLMBackend};
+    use anyhow::{Result, anyhow};
+    use async_trait::async_trait;
+    use futures::stream::{self, Stream as FuturesStream};
+    use mistralrs::{
+        ChatCompletionChunkResponse, ChatCompletionResponse, Choice, ChunkChoice, Delta, Model,
+        RequestBuilder, Response, ResponseMessage, Usage,
+    };
+    use serde_json::Value;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    enum TestBackendMode {
+        Stream(std::sync::Mutex<Option<Vec<Response>>>),
+        ImmediateError(String),
+    }
+
+    struct TestBackend {
+        mode: TestBackendMode,
+    }
+
+    #[async_trait]
+    impl LLMBackend for TestBackend {
+        async fn stream_chat_request(
+            &self,
+            _request: RequestBuilder,
+        ) -> Result<Box<dyn FuturesStream<Item = Response> + Unpin + Send>> {
+            match &self.mode {
+                TestBackendMode::Stream(responses) => {
+                    let responses = responses
+                        .lock()
+                        .expect("test backend stream lock")
+                        .take()
+                        .unwrap_or_default();
+                    Ok(Box::new(stream::iter(responses)))
+                }
+                TestBackendMode::ImmediateError(message) => Err(anyhow!(message.clone())),
+            }
+        }
+
+        async fn load_model(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn reload_model(&self, _model_filename: String) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_model(&self) -> Result<Arc<Model>> {
+            Err(anyhow!("test backend does not provide a model"))
+        }
+    }
+
+    fn test_usage() -> Usage {
+        Usage {
+            completion_tokens: 2,
+            prompt_tokens: 3,
+            total_tokens: 5,
+            avg_tok_per_sec: 0.0,
+            avg_prompt_tok_per_sec: 0.0,
+            avg_compl_tok_per_sec: 0.0,
+            total_time_sec: 0.0,
+            total_prompt_time_sec: 0.0,
+            total_completion_time_sec: 0.0,
+        }
+    }
+
+    fn test_agent(backend: TestBackend) -> Agent {
+        Agent {
+            backend: Arc::new(Box::new(backend)),
+            backend_kind: BackendKind::Http,
+            system_prompt: Arc::new(Mutex::new("system prompt".to_string())),
+            tools: Arc::new(Mutex::new(vec![])),
+            thinking_summarizer: Arc::new(Mutex::new(
+                crate::thinking_summarizer::ThinkingSummarizer::new(),
+            )),
+            cancel_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            conversation: Arc::new(Mutex::new(None)),
+            thinking_tags: Arc::new(Mutex::new(crate::model_config::ThinkingTags::default())),
+            safety_config: Arc::new(Mutex::new(crate::safety_config::SafetyConfig::default())),
+            working_directory: None,
+            workspace_session_id: Arc::new(Mutex::new(None)),
+            model_name: Arc::new(Mutex::new("test-model".to_string())),
+        }
+    }
+
+    async fn seed_conversation(agent: &Agent) {
+        agent
+            .restore_conversation(
+                r#"[
+                    {"role":"system","content":"system prompt"},
+                    {"role":"user","content":"old user"},
+                    {"role":"assistant","content":"old assistant"}
+                ]"#,
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn exported_messages(agent: &Agent) -> Vec<Value> {
+        serde_json::from_str(
+            &agent
+                .export_conversation()
+                .await
+                .expect("conversation should be exported"),
+        )
+        .expect("conversation should serialize to JSON")
+    }
+
+    fn message_content(message: &Value) -> &str {
+        message
+            .get("content")
+            .and_then(crate::message_helpers::value_left_str)
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn successful_plain_response_is_persisted_to_conversation() {
+        let agent = test_agent(TestBackend {
+            mode: TestBackendMode::Stream(std::sync::Mutex::new(Some(vec![
+                Response::Chunk(ChatCompletionChunkResponse {
+                    id: "chunk-1".to_string(),
+                    choices: vec![ChunkChoice {
+                        finish_reason: None,
+                        index: 0,
+                        delta: Delta {
+                            content: Some("new assistant".to_string()),
+                            role: "assistant".to_string(),
+                            tool_calls: None,
+                            reasoning_content: None,
+                        },
+                        logprobs: None,
+                    }],
+                    created: 0,
+                    model: "test-model".to_string(),
+                    system_fingerprint: "test".to_string(),
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                }),
+                Response::Done(ChatCompletionResponse {
+                    id: "done-1".to_string(),
+                    choices: vec![Choice {
+                        finish_reason: "stop".to_string(),
+                        index: 0,
+                        message: ResponseMessage {
+                            content: Some("new assistant".to_string()),
+                            role: "assistant".to_string(),
+                            tool_calls: None,
+                            reasoning_content: None,
+                        },
+                        logprobs: None,
+                    }],
+                    created: 0,
+                    model: "test-model".to_string(),
+                    system_fingerprint: "test".to_string(),
+                    object: "chat.completion".to_string(),
+                    usage: test_usage(),
+                }),
+            ]))),
+        });
+        seed_conversation(&agent).await;
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        agent.process_message("new user".to_string(), tx).await.unwrap();
+
+        let messages = exported_messages(&agent).await;
+        let contents: Vec<&str> = messages.iter().map(message_content).collect();
+        assert_eq!(
+            contents,
+            vec![
+                "system prompt",
+                "old user",
+                "old assistant",
+                "new user",
+                "new assistant",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn immediate_backend_error_keeps_user_turn_in_conversation() {
+        let agent = test_agent(TestBackend {
+            mode: TestBackendMode::ImmediateError("backend failed".to_string()),
+        });
+        seed_conversation(&agent).await;
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let err = agent.process_message("new user".to_string(), tx).await.unwrap_err();
+        assert!(err.to_string().contains("backend failed"));
+
+        let messages = exported_messages(&agent).await;
+        let contents: Vec<&str> = messages.iter().map(message_content).collect();
+        assert_eq!(
+            contents,
+            vec!["system prompt", "old user", "old assistant", "new user",]
+        );
     }
 }

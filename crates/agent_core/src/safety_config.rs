@@ -98,7 +98,7 @@ impl SafetyConfig {
             .map_err(|_| anyhow::anyhow!("HOME environment variable not set"))?;
         Ok(PathBuf::from(home)
             .join(".config")
-            .join(".nite")
+            .join("cocode")
             .join("safety.toml"))
     }
 

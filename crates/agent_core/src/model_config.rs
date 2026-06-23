@@ -163,7 +163,7 @@ impl ModelConfig {
         Ok(config)
     }
 
-    /// Load model configuration from ~/.config/.nite/models/<model_name>/model.yaml
+    /// Load model configuration from ~/.config/cocode/models/<model_name>/model.yaml
     pub fn from_model_name(model_name: &str) -> Result<Self> {
         let config_path = Self::get_config_path(model_name)?;
         Self::from_file(config_path)
@@ -175,7 +175,7 @@ impl ModelConfig {
 
         let config_dir = home
             .join(".config")
-            .join(".nite")
+            .join("cocode")
             .join("models")
             .join(model_name);
         let config_file = config_dir.join("model.yaml");
@@ -283,7 +283,7 @@ pub fn create_default_thinking_config(
     })
 }
 
-/// Save a model configuration to ~/.config/.nite/models/<model_name>/model.yaml
+/// Save a model configuration to ~/.config/cocode/models/<model_name>/model.yaml
 pub fn save_model_config(model_name: &str, config: &ModelConfig) -> Result<()> {
     let config_file = ModelConfig::get_config_path(model_name)?;
 

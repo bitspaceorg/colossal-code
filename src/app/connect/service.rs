@@ -12,6 +12,9 @@ use crate::app::connect::{
 use crate::app::persistence::auth_store::{
     AuthStore, StoredAuthKind, StoredConnection, current_unix_timestamp, save_auth_store,
 };
+use crate::app::persistence::provider_files::{
+    ProviderFile, provider_id_from_name, save_provider_file,
+};
 
 fn require_claude_code_access_token(access_token: Option<&str>) -> Result<()> {
     if access_token.is_some_and(|token| !token.trim().is_empty()) {
@@ -89,6 +92,61 @@ impl App {
         self.connect.input.trim().to_string()
     }
 
+    pub(crate) fn sanitized_connect_base_url(&self) -> String {
+        self.connect
+            .base_url_input
+            .trim()
+            .trim_end_matches('/')
+            .to_string()
+    }
+
+    pub(crate) fn selected_provider_needs_base_url_input(&self) -> bool {
+        self.connect
+            .selected_provider
+            .as_ref()
+            .is_some_and(|provider| provider.id == "openai-compatible")
+    }
+
+    pub(crate) fn selected_provider_needs_name_input(&self) -> bool {
+        self.selected_provider_needs_base_url_input()
+    }
+
+    pub(crate) fn sanitized_connect_provider_name(&self) -> String {
+        self.connect.provider_name_input.trim().to_string()
+    }
+
+    pub(crate) fn select_connect_api_key_field(&mut self, selected_index: usize) {
+        self.connect.selected_index =
+            selected_index.min(if self.selected_provider_needs_name_input() {
+                2
+            } else if self.selected_provider_needs_base_url_input() {
+                1
+            } else {
+                0
+            });
+        self.connect.input_cursor = match self.connect.selected_index {
+            0 if self.selected_provider_needs_name_input() => {
+                self.connect.provider_name_input.chars().count()
+            }
+            1 if self.selected_provider_needs_base_url_input() => {
+                self.connect.base_url_input.chars().count()
+            }
+            _ => self.connect.input.chars().count(),
+        };
+    }
+
+    pub(crate) fn active_connect_api_key_field_len(&self) -> usize {
+        match self.connect.selected_index {
+            0 if self.selected_provider_needs_name_input() => {
+                self.connect.provider_name_input.chars().count()
+            }
+            1 if self.selected_provider_needs_base_url_input() => {
+                self.connect.base_url_input.chars().count()
+            }
+            _ => self.connect.input.chars().count(),
+        }
+    }
+
     pub(crate) fn open_connect_modal(&mut self) {
         self.connect.show_connect_modal = true;
         self.connect.mode = ConnectModalMode::Providers;
@@ -96,6 +154,8 @@ impl App {
         self.connect.selected_index = 0;
         self.connect.filter.clear();
         self.connect.input.clear();
+        self.connect.base_url_input.clear();
+        self.connect.provider_name_input.clear();
         self.connect.input_cursor = 0;
         self.connect.selected_provider = None;
         self.connect.selected_auth_method = None;
@@ -112,6 +172,8 @@ impl App {
         self.connect.mode = ConnectModalMode::Providers;
         self.connect.filter.clear();
         self.connect.input.clear();
+        self.connect.base_url_input.clear();
+        self.connect.provider_name_input.clear();
         self.connect.input_cursor = 0;
         self.connect.selected_provider = None;
         self.connect.selected_auth_method = None;
@@ -211,8 +273,25 @@ impl App {
             .as_ref()
             .and_then(|connection| connection.api_key.clone())
             .unwrap_or_default();
-        self.connect.input_cursor = self.connect.input.chars().count();
+        self.connect.base_url_input = saved
+            .as_ref()
+            .and_then(|connection| connection.base_url.clone())
+            .or_else(|| default_base_url_for_provider(&provider.id))
+            .unwrap_or_default();
+        self.connect.provider_name_input = if provider.id == "openai-compatible" {
+            saved
+                .as_ref()
+                .map(|connection| connection.provider_name.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         self.connect.selected_index = 0;
+        self.connect.input_cursor = if provider.id == "openai-compatible" {
+            self.connect.provider_name_input.chars().count()
+        } else {
+            self.connect.input.chars().count()
+        };
 
         self.connect.mode = if provider.auth_methods.len() > 1 {
             ConnectModalMode::AuthMethod
@@ -234,7 +313,20 @@ impl App {
             .unwrap_or(ConnectAuthMethod::ApiKey);
 
         let now = current_unix_timestamp();
-        let id = provider.id.clone();
+        let is_custom_provider = provider.id == "openai-compatible";
+        let custom_name = if is_custom_provider {
+            let name = self.sanitized_connect_provider_name();
+            if name.is_empty() {
+                return Err(color_eyre::eyre::eyre!("Provider name is empty"));
+            }
+            Some(name)
+        } else {
+            None
+        };
+        let id = custom_name
+            .as_deref()
+            .map(provider_id_from_name)
+            .unwrap_or_else(|| provider.id.clone());
         let created_at = self
             .connect
             .saved_connections
@@ -254,14 +346,28 @@ impl App {
                 if api_key.is_empty() {
                     return Err(color_eyre::eyre::eyre!("API key is empty"));
                 }
+                let base_url = if is_custom_provider {
+                    let base_url = self.sanitized_connect_base_url();
+                    if base_url.is_empty() {
+                        return Err(color_eyre::eyre::eyre!("Base URL is empty"));
+                    }
+                    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+                        return Err(color_eyre::eyre::eyre!(
+                            "Base URL must start with http:// or https://"
+                        ));
+                    }
+                    Some(base_url)
+                } else {
+                    default_base_url_for_provider(&provider.id)
+                };
                 StoredConnection {
                     id: id.clone(),
-                    provider_id: provider.id.clone(),
-                    provider_name: provider.name,
+                    provider_id: id.clone(),
+                    provider_name: custom_name.clone().unwrap_or(provider.name),
                     auth_kind: StoredAuthKind::ApiKey,
                     api_key: Some(api_key),
                     model,
-                    base_url: default_base_url_for_provider(&provider.id),
+                    base_url,
                     completions_path: default_completions_path_for_provider(&provider.id),
                     account_id: None,
                     access_token: None,
@@ -353,6 +459,17 @@ impl App {
         store.upsert_connection(connection.clone());
         save_auth_store(&store)?;
 
+        if let (true, Some(name), Some(url_base)) = (
+            is_custom_provider,
+            custom_name.as_ref(),
+            connection.base_url.clone(),
+        ) {
+            save_provider_file(&ProviderFile {
+                name: name.clone(),
+                url_base,
+            })?;
+        }
+
         self.connect.saved_connections = store.connections;
         self.connect.active_connection_id = store.active_connection_id;
         Ok(connection)
@@ -436,7 +553,23 @@ impl App {
                 self.clamp_connect_provider_selection();
             }
             ConnectModalMode::ApiKey => {
-                Self::insert_at_char(&mut self.connect.input, self.connect.input_cursor, &data);
+                if self.connect.selected_index == 0 && self.selected_provider_needs_name_input() {
+                    Self::insert_at_char(
+                        &mut self.connect.provider_name_input,
+                        self.connect.input_cursor,
+                        &data,
+                    );
+                } else if self.connect.selected_index == 1
+                    && self.selected_provider_needs_base_url_input()
+                {
+                    Self::insert_at_char(
+                        &mut self.connect.base_url_input,
+                        self.connect.input_cursor,
+                        &data,
+                    );
+                } else {
+                    Self::insert_at_char(&mut self.connect.input, self.connect.input_cursor, &data);
+                }
                 self.connect.input_cursor += data.chars().count();
             }
             ConnectModalMode::Subscription
@@ -465,11 +598,27 @@ impl App {
                 self.clamp_connect_provider_selection();
             }
             ConnectModalMode::ApiKey => {
-                Self::insert_at_char(
-                    &mut self.connect.input,
-                    self.connect.input_cursor,
-                    &c.to_string(),
-                );
+                if self.connect.selected_index == 0 && self.selected_provider_needs_name_input() {
+                    Self::insert_at_char(
+                        &mut self.connect.provider_name_input,
+                        self.connect.input_cursor,
+                        &c.to_string(),
+                    );
+                } else if self.connect.selected_index == 1
+                    && self.selected_provider_needs_base_url_input()
+                {
+                    Self::insert_at_char(
+                        &mut self.connect.base_url_input,
+                        self.connect.input_cursor,
+                        &c.to_string(),
+                    );
+                } else {
+                    Self::insert_at_char(
+                        &mut self.connect.input,
+                        self.connect.input_cursor,
+                        &c.to_string(),
+                    );
+                }
                 self.connect.input_cursor += 1;
             }
             ConnectModalMode::AuthMethod
@@ -492,7 +641,21 @@ impl App {
                 if self.connect.input_cursor == 0 {
                     return;
                 }
-                Self::remove_at_char(&mut self.connect.input, self.connect.input_cursor - 1);
+                if self.connect.selected_index == 0 && self.selected_provider_needs_name_input() {
+                    Self::remove_at_char(
+                        &mut self.connect.provider_name_input,
+                        self.connect.input_cursor - 1,
+                    );
+                } else if self.connect.selected_index == 1
+                    && self.selected_provider_needs_base_url_input()
+                {
+                    Self::remove_at_char(
+                        &mut self.connect.base_url_input,
+                        self.connect.input_cursor - 1,
+                    );
+                } else {
+                    Self::remove_at_char(&mut self.connect.input, self.connect.input_cursor - 1);
+                }
                 self.connect.input_cursor -= 1;
             }
             ConnectModalMode::AuthMethod
@@ -534,6 +697,18 @@ impl App {
 fn default_base_url_for_provider(provider_id: &str) -> Option<String> {
     match provider_id {
         "openai" => Some("https://api.openai.com".to_string()),
+        "anthropic" => Some("https://api.anthropic.com".to_string()),
+        "openrouter" => Some("https://openrouter.ai/api".to_string()),
+        "deepseek" => Some("https://api.deepseek.com".to_string()),
+        "groq" => Some("https://api.groq.com/openai".to_string()),
+        "xai" => Some("https://api.x.ai".to_string()),
+        "mistral" => Some("https://api.mistral.ai".to_string()),
+        "cerebras" => Some("https://api.cerebras.ai".to_string()),
+        "togetherai" => Some("https://api.together.xyz".to_string()),
+        "perplexity" => Some("https://api.perplexity.ai".to_string()),
+        "moonshotai" => Some("https://api.moonshot.ai".to_string()),
+        "alibaba" => Some("https://dashscope.aliyuncs.com/compatible-mode".to_string()),
+        "nvidia" => Some("https://integrate.api.nvidia.com".to_string()),
         _ => None,
     }
 }
@@ -541,13 +716,21 @@ fn default_base_url_for_provider(provider_id: &str) -> Option<String> {
 fn default_completions_path_for_provider(provider_id: &str) -> Option<String> {
     match provider_id {
         "openai" => Some("/v1/chat/completions".to_string()),
+        "anthropic" => Some("/v1/messages".to_string()),
+        "openai-compatible" => Some("/v1/chat/completions".to_string()),
+        "openrouter" | "deepseek" | "groq" | "xai" | "mistral" | "cerebras" | "togetherai"
+        | "moonshotai" | "alibaba" | "nvidia" => Some("/v1/chat/completions".to_string()),
+        "perplexity" => Some("/chat/completions".to_string()),
         _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{require_claude_code_access_token, saved_openai_subscription_state};
+    use super::{
+        default_base_url_for_provider, default_completions_path_for_provider,
+        require_claude_code_access_token, saved_openai_subscription_state,
+    };
     use crate::app::persistence::auth_store::{StoredAuthKind, StoredConnection};
 
     #[test]
@@ -587,5 +770,30 @@ mod tests {
         assert_eq!(state.device_auth_id, None);
         assert_eq!(state.access_token.as_deref(), Some("access"));
         assert_eq!(state.refresh_token.as_deref(), Some("refresh"));
+    }
+
+    #[test]
+    fn api_key_provider_defaults_route_to_their_own_backends() {
+        assert_eq!(
+            default_base_url_for_provider("openai").as_deref(),
+            Some("https://api.openai.com")
+        );
+        assert_eq!(
+            default_completions_path_for_provider("openai").as_deref(),
+            Some("/v1/chat/completions")
+        );
+        assert_eq!(
+            default_base_url_for_provider("anthropic").as_deref(),
+            Some("https://api.anthropic.com")
+        );
+        assert_eq!(
+            default_completions_path_for_provider("anthropic").as_deref(),
+            Some("/v1/messages")
+        );
+        assert_eq!(default_base_url_for_provider("openai-compatible"), None);
+        assert_eq!(
+            default_completions_path_for_provider("openai-compatible").as_deref(),
+            Some("/v1/chat/completions")
+        );
     }
 }

@@ -1,7 +1,7 @@
 use color_eyre::Result;
 use std::collections::HashSet;
 
-use crate::app::connect::model_discovery::{provider_model_metadata, provider_models_metadata};
+use crate::app::connect::model_discovery::resolve_connection_models;
 use crate::app::persistence::auth_store::{StoredConnection, load_auth_store};
 use crate::app::{
     AUTO_SUMMARIZE_THRESHOLD_CONFIG_KEY, AUTO_SUMMARIZE_THRESHOLD_VERSION,
@@ -86,6 +86,13 @@ impl App {
     pub(crate) fn build_available_models(
         connections: &[StoredConnection],
     ) -> Result<Vec<ModelInfo>> {
+        Self::build_available_models_with_discovery(connections, false)
+    }
+
+    pub(crate) fn build_available_models_with_discovery(
+        connections: &[StoredConnection],
+        discover: bool,
+    ) -> Result<Vec<ModelInfo>> {
         let mut models = Vec::new();
         if let Some(models_dir) = Self::models_directory_path()
             && models_dir.exists()
@@ -133,59 +140,67 @@ impl App {
         }
 
         let mut seen = HashSet::new();
-        seen.extend(models.iter().map(|model| model.filename.clone()));
+        seen.extend(
+            models
+                .iter()
+                .map(|model| (model.connection_id.clone(), model.filename.clone())),
+        );
 
         for connection in connections {
-            // Try to get provider metadata dynamically
-            let provider_metadata = match provider_models_metadata(&connection.provider_id) {
-                Ok(metadata) => metadata,
-                Err(e) => {
-                    eprintln!(
-                        "[WARN] Failed to fetch model metadata for provider '{}': {}",
-                        connection.provider_id, e
-                    );
-                    Default::default()
-                }
-            };
+            // Startup must not block on remote model catalogs. Use the saved model and
+            // small built-in lists; explicit refresh paths can do network discovery.
+            if let Some(model) = connection.model.as_deref()
+                && seen.insert((Some(connection.id.clone()), model.to_string()))
+            {
+                models.push(ModelInfo {
+                    filename: model.to_string(),
+                    display_name: model.to_string(),
+                    connection_id: Some(connection.id.clone()),
+                    provider_name: Some(connection.provider_name.clone()),
+                    size_mb: 0.0,
+                    quantization: None,
+                    architecture: None,
+                    parameter_count: None,
+                    file_hash: None,
+                    author: None,
+                    version: None,
+                    context_length: None,
+                    supported_effort_levels: Vec::new(),
+                });
+            }
 
-            // If metadata is available, use those models dynamically instead of hardcoded lists
-            if !provider_metadata.is_empty() {
-                for (model_id, metadata) in provider_metadata.iter() {
-                    if !seen.insert(model_id.clone()) {
-                        continue;
-                    }
-
-                    models.push(ModelInfo {
-                        filename: model_id.clone(),
-                        display_name: metadata.display_name.clone(),
-                        connection_id: Some(connection.id.clone()),
-                        provider_name: Some(connection.provider_name.clone()),
-                        size_mb: 0.0,
-                        quantization: None,
-                        architecture: None,
-                        parameter_count: None,
-                        file_hash: None,
-                        author: None,
-                        version: None,
-                        context_length: metadata.context_length,
-                        supported_effort_levels: metadata.supported_effort_levels.clone(),
-                    });
-                }
-            } else {
-                // Fallback to hardcoded lists for backward compatibility
-                let provider_models = connected_provider_models(&connection.provider_id);
-                if provider_models.is_empty() {
+            let provider_models = connected_provider_models(&connection.provider_id);
+            for model in provider_models {
+                if !seen.insert((Some(connection.id.clone()), (*model).to_string())) {
                     continue;
                 }
 
-                for model in provider_models {
-                    if !seen.insert((*model).to_string()) {
+                models.push(ModelInfo {
+                    filename: (*model).to_string(),
+                    display_name: (*model).to_string(),
+                    connection_id: Some(connection.id.clone()),
+                    provider_name: Some(connection.provider_name.clone()),
+                    size_mb: 0.0,
+                    quantization: None,
+                    architecture: None,
+                    parameter_count: None,
+                    file_hash: None,
+                    author: None,
+                    version: None,
+                    context_length: None,
+                    supported_effort_levels: Vec::new(),
+                });
+            }
+
+            if discover {
+                for model in resolve_connection_models(connection)? {
+                    if !seen.insert((Some(connection.id.clone()), model.clone())) {
                         continue;
                     }
 
                     models.push(ModelInfo {
-                        filename: (*model).to_string(),
-                        display_name: (*model).to_string(),
+                        filename: model.clone(),
+                        display_name: model,
                         connection_id: Some(connection.id.clone()),
                         provider_name: Some(connection.provider_name.clone()),
                         size_mb: 0.0,
@@ -207,7 +222,7 @@ impl App {
     }
 
     pub(crate) fn models_directory_path() -> Option<std::path::PathBuf> {
-        dirs::home_dir().map(|home| home.join(".config").join(".nite").join("models"))
+        dirs::home_dir().map(|home| home.join(".config").join("cocode").join("models"))
     }
 
     pub(crate) fn load_config_value(key: &str) -> Option<String> {
@@ -254,12 +269,7 @@ impl App {
             return None;
         };
 
-        if let Some(provider_id) = provider_id
-            && let Some(metadata) = provider_model_metadata(provider_id, model)
-            && metadata.context_length.is_some()
-        {
-            return metadata.context_length;
-        }
+        let _ = provider_id;
 
         let models_dir = Self::models_directory_path();
         let dir_ref = models_dir.as_deref();
@@ -314,7 +324,15 @@ impl App {
     }
 
     pub(crate) fn refresh_available_models_cache(&mut self, _discover: bool) -> Result<()> {
-        self.load_models()
+        let models = match load_auth_store() {
+            Ok(store) => {
+                Self::build_available_models_with_discovery(&store.connections, _discover)?
+            }
+            Err(_) => Self::build_available_models(&self.connect.saved_connections)?,
+        };
+        self.available_models = models;
+        self.model_selected_index = 0;
+        Ok(())
     }
 
     pub(crate) fn initialize_config_file() -> Result<()> {

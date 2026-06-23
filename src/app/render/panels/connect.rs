@@ -19,6 +19,7 @@ impl App {
         let size = match self.connect.mode {
             ConnectModalMode::Providers => (72, 18),
             ConnectModalMode::AuthMethod => (72, 16),
+            ConnectModalMode::ApiKey if self.selected_provider_needs_name_input() => (72, 20),
             ConnectModalMode::ApiKey => (72, 14),
             ConnectModalMode::Subscription => (72, 14),
             ConnectModalMode::Models => (72, 16),
@@ -210,15 +211,19 @@ impl App {
                 sections[2],
             );
         } else {
-            let items: Vec<ListItem> = filtered
-                .iter()
-                .enumerate()
+            let row_height = 2usize;
+            let visible_count = ((sections[2].height as usize) / row_height).max(1);
+            let selected_index = self
+                .connect
+                .selected_index
+                .min(filtered.len().saturating_sub(1));
+            let offset = selected_index
+                .saturating_add(1)
+                .saturating_sub(visible_count);
+            let visible = filtered.iter().enumerate().skip(offset).take(visible_count);
+            let items: Vec<ListItem> = visible
                 .map(|(idx, provider)| {
-                    let selected = idx
-                        == self
-                            .connect
-                            .selected_index
-                            .min(filtered.len().saturating_sub(1));
+                    let selected = idx == selected_index;
                     let prefix = if selected { ">  " } else { "   " };
                     let connected = self
                         .connect
@@ -275,23 +280,45 @@ impl App {
         let title = provider
             .map(|provider| format!(" {} API Key ", provider.name))
             .unwrap_or_else(|| " API Key ".to_string());
+        let needs_base_url = self.selected_provider_needs_base_url_input();
+        let needs_name = self.selected_provider_needs_name_input();
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Yellow))
             .style(Style::default().bg(CONNECT_BG))
             .title(title)
-            .title_bottom(Line::from(" Enter continue · Esc back ").centered());
+            .title_bottom(
+                Line::from(if needs_base_url {
+                    " Up/Down field · Enter continue · Esc back "
+                } else {
+                    " Enter continue · Esc back "
+                })
+                .centered(),
+            );
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let sections = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(2),
-            Constraint::Length(1),
-        ])
-        .split(inner);
+        let sections = if needs_base_url {
+            Layout::vertical([
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Min(2),
+                Constraint::Length(1),
+            ])
+            .split(inner)
+        } else {
+            Layout::vertical([
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Min(2),
+                Constraint::Length(1),
+                Constraint::Length(0),
+            ])
+            .split(inner)
+        };
 
         let description = provider
             .map(|provider| provider.api_key_hint.clone())
@@ -330,17 +357,97 @@ impl App {
             sections[0],
         );
 
+        if needs_name {
+            let name_block = Block::default()
+                .borders(Borders::ALL)
+                .title(" Provider Name ")
+                .style(Style::default().bg(CONNECT_BG))
+                .border_style(if self.connect.selected_index == 0 {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                });
+            let name_inner = name_block.inner(sections[1]);
+            frame.render_widget(name_block, sections[1]);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    if self.connect.provider_name_input.is_empty() {
+                        "provider name".to_string()
+                    } else {
+                        self.connect.provider_name_input.clone()
+                    },
+                    if self.connect.provider_name_input.is_empty() {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                )))
+                .style(Style::default().bg(CONNECT_BG)),
+                name_inner,
+            );
+        }
+
+        let url_section = if needs_name { sections[2] } else { sections[1] };
+        let key_section = if needs_base_url {
+            if needs_name { sections[3] } else { sections[2] }
+        } else {
+            sections[1]
+        };
+        if needs_base_url {
+            let url_block = Block::default()
+                .borders(Borders::ALL)
+                .title(" Base URL ")
+                .style(Style::default().bg(CONNECT_BG))
+                .border_style(
+                    if self.connect.selected_index == if needs_name { 1 } else { 0 } {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                );
+            let url_inner = url_block.inner(url_section);
+            frame.render_widget(url_block, url_section);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    if self.connect.base_url_input.is_empty() {
+                        "https://your-endpoint.example".to_string()
+                    } else {
+                        self.connect.base_url_input.clone()
+                    },
+                    if self.connect.base_url_input.is_empty() {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                )))
+                .style(Style::default().bg(CONNECT_BG)),
+                url_inner,
+            );
+        }
+
         let masked = if self.connect.input.is_empty() {
             "enter api key".to_string()
         } else {
             "*".repeat(self.connect.input.chars().count())
         };
+        let key_index = if needs_name {
+            2
+        } else if needs_base_url {
+            1
+        } else {
+            0
+        };
         let input_block = Block::default()
             .borders(Borders::ALL)
+            .title(" API Key ")
             .style(Style::default().bg(CONNECT_BG))
-            .border_style(Style::default().fg(Color::DarkGray));
-        let input_inner = input_block.inner(sections[1]);
-        frame.render_widget(input_block, sections[1]);
+            .border_style(if self.connect.selected_index == key_index {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            });
+        let input_inner = input_block.inner(key_section);
+        frame.render_widget(input_block, key_section);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 masked,
@@ -354,6 +461,11 @@ impl App {
             input_inner,
         );
 
+        let summary_section = if needs_base_url {
+            if needs_name { sections[4] } else { sections[3] }
+        } else {
+            sections[2]
+        };
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(vec![
@@ -367,6 +479,24 @@ impl App {
                     ),
                 ]),
                 Line::from(vec![
+                    Span::styled("Base URL", Style::default().fg(Color::Yellow)),
+                    Span::raw(": "),
+                    Span::styled(
+                        if needs_base_url {
+                            self.connect.base_url_input.as_str()
+                        } else {
+                            provider
+                                .and_then(|provider| match provider.id.as_str() {
+                                    "openai" => Some("https://api.openai.com"),
+                                    "anthropic" => Some("https://api.anthropic.com"),
+                                    _ => None,
+                                })
+                                .unwrap_or("custom")
+                        },
+                        Style::default().fg(Color::White),
+                    ),
+                ]),
+                Line::from(vec![
                     Span::styled("Key length", Style::default().fg(Color::Yellow)),
                     Span::raw(": "),
                     Span::styled(
@@ -376,16 +506,21 @@ impl App {
                 ]),
             ])
             .style(Style::default().bg(CONNECT_BG)),
-            sections[2],
+            summary_section,
         );
 
+        let footer_section = if needs_base_url {
+            if needs_name { sections[5] } else { sections[4] }
+        } else {
+            sections[3]
+        };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("Esc", Style::default().fg(Color::Magenta)),
                 Span::styled(" back", Style::default().fg(Color::DarkGray)),
             ]))
             .style(Style::default().bg(CONNECT_BG)),
-            sections[3],
+            footer_section,
         );
     }
 

@@ -2,6 +2,7 @@ use color_eyre::Result;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
+use std::time::Duration;
 
 use crate::app::connect::ConnectProviderOption;
 use crate::app::persistence::auth_store::{StoredAuthKind, StoredConnection};
@@ -52,10 +53,6 @@ pub(crate) fn resolve_provider_models(
     api_key: Option<&str>,
     saved_connection: Option<&StoredConnection>,
 ) -> Result<Vec<String>> {
-    if provider.id != "openai" && provider.id != "anthropic" {
-        return Ok(provider.models.clone());
-    }
-
     let fetched = match auth_kind.unwrap_or(StoredAuthKind::ApiKey) {
         StoredAuthKind::ApiKey => match provider.id.as_str() {
             "openai" => api_key
@@ -66,7 +63,10 @@ pub(crate) fn resolve_provider_models(
                 .filter(|value| !value.trim().is_empty())
                 .map(fetch_anthropic_api_models)
                 .transpose()?,
-            _ => None,
+            _ => match saved_connection {
+                Some(connection) => Some(fetch_openai_compatible_api_models(connection)?),
+                None => None,
+            },
         },
         StoredAuthKind::OpenAiSubscription => match saved_connection {
             Some(connection) => Some(fetch_openai_subscription_models(connection)?),
@@ -80,6 +80,30 @@ pub(crate) fn resolve_provider_models(
     }
 
     Ok(provider.models.clone())
+}
+
+pub(crate) fn resolve_connection_models(connection: &StoredConnection) -> Result<Vec<String>> {
+    match connection.auth_kind {
+        StoredAuthKind::ApiKey => match connection.provider_id.as_str() {
+            "openai" => connection
+                .api_key
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(fetch_openai_api_models)
+                .transpose()
+                .map(|models| models.unwrap_or_default()),
+            "anthropic" => connection
+                .api_key
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(fetch_anthropic_api_models)
+                .transpose()
+                .map(|models| models.unwrap_or_default()),
+            _ => fetch_openai_compatible_api_models(connection),
+        },
+        StoredAuthKind::OpenAiSubscription => fetch_openai_subscription_models(connection),
+        StoredAuthKind::ClaudeCode => Ok(default_claude_code_models()),
+    }
 }
 
 pub(crate) fn resolve_model_display_names(
@@ -117,7 +141,7 @@ pub(crate) fn fallback_formatted_model_display_name(provider_id: &str, model_id:
 fn fetch_openai_api_models(api_key: &str) -> Result<Vec<String>> {
     let api_key = api_key.trim().to_string();
     run_blocking_request(move || {
-        let client = Client::new();
+        let client = Client::builder().timeout(Duration::from_secs(8)).build()?;
         let response = client
             .get("https://api.openai.com/v1/models")
             .bearer_auth(api_key)
@@ -143,7 +167,7 @@ fn fetch_openai_subscription_models(connection: &StoredConnection) -> Result<Vec
 
     let account_id = connection.account_id.clone();
     run_blocking_request(move || {
-        let client = Client::new();
+        let client = Client::builder().timeout(Duration::from_secs(8)).build()?;
         let mut request = client
             .get("https://api.openai.com/v1/models")
             .bearer_auth(access_token.trim());
@@ -215,7 +239,7 @@ fn filter_openai_model_ids(ids: impl IntoIterator<Item = String>) -> Vec<String>
 fn fetch_anthropic_api_models(api_key: &str) -> Result<Vec<String>> {
     let api_key = api_key.trim().to_string();
     run_blocking_request(move || {
-        let client = Client::new();
+        let client = Client::builder().timeout(Duration::from_secs(8)).build()?;
         let response = client
             .get("https://api.anthropic.com/v1/models")
             .header("x-api-key", &api_key)
@@ -227,6 +251,46 @@ fn fetch_anthropic_api_models(api_key: &str) -> Result<Vec<String>> {
 
         let payload: OpenAiModelsResponse = response.json()?;
         Ok(payload.data.into_iter().map(|entry| entry.id).collect())
+    })
+}
+
+fn fetch_openai_compatible_api_models(connection: &StoredConnection) -> Result<Vec<String>> {
+    let Some(base_url) = connection.base_url.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let base_url = base_url.trim().trim_end_matches('/').to_string();
+    if base_url.is_empty() {
+        return Ok(Vec::new());
+    }
+    let api_key = connection.api_key.clone();
+    run_blocking_request(move || {
+        let client = Client::builder().timeout(Duration::from_secs(5)).build()?;
+        let models_url = if base_url.ends_with("/v1") {
+            format!("{base_url}/models")
+        } else {
+            format!("{base_url}/v1/models")
+        };
+        let mut request = client.get(models_url);
+        if let Some(api_key) = api_key.as_deref().filter(|key| !key.trim().is_empty()) {
+            request = request.bearer_auth(api_key.trim());
+        }
+        let response = request.send()?;
+        if !response.status().is_success() {
+            return Ok(Vec::new());
+        }
+        let payload: OpenAiModelsResponse = response.json()?;
+        Ok(payload
+            .data
+            .into_iter()
+            .filter_map(|entry| {
+                let lowered = entry.id.to_ascii_lowercase();
+                if lowered.contains("embedding") {
+                    None
+                } else {
+                    Some(entry.id)
+                }
+            })
+            .collect())
     })
 }
 
@@ -258,7 +322,7 @@ fn fetch_provider_model_metadata(
 ) -> Result<HashMap<String, ProviderModelMetadata>> {
     let provider_id = provider_id.to_string();
     run_blocking_request(move || {
-        let client = Client::new();
+        let client = Client::builder().timeout(Duration::from_secs(5)).build()?;
         let response = client
             .get("https://models.dev/api.json")
             .header(reqwest::header::USER_AGENT, "nite")
@@ -476,6 +540,10 @@ mod tests {
         ModelsDevLimit, ModelsDevModel, derive_supported_reasoning_efforts,
         fallback_model_display_name,
     };
+    use crate::app::persistence::auth_store::{StoredAuthKind, StoredConnection};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn formats_openai_model_ids_when_catalog_is_missing() {
@@ -539,6 +607,63 @@ mod tests {
                 &model,
             ),
             vec!["low", "medium", "high"]
+        );
+    }
+
+    #[test]
+    fn resolves_openai_compatible_models_from_v1_models_endpoint() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0; 1024];
+            let _ = stream.read(&mut buffer).unwrap();
+            let body = r#"{
+                "data": [
+                    {"id":"qwen/qwen3.6-27b","object":"model","owned_by":"organization_owner"},
+                    {"id":"text-embedding-nomic-embed-text-v1.5","object":"model","owned_by":"organization_owner"},
+                    {"id":"qwen3.5-27b-claude-4.6-opus-reasoning-distilled","object":"model","owned_by":"organization_owner"}
+                ],
+                "object":"list"
+            }"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let connection = StoredConnection {
+            id: "lmstudio".to_string(),
+            provider_id: "lmstudio".to_string(),
+            provider_name: "LMStudio".to_string(),
+            auth_kind: StoredAuthKind::ApiKey,
+            api_key: None,
+            model: None,
+            base_url: Some(format!("http://{address}/v1")),
+            completions_path: Some("/v1/chat/completions".to_string()),
+            account_id: None,
+            access_token: None,
+            refresh_token: None,
+            access_expires_at: None,
+            oauth_scopes: Vec::new(),
+            oauth_subscription_type: None,
+            oauth_rate_limit_tier: None,
+            organization_id: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        let models = super::resolve_connection_models(&connection).unwrap();
+        handle.join().unwrap();
+        assert_eq!(
+            models,
+            vec![
+                "qwen/qwen3.6-27b".to_string(),
+                "qwen3.5-27b-claude-4.6-opus-reasoning-distilled".to_string(),
+            ]
         );
     }
 }

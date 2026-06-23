@@ -2,7 +2,7 @@ use color_eyre::Result;
 use std::path::{Path, PathBuf};
 
 pub(crate) fn conversations_dir_from_home(home: &Path) -> PathBuf {
-    home.join(".config").join(".nite").join("conversations")
+    home.join(".config").join("cocode").join("conversations")
 }
 
 pub fn conversations_dir() -> Result<PathBuf> {
@@ -94,6 +94,6 @@ mod tests {
     fn conversations_dir_is_under_home_config() {
         let base = std::env::temp_dir().join("cocode_persistence_test_home");
         let path = conversations_dir_from_home(&base);
-        assert!(path.ends_with(".config/.nite/conversations"));
+        assert!(path.ends_with(".config/cocode/conversations"));
     }
 }

@@ -79,14 +79,24 @@ async fn collect_response_text(
         match response {
             Response::Chunk(chunk) => {
                 if let Some(choice) = chunk.choices.first()
-                    && let Some(content) = &choice.delta.content
+                    && let Some(content) = choice
+                        .delta
+                        .content
+                        .as_ref()
+                        .filter(|content| !content.is_empty())
+                        .or(choice.delta.reasoning_content.as_ref())
                 {
                     merge_streamed_text(&mut out, &mut last, content);
                 }
             }
             Response::Done(done) => {
                 if let Some(choice) = done.choices.first()
-                    && let Some(content) = choice.message.content.as_ref()
+                    && let Some(content) = choice
+                        .message
+                        .content
+                        .as_ref()
+                        .filter(|content| !content.is_empty())
+                        .or(choice.message.reasoning_content.as_ref())
                 {
                     out = content.clone();
                 }
@@ -734,7 +744,9 @@ impl Agent {
         {
             BackendConfig::None
         } else {
-            let model_path = "/home/wise/.config/.nite/models".to_string();
+            let model_path = std::env::var("HOME")
+                .map(|home| format!("{home}/.config/cocode/models"))
+                .unwrap_or_else(|_| "/home/wise/.config/cocode/models".to_string());
             let selected_model = model_filename
                 .unwrap_or_else(|| "Qwen_Qwen3-4B-Thinking-2507-Q8_0.gguf".to_string());
 
@@ -845,8 +857,10 @@ impl Agent {
             .await?;
 
         if self.backend_kind == BackendKind::Local {
-            let tags =
-                Self::load_thinking_tags("/home/wise/.config/.nite/models", &new_model_filename);
+            let models_dir = std::env::var("HOME")
+                .map(|home| format!("{home}/.config/cocode/models"))
+                .unwrap_or_else(|_| "/home/wise/.config/cocode/models".to_string());
+            let tags = Self::load_thinking_tags(&models_dir, &new_model_filename);
 
             let mut tags_guard = self.thinking_tags.lock().await;
             *tags_guard = tags.clone();

@@ -11,7 +11,7 @@ pub fn history_file_path_for_cwd(cwd: &Path) -> Result<PathBuf> {
 
     let mut history_dir = dirs::config_dir()
         .ok_or_else(|| color_eyre::eyre::eyre!("Could not find config directory"))?;
-    history_dir.push(".nite");
+    history_dir.push("cocode");
     history_dir.push("history");
     std::fs::create_dir_all(&history_dir)?;
 

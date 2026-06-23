@@ -110,15 +110,25 @@ impl App {
                         ConnectModalMode::Providers
                     };
                     self.connect.input.clear();
+                    self.connect.base_url_input.clear();
+                    self.connect.provider_name_input.clear();
                     self.connect.input_cursor = 0;
+                }
+                KeyCode::Up if self.selected_provider_needs_base_url_input() => {
+                    self.select_connect_api_key_field(
+                        self.connect.selected_index.saturating_sub(1),
+                    );
+                }
+                KeyCode::Down | KeyCode::Tab if self.selected_provider_needs_base_url_input() => {
+                    self.select_connect_api_key_field(self.connect.selected_index + 1);
                 }
                 KeyCode::Backspace => self.backspace_connect_input(),
                 KeyCode::Left => {
                     self.connect.input_cursor = self.connect.input_cursor.saturating_sub(1);
                 }
                 KeyCode::Right => {
-                    self.connect.input_cursor =
-                        (self.connect.input_cursor + 1).min(self.connect.input.chars().count());
+                    self.connect.input_cursor = (self.connect.input_cursor + 1)
+                        .min(self.active_connect_api_key_field_len());
                 }
                 KeyCode::Char(c)
                     if !key.modifiers.contains(KeyModifiers::CONTROL)

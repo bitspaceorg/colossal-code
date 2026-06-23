@@ -408,7 +408,7 @@ impl App {
                 )),
                 Line::from(""),
                 Line::from(Span::raw(
-                    "Place .gguf model files in ~/.config/.nite/models/",
+                    "Place .gguf model files in ~/.config/cocode/models/",
                 )),
             ];
             let content_area = ratatui::layout::Rect {
@@ -677,7 +677,7 @@ impl App {
                     Line::from(""),
                     Line::from(Span::raw("Custom commands can be added in:")),
                     Line::from(Span::styled(
-                        "  ~/.config/.nite/commands/",
+                        "  ~/.config/cocode/commands/",
                         Style::default().fg(Color::Blue),
                     )),
                     Line::from(""),

@@ -2,11 +2,11 @@ use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
 
-/// Get the Nite config directory path
+/// Get the cocode config directory path
 pub fn get_config_dir() -> Result<PathBuf> {
     let home =
         std::env::var("HOME").map_err(|_| anyhow::anyhow!("HOME environment variable not set"))?;
-    Ok(PathBuf::from(home).join(".config").join(".nite"))
+    Ok(PathBuf::from(home).join(".config").join("cocode"))
 }
 
 /// Get the models directory path
@@ -39,7 +39,7 @@ pub fn initialize_config() -> Result<()> {
     let config_dir = get_config_dir()?;
     let models_dir = get_models_dir()?;
 
-    // Create .config/.nite if it doesn't exist
+    // Create .config/cocode if it doesn't exist
     if !config_dir.exists() {
         fs::create_dir_all(&config_dir)?;
         println!("Created config directory: {}", config_dir.display());
@@ -68,7 +68,7 @@ pub fn initialize_config() -> Result<()> {
 }
 
 /// Read the system prompt from .niterules file
-/// Checks local .niterules first, then global ~/.config/.nite/.niterules
+/// Checks local .niterules first, then global ~/.config/cocode/.niterules
 pub fn read_system_prompt() -> Result<String> {
     let local_path = get_local_niterules_path();
 
