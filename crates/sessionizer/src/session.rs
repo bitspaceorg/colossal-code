@@ -44,6 +44,14 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
+fn configure_non_interactive_pager(env: &mut HashMap<String, String>) {
+    env.insert("GIT_PAGER".to_string(), "cat".to_string());
+    env.insert("PAGER".to_string(), "cat".to_string());
+    env.insert("MANPAGER".to_string(), "cat".to_string());
+    env.insert("BAT_PAGER".to_string(), "cat".to_string());
+    env.insert("LESS".to_string(), String::new());
+}
+
 fn shell_program_name(shell: &str) -> String {
     let path = PathBuf::from(shell);
     let resolved = path.canonicalize().unwrap_or(path);
@@ -991,6 +999,7 @@ pub async fn create_sandboxed_exec_session(
     env.insert("HISTSIZE".to_string(), "0".to_string());
     env.insert("SAVEHIST".to_string(), "0".to_string());
     env.insert("HISTCONTROL".to_string(), "ignoreboth".to_string());
+    configure_non_interactive_pager(&mut env);
     env.extend(extra_env);
     let mut request = SandboxManager::new().prepare_spawn(
         SandboxCommand {
@@ -1355,6 +1364,7 @@ pub async fn create_persistent_shell_session(
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
     env.insert("NO_COLOR".to_string(), "1".to_string());
+    configure_non_interactive_pager(&mut env);
     // Suppress bash warnings about escape sequence failures (bash 5.1+).
     env.insert(
         "BASH_SILENCE_ESCAPE_SEQ_FAILURE".to_string(),

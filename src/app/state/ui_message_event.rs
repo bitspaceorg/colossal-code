@@ -7,7 +7,10 @@ pub(crate) enum UiMessageEvent {
         completion_tokens: usize,
         prompt_tokens: usize,
         time_to_first_token_sec: f32,
+        total_time_sec: f32,
         stop_reason: String,
+        mode_key: String,
+        model_name: String,
     },
     ToolCallStarted {
         tool_name: String,
@@ -54,8 +57,20 @@ impl UiMessageEvent {
             let mut parts = message
                 .trim_start_matches("[GEN_STATS:")
                 .trim_end_matches(']')
-                .splitn(5, '|');
-            if let (Some(tps), Some(comp), Some(prompt), Some(ttft), Some(reason)) = (
+                .splitn(8, '|');
+            if let (
+                Some(tps),
+                Some(comp),
+                Some(prompt),
+                Some(ttft),
+                Some(total_time),
+                Some(reason),
+                Some(mode_key),
+                Some(model_name),
+            ) = (
+                parts.next(),
+                parts.next(),
+                parts.next(),
                 parts.next(),
                 parts.next(),
                 parts.next(),
@@ -66,18 +81,23 @@ impl UiMessageEvent {
                 Ok(completion_tokens),
                 Ok(prompt_tokens),
                 Ok(time_to_first_token_sec),
+                Ok(total_time_sec),
             ) = (
                 tps.parse::<f32>(),
                 comp.parse::<usize>(),
                 prompt.parse::<usize>(),
                 ttft.parse::<f32>(),
+                total_time.parse::<f32>(),
             ) {
                 return Some(Self::GenerationStats {
                     tokens_per_sec,
                     completion_tokens,
                     prompt_tokens,
                     time_to_first_token_sec,
+                    total_time_sec,
                     stop_reason: Self::unescape_field(reason),
+                    mode_key: Self::unescape_field(mode_key),
+                    model_name: Self::unescape_field(model_name),
                 });
             }
             return None;
@@ -126,14 +146,20 @@ impl UiMessageEvent {
                 completion_tokens,
                 prompt_tokens,
                 time_to_first_token_sec,
+                total_time_sec,
                 stop_reason,
+                mode_key,
+                model_name,
             } => format!(
-                "[GEN_STATS:{:.6}|{}|{}|{:.6}|{}]",
+                "[GEN_STATS:{:.6}|{}|{}|{:.6}|{:.6}|{}|{}|{}]",
                 tokens_per_sec,
                 completion_tokens,
                 prompt_tokens,
                 time_to_first_token_sec,
-                Self::escape_field(stop_reason)
+                total_time_sec,
+                Self::escape_field(stop_reason),
+                Self::escape_field(mode_key),
+                Self::escape_field(model_name)
             ),
             Self::ToolCallStarted { tool_name, args } => {
                 format!(
@@ -170,7 +196,9 @@ mod tests {
 
     #[test]
     fn parses_generation_stats_event() {
-        let parsed = UiMessageEvent::parse("[GEN_STATS:1.500000|7|11|0.250000|end_turn]");
+        let parsed = UiMessageEvent::parse(
+            "[GEN_STATS:1.500000|7|11|0.250000|3.750000|end_turn|plan|gpt-5.4]",
+        );
         assert!(matches!(
             parsed,
             Some(UiMessageEvent::GenerationStats {
@@ -178,12 +206,18 @@ mod tests {
                 completion_tokens,
                 prompt_tokens,
                 time_to_first_token_sec,
+                total_time_sec,
                 stop_reason,
+                mode_key,
+                model_name,
             }) if (tokens_per_sec - 1.5).abs() < f32::EPSILON
                 && completion_tokens == 7
                 && prompt_tokens == 11
                 && (time_to_first_token_sec - 0.25).abs() < f32::EPSILON
+                && (total_time_sec - 3.75).abs() < f32::EPSILON
                 && stop_reason == "end_turn"
+                && mode_key == "plan"
+                && model_name == "gpt-5.4"
         ));
     }
 
@@ -241,7 +275,10 @@ mod tests {
             completion_tokens: 12,
             prompt_tokens: 34,
             time_to_first_token_sec: 0.75,
+            total_time_sec: 4.5,
             stop_reason: "stop|sequence".to_string(),
+            mode_key: "build".to_string(),
+            model_name: "gpt-5.4".to_string(),
         }
         .to_message();
 
@@ -253,13 +290,14 @@ mod tests {
 
     #[test]
     fn rejects_invalid_generation_stats_payload() {
-        let parsed = UiMessageEvent::parse("[GEN_STATS:nope|7|11|0.250000|end_turn]");
+        let parsed =
+            UiMessageEvent::parse("[GEN_STATS:nope|7|11|0.250000|3.750000|end_turn|plan|gpt-5.4]");
         assert_eq!(parsed, None);
     }
 
     #[test]
     fn rejects_generation_stats_payload_with_missing_fields() {
-        let parsed = UiMessageEvent::parse("[GEN_STATS:1.500000|7|11|0.250000]");
+        let parsed = UiMessageEvent::parse("[GEN_STATS:1.500000|7|11|0.250000|3.750000]");
         assert_eq!(parsed, None);
     }
 }

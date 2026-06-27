@@ -170,6 +170,61 @@ async fn pty_zsh_foreground_command_completes() -> Result<(), Box<dyn std::error
 }
 
 #[tokio::test]
+async fn pty_git_log_does_not_open_a_blocking_pager() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = shell_test_lock();
+    let temp = tempfile::tempdir()?;
+
+    std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(temp.path())
+        .status()?;
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(temp.path())
+        .status()?;
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(temp.path())
+        .status()?;
+    std::fs::write(temp.path().join("note.txt"), "hello\n")?;
+    std::process::Command::new("git")
+        .args(["add", "note.txt"])
+        .current_dir(temp.path())
+        .status()?;
+    std::process::Command::new("git")
+        .args(["commit", "-m", "pager regression", "--quiet"])
+        .current_dir(temp.path())
+        .status()?;
+
+    let (manager, session_id) = create_shell_session(
+        temp.path(),
+        deterministic_shell_path(),
+        workspace_write_policy(temp.path()),
+    )
+    .await?;
+
+    let result = manager
+        .exec_command_in_shell_session(
+            session_id.clone(),
+            "git log -1 --format=%s".to_string(),
+            Some(5_000),
+            1_000,
+            None,
+        )
+        .await?;
+
+    manager.terminate_session(session_id).await?;
+
+    assert_eq!(result.exit_status, ExitStatus::Completed { code: 0 });
+    assert!(
+        result.stdout.contains("pager regression"),
+        "got: {:?}",
+        result.stdout
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn pty_zsh_command_completes_after_approval_retry() -> Result<(), Box<dyn std::error::Error>>
 {
     let _guard = shell_test_lock();

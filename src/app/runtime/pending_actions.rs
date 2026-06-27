@@ -333,6 +333,58 @@ impl App {
             }
         }
 
+        // Handle new conversation pending - save BEFORE clearing
+        if self.new_pending {
+            self.new_pending = false;
+
+            // Save the current conversation once so it remains resumable.
+            if self.persistence_state.current_conversation_id.is_some() && !self.messages.is_empty()
+            {
+                let _ = self.save_conversation().await;
+            }
+
+            self.clear_rewind_state();
+
+            // Clear the live agent conversation before the next save/export can occur.
+            if let Some(agent) = &self.agent {
+                agent.clear_conversation().await;
+            }
+
+            // Clear all rendered conversation state.
+            self.messages.clear();
+            self.message_types.clear();
+            self.message_states.clear();
+            self.message_metadata.clear();
+            self.message_timestamps.clear();
+
+            // Reset conversation tracking so the first real follow-up message creates a new save.
+            self.persistence_state.current_conversation_id = None;
+            self.persistence_state.current_conversation_path = None;
+            self.persistence_state.current_conversation_title = None;
+            self.persistence_state.current_forked_from = None;
+            self.persistence_state.current_forked_at = None;
+            self.persistence_state.title_generation_in_flight = false;
+
+            self.messages.push(
+                UiMessageEvent::Command("Started a new conversation".to_string()).to_message(),
+            );
+            self.message_types.push(MessageType::Agent);
+            self.message_states.push(MessageState::Sent);
+            self.message_metadata.push(None);
+            self.message_timestamps.push(SystemTime::now());
+
+            self.clear_generation_stats();
+            self.streaming_completion_tokens = 0;
+            self.is_thinking = false;
+            self.thinking_indicator_active = false;
+            self.thinking_start_time = None;
+            self.thinking_token_count = 0;
+            self.thinking_raw_content.clear();
+            self.agent_state.agent_processing = false;
+            self.agent_state.agent_response_started = false;
+            self.agent_state.agent_interrupted = false;
+        }
+
         // Handle save pending (auto-save on /clear or /exit)
         if self.persistence_state.save_pending {
             self.persistence_state.save_pending = false;

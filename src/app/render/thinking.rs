@@ -1,6 +1,7 @@
 use agent_core::GenerationStats as AgentGenerationStats;
 use ratatui::style::Color;
 
+use crate::app::AssistantMode;
 use crate::app::state::ui_message_event::UiMessageEvent;
 
 pub fn create_thinking_highlight_spans(text: &str, position: usize) -> Vec<(String, Color)> {
@@ -46,13 +47,20 @@ pub fn create_thinking_highlight_spans(text: &str, position: usize) -> Vec<(Stri
     spans
 }
 
-pub fn encode_generation_stats_message(stats: &AgentGenerationStats) -> String {
+pub fn encode_generation_stats_message(
+    stats: &AgentGenerationStats,
+    assistant_mode: AssistantMode,
+    model_name: Option<&str>,
+) -> String {
     UiMessageEvent::GenerationStats {
         tokens_per_sec: stats.avg_completion_tok_per_sec,
         completion_tokens: stats.completion_tokens,
         prompt_tokens: stats.prompt_tokens,
         time_to_first_token_sec: stats.time_to_first_token_sec,
+        total_time_sec: stats.total_time_sec,
         stop_reason: stats.stop_reason.clone(),
+        mode_key: assistant_mode.stats_key().to_string(),
+        model_name: model_name.unwrap_or("unknown").trim().to_string(),
     }
     .to_message()
 }
@@ -60,6 +68,7 @@ pub fn encode_generation_stats_message(stats: &AgentGenerationStats) -> String {
 #[cfg(test)]
 mod tests {
     use super::{create_thinking_highlight_spans, encode_generation_stats_message};
+    use crate::app::AssistantMode;
     use crate::app::state::ui_message_event::UiMessageEvent;
     use agent_core::GenerationStats as AgentGenerationStats;
     use ratatui::style::Color;
@@ -88,10 +97,11 @@ mod tests {
             completion_tokens: 64,
             prompt_tokens: 128,
             time_to_first_token_sec: 0.35,
+            total_time_sec: 4.2,
             stop_reason: "end_turn".to_string(),
         };
 
-        let encoded = encode_generation_stats_message(&stats);
+        let encoded = encode_generation_stats_message(&stats, AssistantMode::Plan, Some("gpt-5.4"));
         let parsed = UiMessageEvent::parse(&encoded);
 
         assert_eq!(
@@ -101,7 +111,10 @@ mod tests {
                 completion_tokens: 64,
                 prompt_tokens: 128,
                 time_to_first_token_sec: 0.35,
+                total_time_sec: 4.2,
                 stop_reason: "end_turn".to_string(),
+                mode_key: "plan".to_string(),
+                model_name: "gpt-5.4".to_string(),
             })
         );
     }

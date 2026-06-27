@@ -202,6 +202,7 @@ impl SubAgentContext {
             completion_tokens,
             prompt_tokens,
             time_to_first_token_sec: 0.0,
+            total_time_sec: 0.0,
             stop_reason: "end_turn".to_string(),
         });
         self.generation_stats_rendered = false;
@@ -256,7 +257,10 @@ impl SubAgentContext {
         }
 
         if let Some(stats) = self.generation_stats.clone() {
-            self.push_message(encode_generation_stats_message(&stats), MessageType::Agent);
+            self.push_message(
+                encode_generation_stats_message(&stats, crate::app::AssistantMode::None, None),
+                MessageType::Agent,
+            );
             self.generation_stats_rendered = true;
         }
     }

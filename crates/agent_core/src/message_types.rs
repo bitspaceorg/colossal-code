@@ -61,6 +61,7 @@ pub struct GenerationStats {
     pub completion_tokens: usize,
     pub prompt_tokens: usize,
     pub time_to_first_token_sec: f32,
+    pub total_time_sec: f32,
     pub stop_reason: String,
 }
 

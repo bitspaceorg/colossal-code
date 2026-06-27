@@ -14,6 +14,7 @@ use crate::app::{App, StepToolCallEntry, TodoItem};
 
 pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
     let mut outcome = AgentStreamOutcome::new();
+    let active_model_display_name = app.active_model_display_name();
     if let Some(rx) = &mut app.agent_rx {
         while let Ok(msg) = rx.try_recv() {
             // Skip processing agent messages if we've interrupted
@@ -34,6 +35,8 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                                 &mut app.message_metadata,
                                 &mut app.message_timestamps,
                                 &app.generation_stats,
+                                app.safety_state.assistant_mode,
+                                active_model_display_name.clone(),
                                 &mut app.generation_stats_rendered,
                             );
                         }
@@ -56,6 +59,8 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                             &mut app.message_metadata,
                             &mut app.message_timestamps,
                             &app.generation_stats,
+                            app.safety_state.assistant_mode,
+                            active_model_display_name.clone(),
                             &mut app.generation_stats_rendered,
                         );
 
@@ -662,6 +667,8 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                             &mut app.message_metadata,
                             &mut app.message_timestamps,
                             &app.generation_stats,
+                            app.safety_state.assistant_mode,
+                            active_model_display_name.clone(),
                             &mut app.generation_stats_rendered,
                         );
                     }
@@ -912,6 +919,8 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                             &mut app.message_metadata,
                             &mut app.message_timestamps,
                             &app.generation_stats,
+                            app.safety_state.assistant_mode,
+                            active_model_display_name.clone(),
                             &mut app.generation_stats_rendered,
                         );
 
@@ -942,6 +951,8 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                             &mut app.message_metadata,
                             &mut app.message_timestamps,
                             &app.generation_stats,
+                            app.safety_state.assistant_mode,
+                            active_model_display_name.clone(),
                             &mut app.generation_stats_rendered,
                         );
                     }

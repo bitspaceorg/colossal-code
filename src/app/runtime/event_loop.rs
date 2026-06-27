@@ -1,5 +1,7 @@
 use color_eyre::Result;
-use ratatui::crossterm::event::{Event, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind};
+use ratatui::crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind,
+};
 use std::time::{Duration, Instant};
 
 use crate::app::runtime::event_loop_handlers;
@@ -36,6 +38,10 @@ impl App {
             );
         }
 
+        if self.handle_home_end_scroll_key(key) {
+            return;
+        }
+
         match self.mode {
             Mode::Normal => event_loop_handlers::handle_runtime_key_normal(self, key),
             Mode::Navigation | Mode::Visual | Mode::Search => {
@@ -45,6 +51,76 @@ impl App {
             Mode::SessionWindow => {
                 event_loop_handlers::handle_runtime_key_session_window(self, key)
             }
+        }
+    }
+
+    fn handle_home_end_scroll_key(&mut self, key: KeyEvent) -> bool {
+        match (self.mode, key.code) {
+            (Mode::Normal, KeyCode::Home) => {
+                if !self.scroll_messages_enabled
+                    || self.phase != Phase::Input
+                    || self.show_background_tasks
+                    || self.viewing_task.is_some()
+                    || self.ui_state.show_help
+                    || self.ui_state.show_resume
+                    || self.show_rewind
+                    || self.isolated_changes.show_review_panel
+                    || self.show_todos
+                    || self.show_model_selection
+                    || self.should_render_spec_tree(None)
+                {
+                    return false;
+                }
+
+                self.follow_messages_tail = false;
+                self.message_scroll_offset = 0;
+                self.last_message_scroll_at = Some(Instant::now());
+                true
+            }
+            (Mode::Normal, KeyCode::End) => {
+                if !self.scroll_messages_enabled
+                    || self.phase != Phase::Input
+                    || self.show_background_tasks
+                    || self.viewing_task.is_some()
+                    || self.ui_state.show_help
+                    || self.ui_state.show_resume
+                    || self.show_rewind
+                    || self.isolated_changes.show_review_panel
+                    || self.show_todos
+                    || self.show_model_selection
+                    || self.should_render_spec_tree(None)
+                {
+                    return false;
+                }
+
+                self.follow_messages_tail = true;
+                self.message_scroll_offset = 0;
+                self.last_message_scroll_at = Some(Instant::now());
+                true
+            }
+            (Mode::Navigation | Mode::Visual | Mode::Search, KeyCode::Home) => {
+                self.nav_scroll_offset = 0;
+                self.editor.state.cursor.row = 0;
+                self.editor.state.cursor.col = 0;
+                self.editor.state.set_viewport_offset_y(0);
+                self.cached_mode_content = None;
+                true
+            }
+            (Mode::Navigation | Mode::Visual | Mode::Search, KeyCode::End) => {
+                let visible_rows = self.editor.state.viewport_rows().max(1);
+                let last_row = self.editor.state.lines.len().saturating_sub(1);
+                let max_scroll = last_row.saturating_sub(visible_rows.saturating_sub(1));
+                self.nav_scroll_offset = max_scroll;
+                self.editor.state.cursor.row = last_row;
+                self.editor.state.cursor.col =
+                    self.editor.state.lines.len_col(last_row).unwrap_or(0);
+                self.editor
+                    .state
+                    .set_viewport_offset_y(self.nav_scroll_offset);
+                self.cached_mode_content = None;
+                true
+            }
+            _ => false,
         }
     }
 

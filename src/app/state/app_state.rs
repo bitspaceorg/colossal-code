@@ -104,6 +104,36 @@ pub(crate) enum AssistantMode {
 }
 
 impl AssistantMode {
+    pub(crate) fn stats_key(self) -> &'static str {
+        match self {
+            AssistantMode::None => "build",
+            AssistantMode::Yolo => "yolo",
+            AssistantMode::Plan => "plan",
+            AssistantMode::AutoAccept => "auto-accept",
+            AssistantMode::ReadOnly => "read-only",
+        }
+    }
+
+    pub(crate) fn stats_display(self) -> Option<(&'static str, Color)> {
+        match self {
+            AssistantMode::None => Some(("Build", Color::Cyan)),
+            AssistantMode::Yolo => Some(("YOLO", Color::Magenta)),
+            AssistantMode::Plan => Some(("Plan", Color::Blue)),
+            AssistantMode::AutoAccept => Some(("Auto-accept", Color::Green)),
+            AssistantMode::ReadOnly => Some(("Read-only", Color::Yellow)),
+        }
+    }
+
+    pub(crate) fn from_stats_key(key: &str) -> Self {
+        match key {
+            "yolo" => AssistantMode::Yolo,
+            "plan" => AssistantMode::Plan,
+            "auto-accept" => AssistantMode::AutoAccept,
+            "read-only" => AssistantMode::ReadOnly,
+            _ => AssistantMode::None,
+        }
+    }
+
     pub(crate) fn reminder_name(self) -> &'static str {
         match self {
             AssistantMode::None => "build",
@@ -281,6 +311,7 @@ pub(crate) struct App {
     pub(crate) show_queue_choice: bool,      // Show the queue choice popup
     pub(crate) queue_choice_input: String,   // Collect user choice for queue
     pub(crate) export_pending: bool,         // Flag to trigger export in async context
+    pub(crate) new_pending: bool,            // Flag to trigger new conversation in async context
     pub(crate) review_pending: Option<crate::app::commands::ReviewOptions>, // Flag to trigger code review in async context
     pub(crate) spec_pending: Option<String>, // Flag to trigger /spec command in async context
     pub(crate) orchestration_pending: Option<String>, // Flag to trigger orchestration from tool call

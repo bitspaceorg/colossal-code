@@ -131,6 +131,7 @@ impl Agent {
                                 completion_tokens,
                                 prompt_tokens,
                                 time_to_first_token_sec: time_to_first,
+                                total_time_sec: elapsed_sec,
                                 stop_reason: "cancelled".to_string(),
                             };
                             let _ = tx.send(AgentMessage::GenerationStats(stats));
@@ -187,6 +188,7 @@ impl Agent {
                                     completion_tokens: usage_stats.completion_tokens,
                                     prompt_tokens,
                                     time_to_first_token_sec: usage_stats.total_prompt_time_sec,
+                                    total_time_sec: usage_stats.total_time_sec,
                                     stop_reason,
                                 };
 
@@ -603,6 +605,7 @@ impl Agent {
                                 completion_tokens: response.usage.completion_tokens,
                                 prompt_tokens,
                                 time_to_first_token_sec: response.usage.total_prompt_time_sec,
+                                total_time_sec: response.usage.total_time_sec,
                                 stop_reason,
                             };
 
@@ -944,7 +947,10 @@ mod tests {
         seed_conversation(&agent).await;
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        agent.process_message("new user".to_string(), tx).await.unwrap();
+        agent
+            .process_message("new user".to_string(), tx)
+            .await
+            .unwrap();
 
         let messages = exported_messages(&agent).await;
         let contents: Vec<&str> = messages.iter().map(message_content).collect();
@@ -968,7 +974,10 @@ mod tests {
         seed_conversation(&agent).await;
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        let err = agent.process_message("new user".to_string(), tx).await.unwrap_err();
+        let err = agent
+            .process_message("new user".to_string(), tx)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("backend failed"));
 
         let messages = exported_messages(&agent).await;

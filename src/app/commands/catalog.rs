@@ -13,6 +13,7 @@ pub(crate) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/help", "show help information and available commands"),
     ("/model", "set the ai model for colossal code"),
+    ("/new", "start a new conversation"),
     ("/resume", "resume a conversation"),
     (
         "/review",

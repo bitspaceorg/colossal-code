@@ -37,6 +37,7 @@ impl App {
         }
 
         match dispatch {
+            SlashCommandDispatch::New => {}
             SlashCommandDispatch::Apply => {
                 if self.isolated_changes.pending_count == 0 {
                     self.messages

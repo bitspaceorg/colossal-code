@@ -8,12 +8,18 @@ use std::time::SystemTime;
 
 impl App {
     pub(crate) fn push_generation_stats_message(
+        assistant_mode: crate::app::AssistantMode,
+        model_name: Option<String>,
         messages: &mut Vec<String>,
         message_types: &mut Vec<MessageType>,
         message_states: &mut Vec<MessageState>,
         stats: &AgentGenerationStats,
     ) {
-        messages.push(encode_generation_stats_message(stats));
+        messages.push(encode_generation_stats_message(
+            stats,
+            assistant_mode,
+            model_name.as_deref(),
+        ));
         message_types.push(MessageType::Agent);
         message_states.push(MessageState::Sent);
     }
@@ -26,6 +32,7 @@ impl App {
     }
 
     pub(crate) fn ensure_generation_stats_marker(&mut self) {
+        let model_name = self.active_model_display_name();
         Self::ensure_generation_stats_marker_fields(
             &mut self.messages,
             &mut self.message_types,
@@ -33,6 +40,8 @@ impl App {
             &mut self.message_metadata,
             &mut self.message_timestamps,
             &self.generation_stats,
+            self.safety_state.assistant_mode,
+            model_name,
             &mut self.generation_stats_rendered,
         );
     }
@@ -49,6 +58,7 @@ impl App {
                 && existing.prompt_tokens == stats.prompt_tokens
                 && (existing.time_to_first_token_sec - stats.time_to_first_token_sec).abs()
                     < f32::EPSILON
+                && (existing.total_time_sec - stats.total_time_sec).abs() < f32::EPSILON
                 && existing.stop_reason == stats.stop_reason
         });
 
@@ -111,6 +121,8 @@ impl App {
         message_metadata: &mut Vec<Option<UIMessageMetadata>>,
         message_timestamps: &mut Vec<SystemTime>,
         stats: &Option<AgentGenerationStats>,
+        assistant_mode: crate::app::AssistantMode,
+        model_name: Option<String>,
         rendered_flag: &mut bool,
     ) {
         if *rendered_flag {
@@ -118,14 +130,22 @@ impl App {
         }
 
         if let Some(stats) = stats.clone() {
-            let encoded = encode_generation_stats_message(&stats);
+            let encoded =
+                encode_generation_stats_message(&stats, assistant_mode, model_name.as_deref());
             let has_same_marker = messages.iter().rev().take(6).any(|msg| msg == &encoded);
             if has_same_marker {
                 *rendered_flag = true;
                 return;
             }
 
-            Self::push_generation_stats_message(messages, message_types, message_states, &stats);
+            Self::push_generation_stats_message(
+                assistant_mode,
+                model_name,
+                messages,
+                message_types,
+                message_states,
+                &stats,
+            );
             message_metadata.push(None);
             message_timestamps.push(SystemTime::now());
             *rendered_flag = true;

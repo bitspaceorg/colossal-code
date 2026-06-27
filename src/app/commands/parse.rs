@@ -40,6 +40,7 @@ pub(crate) enum ParsedSlashCommand {
     Vim,
     Todos,
     Shells,
+    New,
     Model,
     Safety { args: Vec<String> },
     Review { options: ReviewOptions },
@@ -98,6 +99,8 @@ pub(crate) fn parse_slash_command(command: &str) -> ParsedSlashCommand {
         ParsedSlashCommand::Shells
     } else if cmd_lower == "/model" {
         ParsedSlashCommand::Model
+    } else if cmd_lower == "/new" {
+        ParsedSlashCommand::New
     } else if cmd_lower.starts_with("/safety") {
         let args = command
             .split_whitespace()

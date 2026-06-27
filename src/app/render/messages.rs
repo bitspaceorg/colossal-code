@@ -260,7 +260,10 @@ impl App {
                 completion_tokens,
                 prompt_tokens,
                 time_to_first_token_sec,
+                total_time_sec,
                 stop_reason,
+                mode_key,
+                model_name,
             }) = parsed_event.as_ref()
         {
             let stats_text = format!(
@@ -271,15 +274,39 @@ impl App {
                 time_to_first_token_sec,
                 stop_reason
             );
-            return Text::from(vec![Line::from(vec![
-                Self::connector_prefix(connector, true),
-                Span::styled(
-                    stats_text,
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            ])]);
+            let mode_display = crate::app::AssistantMode::from_stats_key(mode_key).stats_display();
+            let total_time_text = self.format_elapsed_time(total_time_sec.round().max(0.0) as u64);
+            let mut detail_spans = vec![Self::connector_prefix(connector, false), Span::raw(" ")];
+            if let Some((mode_name, mode_color)) = mode_display {
+                detail_spans.push(Span::styled("◈ ", Style::default().fg(mode_color)));
+                detail_spans.push(Span::styled(
+                    mode_name.to_string(),
+                    Style::default().fg(mode_color),
+                ));
+                detail_spans.push(Span::styled(" • ", Style::default().fg(Color::DarkGray)));
+            }
+            detail_spans.push(Span::styled(
+                model_name.clone(),
+                Style::default().fg(Color::Gray),
+            ));
+            detail_spans.push(Span::styled(" • ", Style::default().fg(Color::DarkGray)));
+            detail_spans.push(Span::styled(
+                total_time_text,
+                Style::default().fg(Color::Gray),
+            ));
+            let details_line = Line::from(detail_spans);
+            return Text::from(vec![
+                details_line,
+                Line::from(vec![
+                    Self::connector_prefix(connector, true),
+                    Span::styled(
+                        stats_text,
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                ]),
+            ]);
         }
 
         if is_agent

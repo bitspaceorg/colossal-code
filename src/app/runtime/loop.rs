@@ -9,6 +9,7 @@ pub(crate) enum CommandRuntimeRoute {
     Review(ReviewOptions),
     Spec(String),
     Compact(CompactOptions),
+    New,
 }
 
 pub(crate) fn route_command_runtime(
@@ -30,6 +31,7 @@ pub(crate) fn route_command_runtime(
                 })
             }
         }
+        SlashCommandDispatch::New => CommandRuntimeRoute::New,
         _ => CommandRuntimeRoute::None,
     }
 }
@@ -60,6 +62,10 @@ pub(crate) fn apply_command_runtime_route(app: &mut App, route: CommandRuntimeRo
             app.compaction_resume_prompt = None;
             app.compaction_resume_ready = false;
             app.compact_pending = Some(options);
+            true
+        }
+        CommandRuntimeRoute::New => {
+            app.new_pending = true;
             true
         }
     }

@@ -291,6 +291,7 @@ impl App {
             show_queue_choice: false,
             queue_choice_input: String::new(),
             export_pending: false,
+            new_pending: false,
             review_pending: None,
             spec_pending: None,
             orchestration_pending: None,
