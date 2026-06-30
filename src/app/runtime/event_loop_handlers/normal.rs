@@ -412,6 +412,7 @@ mod tests {
         let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
         let mut app = App::new().await.expect("create app");
         app.phase = Phase::Input;
+        app.connect.show_connect_modal = false;
         app.show_background_tasks = true;
         app.agent_state.agent_processing = true;
 

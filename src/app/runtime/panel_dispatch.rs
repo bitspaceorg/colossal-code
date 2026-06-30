@@ -753,6 +753,7 @@ mod tests {
         let _lock = env_test_lock();
         let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
         let mut app = App::new().await.expect("create app");
+        app.connect.show_connect_modal = false;
         app.show_background_tasks = true;
         app.safety_state.show_approval_prompt = true;
 
@@ -775,6 +776,7 @@ mod tests {
         let _lock = env_test_lock();
         let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
         let mut app = App::new().await.expect("create app");
+        app.connect.show_connect_modal = false;
         app.show_background_tasks = true;
         app.viewing_task = Some((
             "shell-1".to_string(),
@@ -791,6 +793,7 @@ mod tests {
         let _lock = env_test_lock();
         let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
         let mut app = App::new().await.expect("create app");
+        app.connect.show_connect_modal = false;
         app.show_queue_choice = true;
         app.queue_choice_input = "queued message".to_string();
 
@@ -805,6 +808,7 @@ mod tests {
         let _lock = env_test_lock();
         let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
         let mut app = App::new().await.expect("create app");
+        app.connect.show_connect_modal = false;
         app.show_todos = true;
         app.input = "should stay".to_string();
 
@@ -818,6 +822,7 @@ mod tests {
         let _lock = env_test_lock();
         let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
         let mut app = App::new().await.expect("create app");
+        app.connect.show_connect_modal = false;
         app.ui_state.show_help = true;
         app.input = "preserve".to_string();
 
@@ -836,6 +841,7 @@ mod tests {
         let _lock = env_test_lock();
         let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
         let mut app = App::new().await.expect("create app");
+        app.connect.show_connect_modal = false;
         app.show_queue_choice = true;
         app.queue_choice_input = "queued".to_string();
         app.input = "stay".to_string();
@@ -867,6 +873,7 @@ mod tests {
         let _lock = env_test_lock();
         let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
         let mut app = App::new().await.expect("create app");
+        app.connect.show_connect_modal = false;
         app.show_model_selection = true;
         app.show_rewind = true;
 
@@ -878,6 +885,7 @@ mod tests {
         let _lock = env_test_lock();
         let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
         let mut app = App::new().await.expect("create app");
+        app.connect.show_connect_modal = false;
         app.ui_state.show_resume = true;
         app.input = "keep me".to_string();
 
@@ -891,6 +899,7 @@ mod tests {
         let _lock = env_test_lock();
         let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
         let mut app = App::new().await.expect("create app");
+        app.connect.show_connect_modal = false;
         app.show_rewind = true;
         app.input = "keep me".to_string();
 
