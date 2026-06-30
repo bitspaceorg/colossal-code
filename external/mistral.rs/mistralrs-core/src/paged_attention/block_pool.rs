@@ -4,7 +4,7 @@
 //! following vLLM's v1 `BlockPool` + `FreeKVCacheBlockQueue` design.
 //!
 //! Key properties:
-//! - O(1) allocation (pop from free list head — LRU eviction order)
+//! - O(1) allocation (pop from free list head, LRU eviction order)
 //! - O(1) free (append to free list tail)
 //! - O(1) remove from middle of free list (for cache hits)
 //! - Freed blocks retain their hash for potential future reuse
@@ -29,11 +29,9 @@ pub struct KVCacheBlock {
     pub block_id: usize,
     /// Reference count. 0 means the block is free (in the free list or eviction candidate).
     pub ref_cnt: u32,
-    /// The content-based hash of this block, set when the block is full and cached.
-    /// Retained even when freed (ref_cnt drops to 0) so the block can be reused
-    /// if a future request has the same prefix. Cleared only when the block is
-    /// evicted (reallocated to a different request).
-    pub block_hash: Option<BlockHashWithGroupId>,
+    /// The content-based cache keys for this block, set when the block is full and cached.
+    /// Retained even when freed so the block can be reused by future requests.
+    pub block_hashes: Vec<BlockHashWithGroupId>,
     /// Previous block in the free list (NO_LINK if not in free list or at head).
     prev_free: usize,
     /// Next block in the free list (NO_LINK if not in free list or at tail).
@@ -47,7 +45,7 @@ impl KVCacheBlock {
         Self {
             block_id,
             ref_cnt: 0,
-            block_hash: None,
+            block_hashes: Vec::new(),
             prev_free: NO_LINK,
             next_free: NO_LINK,
             is_null: false,
@@ -62,7 +60,7 @@ impl KVCacheBlock {
 
     /// Reset the hash when the block is evicted (reallocated).
     fn reset_hash(&mut self) {
-        self.block_hash = None;
+        self.block_hashes.clear();
     }
 }
 
@@ -233,7 +231,7 @@ impl BlockHashToBlockMap {
                 if id == block_id {
                     Some(id)
                 } else {
-                    // Put it back — this block_id doesn't match
+                    // Put it back, this block_id doesn't match
                     self.cache.insert(*key, CachedBlocks::Single(id));
                     None
                 }
@@ -264,7 +262,7 @@ impl BlockHashToBlockMap {
 /// The block pool manages all physical KV cache blocks.
 ///
 /// It provides allocation, freeing, and prefix cache operations.
-/// Freed blocks retain their hash for potential reuse — they are only truly
+/// Freed blocks retain their hash for potential reuse, they are only truly
 /// evicted (hash cleared) when they are reallocated to a new request.
 pub struct BlockPool {
     /// All blocks, indexed by block_id. Includes 2 extra sentinel blocks at the end.
@@ -373,7 +371,7 @@ impl BlockPool {
         Some(cached_ids)
     }
 
-    /// Touch blocks — increment ref_cnt and remove from free list if ref_cnt was 0.
+    /// Touch blocks, increment ref_cnt and remove from free list if ref_cnt was 0.
     ///
     /// Called when cached blocks are reused by a new request (prefix cache hit).
     pub fn touch(&mut self, block_ids: &[usize]) {
@@ -389,7 +387,7 @@ impl BlockPool {
         }
     }
 
-    /// Free blocks — decrement ref_cnt, append to free list tail if it hits 0.
+    /// Free blocks, decrement ref_cnt, append to free list tail if it hits 0.
     ///
     /// Blocks retain their hash when freed! They stay in the cache for potential
     /// future reuse. They are only evicted (hash cleared) when reallocated.
@@ -479,8 +477,7 @@ impl BlockPool {
             let block_id = block_ids[idx];
             let block = &mut self.blocks[block_id];
 
-            // Skip null blocks and already-cached blocks
-            if block.is_null || block.block_hash.is_some() {
+            if block.is_null {
                 continue;
             }
 
@@ -489,7 +486,11 @@ impl BlockPool {
                 group_id: kv_cache_group_id,
             };
 
-            block.block_hash = Some(hash_with_group);
+            if block.block_hashes.contains(&hash_with_group) {
+                continue;
+            }
+
+            block.block_hashes.push(hash_with_group);
             self.cached_block_hash_to_block
                 .insert(hash_with_group, block_id);
         }
@@ -497,10 +498,9 @@ impl BlockPool {
 
     /// Evict a cached block's hash from the cache map and reset its hash.
     fn maybe_evict_cached_block(&mut self, block_id: usize) {
-        let block_hash = self.blocks[block_id].block_hash;
-        if let Some(hash) = block_hash {
-            self.cached_block_hash_to_block.pop(&hash, block_id);
-            self.blocks[block_id].reset_hash();
+        let block_hashes = std::mem::take(&mut self.blocks[block_id].block_hashes);
+        for hash in &block_hashes {
+            self.cached_block_hash_to_block.pop(hash, block_id);
         }
     }
 
@@ -542,7 +542,11 @@ impl BlockPool {
 
     /// Get the block hash for a block (for debugging/testing).
     pub fn block_hash(&self, block_id: usize) -> Option<BlockHashWithGroupId> {
-        self.blocks[block_id].block_hash
+        self.blocks[block_id].block_hashes.first().copied()
+    }
+
+    pub fn block_hashes(&self, block_id: usize) -> &[BlockHashWithGroupId] {
+        &self.blocks[block_id].block_hashes
     }
 }
 
@@ -659,7 +663,7 @@ mod tests {
         // Free all
         pool.free_blocks(&block_ids);
 
-        // Now allocate again — should evict the cached block
+        // Now allocate again, should evict the cached block
         let new_ids = pool.get_new_blocks(3).unwrap();
         assert_eq!(new_ids.len(), 3);
 
@@ -677,11 +681,11 @@ mod tests {
         pool.touch(&block_ids);
         assert_eq!(pool.block_ref_cnt(block_ids[0]), 2);
 
-        // Free once — ref_cnt should be 1, not in free list
+        // Free once, ref_cnt should be 1, not in free list
         pool.free_blocks(&block_ids);
         assert_eq!(pool.block_ref_cnt(block_ids[0]), 1);
 
-        // Free again — ref_cnt 0, added to free list
+        // Free again, ref_cnt 0, added to free list
         pool.free_blocks(&block_ids);
         assert_eq!(pool.block_ref_cnt(block_ids[0]), 0);
     }
@@ -736,6 +740,26 @@ mod tests {
         // Should fail if one group is missing
         let cached = pool.get_cached_block(h0, &[0, 2]);
         assert!(cached.is_none());
+    }
+
+    #[test]
+    fn test_same_block_can_cache_multiple_groups() {
+        let mut pool = BlockPool::new(8, true, 4);
+        let ids = pool.get_new_blocks(1).unwrap();
+        let h0 = hash_block_tokens(None, &[1, 2, 3, 4], None);
+
+        pool.cache_full_blocks(&ids, &[h0], 0, 1, 0);
+        pool.cache_full_blocks(&ids, &[h0], 0, 1, 1);
+
+        let cached = pool.get_cached_block(h0, &[0, 1]).unwrap();
+        assert_eq!(cached, vec![ids[0], ids[0]]);
+        assert_eq!(pool.block_hashes(ids[0]).len(), 2);
+
+        pool.free_blocks(&ids);
+        let _ = pool.get_new_blocks(pool.num_free_blocks()).unwrap();
+
+        assert!(pool.get_cached_block(h0, &[0]).is_none());
+        assert!(pool.get_cached_block(h0, &[1]).is_none());
     }
 
     #[test]

@@ -107,20 +107,27 @@ pub async fn send_request_with_model(
 }
 
 /// Generic function to process non-streaming responses.
-pub(crate) async fn base_process_non_streaming_response<R>(
+pub(crate) async fn base_process_non_streaming_response<R, M, E>(
     rx: &mut Receiver<Response>,
     state: SharedMistralRsState,
-    match_fn: fn(SharedMistralRsState, Response) -> R,
-    error_handler: fn(
-        SharedMistralRsState,
-        Box<dyn std::error::Error + Send + Sync + 'static>,
-    ) -> R,
-) -> R {
-    match rx.recv().await {
-        Some(response) => match_fn(state, response),
-        None => {
-            let error = anyhow::Error::msg("No response received from the model.");
-            error_handler(state, error.into())
+    match_fn: M,
+    error_handler: E,
+) -> R
+where
+    M: FnOnce(SharedMistralRsState, Response) -> R,
+    E: FnOnce(SharedMistralRsState, Box<dyn std::error::Error + Send + Sync + 'static>) -> R,
+{
+    loop {
+        match rx.recv().await {
+            Some(Response::AgenticToolCallProgress { .. }) => continue,
+            Some(Response::BlockDenoisingProgress(_)) => continue,
+            Some(Response::AgenticToolApprovalRequired { .. }) => continue,
+            Some(Response::File(_)) => continue,
+            Some(response) => return match_fn(state, response),
+            None => {
+                let error = anyhow::Error::msg("No response received from the model.");
+                return error_handler(state, error.into());
+            }
         }
     }
 }

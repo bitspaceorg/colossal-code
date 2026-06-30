@@ -2,12 +2,12 @@
 
 use std::collections::HashMap;
 
-use crate::attention::SdpaParams;
+use crate::attention::{AttentionMask, SdpaParams};
 use crate::device_map::{DeviceMappedMask, DeviceMapper};
 use crate::gguf::Content;
-use crate::layers::CausalMasker;
-use crate::layers::RmsNorm;
 use crate::layers::Sdpa;
+use crate::layers::{apply_rotary_q, RmsNorm};
+use crate::layers::{CausalMaskConfig, CausalMasker};
 use crate::lora::get_lora_cfg;
 use crate::lora::LinearLayerLike;
 use crate::lora::LoraConfig;
@@ -20,9 +20,10 @@ use crate::pipeline::EitherCache;
 use crate::utils::progress::{new_multi_progress, NiceProgressBar};
 use candle_core::quantized::QMatMul;
 use candle_core::quantized::QTensor;
-use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
+use candle_core::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::Embedding;
 use mistralrs_quant::ShardedVarBuilder;
+use tqdm::Iter;
 use tracing::info;
 
 use super::classifier::XLoraClassifier;
@@ -95,26 +96,15 @@ struct LayerWeights {
 }
 
 impl LayerWeights {
-    fn apply_rotary_emb(&self, xs: &Tensor, seqlen_offsets: &[usize]) -> Result<Tensor> {
-        let (_b_sz, _h, seq_len, _n_embd) = xs.dims4()?;
-        let mut outputs = Vec::new();
-        for (i, offset) in seqlen_offsets.iter().enumerate() {
-            let cos = self.cos.narrow(0, *offset, seq_len)?;
-            let sin = self.sin.narrow(0, *offset, seq_len)?;
-            outputs.push(candle_nn::rotary_emb::rope(
-                &xs.i(i)?.unsqueeze(0)?.contiguous()?,
-                &cos,
-                &sin,
-            )?);
-        }
-        Tensor::cat(&outputs, 0)
+    fn apply_rotary_emb_positions(&self, xs: &Tensor, positions: &Tensor) -> Result<Tensor> {
+        apply_rotary_q(xs, &self.cos, &self.sin, positions, true)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn forward_attn(
         &self,
         x: &Tensor,
-        mask: Option<&Tensor>,
+        mask: &AttentionMask,
         seqlen_offsets: &[usize],
         kv_cache: &mut Option<(Tensor, Tensor)>,
         scalings: Option<Tensor>,
@@ -155,17 +145,30 @@ impl LayerWeights {
             (q, k, v)
         };
 
-        let q = self.apply_rotary_emb(&q, seqlen_offsets)?.contiguous()?;
-        let k = self.apply_rotary_emb(&k, seqlen_offsets)?;
+        let positions = seqlen_offsets
+            .iter()
+            .copied()
+            .map(u32::try_from)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(candle_core::Error::wrap)?;
+        let positions = Tensor::from_vec(positions, seqlen_offsets.len(), q.device())?;
+        let q = self
+            .apply_rotary_emb_positions(&q, &positions)?
+            .contiguous()?;
+        let k = self.apply_rotary_emb_positions(&k, &positions)?;
 
         let (k, v, attn_mask) =
             Cache::update_kv_cache_sliding_window(kv_cache, k, v, mask, Some(self.sliding_window))?;
+        let attn_mask = match attn_mask {
+            Some(t) => AttentionMask::Custom(t),
+            None => AttentionMask::None,
+        };
 
         let y = Sdpa.run_attention(
             &q,
             &k,
             &v,
-            attn_mask.as_ref(),
+            &attn_mask,
             Some(flash_params),
             &self.sdpa_params,
         )?;
@@ -345,7 +348,7 @@ impl ModelConfig::FromAdapterGGUF for ModelWeights {
         if xlora_config.is_none() {
             // We are now a LoRA model so we must merge the weights
             info!("Merging LoRA adapters.");
-            for layer in layers.iter_mut() {
+            for layer in layers.iter_mut().tqdm() {
                 layer.attn_qkv.merge_weights()?;
                 layer.attn_output.merge_weights()?;
                 layer.mlp.ffn_down.merge_weights()?;
@@ -411,12 +414,14 @@ impl ModelWeights {
         } else {
             self.cache.full().lock()
         };
-        let mask = CausalMasker.make_sliding_window_causal_mask_matrix(
+        let mask = CausalMasker.make_causal_mask(
             input_ids,
             &*cache,
-            Some(self.max_seq_len),
             self.dtype,
-            self.layers[0].n_head,
+            &CausalMaskConfig {
+                sliding_window: Some(self.max_seq_len),
+                ..Default::default()
+            },
         )?;
         let mask = match self.mapper {
             Some(ref mapper) => DeviceMappedMask::new(mask, &**mapper)?,
@@ -430,7 +435,7 @@ impl ModelWeights {
             let ys = xs.apply(&layer.attn_norm)?;
             let ys = layer.forward_attn(
                 &ys,
-                mask.as_ref().map(|m| m.get(xs.device())),
+                &mask.get(xs.device()),
                 seqlen_offsets,
                 &mut cache[i],
                 scalings.clone(),

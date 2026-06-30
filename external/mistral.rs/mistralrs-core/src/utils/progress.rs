@@ -7,6 +7,7 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rayon::prelude::*;
 use std::iter::Iterator;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tqdm::Iter;
 
 static PROGRESS_SUPPRESS_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -64,7 +65,7 @@ pub trait IterWithProgress<'a, T>: Iterator<Item = T> + 'a {
         if is_silent {
             Box::new(self)
         } else {
-            Box::new(self)
+            Box::new(self.tqdm())
         }
     }
 }

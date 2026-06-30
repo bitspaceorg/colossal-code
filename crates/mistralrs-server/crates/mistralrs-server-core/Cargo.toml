@@ -17,8 +17,8 @@ validator.workspace = true
 parking_lot.workspace = true
 mistralrs-server-config = { path = "../mistralrs-server-config" }
 mistralrs-core.workspace = true
-candle-core = { git = "https://github.com/EricLBuehler/candle.git", rev = "7511e510" }
-candle-nn = { git = "https://github.com/EricLBuehler/candle.git", rev = "7511e510" }
+candle-core = { git = "https://github.com/huggingface/candle.git", version = "0.10.2", rev = "a9667ca" }
+candle-nn = { git = "https://github.com/huggingface/candle.git", version = "0.10.2", rev = "a9667ca" }
 hf-hub = "0.4"
 tokio-stream.workspace = true
 humantime-serde.workspace = true

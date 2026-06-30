@@ -1,17 +1,19 @@
-use super::hf::{hf_access_error, remote_issue_from_api_error, RemoteAccessIssue};
+use super::hf::{
+    build_api_with_cache, hf_access_error, remote_issue_from_api_error, RemoteAccessIssue,
+};
 use super::{
     DiffusionLoaderBuilder, DiffusionLoaderType, EmbeddingLoaderBuilder, EmbeddingLoaderType,
-    EmbeddingSpecificConfig, Loader, ModelKind, ModelPaths, NormalLoaderBuilder, NormalLoaderType,
-    NormalSpecificConfig, SpeechLoader, TokenSource, VisionLoaderBuilder, VisionLoaderType,
-    VisionSpecificConfig,
+    EmbeddingSpecificConfig, Loader, ModelKind, ModelPaths, MultimodalLoaderBuilder,
+    MultimodalLoaderType, MultimodalSpecificConfig, NormalLoaderBuilder, NormalLoaderType,
+    NormalSpecificConfig, SpeechLoader, TokenSource,
 };
-use crate::utils::{progress::ProgressScopeGuard, tokens::get_token};
+use crate::utils::progress::ProgressScopeGuard;
 use crate::Ordering;
 use crate::{DeviceMapSetting, IsqType, PagedAttentionConfig, Pipeline, TryIntoDType};
 use anyhow::Result;
 use candle_core::Device;
 use hf_hub::{
-    api::sync::{ApiBuilder, ApiError, ApiRepo},
+    api::sync::{ApiError, ApiRepo},
     Cache, Repo, RepoType,
 };
 use serde::Deserialize;
@@ -26,7 +28,7 @@ use tracing::{debug, info, warn};
 pub struct AutoLoader {
     model_id: String,
     normal_builder: Mutex<Option<NormalLoaderBuilder>>,
-    vision_builder: Mutex<Option<VisionLoaderBuilder>>,
+    multimodal_builder: Mutex<Option<MultimodalLoaderBuilder>>,
     embedding_builder: Mutex<Option<EmbeddingLoaderBuilder>>,
     loader: Mutex<Option<Box<dyn Loader>>>,
     hf_cache_path: Option<PathBuf>,
@@ -34,7 +36,7 @@ pub struct AutoLoader {
 
 pub struct AutoLoaderBuilder {
     normal_cfg: NormalSpecificConfig,
-    vision_cfg: VisionSpecificConfig,
+    multimodal_cfg: MultimodalSpecificConfig,
     embedding_cfg: EmbeddingSpecificConfig,
     chat_template: Option<String>,
     tokenizer_json: Option<String>,
@@ -52,7 +54,7 @@ impl AutoLoaderBuilder {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         normal_cfg: NormalSpecificConfig,
-        vision_cfg: VisionSpecificConfig,
+        multimodal_cfg: MultimodalSpecificConfig,
         embedding_cfg: EmbeddingSpecificConfig,
         chat_template: Option<String>,
         tokenizer_json: Option<String>,
@@ -62,7 +64,7 @@ impl AutoLoaderBuilder {
     ) -> Self {
         Self {
             normal_cfg,
-            vision_cfg,
+            multimodal_cfg,
             embedding_cfg,
             chat_template,
             tokenizer_json,
@@ -104,7 +106,7 @@ impl AutoLoaderBuilder {
     pub fn build(self) -> Box<dyn Loader> {
         let Self {
             normal_cfg,
-            vision_cfg,
+            multimodal_cfg,
             embedding_cfg,
             chat_template,
             tokenizer_json,
@@ -137,18 +139,18 @@ impl AutoLoaderBuilder {
             normal_builder = normal_builder.hf_cache_path(path.clone());
         }
 
-        let mut vision_builder = VisionLoaderBuilder::new(
-            vision_cfg,
+        let mut multimodal_builder = MultimodalLoaderBuilder::new(
+            multimodal_cfg,
             chat_template,
             tokenizer_json.clone(),
             Some(model_id.clone()),
             jinja_explicit,
         );
         if let Some(ref adapters) = lora_adapter_ids {
-            vision_builder = vision_builder.with_lora(adapters.clone());
+            multimodal_builder = multimodal_builder.with_lora(adapters.clone());
         }
         if let Some(ref path) = hf_cache_path {
-            vision_builder = vision_builder.hf_cache_path(path.clone());
+            multimodal_builder = multimodal_builder.hf_cache_path(path.clone());
         }
 
         let mut embedding_builder =
@@ -163,7 +165,7 @@ impl AutoLoaderBuilder {
         Box::new(AutoLoader {
             model_id,
             normal_builder: Mutex::new(Some(normal_builder)),
-            vision_builder: Mutex::new(Some(vision_builder)),
+            multimodal_builder: Mutex::new(Some(multimodal_builder)),
             embedding_builder: Mutex::new(Some(embedding_builder)),
             loader: Mutex::new(None),
             hf_cache_path,
@@ -186,7 +188,7 @@ struct ConfigArtifacts {
 
 enum Detected {
     Normal(NormalLoaderType),
-    Vision(VisionLoaderType),
+    Multimodal(MultimodalLoaderType),
     Embedding(Option<EmbeddingLoaderType>),
     Diffusion(DiffusionLoaderType),
     Speech(crate::speech_models::SpeechLoaderType),
@@ -197,18 +199,9 @@ impl AutoLoader {
         api: &ApiRepo,
         model_id: &Path,
         file: &str,
+        revision: &str,
     ) -> std::result::Result<Option<PathBuf>, ApiError> {
-        if model_id.exists() {
-            let path = model_id.join(file);
-            if path.exists() {
-                info!("Loading `{}` locally at `{}`", file, path.display());
-                Ok(Some(path))
-            } else {
-                Ok(None)
-            }
-        } else {
-            api.get(file).map(Some)
-        }
+        crate::pipeline::hf::try_get_file(api, model_id, file, revision)
     }
 
     fn list_local_repo_files(model_root: &Path) -> Vec<String> {
@@ -272,26 +265,21 @@ impl AutoLoader {
             .clone()
             .map(Cache::new)
             .unwrap_or_default();
-        let mut api = ApiBuilder::from_cache(cache)
-            .with_progress(!silent)
-            .with_token(get_token(token_source)?);
-        if let Some(cache_dir) = crate::hf_hub_cache_dir() {
-            api = api.with_cache_dir(cache_dir);
-        }
-        let api = api.build()?;
+        let api = build_api_with_cache(token_source, !silent, Some(cache))?;
         let revision = revision.unwrap_or_else(|| "main".to_string());
         let api = api.repo(Repo::with_revision(
             self.model_id.clone(),
             RepoType::Model,
-            revision,
+            revision.clone(),
         ));
         let model_id = Path::new(&self.model_id);
         let mut remote_access_issue = None;
-        let contents = match Self::try_get_file(&api, model_id, "config.json") {
+        let contents = match Self::try_get_file(&api, model_id, "config.json", &revision) {
             Ok(Some(path)) => Some(std::fs::read_to_string(&path)?),
             Ok(None) => None,
             Err(err) => {
-                let issue = remote_issue_from_api_error(model_id, Some("config.json"), &err);
+                let issue =
+                    remote_issue_from_api_error(model_id, Some("config.json"), &revision, &err);
                 warn!(
                     "Auto loader could not fetch `config.json` for `{}`: {}",
                     self.model_id, issue.message
@@ -302,11 +290,11 @@ impl AutoLoader {
         };
         let sentence_transformers_present =
             model_id.join("config_sentence_transformers.json").exists()
-                || Self::fetch_sentence_transformers_config(&api, model_id);
+                || Self::fetch_sentence_transformers_config(&api, model_id, &revision);
         let repo_files = if model_id.exists() {
             Self::list_local_repo_files(model_id)
         } else {
-            crate::api_dir_list!(api, model_id, false).collect::<Vec<_>>()
+            crate::api_dir_list!(api, model_id, false, &revision).collect::<Vec<_>>()
         };
         Ok(ConfigArtifacts {
             contents,
@@ -323,12 +311,15 @@ impl AutoLoader {
             .unwrap_or(false)
     }
 
-    fn fetch_sentence_transformers_config(api: &ApiRepo, model_id: &Path) -> bool {
-        if model_id.exists() {
-            return false;
-        }
-        match api.get("config_sentence_transformers.json") {
-            Ok(_) => true,
+    fn fetch_sentence_transformers_config(api: &ApiRepo, model_id: &Path, revision: &str) -> bool {
+        match crate::pipeline::hf::try_get_file(
+            api,
+            model_id,
+            "config_sentence_transformers.json",
+            revision,
+        ) {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
             Err(err) => {
                 debug!(
                     "No `config_sentence_transformers.json` found for `{}`: {err}",
@@ -379,7 +370,7 @@ impl AutoLoader {
         if artifacts.contents.is_none() && artifacts.repo_files.iter().any(|f| f == "params.json") {
             // Voxtral uses params.json with a "multimodal" key containing "whisper_model_args"
             info!("Detected `params.json` in repo; routing as Voxtral.");
-            return Ok(Detected::Vision(VisionLoaderType::Voxtral));
+            return Ok(Detected::Multimodal(MultimodalLoaderType::Voxtral));
         }
 
         let config = artifacts.contents.as_ref().ok_or_else(|| {
@@ -396,8 +387,8 @@ impl AutoLoader {
             anyhow::bail!("Expected exactly one architecture in config");
         }
         let name = &cfg.architectures[0];
-        if let Ok(tp) = VisionLoaderType::from_causal_lm_name(name) {
-            return Ok(Detected::Vision(tp));
+        if let Ok(tp) = MultimodalLoaderType::from_causal_lm_name(name) {
+            return Ok(Detected::Multimodal(tp));
         }
         let tp = NormalLoaderType::from_causal_lm_name(name)?;
         Ok(Detected::Normal(tp))
@@ -419,9 +410,9 @@ impl AutoLoader {
                 let loader = builder.build(Some(tp)).expect("build normal");
                 *guard = Some(loader);
             }
-            Detected::Vision(tp) => {
+            Detected::Multimodal(tp) => {
                 let builder = self
-                    .vision_builder
+                    .multimodal_builder
                     .lock()
                     .unwrap()
                     .take()

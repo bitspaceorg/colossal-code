@@ -1,5 +1,6 @@
 #![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 
+use crate::paged_attention::block_hash::MultimodalKind;
 use std::{any::Any, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
@@ -78,6 +79,7 @@ impl InputsProcessor for Phi3InputsProcessor {
         no_kv_cache: bool,
         last_n_context_len: Option<(usize, usize)>,
         return_raw_logits: bool,
+        sliding_window: Option<usize>,
         other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<PagedAttentionMeta>,
         mapper: Option<&dyn DeviceMapper>,
@@ -161,6 +163,7 @@ impl InputsProcessor for Phi3InputsProcessor {
                     no_kv_cache,
                     last_n_context_len,
                     return_raw_logits,
+                    sliding_window,
                     other_config,
                     paged_attn_metadata,
                     mapper,
@@ -181,6 +184,7 @@ impl InputsProcessor for Phi3InputsProcessor {
                         paged_attn_meta,
                         flash_meta,
                         flash_meta_full: _,
+                        recurrent_batch_kind,
                     } = *inputs
                         .downcast::<text_models_inputs_processor::ModelInputs>()
                         .expect("Downcast failed.");
@@ -197,6 +201,7 @@ impl InputsProcessor for Phi3InputsProcessor {
                         }),
                         paged_attn_meta,
                         flash_meta,
+                        recurrent_batch_kind,
                     });
                     InputProcessorOutput {
                         inputs,
@@ -259,8 +264,8 @@ impl InputsProcessor for Phi3InputsProcessor {
                 if unique_image_ids != (1u32..unique_image_ids.len() as u32 + 1).collect::<Vec<_>>()
                 {
                     return Err(anyhow::Error::msg(
-                        "`image_ids` must start from 1, and must be continuous, e.g. [1, 2, 3], cannot be [1, 4, 5].",
-                    ));
+                    "`image_ids` must start from 1, and must be continuous, e.g. [1, 2, 3], cannot be [1, 4, 5].",
+                ));
                 }
                 // Total images must be the same as the number of image tags
                 if unique_image_ids.len() != n_images {
@@ -314,7 +319,7 @@ impl InputsProcessor for Phi3InputsProcessor {
                         seq.set_mm_features(build_mm_features_from_ranges(
                             &img_ranges,
                             &hashes,
-                            "img",
+                            MultimodalKind::Image,
                         ));
                     }
                 }
@@ -338,6 +343,7 @@ impl InputsProcessor for Phi3InputsProcessor {
                 return_raw_logits,
                 paged_attn_metadata.as_mut(),
                 mapper,
+                sliding_window,
             )
         } else {
             get_completion_input(
@@ -349,6 +355,7 @@ impl InputsProcessor for Phi3InputsProcessor {
                 return_raw_logits,
                 paged_attn_metadata.as_mut(),
                 mapper,
+                sliding_window,
             )
         };
 
@@ -392,6 +399,11 @@ impl InputsProcessor for Phi3InputsProcessor {
                 }),
                 paged_attn_meta,
                 flash_meta,
+                recurrent_batch_kind: if is_prompt {
+                    crate::pipeline::RecurrentBatchKind::Prefill
+                } else {
+                    crate::pipeline::RecurrentBatchKind::Decode
+                },
             });
             InputProcessorOutput {
                 inputs,

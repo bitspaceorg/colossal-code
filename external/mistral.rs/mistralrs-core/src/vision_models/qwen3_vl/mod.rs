@@ -1,26 +1,27 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::AttentionMask;
+use crate::layers_masker::CausalMaskConfig;
 use std::{
     any::Any,
     sync::{Arc, Mutex},
 };
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
-use mistralrs_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
+use mistralrs_quant::{NonZeroOp, ShardedVarBuilder};
 use text::Qwen3VLTextModel;
 use vision::Qwen3VLVisionModel;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
-    device_map::DeviceMapper,
     layers::CausalMasker,
     layers_masker::{masked_fill, PastKvLenCache},
     paged_attention::{
-        encoder_cache::EncoderCacheManager, AttentionImplementation, ModelConfigMetadata,
+        encoder_cache::{CacheModality, EncoderCacheManager},
+        AttentionImplementation, ModelConfigMetadata,
     },
     pipeline::{
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, NormalLoadingMetadata, VisionModel,
+        EitherCache, IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata,
     },
 };
 
@@ -44,13 +45,13 @@ pub struct Qwen3VLModel {
 }
 
 /// Compute 3D MRoPE position IDs and position deltas for Qwen3 VL models.
-/// Shared between Qwen3VLModel and Qwen3VLMoEModel.
+/// Shared between Qwen3VL models.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn get_rope_index(
     input_ids: &Tensor,
     image_grid_thw: Option<&Tensor>,
     video_grid_thw: Option<&Tensor>,
-    attention_mask: Option<&Tensor>,
+    attention_mask: &AttentionMask,
     spatial_merge_size: usize,
     image_token_id: u32,
     video_token_id: u32,
@@ -63,8 +64,8 @@ pub(crate) fn get_rope_index(
         let device = input_ids.device().clone();
 
         let attention_mask_tensor = match attention_mask {
-            Some(mask) => mask.clone(),
-            None => Tensor::ones((batch, seq_len), DType::F32, &device)?,
+            AttentionMask::Custom(mask) => mask.clone(),
+            _ => Tensor::ones((batch, seq_len), DType::F32, &device)?,
         };
         let attention_mask_vec = attention_mask_tensor.to_vec2::<f32>()?;
         let input_ids_vec = input_ids.to_vec2::<u32>()?;
@@ -318,7 +319,7 @@ pub(crate) fn get_rope_index(
         let mrope_position_deltas = Tensor::from_vec(mrope_position_deltas, (batch, 1), &device)?;
 
         Ok((position_ids, mrope_position_deltas))
-    } else if let Some(attention_mask) = attention_mask {
+    } else if let AttentionMask::Custom(attention_mask) = attention_mask {
         let position_ids = (attention_mask.to_dtype(DType::F32)?.cumsum(D::Minus1)? - 1f64)?;
         let position_ids = masked_fill(&position_ids, &attention_mask.eq(0f64)?, 1i64)?;
         let position_ids = position_ids.unsqueeze(0)?.repeat((3, 1, 1))?;
@@ -398,24 +399,25 @@ impl Qwen3VLModel {
         seqlens: Vec<usize>,
         continuous_img_pad: Vec<Vec<(usize, usize)>>,
         continuous_vid_pad: Vec<Vec<(usize, usize)>>,
-        seqlen_offsets: &[usize],
-        context_lens: Vec<(usize, usize)>,
         image_hashes: &[u64],
-        metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
+        ctx: &ModelForwardContext<'_>,
     ) -> Result<Tensor> {
-        let mut attention_mask = CausalMasker.make_sliding_window_causal_mask_matrix(
+        let seqlen_offsets = ctx.seqlen_offsets();
+        let mut attention_mask = CausalMasker.make_causal_mask(
             input_ids,
             &seqlen_offsets as &dyn PastKvLenCache,
-            self.text.cfg.sliding_window,
             self.text.dtype,
-            self.text.cfg.num_attn_heads,
+            &CausalMaskConfig {
+                sliding_window: self.text.cfg.sliding_window,
+                ..Default::default()
+            },
         )?;
-        let is_first_chunk = metadata
-            .as_ref()
-            .map(|(_, meta)| meta.is_first_prompt_chunk)
-            .unwrap_or(true);
-        attention_mask = attention_mask.filter(|_| is_first_chunk);
+        let is_first_chunk = ctx.is_first_prompt_chunk();
+        attention_mask = if is_first_chunk {
+            attention_mask
+        } else {
+            AttentionMask::None
+        };
 
         let mut input_embeds = self.text.embed_tokens(input_ids)?;
         let (batch_size, seq_len, hidden_dim) = input_embeds.dims3()?;
@@ -461,7 +463,7 @@ impl Qwen3VLModel {
                         .lock()
                         .expect("encoder cache lock poisoned");
                     for (i, &hash) in image_hashes.iter().enumerate() {
-                        if let Some(cached) = guard.get(hash) {
+                        if let Some(cached) = guard.get(CacheModality::Image, hash) {
                             per_image[i] = Some(cached);
                         } else {
                             miss_indices.push(i);
@@ -526,7 +528,11 @@ impl Qwen3VLModel {
                                 cache_entry.push(single_ds.clone());
                             }
                             enc_offset += n_out;
-                            guard.insert(image_hashes[orig_idx], cache_entry.clone());
+                            guard.insert(
+                                CacheModality::Image,
+                                image_hashes[orig_idx],
+                                cache_entry.clone(),
+                            );
                             per_image[orig_idx] = Some(cache_entry);
                         }
                     }
@@ -682,12 +688,12 @@ impl Qwen3VLModel {
                     }
                     if img_offset != img_layer.dim(0)? || vid_offset != vid_layer.dim(0)? {
                         candle_core::bail!(
-                            "DeepStack feature alignment failed for images ({}/{}) or videos ({}/{})",
-                            img_offset,
-                            img_layer.dim(0)?,
-                            vid_offset,
-                            vid_layer.dim(0)?
-                        );
+                                "DeepStack feature alignment failed for images ({}/{}) or videos ({}/{})",
+                                img_offset,
+                                img_layer.dim(0)?,
+                                vid_offset,
+                                vid_layer.dim(0)?
+                            );
                     }
                     let row_refs: Vec<&Tensor> = rows.iter().collect();
                     combined_layers.push(Tensor::stack(&row_refs, 0)?);
@@ -717,35 +723,25 @@ impl Qwen3VLModel {
             input_ids_full,
             rope_img_grid_thw.as_ref(),
             rope_vid_grid_thw.as_ref(),
-            Some(&ropeidx_attn_mask),
+            &AttentionMask::Custom(ropeidx_attn_mask.clone()),
             self.spatial_merge_size,
             self.image_token_id,
             self.video_token_id,
             self.vision_start_token_id,
             self.vision_end_token_id,
         )?;
-        let position_ids = if attention_mask.is_some() {
-            let full_len = position_ids.dim(2)?;
-            let trimmed_len = input_ids.dim(1)?;
-            position_ids.narrow(2, full_len - trimmed_len, trimmed_len)?
-        } else {
-            let mut position_ids = Tensor::new(
-                seqlen_offsets.iter().map(|x| *x as i64).collect::<Vec<_>>(),
-                input_ids.device(),
-            )?
-            .reshape((1, (), 1))?
-            .repeat((3, 1, 1))?;
-            position_ids = position_ids.broadcast_add(&mrope_position_deltas.unsqueeze(0)?)?;
-            position_ids
-        };
+        let position_ids = crate::vision_models::mrope_position_ids_for_input(
+            &position_ids,
+            &mrope_position_deltas,
+            input_ids,
+            seqlen_offsets,
+        )?;
 
         let out = self.text.forward_embeds(
             input_embeds,
-            attention_mask.as_ref(),
+            &attention_mask,
             &position_ids,
-            context_lens,
-            metadata,
-            flash_params,
+            ctx,
             visual_pos_masks.as_ref(),
             deepstack_visual_embeds.as_deref(),
         )?;
@@ -768,17 +764,17 @@ pub(crate) struct Qwen3VLVisionSpecificArgs {
     pub image_hashes: Vec<u64>,
 }
 
-impl VisionModel for Qwen3VLModel {
+impl crate::speculative::SpeculativeTargetMixin for Qwen3VLModel {}
+
+impl crate::block_diffusion::BlockDiffusionMixin for Qwen3VLModel {}
+
+impl MultimodalModel for Qwen3VLModel {
     fn forward(
         &self,
         input_ids: &Tensor,
         pixel_values: Option<Tensor>,
-        seqlen_offsets: &[usize],
-        context_lens: Vec<(usize, usize)>,
-        _position_ids: Vec<usize>,
         model_specific_args: Box<dyn Any>,
-        metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
+        ctx: &mut crate::pipeline::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         let Qwen3VLVisionSpecificArgs {
             input_ids_full,
@@ -817,18 +813,12 @@ impl VisionModel for Qwen3VLModel {
             seqlens,
             continuous_img_pad,
             continuous_vid_pad,
-            seqlen_offsets,
-            context_lens,
             &image_hashes,
-            metadata,
-            flash_params,
+            ctx,
         )
     }
     fn cache(&self) -> &EitherCache {
         &self.text.cache
-    }
-    fn cache_mut(&mut self) -> &mut EitherCache {
-        &mut self.text.cache
     }
     fn device(&self) -> &Device {
         &self.text.device
@@ -869,14 +859,6 @@ impl VisionModel for Qwen3VLModel {
 }
 
 impl IsqModel for Qwen3VLModel {
-    fn get_layers(
-        &mut self,
-    ) -> (
-        Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)>,
-        &dyn DeviceMapper,
-    ) {
-        self.text.get_layers()
-    }
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let mut tensors = self.text.residual_tensors();
         tensors.extend(self.vision.residual_tensors());

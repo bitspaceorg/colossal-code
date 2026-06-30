@@ -58,6 +58,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                     params.insert("required".to_string(), json!(["command"]));
                     params
                 }),
+                strict: None,
             },
         },
         ToolName::ReadOutput => Tool {
@@ -80,6 +81,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                     params.insert("required".to_string(), json!(["session_id"]));
                     params
                 }),
+                strict: None,
             },
         },
         ToolName::DeletePath => Tool {
@@ -102,6 +104,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                     params.insert("required".to_string(), json!(["path"]));
                     params
                 }),
+                strict: None,
             },
         },
         ToolName::DeleteMany => Tool {
@@ -127,6 +130,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                     params.insert("required".to_string(), json!(["paths"]));
                     params
                 }),
+                strict: None,
             },
         },
         ToolName::GetFiles => Tool {
@@ -153,6 +157,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                     params.insert("required".to_string(), json!(["path"]));
                     params
                 }),
+                strict: None,
             },
         },
         ToolName::GetFilesRecursive => Tool {
@@ -193,6 +198,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                     params.insert("required".to_string(), json!(["path"]));
                     params
                 }),
+                strict: None,
             },
         },
         ToolName::SearchFilesWithRegex => Tool {
@@ -241,6 +247,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                     params.insert("required".to_string(), json!(["path", "regex_pattern"]));
                     params
                 }),
+                strict: None,
             },
         },
         ToolName::ReadFile => Tool {
@@ -287,6 +294,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                     params.insert("required".to_string(), json!(["path"]));
                     params
                 }),
+                strict: None,
             },
         },
         ToolName::EditFile => Tool {
@@ -317,6 +325,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                     params.insert("required".to_string(), json!(["path", "old_string", "new_string"]));
                     params
                 }),
+                strict: None,
             },
         },
         ToolName::SemanticSearch => Tool {
@@ -339,6 +348,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                     params.insert("required".to_string(), json!(["query"]));
                     params
                 }),
+                strict: None,
             },
         },
         ToolName::WebSearch => Tool {
@@ -372,6 +382,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                     params.insert("required".to_string(), json!(["query"]));
                     params
                 }),
+                strict: None,
             },
         },
         ToolName::HtmlToText => Tool {
@@ -394,6 +405,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                     params.insert("required".to_string(), json!(["url"]));
                     params
                 }),
+                strict: None,
             },
         },
         ToolName::TodoWrite => Tool {
@@ -442,6 +454,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                     params.insert("required".to_string(), json!(["todos"]));
                     params
                 }),
+                strict: None,
             },
         },
         ToolName::RequestSplit => Tool {
@@ -463,6 +476,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                     );
                     params
                 }),
+                strict: None,
             },
         },
         ToolName::OrchestrateTask => Tool {
@@ -489,6 +503,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                     params.insert("required".to_string(), json!(["goal"]));
                     params
                 }),
+                strict: None,
             },
         },
         ToolName::SubmitVerification => Tool {
@@ -519,6 +534,7 @@ pub fn build_tool(tool_name: ToolName) -> Tool {
                     params.insert("required".to_string(), json!(["status", "end_convo"]));
                     params
                 }),
+                strict: None,
             },
         },
     }

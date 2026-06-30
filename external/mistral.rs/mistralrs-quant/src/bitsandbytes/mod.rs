@@ -1,7 +1,4 @@
-use std::{
-    borrow::Cow,
-    sync::{atomic::AtomicUsize, Arc},
-};
+use std::sync::{atomic::AtomicUsize, Arc};
 
 use candle_core::{Context, DType, Device, Result, Shape, Tensor};
 use serde::Deserialize;
@@ -87,9 +84,7 @@ impl BnbLinear {
         if !vb_w.contains_tensor("quant_state.bitsandbytes__nf4")
             && !vb_w.contains_tensor("quant_state.bitsandbytes__fp4")
         {
-            candle_core::bail!(
-                "`BnbLinear` expects either `...__nf4` or `...__fp4` tensors, this means the layer is not 4bit."
-            );
+            candle_core::bail!("`BnbLinear` expects either `...__nf4` or `...__fp4` tensors, this means the layer is not 4bit.");
         }
 
         let bias = if bias {
@@ -235,7 +230,7 @@ impl QuantMethod for BnbLinear {
         Self::dequantize(&self.weight, &self.params, self.quant_ty)
     }
 
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+    fn forward_raw(&self, xs: &Tensor) -> Result<Tensor> {
         let w = Self::dequantize(&self.weight, &self.params, self.quant_ty)?
             .t()?
             .to_dtype(xs.dtype())?;
@@ -259,6 +254,23 @@ impl QuantMethod for BnbLinear {
         (self.params.dtype.into(), self.weight.device().clone())
     }
 
+    fn plan_isq(&self, request: &crate::IsqRequest) -> Result<crate::IsqPlanParams> {
+        let shape = self
+            .params
+            .shape
+            .as_ref()
+            .unwrap_or_else(|| self.weight.shape())
+            .dims()
+            .to_vec();
+        Ok(crate::plan_weight_isq(
+            self.params.dtype.into(),
+            self.weight.device().clone(),
+            shape,
+            request,
+            true,
+        ))
+    }
+
     fn apply_isq(
         self: Arc<Self>,
         _dtype: Option<IsqType>,
@@ -277,20 +289,5 @@ impl QuantizedSerde for BnbLinear {
     }
     fn name(&self) -> &'static str {
         "bnb-linear"
-    }
-    fn serialize(&self) -> Result<Cow<'_, [u8]>> {
-        candle_core::bail!("BitsAndBytes quantization does not support UQFF serialization")
-    }
-
-    fn deserialize(
-        _data: Cow<[u8]>,
-        _device: &Device,
-        _comm: &Arc<crate::Comm>,
-        _guard: QuantizeOntoGuard,
-    ) -> Result<Arc<dyn QuantMethod>>
-    where
-        Self: Sized,
-    {
-        candle_core::bail!("BitsAndBytes quantization does not support UQFF deserialization")
     }
 }

@@ -143,6 +143,7 @@ impl InputsProcessor for Idefics2ImageProcessor {
         no_kv_cache: bool,
         last_n_context_len: Option<(usize, usize)>,
         return_raw_logits: bool,
+        sliding_window: Option<usize>,
         other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<PagedAttentionMeta>,
         mapper: Option<&dyn DeviceMapper>,
@@ -179,6 +180,7 @@ impl InputsProcessor for Idefics2ImageProcessor {
                 return_raw_logits,
                 paged_attn_metadata.as_mut(),
                 mapper,
+                sliding_window,
             )
             .unwrap()
         } else {
@@ -194,6 +196,7 @@ impl InputsProcessor for Idefics2ImageProcessor {
                 return_raw_logits,
                 paged_attn_metadata.as_mut(),
                 mapper,
+                sliding_window,
             )
             .unwrap()
         };
@@ -276,6 +279,11 @@ impl InputsProcessor for Idefics2ImageProcessor {
             }),
             paged_attn_meta,
             flash_meta,
+            recurrent_batch_kind: if is_prompt {
+                crate::pipeline::RecurrentBatchKind::Prefill
+            } else {
+                crate::pipeline::RecurrentBatchKind::Decode
+            },
         });
         Ok(InputProcessorOutput {
             inputs,
@@ -336,9 +344,7 @@ impl ImagePreProcessor for Idefics2ImageProcessor {
                 } else if size.contains_key("height") && size.contains_key("width") {
                     (size["height"] as usize, size["width"] as usize)
                 } else {
-                    candle_core::bail!(
-                        "Size must be a map of `shortest_edge` and `longest_edge` or `height` and `width`."
-                    );
+                    candle_core::bail!("Size must be a map of `shortest_edge` and `longest_edge` or `height` and `width`.");
                 };
 
                 *image = image.resize_exact(w as u32, h as u32, config.resampling.to_filter()?);

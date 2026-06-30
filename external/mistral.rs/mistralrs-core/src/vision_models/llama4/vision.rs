@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::{LayerNorm, LayerNormConfig, Linear, Module};
@@ -8,7 +8,7 @@ use indicatif::MultiProgress;
 use mistralrs_quant::{ColumnParallelLayer, QuantMethod, RowParallelLayer, ShardedVarBuilder};
 
 use crate::{
-    attention::SdpaParams,
+    attention::{AttentionMask, SdpaParams},
     layers::{layer_norm, linear_no_bias, Activation, Sdpa},
     ops::RepeatInterleaveOp,
     pipeline::{text_models_inputs_processor::FlashParams, IsqModel},
@@ -160,21 +160,9 @@ impl Llama4VisionAttention {
         })
     }
 
-    fn forward(&self, hidden_state: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
-        let mut hidden_state = hidden_state.clone();
-        let original_dtype = hidden_state.dtype();
-        if let Some(t) = self.q_proj.quantized_act_type() {
-            hidden_state = hidden_state.to_dtype(t)?;
-        }
-        let mut q = self.q_proj.forward(&hidden_state)?;
-        let mut k = self.k_proj.forward(&hidden_state)?;
-        let mut v = self.v_proj.forward(&hidden_state)?;
-        if self.q_proj.quantized_act_type().is_some() {
-            q = q.to_dtype(original_dtype)?;
-            k = k.to_dtype(original_dtype)?;
-            v = v.to_dtype(original_dtype)?;
-        }
-
+    fn forward(&self, hidden_state: &Tensor, attention_mask: &AttentionMask) -> Result<Tensor> {
+        let (mut q, mut k, mut v) =
+            crate::ops::qkv_projections(hidden_state, &*self.q_proj, &*self.k_proj, &*self.v_proj)?;
         // Should be same, no caching...
         let (bs, q_sq, _) = q.dims3()?;
         let (_, k_sq, _) = k.dims3()?;
@@ -192,21 +180,19 @@ impl Llama4VisionAttention {
             .transpose(1, 2)?
             .contiguous()?;
 
-        // Apply rope
-        {
-            q = candle_nn::rotary_emb::rope_i(&q, &self.freqs.cos, &self.freqs.sin)?;
-            k = candle_nn::rotary_emb::rope_i(&k, &self.freqs.cos, &self.freqs.sin)?;
-        }
+        let qk = crate::layers::apply_rotary_preselected_qk(
+            &q,
+            &k,
+            &self.freqs.cos,
+            &self.freqs.sin,
+            false,
+        )?;
+        q = qk.0;
+        k = qk.1;
 
-        let flash_params = FlashParams {
-            max_q: 0,
-            max_k: 0,
-            cumulative_seqlens_q: HashMap::new(),
-            cumulative_seqlens_k: HashMap::new(),
-            causal: false,
-        };
+        let flash_params = FlashParams::empty(false);
 
-        let mut attn_output = Sdpa
+        let attn_output = Sdpa
             .run_attention(
                 &q,
                 &k,
@@ -220,13 +206,7 @@ impl Llama4VisionAttention {
             .reshape((bs, q_sq, ()))?
             .to_dtype(q.dtype())?;
 
-        if let Some(t) = self.q_proj.quantized_act_type() {
-            attn_output = attn_output.to_dtype(t)?;
-        }
-        let mut res = self.o_proj.forward(&attn_output)?;
-        if self.q_proj.quantized_act_type().is_some() {
-            res = res.to_dtype(original_dtype)?;
-        }
+        let res = self.o_proj.forward(&attn_output)?;
         Ok(res)
     }
 }
@@ -265,17 +245,9 @@ impl Llama4Mlp {
     }
 
     fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
-        let original_dtype = hidden_states.dtype();
-        let mut hidden_states = hidden_states.clone();
-        if let Some(t) = self.fc1.quantized_act_type() {
-            hidden_states = hidden_states.to_dtype(t)?;
-        }
-        hidden_states = self.fc1.forward(&hidden_states)?;
-        hidden_states = self.act.forward(&hidden_states)?;
-        hidden_states = self.fc2.forward(&hidden_states)?;
-        if self.fc1.quantized_act_type().is_some() {
-            hidden_states = hidden_states.to_dtype(original_dtype)?;
-        }
+        let hidden_states = self.fc1.forward(hidden_states)?;
+        let hidden_states = self.act.forward(&hidden_states)?;
+        let hidden_states = self.fc2.forward(&hidden_states)?;
         Ok(hidden_states)
     }
 }
@@ -318,7 +290,7 @@ impl Llama4VisionEncoderLayer {
         })
     }
 
-    fn forward(&self, hidden_state: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
+    fn forward(&self, hidden_state: &Tensor, attention_mask: &AttentionMask) -> Result<Tensor> {
         // Self attn
         let residual = hidden_state;
         let mut hidden_state = self.input_layernorm.forward(hidden_state)?;
@@ -364,7 +336,7 @@ impl Llama4VisionEncoder {
     fn forward_with_states(
         &self,
         hidden_state: &Tensor,
-        attention_mask: Option<&Tensor>,
+        attention_mask: &AttentionMask,
     ) -> Result<Tensor> {
         let mut hidden_state = hidden_state.clone();
         for layer in self.layers.iter() {
@@ -422,19 +394,11 @@ impl Llama4VisionPixelShuffleMLP {
     }
 
     fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
-        let original_dtype = hidden_states.dtype();
-        let mut hidden_states = hidden_states.clone();
-        if let Some(t) = self.fc1.quantized_act_type() {
-            hidden_states = hidden_states.to_dtype(t)?;
-        }
-        hidden_states = self.act.forward(
+        let hidden_states = self.act.forward(
             &self
                 .fc2
-                .forward(&self.act.forward(&self.fc1.forward(&hidden_states)?)?)?,
+                .forward(&self.act.forward(&self.fc1.forward(hidden_states)?)?)?,
         )?;
-        if self.fc1.quantized_act_type().is_some() {
-            hidden_states = hidden_states.to_dtype(original_dtype)?;
-        }
         Ok(hidden_states)
     }
 }
@@ -674,7 +638,9 @@ impl Llama4VisionModel {
         // Apply encoder
         hidden_state =
             hidden_state.reshape((bs_times_num_tiles * num_concurrent_media, (), hidden_dim))?;
-        hidden_state = self.model.forward_with_states(&hidden_state, None)?;
+        hidden_state = self
+            .model
+            .forward_with_states(&hidden_state, &AttentionMask::None)?;
 
         hidden_state = self.layernorm_post.forward(&hidden_state)?;
 
@@ -682,36 +648,9 @@ impl Llama4VisionModel {
 
         self.vision_adapter.forward(&hidden_state)
     }
-
-    pub fn get_isq_layers(&mut self) -> Vec<&mut std::sync::Arc<dyn mistralrs_quant::QuantMethod>> {
-        let mut layers = Vec::new();
-        for layer in &mut self.model.layers {
-            layers.push(&mut layer.self_attn.q_proj);
-            layers.push(&mut layer.self_attn.k_proj);
-            layers.push(&mut layer.self_attn.v_proj);
-            layers.push(&mut layer.self_attn.o_proj);
-
-            layers.push(&mut layer.mlp.fc1);
-            layers.push(&mut layer.mlp.fc2);
-        }
-        layers.push(&mut self.vision_adapter.mlp.fc1);
-        layers.push(&mut self.vision_adapter.mlp.fc2);
-        layers
-    }
 }
 
 impl IsqModel for Llama4VisionModel {
-    fn get_layers(
-        &mut self,
-    ) -> (
-        Vec<(
-            &mut std::sync::Arc<dyn mistralrs_quant::QuantMethod>,
-            Option<usize>,
-        )>,
-        &dyn crate::device_map::DeviceMapper,
-    ) {
-        unreachable!("Llama4Vision model cannot be quantized.");
-    }
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
 

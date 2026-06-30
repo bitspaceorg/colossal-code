@@ -3,7 +3,7 @@
 use candle_core::{Device, Result, Tensor};
 
 use crate::{
-    attention::SdpaParams,
+    attention::{AttentionMask, SdpaParams},
     pipeline::text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
 };
 
@@ -39,26 +39,26 @@ fn is_mla_disabled() -> bool {
 /// - Paged KV indptr metadata is available
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 pub fn should_use_mla_decode(
-    attention_mask: Option<&Tensor>,
+    attention_mask: &AttentionMask,
     seq_len: usize,
     paged_attn_enabled: bool,
     device: &Device,
     metadata: &Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
 ) -> bool {
     !is_mla_disabled()
-        && attention_mask.is_none()
+        && matches!(attention_mask, AttentionMask::None)
         && seq_len == 1
         && paged_attn_enabled
         && matches!(device, Device::Cuda(_))
         && metadata
             .as_ref()
-            .and_then(|(_, meta)| meta.paged_kv_indptr.as_ref())
+            .and_then(|(_, meta)| meta.flashinfer.as_ref())
             .is_some()
 }
 
 #[cfg(not(all(feature = "cuda", target_family = "unix")))]
 pub fn should_use_mla_decode(
-    _attention_mask: Option<&Tensor>,
+    _attention_mask: &AttentionMask,
     _seq_len: usize,
     _paged_attn_enabled: bool,
     _device: &Device,
@@ -135,40 +135,45 @@ pub fn mla_decode_forward(
     } else {
         slot_mapping.clone()
     };
-    let paged_kv_indptr = input_metadata
-        .paged_kv_indptr
+    let flashinfer = input_metadata
+        .flashinfer
         .as_ref()
-        .and_then(|m| m.get(&device_location))
+        .ok_or_else(|| candle_core::Error::msg("FlashInfer metadata missing"))?;
+    let view = flashinfer.views.select(sdpa_params.sliding_window);
+    let paged_kv_indptr = view
+        .paged_kv
+        .indptr
+        .get(&device_location)
         .ok_or_else(|| candle_core::Error::msg("paged_kv_indptr missing"))?;
-    let paged_kv_indices = input_metadata
-        .paged_kv_indices
-        .as_ref()
-        .and_then(|m| m.get(&device_location))
+    let paged_kv_indices = view
+        .paged_kv
+        .indices
+        .get(&device_location)
         .ok_or_else(|| candle_core::Error::msg("paged_kv_indices missing"))?;
-    let paged_kv_last_page_len = input_metadata
-        .paged_kv_last_page_len
-        .as_ref()
-        .and_then(|m| m.get(&device_location))
+    let paged_kv_last_page_len = view
+        .paged_kv
+        .last_page_len
+        .get(&device_location)
         .ok_or_else(|| candle_core::Error::msg("paged_kv_last_page_len missing"))?;
-    let paged_kv_request_indices = input_metadata
-        .paged_kv_request_indices
-        .as_ref()
-        .and_then(|m| m.get(&device_location))
+    let paged_kv_request_indices = view
+        .tile_plan
+        .request_indices
+        .get(&device_location)
         .ok_or_else(|| candle_core::Error::msg("paged_kv_request_indices missing"))?;
-    let paged_kv_tile_indices = input_metadata
-        .paged_kv_tile_indices
-        .as_ref()
-        .and_then(|m| m.get(&device_location))
+    let paged_kv_tile_indices = view
+        .tile_plan
+        .kv_tile_indices
+        .get(&device_location)
         .ok_or_else(|| candle_core::Error::msg("paged_kv_tile_indices missing"))?;
-    let paged_kv_o_indptr = input_metadata
-        .paged_kv_o_indptr
-        .as_ref()
-        .and_then(|m| m.get(&device_location))
+    let paged_kv_o_indptr = view
+        .tile_plan
+        .o_indptr
+        .get(&device_location)
         .ok_or_else(|| candle_core::Error::msg("paged_kv_o_indptr missing"))?;
-    let paged_kv_chunk_size = input_metadata
-        .paged_kv_chunk_size
-        .as_ref()
-        .and_then(|m| m.get(&device_location))
+    let paged_kv_chunk_size = view
+        .tile_plan
+        .kv_chunk_size
+        .get(&device_location)
         .ok_or_else(|| candle_core::Error::msg("paged_kv_chunk_size missing"))?;
 
     let ckv_flat = ckv.contiguous()?.reshape((bs * seq_len, kv_lora_rank))?;
@@ -275,7 +280,7 @@ pub fn mla_cache_forward(
     v: &Tensor,
     ckv: &Tensor,
     k_pe: &Tensor,
-    attention_mask: Option<&Tensor>,
+    attention_mask: &AttentionMask,
     seqlen_offsets: &[usize],
     metadata: &Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
     flash_params: &FlashParams,
@@ -323,7 +328,7 @@ pub fn mla_cache_forward(
 
     let prefix_lens = seqlen_offsets;
     let needs_prefix = prefix_lens.iter().any(|&len| len > 0);
-    if !needs_prefix && attention_mask.is_some() {
+    if !needs_prefix && !matches!(attention_mask, AttentionMask::None) {
         Sdpa.run_attention(q, k, v, attention_mask, Some(flash_params), sdpa_params)
     } else {
         let ((key_cache, value_cache), input_metadata) =
@@ -431,7 +436,7 @@ pub fn mla_cache_forward(
                 &token_to_seq,
             )?;
 
-            let mut kv_prefix = kv_b_proj.forward_autocast(&ckv_prefix)?;
+            let mut kv_prefix = kv_b_proj.forward(&ckv_prefix)?;
             kv_prefix = kv_prefix.reshape((
                 total_prefix_tokens,
                 num_attention_heads,
@@ -531,6 +536,7 @@ pub fn mla_cache_forward(
                 &v_full.unsqueeze(0)?,
                 mask.as_ref(),
                 sdpa_params,
+                flash_params.causal,
             )?;
             let mut attn_out_i = attn_out_i.squeeze(0)?.transpose(0, 1)?;
             if cur_len < seq_len {
@@ -550,7 +556,7 @@ pub fn mla_cache_forward(
     _v: &Tensor,
     _ckv: &Tensor,
     _k_pe: &Tensor,
-    _attention_mask: Option<&Tensor>,
+    _attention_mask: &AttentionMask,
     _seqlen_offsets: &[usize],
     _metadata: &Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
     _flash_params: &FlashParams,

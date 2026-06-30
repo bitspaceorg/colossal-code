@@ -8,8 +8,8 @@ use tokio::sync::Mutex;
 use crate::{
     engine::IntervalLogger,
     paged_attention::{
-        CacheConfig, KVCacheManager, PagedAttentionScheduler, PagedAttentionSchedulerConfig,
-        PagedAttentionSchedulerOutput,
+        block_hash::BlockHash, CacheConfig, KVCacheManager, PagedAttentionScheduler,
+        PagedAttentionSchedulerConfig, PagedAttentionSchedulerOutput,
     },
     sequence::Sequence,
 };
@@ -51,16 +51,30 @@ pub enum SchedulerOutput<'a> {
     },
 }
 
+pub trait PagedPrefixCacheValidator {
+    fn validate_prefix_cache_hit(
+        &mut self,
+        seq: &mut Sequence,
+        block_hashes: &[BlockHash],
+        cached_tokens: usize,
+        block_size: usize,
+    ) -> usize;
+}
+
 pub trait Scheduler: Send + Sync {
-    fn schedule(&mut self, logger: &IntervalLogger) -> SchedulerOutput<'_>;
+    fn schedule(
+        &mut self,
+        logger: &IntervalLogger,
+        prefix_validator: Option<&mut dyn PagedPrefixCacheValidator>,
+    ) -> SchedulerOutput<'_>;
     fn waiting_len(&self) -> usize;
     fn running_len(&self) -> usize;
     fn add_seq(&mut self, seq: Sequence);
     /// This may do nothing. It depends on the implementation
     fn free_finished_sequence_groups(&mut self);
-    /// Get Mamba state pool indices of finished sequences for freeing.
+    /// Get recurrent state pool indices of finished sequences for freeing.
     /// Called before free_finished_sequence_groups to allow cleanup of hybrid cache slots.
-    fn get_finished_mamba_indices(&self) -> Vec<usize>;
+    fn get_finished_recurrent_indices(&self) -> Vec<usize>;
 
     // PagedAttention metadata
     fn block_size(&self) -> Option<usize>;

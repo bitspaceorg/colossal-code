@@ -4,18 +4,17 @@ use std::sync::Arc;
 
 use candle_core::quantized::QMatMul;
 use candle_core::quantized::QTensor;
-use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
+use candle_core::{DType, Device, IndexOp, Module, Result, Tensor};
 use candle_nn::{Embedding, LayerNorm};
 use mistralrs_quant::GgufMatMul;
 use mistralrs_quant::QuantMethod;
 use mistralrs_quant::QuantMethodConfig;
 
-use crate::attention::SdpaParams;
+use crate::attention::{AttentionMask, SdpaParams};
 use crate::device_map::{DeviceMappedMask, DeviceMapper};
 use crate::gguf::Content;
-use crate::layers::MatMul;
-use crate::layers::Sdpa;
-use crate::layers::{CausalMasker, QLinear};
+use crate::layers::{apply_rotary_q, Sdpa};
+use crate::layers::{CausalMaskConfig, CausalMasker, QLinear};
 use crate::layers_masker::PastKvLenCache;
 use crate::paged_attention::AttentionImplementation;
 use crate::paged_attention::PagedAttention;
@@ -38,7 +37,7 @@ struct Mlp {
 
 impl Module for Mlp {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        MatMul.qmethod_matmul(&MatMul.qmethod_matmul(xs, &*self.ffn_up)?, &*self.ffn_down)
+        self.ffn_down.forward(&self.ffn_up.forward(xs)?)
     }
 }
 
@@ -51,32 +50,20 @@ struct LayerWeights {
     head_dim: usize,
     cos: Tensor,
     sin: Tensor,
-    rope_dim: usize,
     paged_attn: Option<PagedAttention>,
     sdpa_params: SdpaParams,
     dtype: DType,
 }
 
 impl LayerWeights {
-    fn forward(&self, xs: &Tensor, start_offsets: &[usize]) -> Result<Tensor> {
-        let (_b_sz, _n_head, seq_len, _n_embd) = xs.dims4()?;
-        let xs_rot = xs.i((.., .., .., ..self.rope_dim))?;
-        let xs_pass = xs.i((.., .., .., self.rope_dim..))?;
-        let mut chunks = Vec::new();
-        for (b, offset) in (0..xs.dim(0)?).zip(start_offsets) {
-            let cos = self.cos.narrow(0, *offset, seq_len)?;
-            let sin = self.sin.narrow(0, *offset, seq_len)?;
-            let xs_rot =
-                candle_nn::rotary_emb::rope(&xs_rot.i(b)?.unsqueeze(0)?.contiguous()?, &cos, &sin)?;
-            chunks.push(Tensor::cat(&[&xs_rot, &xs_pass], D::Minus1)?);
-        }
-        Tensor::cat(&chunks, 0)?.contiguous()
+    fn forward(&self, xs: &Tensor, positions: &Tensor) -> Result<Tensor> {
+        apply_rotary_q(xs, &self.cos, &self.sin, positions, true)
     }
 
     fn forward_attn(
         &self,
         x: &Tensor,
-        mask: Option<&Tensor>,
+        mask: &AttentionMask,
         seqlen_offsets: &[usize],
         kv_cache: &mut KvCache,
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
@@ -96,8 +83,15 @@ impl LayerWeights {
         // impact on performance.
         let v = v.contiguous()?;
 
-        let q = self.forward(&q, seqlen_offsets)?.contiguous()?;
-        let k = self.forward(&k, seqlen_offsets)?;
+        let positions = seqlen_offsets
+            .iter()
+            .copied()
+            .map(u32::try_from)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(candle_core::Error::wrap)?;
+        let positions = Tensor::from_vec(positions, seqlen_offsets.len(), q.device())?;
+        let q = self.forward(&q, &positions)?.contiguous()?;
+        let k = self.forward(&k, &positions)?;
 
         let y = match &self.paged_attn {
             Some(paged_attn) => {
@@ -121,7 +115,7 @@ impl LayerWeights {
             }
         };
 
-        let y = if mask.is_some() {
+        let y = if mask.is_custom() {
             y.transpose(1, 2)?.reshape((b_sz, seq_len, ()))?
         } else {
             y.reshape((b_sz, seq_len, ()))?
@@ -316,7 +310,6 @@ impl ModelConfig::FromGGUF for ModelWeights {
                 head_dim,
                 cos: cos.clone().to_device(device)?,
                 sin: sin.clone().to_device(device)?,
-                rope_dim,
                 paged_attn,
                 sdpa_params: SdpaParams {
                     n_kv_groups: head_count / head_count_kv,
@@ -352,21 +345,24 @@ impl ModelWeights {
     ) -> Result<Tensor> {
         let mut xs = self.tok_embeddings.forward(input_ids)?;
         let cache = &mut self.cache.normal().0;
-        let mask = CausalMasker.make_causal_mask_matrix(
+        let mask = CausalMasker.make_causal_mask(
             input_ids,
             metadata
                 .as_ref()
                 .map(|(_, _)| &seqlen_offsets as &dyn PastKvLenCache)
                 .unwrap_or(cache as &dyn PastKvLenCache),
             self.dtype,
-            self.layers[0].n_head,
+            &CausalMaskConfig::default(),
         )?;
-        let mask = mask.filter(|_| {
-            metadata
-                .as_ref()
-                .map(|(_, meta)| meta.is_first_prompt_chunk)
-                .unwrap_or(true)
-        });
+        let mask = if metadata
+            .as_ref()
+            .map(|(_, meta)| meta.is_first_prompt_chunk)
+            .unwrap_or(true)
+        {
+            mask
+        } else {
+            AttentionMask::None
+        };
         let mask = DeviceMappedMask::new(mask, &*self.mapper)?;
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
@@ -374,7 +370,7 @@ impl ModelWeights {
             let xs_norm = xs.apply(&layer.attn_norm)?;
             let attn_outputs = layer.forward_attn(
                 &xs_norm,
-                mask.as_ref().map(|m| m.get(xs.device())),
+                &mask.get(xs.device()),
                 seqlen_offsets,
                 &mut cache[i],
                 metadata

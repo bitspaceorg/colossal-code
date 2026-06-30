@@ -1,6 +1,8 @@
 //! ## Chat Completions functionality and route handler.
 
-use std::{ops::Deref, pin::Pin, task::Poll, time::Duration};
+use std::{
+    collections::HashMap, io::Cursor, ops::Deref, pin::Pin, sync::Arc, task::Poll, time::Duration,
+};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -10,15 +12,20 @@ use axum::{
         sse::{Event, KeepAlive, KeepAliveStream},
         IntoResponse, Sse,
     },
+    Extension,
 };
+use base64::{engine::general_purpose::STANDARD, Engine};
 use either::Either;
+use image::DynamicImage;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use mistralrs_core::{
-    ChatCompletionChunkResponse, ChatCompletionResponse, Constraint, MistralRs, ModelCategory,
-    NormalRequest, ReasoningEffort, Request, RequestMessage, Response, SamplingParams,
+    AgentPermission, AgentToolApprovalHandler, AgentToolApprovalNotifier, AgenticToolCallData,
+    AgenticToolCallPhase, AgenticToolCallRecord, ChatCompletionChunkResponse,
+    ChatCompletionResponse, Constraint, MistralRs, ModelCategory, NormalRequest, ReasoningEffort,
+    Request, RequestMessage, Response, SamplingParams,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
@@ -27,16 +34,24 @@ use crate::{
         BaseCompletionResponder,
     },
     handler_core::{
-        base_process_non_streaming_response, create_response_channel, send_request_with_model,
-        BaseJsonModelError, ErrorToResponse, JsonError, ModelErrorMessage,
+        create_response_channel, send_request_with_model, BaseJsonModelError, ErrorToResponse,
+        JsonError, ModelErrorMessage,
     },
+    input_files::{resolve_input_file, InputFileSpec},
+    mistralrs_server_router_builder::AgenticDefaults,
     openai::{
+        normalize_chat_completion_tools, normalize_responses_tools, validate_openai_tool_choice,
         ChatCompletionRequest, Grammar, JsonSchemaResponseFormat, MessageInnerContent,
-        ResponseFormat,
+        OpenAiToolSurface, ResponseFormat,
     },
+    skills::SkillStore,
     streaming::{base_create_streamer, get_keep_alive_interval, BaseStreamer, DoneState},
     types::{ExtractedMistralRsState, OnChunkCallback, OnDoneCallback, SharedMistralRsState},
-    util::{parse_audio_url, parse_image_url, sanitize_error_message, validate_model_name},
+    util::{
+        parse_audio_url_for_server, parse_image_url_for_server, sanitize_error_message,
+        validate_model_name,
+    },
+    video::parse_video_url_for_server,
 };
 
 /// A callback function that processes streaming response chunks before they are sent to the client.
@@ -56,6 +71,11 @@ use crate::{
 ///     chunk
 /// });
 /// ```
+/// Max files surfaced on a single chat completion response body. Additional files
+/// produced by the agentic loop are still reachable via `GET /v1/files/{id}` but
+/// are not embedded in the response JSON to keep the body bounded.
+const MAX_FILES_PER_RESPONSE: usize = 64;
+
 pub type ChatCompletionOnChunkCallback = OnChunkCallback<ChatCompletionChunkResponse>;
 
 /// A callback function that is executed when the streaming response completes.
@@ -84,6 +104,272 @@ pub type ChatCompletionStreamer = BaseStreamer<
     ChatCompletionOnChunkCallback,
     ChatCompletionOnDoneCallback,
 >;
+
+fn encode_agentic_tool_images(images: &[DynamicImage]) -> Vec<String> {
+    images
+        .iter()
+        .filter_map(|image| {
+            let mut buffer = Vec::new();
+            match image.write_to(&mut Cursor::new(&mut buffer), image::ImageFormat::Png) {
+                Ok(()) => Some(STANDARD.encode(buffer)),
+                Err(e) => {
+                    tracing::warn!("failed to encode agentic tool image: {e}");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn serialize_agentic_progress(
+    round: usize,
+    tool_name: &str,
+    phase: &AgenticToolCallPhase,
+) -> Value {
+    let (phase_str, data) = match phase {
+        AgenticToolCallPhase::Calling(data) => ("calling", serialize_agentic_data(data)),
+        AgenticToolCallPhase::Complete(data) => ("complete", serialize_agentic_data(data)),
+    };
+    json!({
+        "type": "agentic_tool_call_progress",
+        "round": round,
+        "tool_name": tool_name,
+        "phase": phase_str,
+        "data": data,
+    })
+}
+
+fn serialize_agentic_data(data: &AgenticToolCallData) -> Value {
+    match data {
+        AgenticToolCallData::CodeExecution {
+            code,
+            stdout,
+            stderr,
+            exception,
+            images,
+            video_frames,
+            video_frame_count,
+            working_directory,
+            execution_time_ms,
+        } => {
+            let mut v = json!({"tool_type": "code_execution"});
+            if let Some(c) = code {
+                v["code"] = json!(c);
+            }
+            if let Some(s) = stdout {
+                v["stdout"] = json!(s);
+            }
+            if let Some(s) = stderr {
+                v["stderr"] = json!(s);
+            }
+            if let Some(e) = exception {
+                v["exception"] = json!(e);
+            }
+            if !images.is_empty() {
+                v["images_base64"] = json!(encode_agentic_tool_images(images));
+            }
+            if !video_frames.is_empty() {
+                v["video_frames_base64"] = json!(encode_agentic_tool_images(video_frames));
+            }
+            if let Some(n) = video_frame_count {
+                v["video_frame_count"] = json!(n);
+            }
+            if let Some(d) = working_directory {
+                v["working_directory"] = json!(d);
+            }
+            if let Some(ms) = execution_time_ms {
+                v["execution_time_ms"] = json!(ms);
+            }
+            v
+        }
+        AgenticToolCallData::WebSearch {
+            query,
+            results_count,
+            sources,
+        } => {
+            let mut v = json!({"tool_type": "web_search"});
+            if let Some(q) = query {
+                v["query"] = json!(q);
+            }
+            if let Some(n) = results_count {
+                v["results_count"] = json!(n);
+            }
+            if !sources.is_empty() {
+                v["sources"] = json!(sources);
+            }
+            v
+        }
+        AgenticToolCallData::Shell {
+            commands,
+            stdout,
+            stderr,
+            exit_code,
+            status,
+            working_directory,
+            timed_out,
+        } => {
+            let mut v = json!({"tool_type": "shell", "commands": commands});
+            if let Some(s) = stdout {
+                v["stdout"] = json!(s);
+            }
+            if let Some(s) = stderr {
+                v["stderr"] = json!(s);
+            }
+            if let Some(code) = exit_code {
+                v["exit_code"] = json!(code);
+            }
+            if let Some(s) = status {
+                v["status"] = json!(s);
+            }
+            if let Some(d) = working_directory {
+                v["working_directory"] = json!(d);
+            }
+            if let Some(t) = timed_out {
+                v["timed_out"] = json!(t);
+            }
+            v
+        }
+        AgenticToolCallData::Custom { arguments, content } => {
+            let mut v = json!({"tool_type": "custom"});
+            if !arguments.is_empty() {
+                v["arguments"] = json!(arguments);
+            }
+            if !content.is_empty() {
+                v["content"] = json!(content);
+            }
+            v
+        }
+    }
+}
+
+/// Arguments string from a Calling-phase `AgenticToolCallData`.
+fn extract_arguments(data: &AgenticToolCallData) -> String {
+    match data {
+        AgenticToolCallData::CodeExecution {
+            code: Some(code), ..
+        } => serde_json::json!({"code": code}).to_string(),
+        AgenticToolCallData::WebSearch {
+            query: Some(query), ..
+        } => serde_json::json!({"query": query}).to_string(),
+        AgenticToolCallData::Shell { commands, .. } => {
+            serde_json::json!({"commands": commands}).to_string()
+        }
+        AgenticToolCallData::Custom { arguments, .. } => arguments.clone(),
+        _ => String::new(),
+    }
+}
+
+/// Fold progress events into `AgenticToolCallRecord` for non-streaming responses. `pending_args` keeps Calling-phase args keyed by (round, tool_name).
+fn record_agentic_progress(
+    records: &mut Vec<AgenticToolCallRecord>,
+    pending_args: &mut HashMap<(usize, String), String>,
+    round: usize,
+    tool_name: &str,
+    phase: &AgenticToolCallPhase,
+) {
+    match phase {
+        AgenticToolCallPhase::Calling(data) => {
+            pending_args.insert((round, tool_name.to_string()), extract_arguments(data));
+        }
+        AgenticToolCallPhase::Complete(data) => {
+            let arguments = pending_args
+                .remove(&(round, tool_name.to_string()))
+                .unwrap_or_default();
+
+            let (result_content, result_images_base64) = match data {
+                AgenticToolCallData::CodeExecution {
+                    stdout,
+                    stderr,
+                    exception,
+                    images,
+                    ..
+                } => {
+                    let mut content_parts = Vec::new();
+                    if let Some(s) = stdout {
+                        content_parts.push(format!("stdout: {s}"));
+                    }
+                    if let Some(s) = stderr {
+                        content_parts.push(format!("stderr: {s}"));
+                    }
+                    if let Some(e) = exception {
+                        content_parts.push(format!("exception: {e}"));
+                    }
+                    (content_parts.join("\n"), encode_agentic_tool_images(images))
+                }
+                AgenticToolCallData::WebSearch {
+                    results_count,
+                    sources,
+                    ..
+                } => {
+                    let mut parts = Vec::new();
+                    if let Some(n) = results_count {
+                        parts.push(format!("{n} results"));
+                    }
+                    if !sources.is_empty() {
+                        parts.push(format!("sources: {}", sources.join(", ")));
+                    }
+                    let msg = parts.join("\n");
+                    (msg, vec![])
+                }
+                AgenticToolCallData::Shell {
+                    stdout,
+                    stderr,
+                    exit_code,
+                    status,
+                    working_directory,
+                    timed_out,
+                    ..
+                } => {
+                    let mut content = json!({
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "exit_code": exit_code,
+                        "status": status,
+                        "working_directory": working_directory,
+                        "timed_out": timed_out,
+                    });
+                    if let Some(obj) = content.as_object_mut() {
+                        obj.retain(|_, value| !value.is_null());
+                    }
+                    (content.to_string(), vec![])
+                }
+                AgenticToolCallData::Custom { content, .. } => (content.clone(), vec![]),
+            };
+            records.push(AgenticToolCallRecord {
+                round,
+                name: tool_name.to_string(),
+                arguments,
+                result_content,
+                result_images_base64,
+                file_ids: Vec::new(),
+            });
+        }
+    }
+}
+
+fn attach_agentic_tool_calls(
+    mut response: ChatCompletionResponse,
+    records: Vec<AgenticToolCallRecord>,
+) -> ChatCompletionResponse {
+    if !records.is_empty() {
+        response.agentic_tool_calls = Some(records);
+    }
+    response
+}
+
+/// Fill each record's `file_ids` from files whose `source.round` and `source.tool` match.
+fn stamp_file_ids(records: &mut [AgenticToolCallRecord], files: &[mistralrs_core::File]) {
+    for r in records.iter_mut() {
+        let matched: Vec<String> = files
+            .iter()
+            .filter(|f| f.source.round == r.round && f.source.tool == r.name)
+            .map(|f| f.id.clone())
+            .collect();
+        if !matched.is_empty() {
+            r.file_ids = matched;
+        }
+    }
+}
 
 impl futures::Stream for ChatCompletionStreamer {
     type Item = Result<Event, axum::Error>;
@@ -156,6 +442,46 @@ impl futures::Stream for ChatCompletionStreamer {
 
                     Poll::Ready(Some(Event::default().json_data(response)))
                 }
+                Response::AgenticToolCallProgress {
+                    round,
+                    tool_name,
+                    phase,
+                } => {
+                    let payload = serialize_agentic_progress(round, &tool_name, &phase);
+                    Poll::Ready(Some(
+                        Event::default()
+                            .event("agentic_tool_call_progress")
+                            .json_data(payload),
+                    ))
+                }
+                Response::AgenticToolApprovalRequired {
+                    approval_id,
+                    session_id,
+                    round,
+                    tool,
+                    arguments,
+                } => {
+                    let payload = json!({
+                        "type": "agentic_tool_approval_required",
+                        "approval_id": approval_id,
+                        "session_id": session_id,
+                        "round": round,
+                        "tool": tool,
+                        "arguments": arguments,
+                    });
+                    Poll::Ready(Some(
+                        Event::default()
+                            .event("agentic_tool_approval_required")
+                            .json_data(payload),
+                    ))
+                }
+                Response::BlockDenoisingProgress(_) => {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                Response::File(file) => Poll::Ready(Some(
+                    Event::default().event("file_produced").json_data(file),
+                )),
                 Response::Done(_) => unreachable!(),
                 Response::CompletionDone(_) => unreachable!(),
                 Response::CompletionModelError(_, _) => unreachable!(),
@@ -212,16 +538,35 @@ fn parse_reasoning_effort(effort: &Option<String>) -> Option<ReasoningEffort> {
         })
 }
 
+pub struct ChatCompletionParseContext {
+    pub state: SharedMistralRsState,
+    pub tx: Sender<Response>,
+    pub tool_dispatch_url: Option<String>,
+    pub agent_approval_handler: Option<AgentToolApprovalHandler>,
+    pub agent_approval_notifier: Option<Arc<AgentToolApprovalNotifier>>,
+    pub tool_surface: OpenAiToolSurface,
+    pub skill_store: Option<Arc<SkillStore>>,
+}
+
 /// Parses and validates a chat completion request.
 ///
 /// This function transforms an OpenAI-compatible chat completion request into the
 /// request format used by mistral.rs.
 pub async fn parse_request(
     oairequest: ChatCompletionRequest,
-    state: SharedMistralRsState,
-    tx: Sender<Response>,
+    ctx: ChatCompletionParseContext,
 ) -> Result<(Request, bool)> {
-    let repr = serde_json::to_string(&oairequest).expect("Serialization of request failed.");
+    let ChatCompletionParseContext {
+        state,
+        tx,
+        tool_dispatch_url,
+        agent_approval_handler,
+        agent_approval_notifier,
+        tool_surface,
+        skill_store,
+    } = ctx;
+    let repr = serde_json::to_string(&oairequest)
+        .context("Failed to serialize chat completion request for logging")?;
     MistralRs::maybe_log_request(state.clone(), repr);
 
     // Validate that the requested model matches the loaded model
@@ -230,13 +575,35 @@ pub async fn parse_request(
     // Parse reasoning effort for Harmony-format models
     let reasoning_effort = parse_reasoning_effort(&oairequest.reasoning_effort);
 
+    let mut normalized_tools = match tool_surface {
+        OpenAiToolSurface::ChatCompletions => {
+            normalize_chat_completion_tools(oairequest.tools, oairequest.web_search_options)?
+        }
+        OpenAiToolSurface::Responses => normalize_responses_tools(oairequest.tools)?,
+    };
+    normalized_tools.enable_shell |= oairequest.enable_shell;
+    normalized_tools
+        .shell_skill_references
+        .extend(oairequest.shell_skill_references);
+    validate_openai_tool_choice(oairequest.tool_choice.as_ref(), &normalized_tools)?;
+    let shell_options = if normalized_tools.shell_skill_references.is_empty() {
+        None
+    } else {
+        let store = skill_store
+            .as_ref()
+            .context("tools[].type=\"shell\" skill references require a configured skill store.")?;
+        Some(store.resolve_references(&normalized_tools.shell_skill_references)?)
+    };
+
     let stop_toks = convert_stop_tokens(oairequest.stop_seqs);
+    let mut input_files = Vec::new();
 
     let messages = match oairequest.messages {
         Either::Left(req_messages) => {
             let mut messages = Vec::new();
             let mut image_urls = Vec::new();
             let mut audio_urls = Vec::new();
+            let mut video_urls = Vec::new();
             for message in req_messages {
                 let content = match message.content.as_deref() {
                     Some(content) => content.clone(),
@@ -319,7 +686,7 @@ pub async fn parse_request(
                         // If there is only one message, it is possible a text message
                         // found when rig is used as client. In this case, we need to check if
                         // the message is a text message or an image message.
-                        if image_messages.len() == 1 {
+                        if image_messages.len() == 1 && !image_messages[0].contains_key("type") {
                             if !image_messages[0].contains_key("text") {
                                 anyhow::bail!("Expected `text` key in input message.");
                             }
@@ -347,6 +714,8 @@ pub async fn parse_request(
                             Text { text: String },
                             Image { image_url: String },
                             Audio { audio_url: String },
+                            Video { video_url: String },
+                            File { spec: InputFileSpec },
                         }
 
                         let mut items = Vec::new();
@@ -355,15 +724,9 @@ pub async fn parse_request(
                                 Some(MessageInnerContent(Either::Left(x))) if x == "text" => {
                                     items.push(ContentPart::Text {
                                         text: image_message
-                                            .get("text")
-                                            .as_ref()
-                                            .context("Text sub-content must have `text` key.")?
-                                            .as_ref()
-                                            .left()
-                                            .context(
-                                                "Text sub-content `text` key must be a string.",
-                                            )?
-                                            .clone(),
+                                            .get("text").as_ref()
+                                            .context("Text sub-content must have `text` key.")?.as_ref()
+                                            .left().context("Text sub-content `text` key must be a string.")?.clone(),
                                     });
                                 }
                                 Some(MessageInnerContent(Either::Left(x))) if x == "image_url" => {
@@ -394,9 +757,44 @@ pub async fn parse_request(
                                             .clone(),
                                     });
                                 }
-                                _ => anyhow::bail!(
-                                    "Expected array content sub-content to be of format {{`type`: `text`, `text`: ...}} and {{`type`: `url`, `image_url`: {{`url`: ...}}}}"
-                                ),
+                                Some(MessageInnerContent(Either::Left(x))) if x == "video_url" => {
+                                    items.push(ContentPart::Video {
+                                        video_url: image_message
+                                            .get("video_url")
+                                            .as_ref()
+                                            .context("Video sub-content must have `video_url` key.")?
+                                            .as_ref()
+                                            .right()
+                                            .context("Video sub-content `video_url` key must be an object.")?
+                                            .get("url")
+                                            .context("Video sub-content `video_url` object must have a `url` key.")?
+                                            .clone(),
+                                    });
+                                }
+                                Some(MessageInnerContent(Either::Left(x))) if x == "file" => {
+                                    let file = image_message
+                                        .get("file")
+                                        .as_ref()
+                                        .context("File sub-content must have `file` key.")?
+                                        .as_ref()
+                                        .right()
+                                        .context("File sub-content `file` key must be an object.")?;
+                                    let spec = InputFileSpec {
+                                        file_id: file.get("file_id").cloned(),
+                                        file_data: file.get("file_data").cloned(),
+                                        file_url: file.get("file_url").cloned(),
+                                        filename: file.get("filename").cloned(),
+                                    };
+                                    if spec.file_url.is_some()
+                                        && matches!(tool_surface, OpenAiToolSurface::ChatCompletions)
+                                    {
+                                        anyhow::bail!(
+                                            "Chat Completions file content does not support `file_url`; use Responses `input_file`."
+                                        );
+                                    }
+                                    items.push(ContentPart::File { spec });
+                                }
+                                _ => anyhow::bail!("Expected array content sub-content to be one of `text`, `image_url`, `audio_url`, `video_url`, or `file`.")
                             }
                         }
 
@@ -423,12 +821,34 @@ pub async fn parse_request(
                             })
                             .collect::<Vec<_>>();
 
-                        // Apply prefixer to text content if this is a vision model with images/audio
+                        let video_urls_iter = items
+                            .iter()
+                            .filter_map(|item| match item {
+                                ContentPart::Video { video_url } => Some(video_url.clone()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        let file_specs_iter = items
+                            .iter()
+                            .filter_map(|item| match item {
+                                ContentPart::File { spec } => Some(spec.clone()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        for spec in file_specs_iter {
+                            let file =
+                                resolve_input_file(state.clone(), spec, "input_file").await?;
+                            state.insert_file(None, file.clone(), None)?;
+                            input_files.push(file);
+                        }
+
+                        // Apply prefixer to text content if this is a multimodal model with images/audio/video
                         // This matches the behavior of interactive mode which auto-inserts media tokens
                         let text_content = if !image_urls_iter.is_empty()
                             || !audio_urls_iter.is_empty()
+                            || !video_urls_iter.is_empty()
                         {
-                            if let Ok(ModelCategory::Vision { prefixer }) =
+                            if let Ok(ModelCategory::Multimodal { prefixer }) =
                                 state.get_model_category(None)
                             {
                                 let mut prefixed = text_content;
@@ -447,6 +867,14 @@ pub async fn parse_request(
                                     let audio_indices: Vec<usize> =
                                         (start_idx..start_idx + audio_urls_iter.len()).collect();
                                     prefixed = prefixer.prefix_audio(audio_indices, &prefixed);
+                                }
+
+                                // Apply video prefixer
+                                if !video_urls_iter.is_empty() {
+                                    let start_idx = video_urls.len();
+                                    let video_indices: Vec<usize> =
+                                        (start_idx..start_idx + video_urls_iter.len()).collect();
+                                    prefixed = prefixer.prefix_video(video_indices, &prefixed);
                                 }
 
                                 prefixed
@@ -476,6 +904,12 @@ pub async fn parse_request(
                                 .insert("type".to_string(), Value::String("audio".to_string()));
                             content_map.push(content_audio_map);
                         }
+                        for _ in &video_urls_iter {
+                            let mut content_video_map = IndexMap::new();
+                            content_video_map
+                                .insert("type".to_string(), Value::String("video".to_string()));
+                            content_map.push(content_video_map);
+                        }
                         {
                             let mut content_text_map = IndexMap::new();
                             content_text_map
@@ -489,14 +923,15 @@ pub async fn parse_request(
                         messages.push(message_map);
                         image_urls.extend(image_urls_iter);
                         audio_urls.extend(audio_urls_iter);
+                        video_urls.extend(video_urls_iter);
                     }
                 }
             }
-            if !image_urls.is_empty() || !audio_urls.is_empty() {
+            if !image_urls.is_empty() || !audio_urls.is_empty() || !video_urls.is_empty() {
                 // Parse images
                 let mut images = Vec::new();
                 for url_unparsed in image_urls {
-                    let image = parse_image_url(&url_unparsed)
+                    let image = parse_image_url_for_server(&url_unparsed)
                         .await
                         .context(format!("Failed to parse image resource: {url_unparsed}"))?;
                     images.push(image);
@@ -505,16 +940,26 @@ pub async fn parse_request(
                 // Parse audios
                 let mut audios = Vec::new();
                 for url_unparsed in audio_urls {
-                    let audio = parse_audio_url(&url_unparsed)
+                    let audio = parse_audio_url_for_server(&url_unparsed)
                         .await
                         .context(format!("Failed to parse audio resource: {url_unparsed}"))?;
                     audios.push(audio);
                 }
 
-                RequestMessage::VisionChat {
+                // Parse videos
+                let mut videos = Vec::new();
+                for url_unparsed in video_urls {
+                    let video = parse_video_url_for_server(&url_unparsed, None)
+                        .await
+                        .context(format!("Failed to parse video resource: {url_unparsed}"))?;
+                    videos.push(video);
+                }
+
+                RequestMessage::MultimodalChat {
                     messages,
                     images,
                     audios,
+                    videos,
                     enable_thinking: oairequest.enable_thinking,
                     reasoning_effort,
                 }
@@ -551,9 +996,7 @@ pub async fn parse_request(
     let is_streaming = oairequest.stream.unwrap_or(false);
 
     if oairequest.grammar.is_some() && oairequest.response_format.is_some() {
-        anyhow::bail!(
-            "Request `grammar` and `response_format` were both provided but are mutually exclusive."
-        )
+        anyhow::bail!("Request `grammar` and `response_format` were both provided but are mutually exclusive.")
     }
 
     let constraint = match oairequest.grammar {
@@ -565,6 +1008,7 @@ pub async fn parse_request(
             Some(ResponseFormat::JsonSchema {
                 json_schema: JsonSchemaResponseFormat { name: _, schema },
             }) => Constraint::JsonSchema(schema),
+            Some(ResponseFormat::JsonObject) => Constraint::JsonSchema(json!({"type": "object"})),
             Some(ResponseFormat::Text) => Constraint::None,
             None => Constraint::None,
         },
@@ -595,10 +1039,23 @@ pub async fn parse_request(
             suffix: None,
             constraint,
             tool_choice: oairequest.tool_choice,
-            tools: oairequest.tools,
+            tools: normalized_tools.tools,
             logits_processors: None,
             return_raw_logits: false,
-            web_search_options: oairequest.web_search_options,
+            web_search_options: normalized_tools.web_search_options,
+            enable_code_execution: normalized_tools.enable_code_execution,
+            enable_shell: normalized_tools.enable_shell,
+            shell_options,
+            code_execution_permission: oairequest.code_execution_permission,
+            code_execution_approval_notifier: None,
+            agent_permission: oairequest.agent_permission,
+            agent_approval_handler,
+            agent_approval_notifier,
+            session_id: oairequest.session_id,
+            files: oairequest.files,
+            input_files,
+            max_tool_rounds: oairequest.max_tool_rounds,
+            tool_dispatch_url,
             model_id: if oairequest.model == "default" {
                 None
             } else {
@@ -620,9 +1077,44 @@ pub async fn parse_request(
 )]
 pub async fn chatcompletions(
     State(state): ExtractedMistralRsState,
-    Json(oairequest): Json<ChatCompletionRequest>,
+    Extension(agentic_defaults): Extension<AgenticDefaults>,
+    Extension(skill_store): Extension<Arc<SkillStore>>,
+    Json(mut oairequest): Json<ChatCompletionRequest>,
 ) -> ChatCompletionResponder {
     let (tx, mut rx) = create_response_channel(None);
+
+    // Apply server-level default for max_tool_rounds (per-request value takes priority)
+    oairequest.max_tool_rounds = oairequest
+        .max_tool_rounds
+        .or(agentic_defaults.max_tool_rounds);
+
+    let request_permission = oairequest
+        .agent_permission
+        .or_else(|| oairequest.code_execution_permission.map(Into::into));
+    oairequest.agent_permission = match (agentic_defaults.agent_permission, request_permission) {
+        (Some(server_permission), Some(request_permission)) => {
+            Some(server_permission.strictest(request_permission))
+        }
+        (Some(server_permission), None) => Some(server_permission),
+        (None, permission) => permission,
+    };
+    oairequest.code_execution_permission = None;
+
+    let is_streaming = oairequest.stream.unwrap_or(false);
+    if matches!(oairequest.agent_permission, Some(AgentPermission::Ask)) && !is_streaming {
+        return ChatCompletionResponder::ValidationError(Box::new(JsonError::new(
+            "agent_permission \"ask\" requires stream=true over HTTP; approve or deny emitted requests with POST /v1/agent/approvals/{approval_id}.".to_string(),
+        )));
+    }
+
+    let agent_approval_handler = matches!(oairequest.agent_permission, Some(AgentPermission::Ask))
+        .then(|| AgentToolApprovalHandler::from_async(agentic_defaults.approval_broker.callback()));
+    let agent_approval_notifier =
+        if is_streaming && matches!(oairequest.agent_permission, Some(AgentPermission::Ask)) {
+            Some(agentic_defaults.approval_broker.notifier(tx.clone()))
+        } else {
+            None
+        };
 
     // Extract model_id for routing before parsing
     let model_id = if oairequest.model == "default" {
@@ -631,7 +1123,21 @@ pub async fn chatcompletions(
         Some(oairequest.model.clone())
     };
 
-    let (request, is_streaming) = match parse_request(oairequest, state.clone(), tx).await {
+    // tool_dispatch_url is server-level only (not settable per-request via HTTP API) for security
+    let (request, is_streaming) = match parse_request(
+        oairequest,
+        ChatCompletionParseContext {
+            state: state.clone(),
+            tx,
+            tool_dispatch_url: agentic_defaults.tool_dispatch_url,
+            agent_approval_handler,
+            agent_approval_notifier,
+            tool_surface: OpenAiToolSurface::ChatCompletions,
+            skill_store: Some(skill_store),
+        },
+    )
+    .await
+    {
         Ok(x) => x,
         Err(e) => return handle_error(state, e.into()),
     };
@@ -674,7 +1180,65 @@ pub async fn process_non_streaming_response(
     rx: &mut Receiver<Response>,
     state: SharedMistralRsState,
 ) -> ChatCompletionResponder {
-    base_process_non_streaming_response(rx, state, match_responses, handle_error).await
+    let mut tool_call_records = Vec::new();
+    let mut pending_args = std::collections::HashMap::new();
+    let mut files: Vec<mistralrs_core::File> = Vec::new();
+
+    loop {
+        match rx.recv().await {
+            Some(Response::AgenticToolCallProgress {
+                round,
+                tool_name,
+                phase,
+            }) => record_agentic_progress(
+                &mut tool_call_records,
+                &mut pending_args,
+                round,
+                &tool_name,
+                &phase,
+            ),
+            Some(Response::AgenticToolApprovalRequired { .. }) => {
+                return ChatCompletionResponder::ValidationError(Box::new(JsonError::new(
+                    "code execution approval requires a streaming HTTP request.".to_string(),
+                )));
+            }
+            Some(Response::BlockDenoisingProgress(_)) => continue,
+            Some(Response::File(file)) => {
+                if files.len() < MAX_FILES_PER_RESPONSE {
+                    files.push(file);
+                } else {
+                    tracing::warn!(
+                        "MAX_FILES_PER_RESPONSE ({MAX_FILES_PER_RESPONSE}) reached; remaining files are fetchable via /v1/files/{{id}}",
+                    );
+                }
+            }
+            Some(Response::Done(response)) => {
+                if !files.is_empty() {
+                    stamp_file_ids(&mut tool_call_records, &files);
+                }
+                let mut response = attach_agentic_tool_calls(response, tool_call_records);
+                if !files.is_empty() {
+                    response.files = Some(files);
+                }
+                return match_responses(state, Response::Done(response));
+            }
+            Some(Response::ModelError(msg, response)) => {
+                if !files.is_empty() {
+                    stamp_file_ids(&mut tool_call_records, &files);
+                }
+                let mut response = attach_agentic_tool_calls(response, tool_call_records);
+                if !files.is_empty() {
+                    response.files = Some(files);
+                }
+                return match_responses(state, Response::ModelError(msg, response));
+            }
+            Some(response) => return match_responses(state, response),
+            None => {
+                let error = anyhow::Error::msg("No response received from the model.");
+                return handle_error(state, error.into());
+            }
+        }
+    }
 }
 
 /// Matches and processes different types of model responses into appropriate chat completion responses.
@@ -702,5 +1266,9 @@ pub fn match_responses(state: SharedMistralRsState, response: Response) -> ChatC
         Response::Speech { .. } => unreachable!(),
         Response::Raw { .. } => unreachable!(),
         Response::Embeddings { .. } => unreachable!(),
+        Response::AgenticToolCallProgress { .. } => unreachable!(),
+        Response::BlockDenoisingProgress(_) => unreachable!(),
+        Response::AgenticToolApprovalRequired { .. } => unreachable!(),
+        Response::File(_) => unreachable!(),
     }
 }

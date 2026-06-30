@@ -1,19 +1,19 @@
 //! Interactive mode implementation
-//!
-//! Ported from mistralrs-server/src/interactive_mode.rs
 
 use directories::ProjectDirs;
 use either::Either;
 use indexmap::IndexMap;
 use mistralrs_core::{
-    speech_utils, Constraint, DiffusionGenerationParams, DrySamplingParams,
-    ImageGenerationResponseFormat, MessageContent, MistralRs, ModelCategory, NormalRequest,
-    Request, RequestMessage, Response, ResponseOk, SamplingParams, WebSearchOptions,
-    TERMINATE_ALL_NEXT_STEP,
+    speech_utils, AgentPermission, AgentToolKind, Constraint, DiffusionGenerationParams,
+    DrySamplingParams, ImageGenerationResponseFormat, MessageContent, MistralRs, ModelCategory,
+    NormalRequest, Request, RequestMessage, Response, ResponseOk, SamplingParams, Usage,
+    WebSearchOptions, TERMINATE_ALL_NEXT_STEP,
 };
 use regex::Regex;
 use rustyline::{error::ReadlineError, history::History, DefaultEditor, Editor, Helper};
 use serde_json::Value;
+#[cfg(feature = "code-execution")]
+use std::collections::VecDeque;
 use std::{
     fs,
     io::{self, Write},
@@ -21,10 +21,22 @@ use std::{
     sync::{atomic::Ordering, Arc, LazyLock, Mutex},
     time::Instant,
 };
-use tokio::sync::mpsc::channel;
+use tokio::sync::mpsc::{channel, Receiver};
 use tracing::{error, info};
 
 use mistralrs_server_core::util;
+use mistralrs_server_core::video::parse_video_url;
+
+const AGENTIC_PANEL_WIDTH: usize = 50;
+const DENOISING_BAR_WIDTH: usize = 28;
+
+#[cfg(feature = "code-execution")]
+static RENDERED_CODE_CALLS: LazyLock<Mutex<VecDeque<String>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
+#[cfg(feature = "code-execution")]
+static APPROVAL_RENDERED_CODE_CALLS: LazyLock<Mutex<VecDeque<String>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
+static AGENTIC_RENDER_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn exit_handler() {
     std::process::exit(0);
@@ -46,8 +58,100 @@ fn history_file_path() -> PathBuf {
     config_dir.join("history.txt")
 }
 
-fn read_line<H: Helper, I: History>(editor: &mut Editor<H, I>) -> String {
-    let r = editor.readline("> ");
+fn format_sampling_params(params: &SamplingParams) -> String {
+    fn fmt_opt<T: std::fmt::Display>(v: &Option<T>) -> String {
+        match v {
+            Some(v) => v.to_string(),
+            None => "off".to_string(),
+        }
+    }
+    let mut parts = vec![
+        format!("temp={}", fmt_opt(&params.temperature)),
+        format!("top_k={}", fmt_opt(&params.top_k)),
+        format!("top_p={}", fmt_opt(&params.top_p)),
+        format!("min_p={}", fmt_opt(&params.min_p)),
+    ];
+    if params.frequency_penalty.is_some() {
+        parts.push(format!("freq_pen={}", fmt_opt(&params.frequency_penalty)));
+    }
+    if params.presence_penalty.is_some() {
+        parts.push(format!("pres_pen={}", fmt_opt(&params.presence_penalty)));
+    }
+    if params.repetition_penalty.is_some() {
+        parts.push(format!("rep_pen={}", fmt_opt(&params.repetition_penalty)));
+    }
+    parts.join(", ")
+}
+
+fn build_prompt(do_search: bool, do_code_exec: bool, do_shell: bool) -> String {
+    let mut tags = Vec::new();
+    if do_code_exec {
+        tags.push("code");
+    }
+    if do_shell {
+        tags.push("shell");
+    }
+    if do_search {
+        tags.push("search");
+    }
+    if tags.is_empty() {
+        "> ".to_string()
+    } else {
+        format!("[{}] > ", tags.join(","))
+    }
+}
+
+struct DenoisingProgress {
+    active: bool,
+}
+
+impl DenoisingProgress {
+    fn new() -> Self {
+        Self { active: false }
+    }
+
+    fn clear(&mut self) {
+        if self.active {
+            eprint!("\r\x1b[K");
+            io::stderr().flush().unwrap();
+            self.active = false;
+        }
+    }
+
+    fn render(&mut self, progress: &mistralrs_core::BlockDenoisingProgress) {
+        if progress.final_block {
+            self.clear();
+            return;
+        }
+
+        let total_steps = progress.total_steps.max(1) as u64;
+        let step = progress.step.min(progress.total_steps.max(1)) as u64;
+        let status = if progress.finished {
+            "stable"
+        } else {
+            "denoising"
+        };
+        let filled = (step as usize)
+            .saturating_mul(DENOISING_BAR_WIDTH)
+            .checked_div(total_steps as usize)
+            .unwrap_or(0)
+            .min(DENOISING_BAR_WIDTH);
+        let empty = DENOISING_BAR_WIDTH - filled;
+        eprint!(
+            "\rblock diffusion [{}{}] {}/{} {}\x1b[K",
+            "=".repeat(filled),
+            " ".repeat(empty),
+            step,
+            total_steps,
+            status,
+        );
+        io::stderr().flush().unwrap();
+        self.active = true;
+    }
+}
+
+fn read_line<H: Helper, I: History>(editor: &mut Editor<H, I>, prompt: &str) -> String {
+    let r = editor.readline(prompt);
     match r {
         Err(ReadlineError::Interrupted) => {
             editor.save_history(&history_file_path()).unwrap();
@@ -76,23 +180,406 @@ fn read_line<H: Helper, I: History>(editor: &mut Editor<H, I>) -> String {
 static CTRLC_HANDLER: LazyLock<Mutex<&'static (dyn Fn() + Sync)>> =
     LazyLock::new(|| Mutex::new(&exit_handler));
 
+pub struct OneshotInput {
+    pub text: String,
+    pub images: Vec<String>,
+    pub videos: Vec<String>,
+    pub audios: Vec<String>,
+}
+
+struct OneshotCtx {
+    do_search: bool,
+    do_code_exec: bool,
+    do_shell: bool,
+    agent_permission: AgentPermission,
+    agent_approval_callback: Option<mistralrs_core::AgentToolApprovalCallback>,
+    enable_thinking: Option<bool>,
+}
+
+pub async fn oneshot_mode(
+    mistralrs: Arc<MistralRs>,
+    do_search: bool,
+    do_code_exec: bool,
+    do_shell: bool,
+    agent_permission: AgentPermission,
+    enable_thinking: Option<bool>,
+    input: OneshotInput,
+) {
+    let agent_approval_callback = cli_agent_approval_callback(agent_permission);
+    let has_media =
+        !input.images.is_empty() || !input.videos.is_empty() || !input.audios.is_empty();
+    let ctx = OneshotCtx {
+        do_search,
+        do_code_exec,
+        do_shell,
+        agent_permission,
+        agent_approval_callback,
+        enable_thinking,
+    };
+
+    if has_media {
+        oneshot_multimodal(mistralrs, ctx, input).await;
+    } else {
+        oneshot_text(mistralrs, ctx, input.text).await;
+    }
+}
+
+async fn oneshot_text(mistralrs: Arc<MistralRs>, ctx: OneshotCtx, text: String) {
+    let OneshotCtx {
+        do_search,
+        do_code_exec,
+        do_shell,
+        agent_permission,
+        agent_approval_callback,
+        enable_thinking,
+    } = ctx;
+    let sender = mistralrs.get_sender(None).unwrap();
+    let sampling_params = interactive_sample_parameters(&mistralrs);
+
+    let mut user_message: IndexMap<String, MessageContent> = IndexMap::new();
+    user_message.insert("role".to_string(), Either::Left("user".to_string()));
+    user_message.insert("content".to_string(), Either::Left(text));
+    let messages = vec![user_message];
+
+    let request_messages = RequestMessage::Chat {
+        messages,
+        enable_thinking,
+        reasoning_effort: None,
+    };
+
+    let (tx, mut rx) = channel(10_000);
+    let session_id = (do_code_exec || do_shell).then(|| uuid::Uuid::new_v4().to_string());
+    let req = Request::Normal(Box::new(NormalRequest {
+        id: mistralrs.next_request_id(),
+        messages: request_messages,
+        sampling_params: sampling_params.clone(),
+        response: tx,
+        return_logprobs: false,
+        is_streaming: true,
+        constraint: Constraint::None,
+        suffix: None,
+        tool_choice: None,
+        tools: None,
+        logits_processors: None,
+        return_raw_logits: false,
+        web_search_options: do_search.then(WebSearchOptions::default),
+        enable_code_execution: do_code_exec,
+        enable_shell: do_shell,
+        shell_options: None,
+        code_execution_permission: None,
+        code_execution_approval_notifier: None,
+        agent_permission: Some(agent_permission),
+        agent_approval_handler: agent_approval_callback
+            .map(mistralrs_core::AgentToolApprovalHandler::from_sync),
+        agent_approval_notifier: None,
+        session_id,
+        max_tool_rounds: None,
+        tool_dispatch_url: None,
+        model_id: None,
+        truncate_sequence: false,
+        files: None,
+        input_files: Vec::new(),
+    }));
+    sender.send(req).await.unwrap();
+    let start_ttft = Instant::now();
+    match stream_assistant_response(&mut rx, start_ttft).await {
+        Ok((_, first_token_duration, last_usage)) => {
+            print_stats(
+                &mistralrs,
+                &sampling_params,
+                first_token_duration,
+                last_usage,
+            );
+        }
+        Err(e) => {
+            error!("{e}");
+        }
+    }
+    println!();
+}
+
+async fn oneshot_multimodal(mistralrs: Arc<MistralRs>, ctx: OneshotCtx, input: OneshotInput) {
+    let OneshotCtx {
+        do_search,
+        do_code_exec,
+        do_shell,
+        agent_permission,
+        agent_approval_callback,
+        enable_thinking,
+    } = ctx;
+    let config = mistralrs.config(None).unwrap();
+    let prefixer = match &config.category {
+        ModelCategory::Multimodal { prefixer } => prefixer,
+        _ => {
+            error!("--image/--video/--audio require a multimodal model, but the loaded model is not multimodal.");
+            return;
+        }
+    };
+
+    let sender = mistralrs.get_sender(None).unwrap();
+    let sampling_params = interactive_sample_parameters(&mistralrs);
+
+    let mut images = Vec::new();
+    let mut audios = Vec::new();
+    let mut videos = Vec::new();
+
+    // Load images
+    let mut image_indexes = Vec::new();
+    for url in &input.images {
+        match util::parse_image_url(url).await {
+            Ok(image) => {
+                info!("Loaded image: {url}");
+                image_indexes.push(images.len());
+                images.push(image);
+            }
+            Err(e) => {
+                error!("Failed to load image {url}: {e}");
+                return;
+            }
+        }
+    }
+
+    // Load audios
+    let mut audio_indexes = Vec::new();
+    for url in &input.audios {
+        match util::parse_audio_url(url).await {
+            Ok(audio) => {
+                info!("Loaded audio: {url}");
+                audio_indexes.push(audios.len());
+                audios.push(audio);
+            }
+            Err(e) => {
+                error!("Failed to load audio {url}: {e}");
+                return;
+            }
+        }
+    }
+
+    // Load videos
+    let mut video_indexes = Vec::new();
+    for url in &input.videos {
+        match parse_video_url(url, None).await {
+            Ok(video) => {
+                info!("Loaded video: {url}");
+                video_indexes.push(videos.len());
+                videos.push(video);
+            }
+            Err(e) => {
+                error!("Failed to load video {url}: {e}");
+                return;
+            }
+        }
+    }
+
+    // Build content parts
+    let mut content_vec: Vec<IndexMap<String, Value>> = Vec::new();
+    for _ in &input.images {
+        content_vec.push(IndexMap::from([(
+            "type".to_string(),
+            Value::String("image".to_string()),
+        )]));
+    }
+    for _ in &input.audios {
+        content_vec.push(IndexMap::from([(
+            "type".to_string(),
+            Value::String("audio".to_string()),
+        )]));
+    }
+    for _ in &input.videos {
+        content_vec.push(IndexMap::from([(
+            "type".to_string(),
+            Value::String("video".to_string()),
+        )]));
+    }
+
+    // Prefix the text with media context
+    let mut prefixed_text = input.text.clone();
+    if !image_indexes.is_empty() {
+        prefixed_text = prefixer.prefix_image(image_indexes, &prefixed_text);
+    }
+    if !audio_indexes.is_empty() {
+        prefixed_text = prefixer.prefix_audio(audio_indexes, &prefixed_text);
+    }
+    if !video_indexes.is_empty() {
+        prefixed_text = prefixer.prefix_video(video_indexes, &prefixed_text);
+    }
+    content_vec.push(IndexMap::from([
+        ("type".to_string(), Value::String("text".to_string())),
+        ("text".to_string(), Value::String(prefixed_text)),
+    ]));
+
+    let mut user_message: IndexMap<String, MessageContent> = IndexMap::new();
+    user_message.insert("role".to_string(), Either::Left("user".to_string()));
+    user_message.insert("content".to_string(), Either::Right(content_vec));
+    let messages = vec![user_message];
+
+    let request_messages = RequestMessage::MultimodalChat {
+        images,
+        audios,
+        videos,
+        messages,
+        enable_thinking,
+        reasoning_effort: None,
+    };
+
+    let (tx, mut rx) = channel(10_000);
+    let session_id = (do_code_exec || do_shell).then(|| uuid::Uuid::new_v4().to_string());
+    let req = Request::Normal(Box::new(NormalRequest {
+        id: mistralrs.next_request_id(),
+        messages: request_messages,
+        sampling_params: sampling_params.clone(),
+        response: tx,
+        return_logprobs: false,
+        is_streaming: true,
+        constraint: Constraint::None,
+        suffix: None,
+        tool_choice: None,
+        tools: None,
+        logits_processors: None,
+        return_raw_logits: false,
+        web_search_options: do_search.then(WebSearchOptions::default),
+        enable_code_execution: do_code_exec,
+        enable_shell: do_shell,
+        shell_options: None,
+        code_execution_permission: None,
+        code_execution_approval_notifier: None,
+        agent_permission: Some(agent_permission),
+        agent_approval_handler: agent_approval_callback
+            .map(mistralrs_core::AgentToolApprovalHandler::from_sync),
+        agent_approval_notifier: None,
+        session_id,
+        max_tool_rounds: None,
+        tool_dispatch_url: None,
+        model_id: None,
+        truncate_sequence: false,
+        files: None,
+        input_files: Vec::new(),
+    }));
+    sender.send(req).await.unwrap();
+    let start_ttft = Instant::now();
+    match stream_assistant_response(&mut rx, start_ttft).await {
+        Ok((_, first_token_duration, last_usage)) => {
+            print_stats(
+                &mistralrs,
+                &sampling_params,
+                first_token_duration,
+                last_usage,
+            );
+        }
+        Err(e) => {
+            error!("{e}");
+        }
+    }
+    println!();
+}
+
+fn print_stats(
+    mistralrs: &Arc<MistralRs>,
+    sampling_params: &SamplingParams,
+    first_token_duration: Option<std::time::Duration>,
+    last_usage: Option<Usage>,
+) {
+    if let Some(last_usage) = last_usage {
+        println!();
+        println!();
+        println!("Stats:");
+        if let Some(ttft) = first_token_duration {
+            println!("CLI time to first token: {:.2?}s", ttft.as_secs_f32());
+        }
+        println!(
+            "Prompt: {} tokens, {:.2} T/s",
+            last_usage.prompt_tokens, last_usage.avg_prompt_tok_per_sec
+        );
+        println!(
+            "Decode: {} tokens, {:.2} T/s",
+            last_usage.completion_tokens, last_usage.avg_compl_tok_per_sec
+        );
+        if let Ok(logger) = mistralrs.get_logger(None) {
+            let (prefix_hits, prefix_total) = logger.prefix_cache_stats();
+            if prefix_total > 0 {
+                println!(
+                    "Prefix cache: {} hits / {} turns",
+                    prefix_hits, prefix_total
+                );
+            }
+            if let Some((hits, misses)) = logger.encoder_cache_stats() {
+                if hits + misses > 0 {
+                    println!("Encoder cache: {}/{} hits", hits, hits + misses);
+                }
+            }
+        }
+        println!("Sampling: {}", format_sampling_params(sampling_params));
+    }
+}
+
 pub async fn interactive_mode(
     mistralrs: Arc<MistralRs>,
     do_search: bool,
+    do_code_exec: bool,
+    do_shell: bool,
+    agent_permission: AgentPermission,
     enable_thinking: Option<bool>,
 ) {
+    let agent_approval_callback = cli_agent_approval_callback(agent_permission);
     match mistralrs.get_model_category(None) {
         Ok(ModelCategory::Text) => {
-            text_interactive_mode(mistralrs, do_search, enable_thinking).await
+            text_interactive_mode(
+                mistralrs,
+                do_search,
+                do_code_exec,
+                do_shell,
+                agent_permission,
+                agent_approval_callback.clone(),
+                enable_thinking,
+            )
+            .await
         }
-        Ok(ModelCategory::Vision { .. }) => {
-            vision_interactive_mode(mistralrs, do_search, enable_thinking).await
+        Ok(ModelCategory::Multimodal { .. }) => {
+            multimodal_interactive_mode(
+                mistralrs,
+                do_search,
+                do_code_exec,
+                do_shell,
+                agent_permission,
+                agent_approval_callback.clone(),
+                enable_thinking,
+            )
+            .await
         }
-        Ok(ModelCategory::Diffusion) => diffusion_interactive_mode(mistralrs, do_search).await,
+        Ok(ModelCategory::Diffusion) => {
+            diffusion_interactive_mode(
+                mistralrs,
+                do_search,
+                do_code_exec,
+                do_shell,
+                agent_permission,
+                agent_approval_callback.clone(),
+            )
+            .await
+        }
         Ok(ModelCategory::Audio) => {
-            audio_interactive_mode(mistralrs, do_search, enable_thinking).await
+            audio_interactive_mode(
+                mistralrs,
+                do_search,
+                do_code_exec,
+                do_shell,
+                agent_permission,
+                agent_approval_callback.clone(),
+                enable_thinking,
+            )
+            .await
         }
-        Ok(ModelCategory::Speech) => speech_interactive_mode(mistralrs, do_search).await,
+        Ok(ModelCategory::Speech) => {
+            speech_interactive_mode(
+                mistralrs,
+                do_search,
+                do_code_exec,
+                do_shell,
+                agent_permission,
+                agent_approval_callback.clone(),
+            )
+            .await
+        }
         Ok(ModelCategory::Embedding) => error!(
             "Embedding models do not support interactive mode. Use the server or Python/Rust APIs."
         ),
@@ -102,15 +589,15 @@ pub async fn interactive_mode(
 
 const COMMAND_COMMANDS: &str = r#"
 Commands:
-- `\help`: Display this message.
-- `\exit`: Quit interactive mode.
-- `\system <system message here>`:
+- `/help`: Display this message.
+- `/exit`: Quit interactive mode.
+- `/system <system message here>`:
     Add a system message to the chat without running the model.
-    Ex: `\system Always respond as a pirate.`
-- `\clear`: Clear the chat history.
-- `\temperature <float>`: Set sampling temperature (0.0 to 2.0).
-- `\topk <int>`: Set top-k sampling value (>0).
-- `\topp <float>`: Set top-p sampling value in (0.0 to 1.0).
+    Ex: `/system Always respond as a pirate.`
+- `/clear`: Clear the chat history.
+- `/temperature <float>`: Set sampling temperature (0.0 to 2.0).
+- `/topk <int>`: Set top-k sampling value (>0).
+- `/topp <float>`: Set top-p sampling value in (0.0 to 1.0).
 "#;
 
 const TEXT_INTERACTIVE_HELP: &str = r#"
@@ -118,43 +605,46 @@ Welcome to interactive mode! Because this model is a text model, you can enter p
 "#;
 
 const VISION_INTERACTIVE_HELP: &str = r#"
-Welcome to interactive mode! Because this model is a vision model, you can enter prompts and chat with the model.
+Welcome to interactive mode! Because this model is a multimodal model, you can enter prompts and chat with the model.
 
-To specify a message with one or more images or audios, simply include the image/audio URL or path:
+To specify a message with one or more images, audios, or videos, simply include the image/audio/video URL or path:
 
 - `Describe these images: path/to/image1.jpg path/to/image2.png`
 - `Describe the image and transcribe the audio: path/to/image1.jpg path/to/sound.mp3`
+- `Describe this video: path/to/video.mp4`
 "#;
 
 const DIFFUSION_INTERACTIVE_HELP: &str = r#"
 Welcome to interactive mode! Because this model is a diffusion model, you can enter prompts and the model will generate an image.
 
 Commands:
-- `\help`: Display this message.
-- `\exit`: Quit interactive mode.
+- `/help`: Display this message.
+- `/exit`: Quit interactive mode.
 "#;
 
 const SPEECH_INTERACTIVE_HELP: &str = r#"
 Welcome to interactive mode! Because this model is a speech generation model, you can enter prompts and the model will generate audio.
 
 Commands:
-- `\help`: Display this message.
-- `\exit`: Quit interactive mode.
+- `/help`: Display this message.
+- `/exit`: Quit interactive mode.
 "#;
 
-const HELP_CMD: &str = "\\help";
-const EXIT_CMD: &str = "\\exit";
-const SYSTEM_CMD: &str = "\\system";
-const CLEAR_CMD: &str = "\\clear";
-const TEMPERATURE_CMD: &str = "\\temperature";
-const TOPK_CMD: &str = "\\topk";
-const TOPP_CMD: &str = "\\topp";
+const HELP_CMD: &str = "/help";
+const EXIT_CMD: &str = "/exit";
+const SYSTEM_CMD: &str = "/system";
+const CLEAR_CMD: &str = "/clear";
+const TEMPERATURE_CMD: &str = "/temperature";
+const TOPK_CMD: &str = "/topk";
+const TOPP_CMD: &str = "/topp";
 
 /// Regex string used to extract image URLs from prompts.
 const IMAGE_REGEX: &str = r#"((?:https?://|file://)?\S+?\.(?:png|jpe?g|bmp|gif|webp)(?:\?\S+?)?)"#;
 const AUDIO_REGEX: &str = r#"((?:https?://|file://)?\S+?\.(?:wav|mp3|flac|ogg)(?:\?\S+?)?)"#;
+const VIDEO_REGEX: &str =
+    r#"((?:https?://|file://)?\S+?\.(?:mp4|avi|mov|mkv|webm|gif|m4v)(?:\?\S+?)?)"#;
 
-fn interactive_sample_parameters() -> SamplingParams {
+fn interactive_fallback_sample_parameters() -> SamplingParams {
     SamplingParams {
         temperature: Some(0.1),
         top_k: Some(32),
@@ -169,6 +659,24 @@ fn interactive_sample_parameters() -> SamplingParams {
         logits_bias: None,
         n_choices: 1,
         dry_params: Some(DrySamplingParams::default()),
+    }
+}
+
+fn interactive_sample_parameters(mistralrs: &Arc<MistralRs>) -> SamplingParams {
+    match mistralrs
+        .config(None)
+        .ok()
+        .and_then(|cfg| cfg.generation_defaults)
+    {
+        Some(defaults) => {
+            let mut params = SamplingParams {
+                dry_params: Some(DrySamplingParams::default()),
+                ..SamplingParams::neutral()
+            };
+            params.apply_model_defaults(&defaults);
+            params
+        }
+        None => interactive_fallback_sample_parameters(),
     }
 }
 
@@ -236,17 +744,23 @@ fn handle_sampling_command(prompt: &str, sampling_params: &mut SamplingParams) -
 async fn text_interactive_mode(
     mistralrs: Arc<MistralRs>,
     do_search: bool,
+    do_code_exec: bool,
+    do_shell: bool,
+    agent_permission: AgentPermission,
+    agent_approval_callback: Option<mistralrs_core::AgentToolApprovalCallback>,
     enable_thinking: Option<bool>,
 ) {
     let sender = mistralrs.get_sender(None).unwrap();
     let mut messages: Vec<IndexMap<String, MessageContent>> = Vec::new();
+    let tool_session_id = uuid::Uuid::new_v4().to_string();
 
-    let mut sampling_params = interactive_sample_parameters();
+    let mut sampling_params = interactive_sample_parameters(&mistralrs);
 
     info!("Starting interactive loop with sampling params: {sampling_params:?}");
     println!(
-        "{}{TEXT_INTERACTIVE_HELP}{COMMAND_COMMANDS}{}",
+        "{}{TEXT_INTERACTIVE_HELP}{COMMAND_COMMANDS}\nSampling: {}\n{}",
         "=".repeat(20),
+        format_sampling_params(&sampling_params),
         "=".repeat(20)
     );
 
@@ -262,7 +776,7 @@ async fn text_interactive_mode(
         // Set the handler to process exit
         *CTRLC_HANDLER.lock().unwrap() = &exit_handler;
 
-        let prompt = read_line(&mut rl);
+        let prompt = read_line(&mut rl, &build_prompt(do_search, do_code_exec, do_shell));
 
         let prompt_trimmed = prompt.as_str().trim();
         if prompt_trimmed.is_empty() {
@@ -292,9 +806,7 @@ async fn text_interactive_mode(
                 let parsed = match &prompt_trimmed.split(SYSTEM_CMD).collect::<Vec<_>>()[..] {
                     &["", a] => a.trim(),
                     _ => {
-                        println!(
-                            "Error: Setting the system command should be done with this format: `{SYSTEM_CMD} This is a system message.`"
-                        );
+                        println!("Error: Setting the system command should be done with this format: `{SYSTEM_CMD} This is a system message.`");
                         continue;
                     }
                 };
@@ -337,83 +849,45 @@ async fn text_interactive_mode(
             logits_processors: None,
             return_raw_logits: false,
             web_search_options: do_search.then(WebSearchOptions::default),
+            enable_code_execution: do_code_exec,
+            enable_shell: do_shell,
+            shell_options: None,
+            code_execution_permission: None,
+            code_execution_approval_notifier: None,
+            agent_permission: Some(agent_permission),
+            agent_approval_handler: agent_approval_callback
+                .clone()
+                .map(mistralrs_core::AgentToolApprovalHandler::from_sync),
+            agent_approval_notifier: None,
+            session_id: if do_code_exec || do_shell {
+                Some(tool_session_id.clone())
+            } else {
+                None
+            },
+            max_tool_rounds: None,
+            tool_dispatch_url: None,
             model_id: None,
             truncate_sequence: false,
+            files: None,
+            input_files: Vec::new(),
         }));
         sender.send(req).await.unwrap();
         let start_ttft = Instant::now();
-        let mut first_token_duration: Option<std::time::Duration> = None;
-
-        let mut assistant_output = String::new();
-
-        // ANSI escape codes for gray (muted) and reset
-        const GRAY: &str = "\x1b[90m";
-        const RESET: &str = "\x1b[0m";
-
-        let mut last_usage = None;
-        while let Some(resp) = rx.recv().await {
-            match resp {
-                Response::Chunk(chunk) => {
-                    last_usage = chunk.usage.clone();
-                    let choice = &chunk.choices[0];
-
-                    // Track first token timing
-                    let has_any_content =
-                        choice.delta.content.is_some() || choice.delta.reasoning_content.is_some();
-                    if has_any_content && first_token_duration.is_none() {
-                        let ttft = Instant::now().duration_since(start_ttft);
-                        first_token_duration = Some(ttft);
-                    }
-
-                    // Display reasoning content in gray (muted)
-                    if let Some(ref reasoning) = choice.delta.reasoning_content {
-                        print!("{GRAY}{reasoning}{RESET}");
-                        io::stdout().flush().unwrap();
-                    }
-
-                    // Display final content normally
-                    if let Some(ref content) = choice.delta.content {
-                        assistant_output.push_str(content);
-                        print!("{content}");
-                        io::stdout().flush().unwrap();
-                    }
-
-                    if let Some(ref finish_reason) = choice.finish_reason {
-                        if matches!(finish_reason.as_str(), "length") {
-                            print!("...");
-                        }
-                        break;
-                    }
-                }
-                Response::InternalError(e) => {
-                    error!("Got an internal error: {e:?}");
+        let (assistant_output, first_token_duration, last_usage) =
+            match stream_assistant_response(&mut rx, start_ttft).await {
+                Ok(response) => response,
+                Err(e) => {
+                    error!("{e}");
                     break 'outer;
                 }
-                Response::ModelError(e, resp) => {
-                    error!("Got a model error: {e:?}, response: {resp:?}");
-                    break 'outer;
-                }
-                Response::ValidationError(e) => {
-                    error!("Got a validation error: {e:?}");
-                    break 'outer;
-                }
-                Response::Done(_) => unreachable!(),
-                Response::CompletionDone(_) => unreachable!(),
-                Response::CompletionModelError(_, _) => unreachable!(),
-                Response::CompletionChunk(_) => unreachable!(),
-                Response::ImageGeneration(_) => unreachable!(),
-                Response::Speech { .. } => unreachable!(),
-                Response::Raw { .. } => unreachable!(),
-                Response::Embeddings { .. } => unreachable!(),
-            }
-        }
+            };
 
         if let Some(last_usage) = last_usage {
             println!();
             println!();
             println!("Stats:");
             if let Some(ttft) = first_token_duration {
-                println!("Time to first token: {:.2?}s", ttft.as_secs_f32());
+                println!("CLI time to first token: {:.2?}s", ttft.as_secs_f32());
             }
             println!(
                 "Prompt: {} tokens, {:.2} T/s",
@@ -432,6 +906,7 @@ async fn text_interactive_mode(
                     );
                 }
             }
+            println!("Sampling: {}", format_sampling_params(&sampling_params));
         }
         let mut assistant_message: IndexMap<String, Either<String, Vec<IndexMap<String, Value>>>> =
             IndexMap::new();
@@ -466,34 +941,463 @@ fn parse_files_and_message(input: &str, regex: &Regex) -> (Vec<String>, String) 
     (urls, text)
 }
 
-async fn vision_interactive_mode(
+#[cfg(feature = "code-execution")]
+fn remember_code_call(queue: &LazyLock<Mutex<VecDeque<String>>>, code: &str) {
+    const MAX_REMEMBERED_CALLS: usize = 16;
+
+    let mut calls = queue.lock().unwrap();
+    if calls.len() >= MAX_REMEMBERED_CALLS {
+        calls.pop_front();
+    }
+    calls.push_back(code.to_string());
+}
+
+#[cfg(feature = "code-execution")]
+fn take_code_call(queue: &LazyLock<Mutex<VecDeque<String>>>, code: &str) -> bool {
+    let mut calls = queue.lock().unwrap();
+    let Some(index) = calls.iter().position(|c| c == code) else {
+        return false;
+    };
+    calls.remove(index);
+    true
+}
+
+#[cfg(feature = "code-execution")]
+fn print_code_call_panel(tool_name: &str, code: &str) {
+    let header = format!("╭─ tool call: {tool_name} ");
+    let pad = AGENTIC_PANEL_WIDTH.saturating_sub(header.len());
+    println!("\n{header}{}", "─".repeat(pad));
+    for line in code.lines() {
+        println!("│ {line}");
+    }
+}
+
+fn print_agentic_progress(
+    tool_name: &str,
+    phase: &mistralrs_core::AgenticToolCallPhase,
+    files: &[mistralrs_core::files::File],
+) {
+    use mistralrs_core::{AgenticToolCallData, AgenticToolCallPhase};
+
+    const GRAY: &str = "\x1b[90m";
+    const RESET: &str = "\x1b[0m";
+
+    let _render_guard = AGENTIC_RENDER_LOCK.lock().unwrap();
+
+    match phase {
+        AgenticToolCallPhase::Calling(data) => {
+            #[cfg(feature = "code-execution")]
+            if let AgenticToolCallData::CodeExecution {
+                code: Some(code), ..
+            } = data
+            {
+                if take_code_call(&APPROVAL_RENDERED_CODE_CALLS, code) {
+                    return;
+                }
+                remember_code_call(&RENDERED_CODE_CALLS, code);
+            }
+
+            let header = format!("╭─ tool call: {} ", tool_name);
+            let pad = AGENTIC_PANEL_WIDTH.saturating_sub(header.len());
+            println!("\n{header}{}", "─".repeat(pad));
+            match data {
+                AgenticToolCallData::CodeExecution {
+                    code: Some(code), ..
+                } => {
+                    for line in code.lines() {
+                        println!("│ {line}");
+                    }
+                }
+                AgenticToolCallData::WebSearch {
+                    query: Some(query), ..
+                } => {
+                    println!("│ query: {query}");
+                }
+                AgenticToolCallData::Shell { commands, .. } => {
+                    for command in commands {
+                        for line in command.lines() {
+                            println!("│ {line}");
+                        }
+                    }
+                }
+                AgenticToolCallData::Custom { arguments, .. } if !arguments.is_empty() => {
+                    println!("│ {arguments}");
+                }
+                _ => {}
+            }
+        }
+        AgenticToolCallPhase::Complete(data) => {
+            match data {
+                AgenticToolCallData::CodeExecution {
+                    stdout,
+                    stderr,
+                    exception,
+                    images,
+                    video_frame_count,
+                    working_directory,
+                    execution_time_ms,
+                    ..
+                } => {
+                    let timing = execution_time_ms
+                        .map(|ms| format!(" ({ms}ms)"))
+                        .unwrap_or_default();
+                    let status = if exception.is_some() {
+                        "error"
+                    } else {
+                        "result"
+                    };
+                    let divider = format!("├─ {status}{timing} ");
+                    let pad = AGENTIC_PANEL_WIDTH.saturating_sub(divider.len());
+                    println!("{divider}{}", "─".repeat(pad));
+                    if let Some(dir) = working_directory {
+                        println!("│ workdir: {dir}");
+                    }
+                    println!("│ stdout:");
+                    match stdout {
+                        Some(s) if !s.trim().is_empty() => {
+                            for line in s.trim().lines() {
+                                println!("│   {line}");
+                            }
+                        }
+                        _ => {
+                            println!("│   {GRAY}<none>{RESET}");
+                        }
+                    }
+                    println!("│ stderr:");
+                    match stderr {
+                        Some(s) if !s.trim().is_empty() => {
+                            for line in s.trim().lines() {
+                                println!("│   {line}");
+                            }
+                        }
+                        _ => {
+                            println!("│   {GRAY}<none>{RESET}");
+                        }
+                    }
+                    if let Some(exc) = exception {
+                        for line in exc.lines() {
+                            println!("│ {line}");
+                        }
+                    }
+                    if !images.is_empty() {
+                        println!("│ {} image(s) captured", images.len());
+                    }
+                    if let Some(n) = video_frame_count {
+                        println!("│ {} video frame(s) captured", n);
+                    }
+                    if !files.is_empty() {
+                        println!("│ files:");
+                        for file in files {
+                            println!(
+                                "│   {} ({}, {} bytes)",
+                                file.name,
+                                file.format.as_deref().unwrap_or(""),
+                                file.bytes
+                            );
+                        }
+                    }
+                }
+                AgenticToolCallData::WebSearch {
+                    results_count,
+                    sources,
+                    ..
+                } => {
+                    let divider = "├─ result ".to_string();
+                    let pad = AGENTIC_PANEL_WIDTH.saturating_sub(divider.len());
+                    println!("{divider}{}", "─".repeat(pad));
+                    if let Some(n) = results_count {
+                        println!("│ {n} results found");
+                    }
+                    if !sources.is_empty() {
+                        println!("│ sources:");
+                        for source in sources {
+                            println!("│   {source}");
+                        }
+                    }
+                }
+                AgenticToolCallData::Shell {
+                    stdout,
+                    stderr,
+                    exit_code,
+                    status,
+                    working_directory,
+                    timed_out,
+                    ..
+                } => {
+                    let status = status.as_deref().unwrap_or("result");
+                    let divider = format!("├─ {status} ");
+                    let pad = AGENTIC_PANEL_WIDTH.saturating_sub(divider.len());
+                    println!("{divider}{}", "─".repeat(pad));
+                    if let Some(dir) = working_directory {
+                        println!("│ workdir: {dir}");
+                    }
+                    if let Some(code) = exit_code {
+                        println!("│ exit: {code}");
+                    }
+                    if matches!(timed_out, Some(true)) {
+                        println!("│ timed out");
+                    }
+                    println!("│ stdout:");
+                    match stdout {
+                        Some(s) if !s.trim().is_empty() => {
+                            for line in s.trim().lines() {
+                                println!("│   {line}");
+                            }
+                        }
+                        _ => {
+                            println!("│   {GRAY}<none>{RESET}");
+                        }
+                    }
+                    println!("│ stderr:");
+                    match stderr {
+                        Some(s) if !s.trim().is_empty() => {
+                            for line in s.trim().lines() {
+                                println!("│   {line}");
+                            }
+                        }
+                        _ => {
+                            println!("│   {GRAY}<none>{RESET}");
+                        }
+                    }
+                }
+                AgenticToolCallData::Custom { content, .. } if !content.is_empty() => {
+                    let divider = "├─ result ".to_string();
+                    let pad = AGENTIC_PANEL_WIDTH.saturating_sub(divider.len());
+                    println!("{divider}{}", "─".repeat(pad));
+                    for line in content.lines().take(5) {
+                        println!("│ {line}");
+                    }
+                }
+                _ => {}
+            }
+            println!("{}", "╰".to_string() + &"─".repeat(AGENTIC_PANEL_WIDTH));
+        }
+    }
+    io::stdout().flush().unwrap();
+}
+
+pub(super) fn cli_agent_approval_callback(
+    permission: AgentPermission,
+) -> Option<mistralrs_core::AgentToolApprovalCallback> {
+    matches!(permission, AgentPermission::Ask).then(agent_approval_callback)
+}
+
+pub(super) fn agent_approval_callback() -> mistralrs_core::AgentToolApprovalCallback {
+    std::sync::Arc::new(move |approval: &mistralrs_core::AgentToolApproval| {
+        let _render_guard = AGENTIC_RENDER_LOCK.lock().unwrap();
+
+        #[cfg(feature = "code-execution")]
+        {
+            if matches!(approval.tool.kind, AgentToolKind::CodeExecution) {
+                if let Some(code) = approval.arguments.get("code").and_then(|v| v.as_str()) {
+                    if !take_code_call(&RENDERED_CODE_CALLS, code) {
+                        remember_code_call(&APPROVAL_RENDERED_CODE_CALLS, code);
+                        print_code_call_panel(&approval.tool.label, code);
+                    }
+                }
+            }
+        }
+
+        let divider = "├─ approval ".to_string();
+        let pad = AGENTIC_PANEL_WIDTH.saturating_sub(divider.len());
+        println!("{divider}{}", "─".repeat(pad));
+        println!("│ session: {}", approval.session_id);
+        println!("│ tool: {}", approval.tool.label);
+        if matches!(approval.tool.kind, AgentToolKind::Shell) {
+            if let Some(commands) = approval
+                .arguments
+                .get("commands")
+                .and_then(|v| v.as_array())
+            {
+                let commands = commands
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>();
+                if !commands.is_empty() {
+                    println!("│ commands:");
+                    for command in commands {
+                        for line in command.lines() {
+                            println!("│   {line}");
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(outputs) = approval.arguments.get("outputs").and_then(|v| v.as_array()) {
+            let outputs = outputs
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>();
+            if !outputs.is_empty() {
+                println!("│ outputs: {}", outputs.join(", "));
+            }
+        }
+
+        loop {
+            print!("│ Approve action? [y]es / [n]o / [a]lways: ");
+            let _ = io::Write::flush(&mut io::stdout());
+
+            let mut input = String::new();
+            if io::stdin().read_line(&mut input).is_err() {
+                return mistralrs_core::AgentToolApprovalDecision::deny(None);
+            }
+            match input.trim().to_ascii_lowercase().as_str() {
+                "y" | "yes" => return mistralrs_core::AgentToolApprovalDecision::approve(),
+                "a" | "always" => {
+                    return mistralrs_core::AgentToolApprovalDecision::approve_for_session();
+                }
+                "" | "n" | "no" => {
+                    return mistralrs_core::AgentToolApprovalDecision::deny(None);
+                }
+                _ => println!("│ Please enter y, n, or a."),
+            }
+        }
+    })
+}
+
+async fn stream_assistant_response(
+    rx: &mut Receiver<Response>,
+    start_ttft: Instant,
+) -> Result<(String, Option<std::time::Duration>, Option<Usage>), String> {
+    let mut assistant_output = String::new();
+    let mut first_token_duration = None;
+    let mut last_usage = None;
+    let mut pending_agentic_files = Vec::new();
+    let mut denoising_progress = DenoisingProgress::new();
+
+    const GRAY: &str = "\x1b[90m";
+    const RESET: &str = "\x1b[0m";
+    let mut was_reasoning = false;
+
+    while let Some(resp) = rx.recv().await {
+        match resp {
+            Response::Chunk(chunk) => {
+                denoising_progress.clear();
+                last_usage = chunk.usage.clone();
+                let choice = &chunk.choices[0];
+
+                let has_any_content =
+                    choice.delta.content.is_some() || choice.delta.reasoning_content.is_some();
+                if has_any_content && first_token_duration.is_none() {
+                    first_token_duration = Some(Instant::now().duration_since(start_ttft));
+                }
+
+                if let Some(ref reasoning) = choice.delta.reasoning_content {
+                    print!("{GRAY}{reasoning}{RESET}");
+                    io::stdout().flush().unwrap();
+                    was_reasoning = true;
+                }
+
+                if let Some(ref content) = choice.delta.content {
+                    if was_reasoning {
+                        println!();
+                        was_reasoning = false;
+                    }
+                    assistant_output.push_str(content);
+                    print!("{content}");
+                    io::stdout().flush().unwrap();
+                }
+
+                if let Some(ref finish_reason) = choice.finish_reason {
+                    if was_reasoning {
+                        println!();
+                    }
+                    if matches!(finish_reason.as_str(), "length") {
+                        print!("...");
+                    }
+                    break;
+                }
+            }
+            Response::AgenticToolCallProgress {
+                round: _,
+                tool_name,
+                phase,
+            } => {
+                denoising_progress.clear();
+                let complete = matches!(phase, mistralrs_core::AgenticToolCallPhase::Complete(_));
+                print_agentic_progress(&tool_name, &phase, &pending_agentic_files);
+                if complete {
+                    pending_agentic_files.clear();
+                }
+            }
+            Response::BlockDenoisingProgress(progress) => {
+                if progress.index != 0 {
+                    denoising_progress.clear();
+                    continue;
+                }
+
+                denoising_progress.render(&progress);
+            }
+            Response::File(file) => {
+                pending_agentic_files.push(file);
+            }
+            Response::AgenticToolApprovalRequired { .. } => continue,
+            Response::InternalError(e) => {
+                denoising_progress.clear();
+                return Err(format!("Got an internal error: {e:?}"));
+            }
+            Response::ModelError(e, resp) => {
+                denoising_progress.clear();
+                return Err(format!("Got a model error: {e:?}, response: {resp:?}"));
+            }
+            Response::ValidationError(e) => {
+                denoising_progress.clear();
+                return Err(format!("Got a validation error: {e:?}"));
+            }
+            Response::Done(_) => unreachable!(),
+            Response::CompletionDone(_) => unreachable!(),
+            Response::CompletionModelError(_, _) => unreachable!(),
+            Response::CompletionChunk(_) => unreachable!(),
+            Response::ImageGeneration(_) => unreachable!(),
+            Response::Speech { .. } => unreachable!(),
+            Response::Raw { .. } => unreachable!(),
+            Response::Embeddings { .. } => unreachable!(),
+        }
+    }
+    denoising_progress.clear();
+
+    Ok((assistant_output, first_token_duration, last_usage))
+}
+
+async fn multimodal_interactive_mode(
     mistralrs: Arc<MistralRs>,
     do_search: bool,
+    do_code_exec: bool,
+    do_shell: bool,
+    agent_permission: AgentPermission,
+    agent_approval_callback: Option<mistralrs_core::AgentToolApprovalCallback>,
     enable_thinking: Option<bool>,
 ) {
+    let tool_session_id = uuid::Uuid::new_v4().to_string();
+
     // Capture HTTP/HTTPS URLs and local file paths ending with common image extensions
     let image_regex = Regex::new(IMAGE_REGEX).unwrap();
     let audio_regex = Regex::new(AUDIO_REGEX).unwrap();
+    let video_regex = Regex::new(VIDEO_REGEX).unwrap();
 
     let sender = mistralrs.get_sender(None).unwrap();
     let mut messages: Vec<IndexMap<String, MessageContent>> = Vec::new();
     let mut images = Vec::new();
     let mut audios = Vec::new();
+    let mut videos = Vec::new();
 
     let config = mistralrs.config(None).unwrap();
     let prefixer = match &config.category {
-        ModelCategory::Vision { prefixer } => prefixer,
+        ModelCategory::Multimodal { prefixer } => prefixer,
         _ => {
-            panic!("`add_image_message` expects a vision model.")
+            panic!("`add_image_message` expects a multimodal model.")
         }
     };
 
-    let mut sampling_params = interactive_sample_parameters();
+    let mut sampling_params = interactive_sample_parameters(&mistralrs);
+    let mut prev_encoder_hits: usize = 0;
+    let mut prev_encoder_misses: usize = 0;
 
     info!("Starting interactive loop with sampling params: {sampling_params:?}");
     println!(
-        "{}{VISION_INTERACTIVE_HELP}{COMMAND_COMMANDS}{}",
+        "{}{VISION_INTERACTIVE_HELP}{COMMAND_COMMANDS}\nSampling: {}\n{}",
         "=".repeat(20),
+        format_sampling_params(&sampling_params),
         "=".repeat(20)
     );
 
@@ -509,7 +1413,7 @@ async fn vision_interactive_mode(
         // Set the handler to process exit
         *CTRLC_HANDLER.lock().unwrap() = &exit_handler;
 
-        let prompt = read_line(&mut rl);
+        let prompt = read_line(&mut rl, &build_prompt(do_search, do_code_exec, do_shell));
 
         let prompt_trimmed = prompt.as_str().trim();
         if prompt_trimmed.is_empty() {
@@ -534,6 +1438,7 @@ async fn vision_interactive_mode(
                 messages.clear();
                 images.clear();
                 audios.clear();
+                videos.clear();
                 info!("Cleared chat history.");
                 continue;
             }
@@ -541,9 +1446,7 @@ async fn vision_interactive_mode(
                 let parsed = match &prompt_trimmed.split(SYSTEM_CMD).collect::<Vec<_>>()[..] {
                     &["", a] => a.trim(),
                     _ => {
-                        println!(
-                            "Error: Setting the system command should be done with this format: `{SYSTEM_CMD} This is a system message.`"
-                        );
+                        println!("Error: Setting the system command should be done with this format: `{SYSTEM_CMD} This is a system message.`");
                         continue;
                     }
                 };
@@ -557,9 +1460,11 @@ async fn vision_interactive_mode(
             _ => {
                 let (urls_image, text_without_images) =
                     parse_files_and_message(prompt_trimmed, &image_regex);
-                let (urls_audio, text) =
+                let (urls_audio, text_without_audios) =
                     parse_files_and_message(&text_without_images, &audio_regex);
-                if !urls_image.is_empty() || !urls_audio.is_empty() {
+                let (urls_video, text) =
+                    parse_files_and_message(&text_without_audios, &video_regex);
+                if !urls_image.is_empty() || !urls_audio.is_empty() || !urls_video.is_empty() {
                     // Load images
                     let mut image_indexes = Vec::new();
                     for url in &urls_image {
@@ -575,8 +1480,8 @@ async fn vision_interactive_mode(
                             }
                         }
                     }
-                    // Load audios (clear previous turn's audio — transcription is per-turn)
-                    audios.clear();
+                    // Load audios and retain earlier turns so multimodal history can be
+                    // replayed with stable audio indices and matching payloads.
                     let mut audio_indexes = Vec::new();
                     for url in &urls_audio {
                         match util::parse_audio_url(url).await {
@@ -587,6 +1492,21 @@ async fn vision_interactive_mode(
                             }
                             Err(e) => {
                                 error!("Failed to read audio from URL/path {}: {}", url, e);
+                                continue 'outer;
+                            }
+                        }
+                    }
+                    // Load videos
+                    let mut video_indexes = Vec::new();
+                    for url in &urls_video {
+                        match parse_video_url(url, None).await {
+                            Ok(video) => {
+                                info!("Added video at `{url}`");
+                                video_indexes.push(videos.len());
+                                videos.push(video);
+                            }
+                            Err(e) => {
+                                error!("Failed to read video from URL/path {}: {}", url, e);
                                 continue 'outer;
                             }
                         }
@@ -605,6 +1525,12 @@ async fn vision_interactive_mode(
                             Value::String("audio".to_string()),
                         )]));
                     }
+                    for _ in &urls_video {
+                        content_vec.push(IndexMap::from([(
+                            "type".to_string(),
+                            Value::String("video".to_string()),
+                        )]));
+                    }
                     // Prefix the text with any media context
                     let mut prefixed_text = text.clone();
                     if !image_indexes.is_empty() {
@@ -614,6 +1540,10 @@ async fn vision_interactive_mode(
                     if !audio_indexes.is_empty() {
                         prefixed_text =
                             prefixer.prefix_audio(audio_indexes.clone(), &prefixed_text);
+                    }
+                    if !video_indexes.is_empty() {
+                        prefixed_text =
+                            prefixer.prefix_video(video_indexes.clone(), &prefixed_text);
                     }
                     // Add the final text part
                     content_vec.push(IndexMap::from([
@@ -641,9 +1571,10 @@ async fn vision_interactive_mode(
         // Set the handler to terminate all seqs, so allowing cancelling running
         *CTRLC_HANDLER.lock().unwrap() = &terminate_handler;
 
-        let request_messages = RequestMessage::VisionChat {
+        let request_messages = RequestMessage::MultimodalChat {
             images: images.clone(),
             audios: audios.clone(),
+            videos: videos.clone(),
             messages: messages.clone(),
             enable_thinking,
             reasoning_effort: None,
@@ -664,83 +1595,45 @@ async fn vision_interactive_mode(
             logits_processors: None,
             return_raw_logits: false,
             web_search_options: do_search.then(WebSearchOptions::default),
+            enable_code_execution: do_code_exec,
+            enable_shell: do_shell,
+            shell_options: None,
+            code_execution_permission: None,
+            code_execution_approval_notifier: None,
+            agent_permission: Some(agent_permission),
+            agent_approval_handler: agent_approval_callback
+                .clone()
+                .map(mistralrs_core::AgentToolApprovalHandler::from_sync),
+            agent_approval_notifier: None,
+            session_id: if do_code_exec || do_shell {
+                Some(tool_session_id.clone())
+            } else {
+                None
+            },
+            max_tool_rounds: None,
+            tool_dispatch_url: None,
             model_id: None,
             truncate_sequence: false,
+            files: None,
+            input_files: Vec::new(),
         }));
         sender.send(req).await.unwrap();
         let start_ttft = Instant::now();
-        let mut first_token_duration: Option<std::time::Duration> = None;
-
-        let mut assistant_output = String::new();
-
-        // ANSI escape codes for gray (muted) and reset
-        const GRAY: &str = "\x1b[90m";
-        const RESET: &str = "\x1b[0m";
-
-        let mut last_usage = None;
-        while let Some(resp) = rx.recv().await {
-            match resp {
-                Response::Chunk(chunk) => {
-                    last_usage = chunk.usage.clone();
-                    let choice = &chunk.choices[0];
-
-                    // Track first token timing
-                    let has_any_content =
-                        choice.delta.content.is_some() || choice.delta.reasoning_content.is_some();
-                    if has_any_content && first_token_duration.is_none() {
-                        let ttft = Instant::now().duration_since(start_ttft);
-                        first_token_duration = Some(ttft);
-                    }
-
-                    // Display reasoning content in gray (muted)
-                    if let Some(ref reasoning) = choice.delta.reasoning_content {
-                        print!("{GRAY}{reasoning}{RESET}");
-                        io::stdout().flush().unwrap();
-                    }
-
-                    // Display final content normally
-                    if let Some(ref content) = choice.delta.content {
-                        assistant_output.push_str(content);
-                        print!("{content}");
-                        io::stdout().flush().unwrap();
-                    }
-
-                    if let Some(ref finish_reason) = choice.finish_reason {
-                        if matches!(finish_reason.as_str(), "length") {
-                            print!("...");
-                        }
-                        break;
-                    }
-                }
-                Response::InternalError(e) => {
-                    error!("Got an internal error: {e:?}");
+        let (assistant_output, first_token_duration, last_usage) =
+            match stream_assistant_response(&mut rx, start_ttft).await {
+                Ok(response) => response,
+                Err(e) => {
+                    error!("{e}");
                     break 'outer;
                 }
-                Response::ModelError(e, resp) => {
-                    error!("Got a model error: {e:?}, response: {resp:?}");
-                    break 'outer;
-                }
-                Response::ValidationError(e) => {
-                    error!("Got a validation error: {e:?}");
-                    break 'outer;
-                }
-                Response::Done(_) => unreachable!(),
-                Response::CompletionDone(_) => unreachable!(),
-                Response::CompletionModelError(_, _) => unreachable!(),
-                Response::CompletionChunk(_) => unreachable!(),
-                Response::ImageGeneration(_) => unreachable!(),
-                Response::Speech { .. } => unreachable!(),
-                Response::Raw { .. } => unreachable!(),
-                Response::Embeddings { .. } => unreachable!(),
-            }
-        }
+            };
 
         if let Some(last_usage) = last_usage {
             println!();
             println!();
             println!("Stats:");
             if let Some(ttft) = first_token_duration {
-                println!("Time to first token: {:.2?}s", ttft.as_secs_f32());
+                println!("CLI time to first token: {:.2?}s", ttft.as_secs_f32());
             }
             println!(
                 "Prompt: {} tokens, {:.2} T/s",
@@ -759,12 +1652,16 @@ async fn vision_interactive_mode(
                     );
                 }
                 if let Some((hits, misses)) = logger.encoder_cache_stats() {
-                    let total = hits + misses;
-                    if total > 0 {
-                        println!("Encoder cache: {} hits / {} turns", hits, total);
+                    let turn_hits = hits - prev_encoder_hits;
+                    let turn_lookups = (hits + misses) - (prev_encoder_hits + prev_encoder_misses);
+                    if turn_lookups > 0 {
+                        println!("Encoder cache: {}/{} hits", turn_hits, turn_lookups);
                     }
+                    prev_encoder_hits = hits;
+                    prev_encoder_misses = misses;
                 }
             }
+            println!("Sampling: {}", format_sampling_params(&sampling_params));
         }
         let mut assistant_message: IndexMap<String, Either<String, Vec<IndexMap<String, Value>>>> =
             IndexMap::new();
@@ -780,13 +1677,25 @@ async fn vision_interactive_mode(
 async fn audio_interactive_mode(
     _mistralrs: Arc<MistralRs>,
     _do_search: bool,
+    _do_code_exec: bool,
+    _do_shell: bool,
+    _agent_permission: AgentPermission,
+    _agent_approval_callback: Option<mistralrs_core::AgentToolApprovalCallback>,
     _enable_thinking: Option<bool>,
 ) {
-    unimplemented!("Using audio models isn't supported yet")
+    error!("Audio models are not supported in `mistralrs run`. Use `mistralrs serve` and the OpenAI-compatible /v1/chat/completions endpoint instead.");
 }
 
-async fn diffusion_interactive_mode(mistralrs: Arc<MistralRs>, do_search: bool) {
+async fn diffusion_interactive_mode(
+    mistralrs: Arc<MistralRs>,
+    do_search: bool,
+    do_code_exec: bool,
+    do_shell: bool,
+    agent_permission: AgentPermission,
+    agent_approval_callback: Option<mistralrs_core::AgentToolApprovalCallback>,
+) {
     let sender = mistralrs.get_sender(None).unwrap();
+    let tool_session_id = uuid::Uuid::new_v4().to_string();
 
     let diffusion_params = DiffusionGenerationParams::default();
 
@@ -809,7 +1718,7 @@ async fn diffusion_interactive_mode(mistralrs: Arc<MistralRs>, do_search: bool) 
         // Set the handler to process exit
         *CTRLC_HANDLER.lock().unwrap() = &exit_handler;
 
-        let prompt = read_line(&mut rl);
+        let prompt = read_line(&mut rl, &build_prompt(do_search, do_code_exec, do_shell));
 
         let prompt = match prompt.as_str().trim() {
             "" => continue,
@@ -850,8 +1759,27 @@ async fn diffusion_interactive_mode(mistralrs: Arc<MistralRs>, do_search: bool) 
             logits_processors: None,
             return_raw_logits: false,
             web_search_options: do_search.then(WebSearchOptions::default),
+            enable_code_execution: do_code_exec,
+            enable_shell: do_shell,
+            shell_options: None,
+            code_execution_permission: None,
+            code_execution_approval_notifier: None,
+            agent_permission: Some(agent_permission),
+            agent_approval_handler: agent_approval_callback
+                .clone()
+                .map(mistralrs_core::AgentToolApprovalHandler::from_sync),
+            agent_approval_notifier: None,
+            session_id: if do_code_exec || do_shell {
+                Some(tool_session_id.clone())
+            } else {
+                None
+            },
+            max_tool_rounds: None,
+            tool_dispatch_url: None,
             model_id: None,
             truncate_sequence: false,
+            files: None,
+            input_files: Vec::new(),
         }));
 
         let start = Instant::now();
@@ -877,8 +1805,16 @@ async fn diffusion_interactive_mode(mistralrs: Arc<MistralRs>, do_search: bool) 
     rl.save_history(&history_file_path()).unwrap();
 }
 
-async fn speech_interactive_mode(mistralrs: Arc<MistralRs>, do_search: bool) {
+async fn speech_interactive_mode(
+    mistralrs: Arc<MistralRs>,
+    do_search: bool,
+    do_code_exec: bool,
+    do_shell: bool,
+    agent_permission: AgentPermission,
+    agent_approval_callback: Option<mistralrs_core::AgentToolApprovalCallback>,
+) {
     let sender = mistralrs.get_sender(None).unwrap();
+    let tool_session_id = uuid::Uuid::new_v4().to_string();
 
     info!("Starting interactive loop for speech");
     println!(
@@ -901,7 +1837,7 @@ async fn speech_interactive_mode(mistralrs: Arc<MistralRs>, do_search: bool) {
         // Set the handler to process exit
         *CTRLC_HANDLER.lock().unwrap() = &exit_handler;
 
-        let prompt = read_line(&mut rl);
+        let prompt = read_line(&mut rl, &build_prompt(do_search, do_code_exec, do_shell));
 
         let prompt = match prompt.as_str().trim() {
             "" => continue,
@@ -939,8 +1875,27 @@ async fn speech_interactive_mode(mistralrs: Arc<MistralRs>, do_search: bool) {
             logits_processors: None,
             return_raw_logits: false,
             web_search_options: do_search.then(WebSearchOptions::default),
+            enable_code_execution: do_code_exec,
+            enable_shell: do_shell,
+            shell_options: None,
+            code_execution_permission: None,
+            code_execution_approval_notifier: None,
+            agent_permission: Some(agent_permission),
+            agent_approval_handler: agent_approval_callback
+                .clone()
+                .map(mistralrs_core::AgentToolApprovalHandler::from_sync),
+            agent_approval_notifier: None,
+            session_id: if do_code_exec || do_shell {
+                Some(tool_session_id.clone())
+            } else {
+                None
+            },
+            max_tool_rounds: None,
+            tool_dispatch_url: None,
             model_id: None,
             truncate_sequence: false,
+            files: None,
+            input_files: Vec::new(),
         }));
 
         let start = Instant::now();

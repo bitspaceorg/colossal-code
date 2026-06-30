@@ -131,8 +131,8 @@ impl<Backer: FcfsBacker> BucketingManager<Backer> for FixedBucketingManager {
         let running = if seq_buckets.len() <= 1 {
             // Full steam ahead or have everything
             seq_buckets
-                .into_iter()
-                .flat_map(|(_, x)| x)
+                .into_values()
+                .flatten()
                 .map(|s| s.reset_urgency())
                 .collect::<Vec<_>>()
         } else {
@@ -308,7 +308,11 @@ impl<Backer: FcfsBacker> DefaultScheduler<Backer> {
 }
 
 impl Scheduler for DefaultScheduler<VecDeque<Sequence>> {
-    fn schedule(&mut self, logger: &IntervalLogger) -> SchedulerOutput<'_> {
+    fn schedule(
+        &mut self,
+        logger: &IntervalLogger,
+        _prefix_validator: Option<&mut dyn crate::scheduler::PagedPrefixCacheValidator>,
+    ) -> SchedulerOutput<'_> {
         SchedulerOutput::DefaultScheduler {
             output: self.schedule(logger),
         }
@@ -334,11 +338,11 @@ impl Scheduler for DefaultScheduler<VecDeque<Sequence>> {
         // Remove finished sequences
         self.running.retain(|seq| !seq.is_finished_paged_attn());
     }
-    fn get_finished_mamba_indices(&self) -> Vec<usize> {
+    fn get_finished_recurrent_indices(&self) -> Vec<usize> {
         self.running
             .iter()
             .filter(|seq| seq.is_finished_paged_attn())
-            .filter_map(|seq| seq.mamba_state_idx())
+            .filter_map(|seq| seq.recurrent_state_idx())
             .collect()
     }
     fn kv_cache_manager(&self) -> Option<Arc<tokio::sync::Mutex<KVCacheManager>>> {

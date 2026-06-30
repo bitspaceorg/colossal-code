@@ -1,9 +1,9 @@
 use crate::{
-    pipeline::NormalCache,
+    pipeline::{KvCache, NormalCache},
     prefix_cacher::MatchingCache,
     request::{DetokenizationRequest, NormalRequest, TokenizationRequest},
     sequence::SeqStepType,
-    tools::{ToolCallingMatcher, ToolChoice},
+    tools::{ToolCallFormat, ToolCallState, ToolChoice},
     ModelCategory, RequestMessage, Response,
 };
 use candle_core::Tensor;
@@ -23,23 +23,52 @@ use crate::{
     StopTokens,
 };
 
-use super::{search_request, Engine, TERMINATE_ALL_NEXT_STEP};
+use super::{agentic_loop, Engine, TERMINATE_ALL_NEXT_STEP};
 
 impl Engine {
     pub async fn handle_request(self: Arc<Self>, request: Request) {
         match request {
-            Request::Normal(request) => {
+            Request::Normal(mut request) => {
                 let is_chat = matches!(
                     &request.messages,
-                    RequestMessage::Chat { .. } | RequestMessage::VisionChat { .. }
+                    RequestMessage::Chat { .. } | RequestMessage::MultimodalChat { .. }
                 );
-                let has_tooling =
-                    !self.tool_callbacks.is_empty() || !self.tool_callbacks_with_tools.is_empty();
+                let in_agentic_loop =
+                    request.max_tool_rounds == agentic_loop::AGENTIC_LOOP_REENTRY_SENTINEL;
+                let has_tooling = self.tool_callbacks.keys().any(|name| {
+                    agentic_loop::registered_tool_active_for_request(
+                        name,
+                        request.enable_code_execution,
+                        request.enable_shell,
+                    )
+                });
                 let has_search = request.web_search_options.is_some();
+                let has_agentic =
+                    request.max_tool_rounds.is_some() || request.tool_dispatch_url.is_some();
+                let has_input_files =
+                    cfg!(feature = "code-execution") && is_chat && !request.input_files.is_empty();
 
-                if is_chat && (has_search || has_tooling) {
-                    search_request::search_request(self.clone(), *request).await;
+                if is_chat
+                    && !in_agentic_loop
+                    && (has_search || has_tooling || has_agentic || has_input_files)
+                {
+                    agentic_loop::agentic_loop(self.clone(), *request).await;
+                } else if request.files.as_ref().is_some_and(|f| !f.is_empty()) {
+                    // `request.files` is set but nothing would produce them. Reject rather than silently degrading to a plain chat.
+                    let _ = request
+                        .response
+                        .send(crate::Response::ValidationError(
+                            "request.files is set but no agentic surface is enabled \
+                             (enable_code_execution / tools / web_search / \
+                             enable_shell / max_tool_rounds / tool_dispatch_url). Files cannot be \
+                             produced without one of these."
+                                .into(),
+                        ))
+                        .await;
                 } else {
+                    if is_chat && !request.input_files.is_empty() {
+                        agentic_loop::inject_input_files_message(&mut request);
+                    }
                     self.add_request(*request).await;
                 }
             }
@@ -47,6 +76,24 @@ impl Engine {
                 if let Err(e) = get_mut_arcmutex!(self.pipeline).re_isq_model(level) {
                     warn!("ISQ requantization failed: {e:?}");
                 }
+            }
+            Request::Calibration(req) => {
+                let result = {
+                    let mut pipeline = get_mut_arcmutex!(self.pipeline);
+                    match &req.action {
+                        crate::CalibrationAction::Start => pipeline
+                            .begin_calibration()
+                            .and_then(|()| pipeline.calibration_status()),
+                        crate::CalibrationAction::Status => pipeline.calibration_status(),
+                        crate::CalibrationAction::Apply { save_cimatrix } => {
+                            pipeline.apply_calibration(save_cimatrix.clone())
+                        }
+                    }
+                };
+                if let Err(e) = &result {
+                    warn!("Calibration request failed: {e:?}");
+                }
+                let _ = req.response.send(result).await;
             }
             Request::Tokenize(req) => self.tokenize_text(req).await,
             Request::Detokenize(req) => self.detokenize_text(req).await,
@@ -60,7 +107,7 @@ impl Engine {
     pub(super) async fn add_request(&self, request: NormalRequest) {
         let is_chat = matches!(
             request.messages,
-            RequestMessage::Chat { .. } | RequestMessage::VisionChat { .. }
+            RequestMessage::Chat { .. } | RequestMessage::MultimodalChat { .. }
         );
         let echo_prompt = matches!(
             request.messages,
@@ -74,7 +121,7 @@ impl Engine {
             RequestMessage::Completion { best_of, .. } => best_of,
             RequestMessage::Chat { .. }
             | RequestMessage::CompletionTokens(_)
-            | RequestMessage::VisionChat { .. }
+            | RequestMessage::MultimodalChat { .. }
             | RequestMessage::ImageGeneration { .. }
             | RequestMessage::SpeechGeneration { .. }
             | RequestMessage::Embedding { .. }
@@ -103,9 +150,9 @@ impl Engine {
             &request.messages,
         ) {
             (
-                ModelCategory::Text | ModelCategory::Vision { .. },
+                ModelCategory::Text | ModelCategory::Multimodal { .. },
                 RequestMessage::Chat { .. }
-                | RequestMessage::VisionChat { .. }
+                | RequestMessage::MultimodalChat { .. }
                 | RequestMessage::Completion { .. }
                 | RequestMessage::CompletionTokens(_),
             ) => (),
@@ -128,20 +175,43 @@ impl Engine {
         }
 
         let images = match request.messages {
-            RequestMessage::VisionChat { ref images, .. } => Some(images.clone()),
+            RequestMessage::MultimodalChat { ref images, .. } => Some(images.clone()),
             _ => None,
         };
 
         let audios = match request.messages {
-            RequestMessage::VisionChat { ref audios, .. } => Some(audios.clone()),
+            RequestMessage::MultimodalChat { ref audios, .. } => Some(audios.clone()),
+            _ => None,
+        };
+        let videos = match request.messages {
+            RequestMessage::MultimodalChat { ref videos, .. } => Some(videos.clone()),
             _ => None,
         };
         let has_tools = request.tools.as_ref().is_some_and(|t| !t.is_empty());
-        let matcher = Arc::new(handle_seq_error!(
-            ToolCallingMatcher::new(request.tool_choice.unwrap_or(ToolChoice::Auto),),
-            request.response
-        ));
-
+        let preferred_tool_call_format = {
+            let pipeline = get_mut_arcmutex!(self.pipeline);
+            pipeline
+                .get_chat_template()
+                .and_then(|chat_template| chat_template.tool_call_format())
+        };
+        let uses_harmony_tool_call_strategy =
+            preferred_tool_call_format == Some(ToolCallFormat::Harmony);
+        let validates_forced_tool_choice = request
+            .tool_choice
+            .as_ref()
+            .is_some_and(|choice| choice.forced_function_name().is_some());
+        let needs_tool_call_state =
+            has_tools || uses_harmony_tool_call_strategy || validates_forced_tool_choice;
+        if uses_harmony_tool_call_strategy
+            && !crate::reasoning_parsers::harmony::is_harmony_encoding_ready()
+        {
+            if let Err(e) = tokio::task::block_in_place(|| {
+                crate::reasoning_parsers::harmony::prewarm_harmony_encoding();
+                Ok::<(), anyhow::Error>(())
+            }) {
+                warn!("Failed to initialize Harmony encoding: {e}");
+            }
+        }
         let image_generation_format = match &request.messages {
             RequestMessage::ImageGeneration { format, .. } => Some(*format),
             _ => None,
@@ -174,15 +244,16 @@ impl Engine {
                 enable_thinking,
                 reasoning_effort,
             }
-            | RequestMessage::VisionChat {
+            | RequestMessage::MultimodalChat {
                 images: _,
                 audios: _,
+                videos: _,
                 messages,
                 enable_thinking,
                 reasoning_effort,
             } => {
                 let pipeline = &*get_mut_arcmutex!(self.pipeline);
-                let tools = request.tools.unwrap_or_default();
+                let tools = request.tools.clone().unwrap_or_default();
                 let template = pipeline.get_processor().process(
                     pipeline,
                     messages,
@@ -249,7 +320,7 @@ impl Engine {
 
         if matches!(
             get_mut_arcmutex!(self.pipeline).category(),
-            ModelCategory::Text | ModelCategory::Vision { .. } | ModelCategory::Embedding
+            ModelCategory::Text | ModelCategory::Multimodal { .. } | ModelCategory::Embedding
         ) && prompt_tokens.len() > get_mut_arcmutex!(self.pipeline).get_metadata().max_seq_len
         {
             // text/vision => truncate from start
@@ -264,7 +335,10 @@ impl Engine {
                     .await
                     .unwrap_or_else(|_| warn!("Receiver disconnected"));
                 return;
-            } else if matches!(category, ModelCategory::Text | ModelCategory::Vision { .. }) {
+            } else if matches!(
+                category,
+                ModelCategory::Text | ModelCategory::Multimodal { .. }
+            ) {
                 let prompt_len = prompt_tokens.len();
                 let max_len = get_mut_arcmutex!(self.pipeline).get_metadata().max_seq_len;
                 let currently_over = prompt_len - max_len;
@@ -286,20 +360,14 @@ impl Engine {
                 let slice_start = prompt_len.saturating_sub(tokens_to_keep);
 
                 prompt_tokens = prompt_tokens[slice_start..].to_vec();
-                warn!(
-                    "Prompt for request {} was {currently_over} tokens over the model maximum length. The first {slice_start} tokens were truncated to make space for generation.",
-                    request.id
-                );
+                warn!("Prompt for request {} was {currently_over} tokens over the model maximum length. The first {slice_start} tokens were truncated to make space for generation.", request.id);
             } else {
                 let prompt_len = prompt_tokens.len();
                 let max_len = get_mut_arcmutex!(self.pipeline).get_metadata().max_seq_len;
                 let currently_over = prompt_len - max_len;
 
                 prompt_tokens = prompt_tokens[..max_len].to_vec();
-                warn!(
-                    "Prompt for request {} was {currently_over} tokens over the model maximum length. The last {currently_over} tokens were truncated to make space for generation.",
-                    request.id
-                );
+                warn!("Prompt for request {} was {currently_over} tokens over the model maximum length. The last {currently_over} tokens were truncated to make space for generation.", request.id);
             }
         }
 
@@ -406,6 +474,7 @@ impl Engine {
             topk,
             topp,
             minp,
+            request.sampling_params.logits_bias.unwrap_or_default(),
             request.logits_processors.unwrap_or_default(),
         );
         let sampler = handle_seq_error!(sampler, request.response);
@@ -454,11 +523,26 @@ impl Engine {
 
             let seq_preallocated_cache = if matches!(
                 get_mut_arcmutex!(self.pipeline).category(),
-                ModelCategory::Text | ModelCategory::Vision { .. }
-            ) && get_mut_arcmutex!(self.pipeline)
-                .do_preallocated_cache()
-            {
-                let metadata = get_mut_arcmutex!(self.pipeline).get_metadata();
+                ModelCategory::Text | ModelCategory::Multimodal { .. }
+            ) {
+                let (metadata, device, needs_preallocated_cache) = {
+                    let pipeline = get_mut_arcmutex!(self.pipeline);
+                    let needs_preallocated_cache = match pipeline.cache() {
+                        crate::pipeline::EitherCache::Normal(normal) => normal
+                            .lock()
+                            .unwrap()
+                            .0
+                            .iter()
+                            .map(|cache| matches!(cache, KvCache::Normal { .. }))
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    (
+                        pipeline.get_metadata(),
+                        pipeline.device(),
+                        needs_preallocated_cache,
+                    )
+                };
                 let model_metadata = metadata
                     .model_metadata
                     .as_ref()
@@ -466,26 +550,33 @@ impl Engine {
                 let n_tokens = prompt_tokens.len();
                 let required_blocks = n_tokens.div_ceil(NormalCache::CACHE_GROW_SIZE);
                 let max_seq_len = required_blocks * NormalCache::CACHE_GROW_SIZE;
-                let k_shape = (
-                    1usize,
-                    model_metadata.num_kv_heads(),
-                    max_seq_len,
-                    model_metadata.k_head_dim(),
-                );
-                let v_shape = (
-                    1usize,
-                    model_metadata.num_kv_heads(),
-                    max_seq_len,
-                    model_metadata.v_head_dim(),
-                );
-                let dtype = get_mut_arcmutex!(self.pipeline)
-                    .get_metadata()
-                    .activation_dtype;
+                let dtype = metadata.activation_dtype;
+                let mut layer_caches = Vec::with_capacity(model_metadata.num_layers());
+                for layer_idx in 0..model_metadata.num_layers() {
+                    if !needs_preallocated_cache
+                        .get(layer_idx)
+                        .copied()
+                        .unwrap_or(false)
+                        || !model_metadata.uses_own_kv_cache_for_layer(layer_idx)
+                    {
+                        layer_caches.push(None);
+                        continue;
+                    }
 
-                let k_seq_cache = {
-                    let k_seq_cache =
-                        Tensor::zeros(k_shape, dtype, &get_mut_arcmutex!(self.pipeline).device());
-                    match k_seq_cache {
+                    let k_shape = (
+                        1usize,
+                        model_metadata.num_kv_heads_for_layer(layer_idx),
+                        max_seq_len,
+                        model_metadata.k_head_dim_for_layer(layer_idx),
+                    );
+                    let v_shape = (
+                        1usize,
+                        model_metadata.num_kv_heads_for_layer(layer_idx),
+                        max_seq_len,
+                        model_metadata.v_head_dim_for_layer(layer_idx),
+                    );
+
+                    let k_seq_cache = match Tensor::zeros(k_shape, dtype, &device) {
                         Ok(x) => x,
                         Err(_) => {
                             request
@@ -499,30 +590,29 @@ impl Engine {
                                 .unwrap_or_else(|_| warn!("Receiver disconnected"));
                             return;
                         }
-                    }
-                };
-                let v_seq_cache = if k_shape == v_shape {
-                    k_seq_cache.clone()
-                } else {
-                    let v_seq_cache =
-                        Tensor::zeros(v_shape, dtype, &get_mut_arcmutex!(self.pipeline).device());
-                    match v_seq_cache {
-                        Ok(x) => x,
-                        Err(_) => {
-                            request
-                                .response
-                                .send(Response::InternalError(
-                                    "Failed to allocate preallocated KV cache."
-                                        .to_string()
-                                        .into(),
-                                ))
-                                .await
-                                .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                            return;
+                    };
+                    let v_seq_cache = if k_shape == v_shape {
+                        k_seq_cache.clone()
+                    } else {
+                        match Tensor::zeros(v_shape, dtype, &device) {
+                            Ok(x) => x,
+                            Err(_) => {
+                                request
+                                    .response
+                                    .send(Response::InternalError(
+                                        "Failed to allocate preallocated KV cache."
+                                            .to_string()
+                                            .into(),
+                                    ))
+                                    .await
+                                    .unwrap_or_else(|_| warn!("Receiver disconnected"));
+                                return;
+                            }
                         }
-                    }
-                };
-                Some((k_seq_cache, v_seq_cache))
+                    };
+                    layer_caches.push(Some((k_seq_cache, v_seq_cache)));
+                }
+                Some(layer_caches)
             } else {
                 None
             };
@@ -530,6 +620,25 @@ impl Engine {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("Time travel has occurred!");
+            let tool_call_state = if needs_tool_call_state {
+                let requested_tool_choice = request.tool_choice.clone().unwrap_or(ToolChoice::Auto);
+                let tool_choice =
+                    if has_tools || requested_tool_choice.forced_function_name().is_some() {
+                        requested_tool_choice
+                    } else {
+                        ToolChoice::None
+                    };
+                Some(handle_seq_error!(
+                    ToolCallState::new(
+                        tool_choice,
+                        request.tools.as_deref(),
+                        preferred_tool_call_format,
+                    ),
+                    request.response
+                ))
+            } else {
+                None
+            };
             let mut seq = Sequence::new_waiting(
                 prompt_tokens.clone(),
                 prompt_text.clone(),
@@ -555,12 +664,9 @@ impl Engine {
                 },
                 images.clone(),
                 audios.clone(),
+                videos.clone(),
                 block_size,
-                if has_tools {
-                    Some(matcher.clone())
-                } else {
-                    None
-                },
+                tool_call_state,
                 image_generation_format,
                 seq_step_type,
                 diffusion_params.clone(),
@@ -575,45 +681,56 @@ impl Engine {
                 self.logger.add_new_sequence();
             }
 
-            // Enable Harmony mode if the chat template uses Harmony format
             {
                 let pipeline = get_mut_arcmutex!(self.pipeline);
                 if let Some(chat_template) = pipeline.get_chat_template() {
-                    if chat_template.is_harmony_format() {
-                        // Pre-warm the Harmony encoding if not already done.
-                        // This must be done in a blocking context because openai-harmony
-                        // uses reqwest::blocking which creates its own tokio runtime.
-                        if !crate::harmony::is_harmony_encoding_ready() {
-                            if let Err(e) = tokio::task::block_in_place(|| {
-                                crate::harmony::prewarm_harmony_encoding();
-                                Ok::<(), anyhow::Error>(())
-                            }) {
-                                warn!("Failed to initialize Harmony encoding: {e}");
-                            }
-                        }
-                        if let Err(e) = seq.enable_harmony_mode() {
-                            warn!("Failed to enable Harmony mode: {e}");
-                        }
+                    if chat_template.uses_channel_tags() && !chat_template.is_harmony_format() {
+                        // Gemma 4: <|channel>thought\n...<channel|>
+                        let prompt_activates_thinking =
+                            seq.get_initial_prompt().contains("<|think|>");
+                        seq.enable_reasoning(
+                            crate::reasoning_parsers::ReasoningMode::TagBased,
+                            Box::new(if prompt_activates_thinking {
+                                crate::reasoning_parsers::TagReasoningContext::new_gemma_channel_with_implicit_thinking()
+                            } else {
+                                crate::reasoning_parsers::TagReasoningContext::new_gemma_channel()
+                            }),
+                        );
                     } else if chat_template.uses_think_tags() {
-                        // Enable think tag mode if the chat template uses <think> tags
-                        seq.enable_think_tag_mode();
+                        // DeepSeek, QwQ, SmolLM3: <think>...</think>
+                        let starts_in_block = seq
+                            .get_initial_prompt()
+                            .trim_end()
+                            .ends_with(crate::reasoning_parsers::tag_based::THINK_OPEN_TAG);
+                        let ctx = if starts_in_block {
+                            crate::reasoning_parsers::TagReasoningContext::new_in_think_block()
+                        } else {
+                            crate::reasoning_parsers::TagReasoningContext::new_think_tags()
+                        };
+                        seq.enable_reasoning(
+                            crate::reasoning_parsers::ReasoningMode::TagBased,
+                            Box::new(ctx),
+                        );
                     }
                 }
             }
 
-            // Allocate Mamba state pool slot for hybrid models
+            // Allocate recurrent state pool slot for hybrid models
             {
                 let pipeline = get_mut_arcmutex!(self.pipeline);
                 if !pipeline.get_metadata().no_kv_cache && pipeline.cache().is_hybrid() {
                     let mut hybrid_cache = pipeline.cache().hybrid();
                     if let Some(slot_idx) = hybrid_cache.allocate_seq() {
-                        seq.set_mamba_state_idx(Some(slot_idx));
+                        seq.set_recurrent_state_idx(Some(slot_idx));
                     }
                 }
             }
 
-            // Run the inputs processor to update the prompt for multimodal models.
-            if images.is_some() || audios.is_some() {
+            // Run the inputs processor to normalize multimodal prompts before prefix-cache lookup.
+            // Rely on the sequence's attached modalities rather than just the top-level request
+            // fields so historical images/audios in a reconstructed multi-turn conversation
+            // still get their prompt rewrite and mm-feature setup before cache matching.
+            if seq.has_images() || seq.has_audios() || seq.has_videos() {
                 let pipeline = get_mut_arcmutex!(self.pipeline);
                 let _ = pipeline.get_processor().inputs_processor().process_inputs(
                     pipeline.tokenizer(),
@@ -624,6 +741,7 @@ impl Engine {
                     pipeline.get_metadata().no_kv_cache,
                     None,
                     false,
+                    pipeline.get_metadata().sliding_window,
                     pipeline.get_input_processor_config(),
                     None,
                     pipeline.device_mapper(),
@@ -635,6 +753,7 @@ impl Engine {
                     seq.get_toks(),
                     seq.image_hashes(),
                     seq.audio_hashes(),
+                    seq.video_hashes(),
                 ),
                 request.response
             );
@@ -642,15 +761,35 @@ impl Engine {
             seq = match prefill_cache.clone() {
                 Some(MatchingCache::Normal {
                     normal,
+                    recurrent_snapshots,
                     images_to_keep,
                     audios_to_keep,
+                    videos_to_keep,
                     toks,
                     offset,
                 }) => {
                     self.logger.add_prefix_cache_hit();
 
+                    // Restore recurrent state for hybrid models
+                    if let Some(snapshots) = recurrent_snapshots {
+                        if let Some(slot_idx) = seq.recurrent_state_idx() {
+                            let pipeline = get_mut_arcmutex!(self.pipeline);
+                            if pipeline.cache().is_hybrid() {
+                                let mut hybrid_cache = pipeline.cache().hybrid();
+                                if let Err(e) =
+                                    hybrid_cache.restore_recurrent_state(slot_idx, &snapshots)
+                                {
+                                    tracing::warn!(
+                                        "Failed to restore recurrent state from prefix cache: {e}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     seq.keep_num_images(images_to_keep);
                     seq.keep_num_audios(audios_to_keep);
+                    seq.keep_num_videos(videos_to_keep);
                     seq.prefill_v2_normal(normal, toks, offset)
                 }
                 None => seq,

@@ -9,10 +9,10 @@ use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::{Embedding, Module};
 use mistralrs_quant::{GgufMatMul, QuantMethod, QuantMethodConfig};
 
-use crate::attention::SdpaParams;
+use crate::attention::{AttentionMask, SdpaParams};
 use crate::device_map::{DeviceMappedMask, DeviceMapper};
 use crate::gguf::Content;
-use crate::layers::{CausalMasker, MatMul, QRmsNorm, RotaryEmbedding, Sdpa};
+use crate::layers::{CausalMaskConfig, CausalMasker, QRmsNorm, RotaryEmbedding, Sdpa};
 use crate::layers_masker::PastKvLenCache;
 use crate::paged_attention::{AttentionImplementation, PagedAttention};
 use crate::pipeline::extract_logits;
@@ -34,10 +34,10 @@ struct Mlp {
 
 impl Mlp {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let w1 = MatMul.qmethod_matmul(xs, &*self.feed_forward_w1)?;
-        let w3 = MatMul.qmethod_matmul(xs, &*self.feed_forward_w3)?;
+        let w1 = self.feed_forward_w1.forward(xs)?;
+        let w3 = self.feed_forward_w3.forward(xs)?;
         let y = crate::ops::mul_and_act(&w1, &w3, crate::layers::Activation::Silu)?;
-        MatMul.qmethod_matmul(&y, &*self.feed_forward_w2)
+        self.feed_forward_w2.forward(&y)
     }
 }
 
@@ -60,36 +60,37 @@ impl MlpOrMoe {
             } => {
                 let (b_size, seq_len, hidden_dim) = xs.dims3()?;
                 let xs = xs.reshape(((), hidden_dim))?;
-                let router_logits = MatMul.qmethod_matmul(&xs, &**feed_forward_gate_inp)?;
-                let routing_weights = candle_nn::ops::softmax_last_dim(&router_logits)?;
+                let router_logits = feed_forward_gate_inp.forward(&xs)?;
+                let topk = crate::ops::moe_router_topk(
+                    &router_logits,
+                    crate::ops::MoeRouterTopKConfig {
+                        top_k: *n_expert_used,
+                        score_function: crate::ops::MoeRouterScoreFunction::Softmax,
+                        selected_weight: crate::ops::MoeRouterSelectedWeight::Score,
+                        renormalize: true,
+                        norm_min: 0.0,
+                        output_scale: 1.0,
+                        logit_clip: None,
+                    },
+                    None,
+                    None,
+                )?;
+                let selected_experts = topk.indices.to_vec2::<u32>()?;
+                let routing_weights = topk.values.to_dtype(DType::F32)?.to_vec2::<f32>()?;
 
-                // In order to extract topk, we extract the data from the tensor and manipulate it
-                // directly. Maybe we will want to use some custom ops instead at some point.
-                let routing_weights = routing_weights.to_dtype(DType::F32)?.to_vec2::<f32>()?;
-
-                // routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
-                // top_x contains the row indexes to evaluate for each expert.
                 let mut top_x = vec![vec![]; experts.len()];
                 let mut selected_rws = vec![vec![]; experts.len()];
-                for (row_idx, rw) in routing_weights.iter().enumerate() {
-                    let mut dst = (0..rw.len() as u32).collect::<Vec<u32>>();
-                    dst.sort_by(|&i, &j| rw[j as usize].total_cmp(&rw[i as usize]));
-                    let mut sum_routing_weights = 0f32;
-                    for &expert_idx in dst.iter().take(*n_expert_used) {
+                for (row_idx, (experts, weights)) in selected_experts
+                    .iter()
+                    .zip(routing_weights.iter())
+                    .enumerate()
+                {
+                    for (&expert_idx, &routing_weight) in experts.iter().zip(weights.iter()) {
                         let expert_idx = expert_idx as usize;
-                        let routing_weight = rw[expert_idx];
-                        sum_routing_weights += routing_weight;
                         top_x[expert_idx].push(row_idx as u32);
-                    }
-                    for &expert_idx in dst.iter().take(*n_expert_used) {
-                        let expert_idx = expert_idx as usize;
-                        let routing_weight = rw[expert_idx];
-                        selected_rws[expert_idx].push(routing_weight / sum_routing_weights)
+                        selected_rws[expert_idx].push(routing_weight)
                     }
                 }
-
-                // routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-                // expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
 
                 let mut ys = xs.zeros_like()?;
                 for (expert_idx, expert_layer) in experts.iter().enumerate() {
@@ -141,22 +142,16 @@ impl LayerWeights {
     fn forward_attn(
         &self,
         x: &Tensor,
-        mask: Option<&Tensor>,
+        mask: &AttentionMask,
         start_offsets: &[usize],
         kv_cache: &mut KvCache,
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
     ) -> Result<Tensor> {
         let (b_sz, seq_len, _) = x.dims3()?;
 
-        let q = MatMul
-            .qmethod_matmul(x, &*self.attention_wq)?
-            .to_dtype(self.dtype)?;
-        let k = MatMul
-            .qmethod_matmul(x, &*self.attention_wk)?
-            .to_dtype(self.dtype)?;
-        let v = MatMul
-            .qmethod_matmul(x, &*self.attention_wv)?
-            .to_dtype(self.dtype)?;
+        let q = self.attention_wq.forward(x)?.to_dtype(self.dtype)?;
+        let k = self.attention_wk.forward(x)?.to_dtype(self.dtype)?;
+        let v = self.attention_wv.forward(x)?.to_dtype(self.dtype)?;
 
         let (q, k, v) = if seq_len != 1 {
             let q = q
@@ -176,7 +171,9 @@ impl LayerWeights {
             (q, k, v)
         };
 
-        let (q, k) = self.rotary.forward(&q, &k, start_offsets)?;
+        let positions =
+            crate::pipeline::text_positions_tensor(start_offsets, q.dim(2)?, q.device())?;
+        let (q, k) = self.rotary.forward(&q, &k, &positions)?;
 
         let y = match &self.paged_attn {
             Some(paged_attn) => {
@@ -200,13 +197,13 @@ impl LayerWeights {
             }
         };
 
-        let y = if mask.is_some() {
+        let y = if mask.is_custom() {
             y.transpose(1, 2)?.reshape((b_sz, seq_len, ()))?
         } else {
             y.reshape((b_sz, seq_len, ()))?
         };
 
-        let y = MatMul.qmethod_matmul(&y.to_dtype(x.dtype())?, &*self.attention_wo)?;
+        let y = self.attention_wo.forward(&y.to_dtype(x.dtype())?)?;
         Ok(y)
     }
 }
@@ -667,22 +664,25 @@ impl ModelWeights {
     ) -> Result<Tensor> {
         let mut layer_in = self.tok_embeddings.forward(x)?;
         let cache = &mut self.cache.normal().0;
-        let mask = CausalMasker.make_causal_mask_matrix(
+        let mask = CausalMasker.make_causal_mask(
             x,
             metadata
                 .as_ref()
                 .map(|(_, _)| &start_offsets as &dyn PastKvLenCache)
                 .unwrap_or(cache as &dyn PastKvLenCache),
             self.dtype,
-            self.layers[0].n_head,
+            &CausalMaskConfig::default(),
         )?;
         // PagedAttention prompt chunking
-        let mask = mask.filter(|_| {
-            metadata
-                .as_ref()
-                .map(|(_, meta)| meta.is_first_prompt_chunk)
-                .unwrap_or(true)
-        });
+        let mask = if metadata
+            .as_ref()
+            .map(|(_, meta)| meta.is_first_prompt_chunk)
+            .unwrap_or(true)
+        {
+            mask
+        } else {
+            AttentionMask::None
+        };
         let mask = if let Some(ref mapper) = self.mapper {
             DeviceMappedMask::new(mask, &**mapper)?
         } else {
@@ -697,7 +697,7 @@ impl ModelWeights {
             let x = layer.attention_norm.forward(&x)?;
             let attn = layer.forward_attn(
                 &x,
-                mask.as_ref().map(|m| m.get(x.device())),
+                &mask.get(x.device()),
                 start_offsets,
                 &mut cache[i],
                 metadata
@@ -716,6 +716,6 @@ impl ModelWeights {
         let layer_in = layer_in.to_device(&self.device)?;
         let x = self.norm.forward(&layer_in)?;
         let x = extract_logits(&x, context_lens)?;
-        MatMul.qmethod_matmul(&x.contiguous()?, &*self.output)
+        self.output.forward(&x.contiguous()?)
     }
 }

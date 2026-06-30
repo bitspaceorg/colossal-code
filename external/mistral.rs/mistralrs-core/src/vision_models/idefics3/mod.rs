@@ -15,16 +15,17 @@ pub use inputs_processor::Idefics3Processor;
 use mistralrs_quant::{NonZeroOp, ShardedVarBuilder};
 use vision::{Idefics3Connector, Idefics3VisionTransformer};
 
+use crate::attention::AttentionMask;
 use crate::{
     amoe::{AnyMoeBaseModelMixin, MlpLayer},
-    device_map::DeviceMapper,
     models::llama::Llama,
     paged_attention::{
-        encoder_cache::EncoderCacheManager, AttentionImplementation, ModelConfigMetadata,
+        encoder_cache::{CacheModality, EncoderCacheManager},
+        AttentionImplementation, ModelConfigMetadata,
     },
     pipeline::{
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, NormalLoadingMetadata, NormalModel, VisionModel,
+        EitherCache, IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata,
+        NormalModel,
     },
     utils::unvarbuilder::UnVarBuilder,
     AnyMoeConfig, AnyMoeExpertType,
@@ -97,17 +98,13 @@ impl Idefics3Model {
         x_flat.reshape(input_embeds.shape())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn forward_inner(
         &self,
         input_ids: &Tensor,
         pixel_values: Option<Tensor>,
-        seqlen_offsets: &[usize],
-        context_lens: Vec<(usize, usize)>,
         pixel_attention_mask: Option<Tensor>,
         image_hashes: &[u64],
-        metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
+        ctx: &mut ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         let input_embeds = if let Some(pixel_values) = pixel_values {
             let input_embeds = self.text_model.get_input_embeddings(input_ids)?;
@@ -203,7 +200,7 @@ impl Idefics3Model {
                         .lock()
                         .expect("encoder cache lock poisoned");
                     for (i, &hash) in image_hashes.iter().enumerate() {
-                        if let Some(cached) = guard.get(hash) {
+                        if let Some(cached) = guard.get(CacheModality::Image, hash) {
                             per_image[i] = Some(cached[0].clone());
                         } else {
                             miss_indices.push(i);
@@ -214,7 +211,9 @@ impl Idefics3Model {
                     for &i in &miss_indices {
                         let pv = pixel_values.get(i)?.unsqueeze(0)?;
                         let mask = patch_attention_mask.get(i)?.unsqueeze(0)?;
-                        let hidden = self.vision.forward(&pv, Some(&mask))?;
+                        let hidden = self
+                            .vision
+                            .forward(&pv, &AttentionMask::Custom(mask.clone()))?;
                         let hidden = self.connector.forward(&hidden)?;
                         let result = hidden.squeeze(0)?;
                         {
@@ -222,7 +221,11 @@ impl Idefics3Model {
                                 .encoder_cache
                                 .lock()
                                 .expect("encoder cache lock poisoned");
-                            guard.insert(image_hashes[i], vec![result.clone()]);
+                            guard.insert(
+                                CacheModality::Image,
+                                image_hashes[i],
+                                vec![result.clone()],
+                            );
                         }
                         per_image[i] = Some(result);
                     }
@@ -231,9 +234,10 @@ impl Idefics3Model {
                 Tensor::stack(&slices, 0)?
             } else {
                 // No caching: original path
-                let image_hidden_states = self
-                    .vision
-                    .forward(&pixel_values, Some(&patch_attention_mask))?;
+                let image_hidden_states = self.vision.forward(
+                    &pixel_values,
+                    &AttentionMask::Custom(patch_attention_mask.clone()),
+                )?;
                 self.connector.forward(&image_hidden_states)?
             };
 
@@ -243,30 +247,11 @@ impl Idefics3Model {
             self.text_model.get_input_embeddings(input_ids)?
         };
 
-        self.text_model.forward_embeds(
-            input_ids,
-            input_embeds,
-            seqlen_offsets,
-            context_lens,
-            metadata,
-            flash_params,
-        )
+        self.text_model.forward_embeds(input_ids, input_embeds, ctx)
     }
 }
 
 impl IsqModel for Idefics3Model {
-    fn get_layers(
-        &mut self,
-    ) -> (
-        Vec<(
-            &mut std::sync::Arc<dyn mistralrs_quant::QuantMethod>,
-            Option<usize>,
-        )>,
-        &dyn DeviceMapper,
-    ) {
-        self.text_model.get_layers()
-    }
-
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
 
@@ -316,17 +301,17 @@ impl AnyMoeBaseModelMixin for Idefics3Model {
     }
 }
 
-impl VisionModel for Idefics3Model {
+impl crate::speculative::SpeculativeTargetMixin for Idefics3Model {}
+
+impl crate::block_diffusion::BlockDiffusionMixin for Idefics3Model {}
+
+impl MultimodalModel for Idefics3Model {
     fn forward(
         &self,
         input_ids: &Tensor,
         pixel_values: Option<Tensor>,
-        seqlen_offsets: &[usize],
-        context_lens: Vec<(usize, usize)>,
-        _: Vec<usize>, // Ignore, it is for phi3
         model_specific_args: Box<dyn Any>,
-        metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
+        ctx: &mut crate::pipeline::ModelForwardContext<'_>,
     ) -> candle_core::Result<Tensor> {
         let Idefics3SpecificArgs {
             pixel_attention_mask,
@@ -337,19 +322,13 @@ impl VisionModel for Idefics3Model {
         self.forward_inner(
             input_ids,
             pixel_values,
-            seqlen_offsets,
-            context_lens,
             pixel_attention_mask,
             &image_hashes,
-            metadata,
-            flash_params,
+            ctx,
         )
     }
     fn cache(&self) -> &EitherCache {
         self.text_model.cache()
-    }
-    fn cache_mut(&mut self) -> &mut EitherCache {
-        self.text_model.cache_mut()
     }
     fn device(&self) -> &Device {
         self.text_model.device()

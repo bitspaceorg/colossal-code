@@ -533,6 +533,7 @@ impl HttpBackend {
                 .clone()
                 .unwrap_or_else(|| "chat.completion.chunk".to_string()),
             usage: None,
+            session_id: None,
         };
 
         let mut usage = usage_from_openai(chat_response.usage.clone(), &content);
@@ -573,6 +574,9 @@ impl HttpBackend {
                 .object
                 .unwrap_or_else(|| "chat.completion".to_string()),
             usage,
+            agentic_tool_calls: None,
+            files: None,
+            session_id: None,
         };
 
         let response_stream = stream::iter(vec![Response::Chunk(chunk), Response::Done(done)]);
@@ -922,6 +926,6 @@ fn tool_choice_to_value(tool_choice: ToolChoice) -> Value {
     match tool_choice {
         ToolChoice::None => Value::String("none".to_string()),
         ToolChoice::Auto => Value::String("auto".to_string()),
-        ToolChoice::Tool(tool) => serde_json::to_value(tool).unwrap_or(Value::Null),
+        other => serde_json::to_value(other).unwrap_or(Value::Null),
     }
 }

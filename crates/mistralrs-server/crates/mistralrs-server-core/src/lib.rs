@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::{
     collections::{HashMap, VecDeque},
     fmt::Debug,
-    fs,
     sync::{
         Arc,
         atomic::{AtomicU32, AtomicU64, Ordering},
@@ -40,6 +39,12 @@ use upstream_mistralrs_server_core::handler_core::DEFAULT_CHANNEL_BUFFER_SIZE;
 use uuid::Uuid;
 
 pub use metrics::ModelMetrics;
+use mistralrs_core::{
+    AddModelConfig, DefaultSchedulerMethod, DeviceMapSetting, EngineConfig, LoaderBuilder,
+    ModelLoaderConfig, Request as EngineRequest, ResponseMessage as EngineResponseMessage,
+    SchedulerConfig, TokenSource as UpTokenSource, ToolCallResponse, get_auto_device_map_params,
+    get_model_dtype, parse_isq_value,
+};
 pub use mistralrs_core::{
     ChatCompletionChunkResponse, ChatCompletionResponse as EngineChatResponse,
     CompletionChunkResponse, CompletionResponse as EngineCompletionResponse,
@@ -47,15 +52,10 @@ pub use mistralrs_core::{
 };
 #[cfg(feature = "mock-manager")]
 use mistralrs_core::{Choice, ChunkChoice, CompletionChoice, CompletionChunkChoice, Delta};
-use mistralrs_core::{
-    DeviceMapSetting, EmbeddingResponse as EngineEmbeddingResponse, LoaderBuilder,
-    Request as EngineRequest, ResponseMessage as EngineResponseMessage,
-    TokenSource as UpTokenSource, ToolCallResponse, get_auto_device_map_params, get_model_dtype,
-};
 pub use mistralrs_server_config::ServerConfig;
 use mistralrs_server_config::{MistralBuilderConfig, ModelBuilderParams, TokenSource};
 pub use streams::{ChatStreamWrapper, CompletionStreamWrapper, StreamInstrumentation, StreamKind};
-use translate::{build_chat_request, build_embedding_request, build_generate_request};
+use translate::{build_chat_request, build_generate_request};
 
 /// Participant role attached to a chat message.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1419,39 +1419,72 @@ impl ModelManager for MistralModelManager {
         self.scheduler.register_activity(&model).await;
         self.touch_model(&model);
         let guard = self.acquire_guard(&model)?;
-        let (tx, mut rx) = mpsc::channel(DEFAULT_CHANNEL_BUFFER_SIZE);
-        let engine_req = build_embedding_request(&req, tx, self.next_request_id());
-        self.engine
-            .send_request_with_model(EngineRequest::Embedding(engine_req), Some(&model))
-            .await?;
         self.metrics.inc_request(&model, "embeddings");
         self.ensure_log_buffer(&model);
-        let response = rx
-            .recv()
-            .await
-            .ok_or_else(|| ModelManagerError::Other("embedding channel closed".into()))?;
-        drop(guard);
-        match response {
-            EngineResponse::Embedding(resp) => {
-                let converted = convert_embedding_response(resp);
-                let usage = converted.usage.clone();
-                self.metrics.add_tokens(&model, usage.prompt_tokens, 0);
-                self.push_info_log(
-                    &model,
-                    "embeddings",
-                    json!({
-                        "count": converted.embeddings.len(),
-                        "usage": usage,
-                    }),
-                );
-                Ok(converted)
+        let inputs = match req.input {
+            EmbeddingInput::Single(value) => vec![value],
+            EmbeddingInput::Multiple(values) => values,
+        };
+        let mut embeddings = Vec::with_capacity(inputs.len());
+        let mut prompt_tokens = 0usize;
+        let mut total_tokens = 0usize;
+
+        for input in inputs {
+            let (tx, mut rx) = mpsc::channel(DEFAULT_CHANNEL_BUFFER_SIZE);
+            let engine_req =
+                translate::build_embedding_request(&model, input, tx, self.next_request_id());
+            self.engine
+                .send_request_with_model(EngineRequest::Normal(Box::new(engine_req)), Some(&model))
+                .await?;
+
+            let response = rx
+                .recv()
+                .await
+                .ok_or_else(|| ModelManagerError::Other("embedding channel closed".into()))?;
+
+            match response {
+                EngineResponse::Embeddings {
+                    embeddings: vector,
+                    prompt_tokens: used_prompt_tokens,
+                    total_tokens: used_total_tokens,
+                } => {
+                    prompt_tokens += used_prompt_tokens;
+                    total_tokens += used_total_tokens;
+                    embeddings.push(vector);
+                }
+                EngineResponse::ValidationError(err) => {
+                    drop(guard);
+                    return Err(ModelManagerError::Other(err.to_string()));
+                }
+                EngineResponse::InternalError(err) => {
+                    drop(guard);
+                    return Err(ModelManagerError::Other(err.to_string()));
+                }
+                _ => {
+                    drop(guard);
+                    return Err(ModelManagerError::Other(
+                        "unexpected response for embeddings".to_string(),
+                    ));
+                }
             }
-            EngineResponse::ValidationError(err) => Err(ModelManagerError::Other(err.to_string())),
-            EngineResponse::InternalError(err) => Err(ModelManagerError::Other(err.to_string())),
-            _ => Err(ModelManagerError::Other(
-                "unexpected response for embeddings".to_string(),
-            )),
         }
+
+        drop(guard);
+        let usage = Usage {
+            prompt_tokens: prompt_tokens.min(u32::MAX as usize) as u32,
+            completion_tokens: 0,
+            total_tokens: total_tokens.min(u32::MAX as usize) as u32,
+        };
+        self.metrics.add_tokens(&model, usage.prompt_tokens, 0);
+        self.push_info_log(
+            &model,
+            "embeddings",
+            json!({
+                "count": embeddings.len(),
+                "usage": usage,
+            }),
+        );
+        Ok(EmbeddingResponse { embeddings, usage })
     }
 
     async fn load_model(&self, req: LoadModelRequest) -> Result<ModelMetadata, ModelManagerError> {
@@ -1475,10 +1508,6 @@ impl ModelManager for MistralModelManager {
         {
             return self.refresh_loaded_metadata(&req).await;
         }
-        let builder = self
-            .builder_cfg
-            .to_builder()
-            .map_err(|err| ModelManagerError::Other(err.to_string()))?;
         let model_config = params
             .to_upstream_model_config()
             .map_err(|err| ModelManagerError::Other(err.to_string()))?;
@@ -1486,12 +1515,89 @@ impl ModelManager for MistralModelManager {
             .engine_state
             .clone()
             .ok_or_else(|| ModelManagerError::Other("dynamic loading is unavailable".into()))?;
-        let upstream_state: upstream_mistralrs_server_core::types::SharedMistralRsState =
-            engine_state.clone().into();
-        builder
-            .add_model_config_to_existing(model_config, upstream_state)
-            .await
+        let model_selected = params
+            .model_selected()
             .map_err(|err| ModelManagerError::Other(err.to_string()))?;
+        let dtype = get_model_dtype(&model_selected)
+            .map_err(|err| ModelManagerError::Other(err.to_string()))?;
+        let mapper = DeviceMapSetting::Auto(
+            get_auto_device_map_params(&model_selected)
+                .map_err(|err| ModelManagerError::Other(err.to_string()))?,
+        );
+        let token_source = self
+            .builder_cfg
+            .token_source
+            .clone()
+            .map(|source| TokenSource::to_upstream(&source))
+            .unwrap_or(UpTokenSource::CacheToken);
+        let no_kv_cache = self.builder_cfg.no_kv_cache.unwrap_or(false);
+        let prefix_cache_n = self.builder_cfg.prefix_cache_n.unwrap_or(16);
+        let max_seqs = self.builder_cfg.max_seqs.unwrap_or(16);
+        let device = Device::Cpu;
+        let isq = params
+            .in_situ_quant
+            .as_ref()
+            .map(|value| {
+                parse_isq_value(value, Some(&device))
+                    .map_err(|err| ModelManagerError::Other(err.to_string()))
+            })
+            .transpose()?;
+        let loader = LoaderBuilder::new(model_selected.clone())
+            .with_no_kv_cache(no_kv_cache)
+            .with_chat_template(params.jinja_template.clone())
+            .with_jinja_explicit(params.jinja_explicit.clone())
+            .build()
+            .map_err(|err| ModelManagerError::Other(err.to_string()))?;
+        let pipeline = loader
+            .load_model_from_hf(
+                None,
+                token_source.clone(),
+                &dtype,
+                &device,
+                false,
+                mapper.clone(),
+                isq.clone(),
+                None,
+            )
+            .map_err(|err| ModelManagerError::Other(err.to_string()))?;
+        let scheduler_config = SchedulerConfig::DefaultScheduler {
+            method: DefaultSchedulerMethod::Fixed(max_seqs.try_into().unwrap()),
+        };
+        let loader_config = ModelLoaderConfig {
+            model_selected,
+            token_source,
+            hf_revision: None,
+            dtype,
+            device: device.clone(),
+            device_map_setting: mapper,
+            isq,
+            paged_attn_config: None,
+            silent: false,
+            chat_template: params.jinja_template.clone(),
+            jinja_explicit: params.jinja_explicit.clone(),
+            mtp_config: None,
+        };
+        let add_model_config = AddModelConfig::new(EngineConfig {
+            no_kv_cache,
+            no_prefix_cache: false,
+            prefix_cache_n,
+            disable_eos_stop: false,
+            throughput_logging_enabled: true,
+            search_embedding_model: None,
+            search_callback: None,
+            tool_callbacks: HashMap::new(),
+        })
+        .with_loader_config(loader_config);
+        engine_state
+            .inner()
+            .add_model(
+                model_config.model_id.clone(),
+                pipeline,
+                scheduler_config,
+                add_model_config,
+            )
+            .await
+            .map_err(ModelManagerError::Other)?;
         let metadata = self.finalize_model_load(&req, &params)?;
         self.metrics.inc_loaded();
         self.metrics.track_active(&req.model, 0);
@@ -1627,16 +1733,6 @@ fn convert_chat_response(response: EngineChatResponse) -> Result<ChatResponse, M
     })
 }
 
-fn convert_embedding_response(response: EngineEmbeddingResponse) -> EmbeddingResponse {
-    let usage = convert_usage(&response.usage);
-    let embeddings = response
-        .data
-        .into_iter()
-        .map(|entry| entry.embedding)
-        .collect();
-    EmbeddingResponse { embeddings, usage }
-}
-
 fn convert_response_message(message: EngineResponseMessage) -> ChatMessage {
     let content = message
         .content
@@ -1718,6 +1814,7 @@ mod tests {
             max_loaded_models: 2,
             max_parallel_requests_per_model: 4,
             max_total_concurrent_requests: 100,
+            paged_attn_gpu_mem: None,
         }
     }
 
@@ -1910,11 +2007,14 @@ mod tests {
             request: Request,
             _model: Option<&str>,
         ) -> Result<(), ModelManagerError> {
-            if let Request::Embedding(req) = request {
+            if let Request::Normal(req) = request {
+                let mistralrs_core::RequestMessage::Embedding { prompt } = req.messages else {
+                    return Ok(());
+                };
                 let usage = EngineUsage {
-                    prompt_tokens: req.inputs.iter().map(|s| s.len()).sum(),
+                    prompt_tokens: prompt.len(),
                     completion_tokens: 0,
-                    total_tokens: req.inputs.iter().map(|s| s.len()).sum(),
+                    total_tokens: prompt.len(),
                     avg_tok_per_sec: 0.0,
                     avg_prompt_tok_per_sec: 0.0,
                     avg_compl_tok_per_sec: 0.0,
@@ -1922,24 +2022,14 @@ mod tests {
                     total_prompt_time_sec: 0.0,
                     total_completion_time_sec: 0.0,
                 };
-                let data = req
-                    .inputs
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, value)| mistralrs_core::EmbeddingData {
-                        object: "embedding".to_string(),
-                        embedding: vec![value.len() as f32 + idx as f32],
-                        index: idx,
+                let _ = req
+                    .response
+                    .send(EngineResponse::Embeddings {
+                        embeddings: vec![prompt.len() as f32],
+                        prompt_tokens: usage.prompt_tokens,
+                        total_tokens: usage.total_tokens,
                     })
-                    .collect();
-                let response = EngineEmbeddingResponse {
-                    id: format!("emb-{}", req.id),
-                    object: "list".to_string(),
-                    model: req.model_id.unwrap_or_default(),
-                    data,
-                    usage,
-                };
-                let _ = req.response.send(EngineResponse::Embedding(response)).await;
+                    .await;
             }
             Ok(())
         }
@@ -1970,6 +2060,14 @@ mod tests {
             vec![]
         }
         async fn register_activity(&self, _model: &str) {}
+        fn can_load_model(
+            &self,
+            _model_name: &str,
+            _estimated_size_bytes: u64,
+        ) -> Result<(), ModelManagerError> {
+            Ok(())
+        }
+        fn set_max_vram_bytes(&self, _bytes: usize) {}
     }
 
     #[tokio::test]
@@ -2669,6 +2767,7 @@ fn mock_chat_chunk(model: &str, text: &str) -> EngineResponse {
         system_fingerprint: "mock".into(),
         object: "chat.completion.chunk".into(),
         usage: None,
+        session_id: None,
     })
 }
 
@@ -2691,6 +2790,9 @@ fn mock_chat_done(model: &str, response: &ChatResponse) -> EngineResponse {
         system_fingerprint: "mock".into(),
         object: "chat.completion".into(),
         usage: usage_to_engine(&response.usage),
+        agentic_tool_calls: None,
+        files: None,
+        session_id: None,
     })
 }
 

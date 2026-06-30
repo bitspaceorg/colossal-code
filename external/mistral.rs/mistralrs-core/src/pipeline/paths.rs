@@ -6,24 +6,21 @@ use std::{
 
 use anyhow::Result;
 use either::Either;
-use hf_hub::{
-    api::sync::{ApiBuilder, ApiRepo},
-    Repo, RepoType,
-};
+use hf_hub::{api::sync::ApiRepo, Repo, RepoType};
 use regex_automata::meta::Regex;
 use serde_json::Value;
-use tracing::{info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::{
     api_dir_list, api_get_file,
     lora::LoraConfig,
     pipeline::{
-        chat_template::{ChatTemplate, ChatTemplateValue},
+        chat_template::{BeginEndUnkPadTok, ChatTemplate, ChatTemplateValue},
+        hf::build_api,
         isq::UQFF_RESIDUAL_SAFETENSORS,
     },
-    utils::tokens::get_token,
     xlora_models::XLoraConfig,
-    ModelPaths, Ordering, TokenSource, GLOBAL_HF_CACHE,
+    ModelPaths, Ordering, TokenSource,
 };
 
 // Match files against these
@@ -63,23 +60,14 @@ pub fn get_xlora_paths(
 ) -> Result<AdapterPaths> {
     match (lora_adapter_ids, xlora_model_id, xlora_order) {
         (None, Some(xlora_id), Some(xlora_order)) => {
-            let api = {
-                let cache = GLOBAL_HF_CACHE.get().cloned().unwrap_or_default();
-                let mut api = ApiBuilder::from_cache(cache)
-                    .with_progress(true)
-                    .with_token(get_token(token_source)?);
-                if let Some(cache_dir) = crate::hf_hub_cache_dir() {
-                    api = api.with_cache_dir(cache_dir);
-                }
-                api.build().map_err(candle_core::Error::msg)?
-            };
+            let api = build_api(token_source, true).map_err(candle_core::Error::msg)?;
             let api = api.repo(Repo::with_revision(
                 xlora_id.clone(),
                 RepoType::Model,
-                revision,
+                revision.clone(),
             ));
             let model_id = Path::new(&xlora_id);
-            let dir_list = api_dir_list!(api, model_id, true).collect::<Vec<_>>();
+            let dir_list = api_dir_list!(api, model_id, true, &revision).collect::<Vec<_>>();
             // Get the path for the xlora classifier
             let xlora_classifier = &dir_list
                 .clone()
@@ -94,7 +82,7 @@ pub fn get_xlora_paths(
 
             let classifier_path = xlora_classifier
                 .map(|xlora_classifier| -> candle_core::Result<_> {
-                    Ok(api_get_file!(api, xlora_classifier, model_id))
+                    Ok(api_get_file!(api, xlora_classifier, model_id, &revision))
                 })
                 .transpose()?;
 
@@ -115,7 +103,7 @@ pub fn get_xlora_paths(
                 if xlora_configs.len() != 1 {
                     warn!("Selecting config: `{}`", config_path);
                 }
-                let config_path = api_get_file!(api, config_path, model_id);
+                let config_path = api_get_file!(api, config_path, model_id, &revision);
                 let conf = fs::read_to_string(config_path)?;
                 let deser: Result<XLoraConfig, serde_json::Error> = serde_json::from_str(&conf);
                 match deser {
@@ -154,18 +142,17 @@ pub fn get_xlora_paths(
                 })
                 .collect::<Vec<_>>();
             if adapter_files.is_empty() && xlora_order.adapters.is_some() {
-                anyhow::bail!(
-                    "Adapter files are empty. Perhaps the ordering file adapters does not match the actual adapters?"
-                )
+                anyhow::bail!("Adapter files are empty. Perhaps the ordering file adapters does not match the actual adapters?")
             }
 
             // Get the local paths for each adapter
             let mut adapters_paths: HashMap<String, Vec<PathBuf>> = HashMap::new();
             for (file, name) in adapter_files {
                 if let Some(paths) = adapters_paths.get_mut(&name) {
-                    paths.push(api_get_file!(api, &file, model_id));
+                    paths.push(api_get_file!(api, &file, model_id, &revision));
                 } else {
-                    adapters_paths.insert(name, vec![api_get_file!(api, &file, model_id)]);
+                    adapters_paths
+                        .insert(name, vec![api_get_file!(api, &file, model_id, &revision)]);
                 }
             }
 
@@ -205,9 +192,7 @@ pub fn get_xlora_paths(
                 anyhow::bail!(
                     "Adapter ordering file, adapter model config, and base model ID do not match: {}, {}, and {} respectively.",
                     xlora_order.base_model_id,
-                    xlora_config
-                        .map(|cfg| cfg.base_model_id)
-                        .unwrap_or(base_model_id.clone()),
+                    xlora_config.map(|cfg| cfg.base_model_id).unwrap_or(base_model_id.clone()),
                     base_model_id
                 );
             }
@@ -218,7 +203,7 @@ pub fn get_xlora_paths(
                     let mut output = HashMap::new();
                     for adapter in preload_adapters {
                         // Get the names and remote paths of the files associated with this adapter
-                        let adapter_files = api_dir_list!(api, &adapter.adapter_model_id, true)
+                        let adapter_files = api_dir_list!(api, &adapter.adapter_model_id, true, &revision)
                             .filter_map(|f| {
                                 if f.contains(&adapter.name) {
                                     Some((f, adapter.name.clone()))
@@ -234,10 +219,10 @@ pub fn get_xlora_paths(
                         let mut adapters_paths: HashMap<String, Vec<PathBuf>> = HashMap::new();
                         for (file, name) in adapter_files {
                             if let Some(paths) = adapters_paths.get_mut(&name) {
-                                paths.push(api_get_file!(api, &file, model_id));
+                                paths.push(api_get_file!(api, &file, model_id, &revision));
                             } else {
                                 adapters_paths
-                                    .insert(name, vec![api_get_file!(api, &file, model_id)]);
+                                    .insert(name, vec![api_get_file!(api, &file, model_id, &revision)]);
                             }
                         }
 
@@ -280,24 +265,26 @@ pub fn get_xlora_paths(
             for adapter_id in adapter_ids {
                 info!("Loading adapter at `{adapter_id}`");
 
-                let api = {
-                    let cache = GLOBAL_HF_CACHE.get().cloned().unwrap_or_default();
-                    let mut api = ApiBuilder::from_cache(cache)
-                        .with_progress(true)
-                        .with_token(get_token(token_source)?);
-                    if let Some(cache_dir) = crate::hf_hub_cache_dir() {
-                        api = api.with_cache_dir(cache_dir);
-                    }
-                    api.build().map_err(candle_core::Error::msg)?
-                };
+                let api = build_api(token_source, true).map_err(candle_core::Error::msg)?;
                 let api = api.repo(Repo::with_revision(
                     adapter_id.clone(),
                     RepoType::Model,
                     revision.clone(),
                 ));
 
-                let config_path = api.get("adapter_config.json")?;
-                let adapter_path = api.get("adapter_model.safetensors")?;
+                let adapter_path_buf = std::path::Path::new(adapter_id);
+                let config_path = crate::pipeline::hf::get_file(
+                    &api,
+                    adapter_path_buf,
+                    "adapter_config.json",
+                    &revision,
+                )?;
+                let adapter_path = crate::pipeline::hf::get_file(
+                    &api,
+                    adapter_path_buf,
+                    "adapter_model.safetensors",
+                    &revision,
+                )?;
                 let lora_config: mistralrs_quant::LoraConfig =
                     serde_json::from_str(&fs::read_to_string(config_path)?)?;
 
@@ -331,23 +318,14 @@ pub fn get_model_paths(
             let mut files = Vec::new();
 
             for name in names {
-                let qapi = {
-                    let cache = GLOBAL_HF_CACHE.get().cloned().unwrap_or_default();
-                    let mut api = ApiBuilder::from_cache(cache)
-                        .with_progress(true)
-                        .with_token(get_token(token_source)?);
-                    if let Some(cache_dir) = crate::hf_hub_cache_dir() {
-                        api = api.with_cache_dir(cache_dir);
-                    }
-                    api.build().map_err(candle_core::Error::msg)?
-                };
+                let qapi = build_api(token_source, true).map_err(candle_core::Error::msg)?;
                 let qapi = qapi.repo(Repo::with_revision(
                     id.to_string(),
                     RepoType::Model,
                     revision.clone(),
                 ));
                 let model_id = Path::new(&id);
-                files.push(api_get_file!(qapi, name, model_id));
+                files.push(api_get_file!(qapi, name, model_id, &revision));
             }
             Ok(files)
         }
@@ -359,7 +337,7 @@ pub fn get_model_paths(
             let pickle_match = Regex::new(PICKLE_MATCH)?;
 
             let mut filenames = vec![];
-            let listing = api_dir_list!(api, model_id, true).filter(|x| {
+            let listing = api_dir_list!(api, model_id, true, &revision).filter(|x| {
                 safetensor_match.is_match(x)
                     || pickle_match.is_match(x)
                     || quant_safetensor_match.is_match(x)
@@ -389,7 +367,7 @@ pub fn get_model_paths(
             } else {
                 anyhow::bail!("Expected file with extension one of .safetensors, .pth, .pt, .bin.");
             };
-            info!(
+            trace!(
                 "Found model weight filenames {:?}",
                 files
                     .iter()
@@ -397,7 +375,7 @@ pub fn get_model_paths(
                     .collect::<Vec<_>>()
             );
             for rfilename in files {
-                filenames.push(api_get_file!(api, &rfilename, model_id));
+                filenames.push(api_get_file!(api, &rfilename, model_id, &revision));
             }
             Ok(filenames)
         }
@@ -445,15 +423,13 @@ pub(crate) fn get_chat_template(
     } else if chat_template_ovrd.is_some() {
         None
     } else {
-        info!(
-            "No chat template file found. Chat template may be set via `chat_template.json` or processor config."
-        );
+        debug!("No chat template file found. Chat template may be set via `chat_template.json` or processor config.");
         None
     };
     let mut template: ChatTemplate = match chat_template_ovrd {
         Some(chat_template) => {
             // In this case the override chat template is being used. The user must add the bos/eos/unk toks themselves.
-            info!("Using literal chat template.");
+            debug!("Using literal chat template.");
             let mut template = ChatTemplate::default();
             template.chat_template = Some(ChatTemplateValue(Either::Left(chat_template)));
             template
@@ -463,8 +439,70 @@ pub(crate) fn get_chat_template(
                 // Check if template_filename is a .jinja file
                 if let Some(template_filename) = paths.get_template_filename() {
                     if template_filename.extension().map(|e| e.to_str()) == Some(Some("jinja")) {
-                        info!("Using chat template from .jinja file.");
-                        let mut template = ChatTemplate::default();
+                        debug!("Using chat template from .jinja file.");
+                        // Load special tokens (bos/eos/unk) from tokenizer_config.json
+                        // in the same directory, matching HF's behavior where
+                        // apply_chat_template passes self.special_tokens_map to the template.
+                        let mut template = template_filename
+                            .parent()
+                            .map(|dir| dir.join("tokenizer_config.json"))
+                            .filter(|p| p.exists())
+                            .and_then(|p| fs::read_to_string(p).ok())
+                            .and_then(|s| serde_json::from_str::<ChatTemplate>(&s).ok())
+                            .unwrap_or_else(|| {
+                                // Fallback: older UQFF repos may not have tokenizer_config.json.
+                                // Try to extract bos/eos tokens from the tokenizer.json's
+                                // added_tokens list to avoid rendering "none" in the template.
+                                let mut ct = ChatTemplate::default();
+                                if let Some(tok_path) = paths
+                                    .get_tokenizer_filename()
+                                    .parent()
+                                    .map(|d| d.join("tokenizer.json"))
+                                    .filter(|p| p.exists())
+                                    .or_else(|| {
+                                        template_filename
+                                            .parent()
+                                            .map(|d| d.join("tokenizer.json"))
+                                            .filter(|p| p.exists())
+                                    })
+                                {
+                                    if let Some(tok_json) =
+                                        fs::read_to_string(&tok_path).ok().and_then(|s| {
+                                            serde_json::from_str::<serde_json::Value>(&s).ok()
+                                        })
+                                    {
+                                        let added = tok_json
+                                            .get("added_tokens")
+                                            .and_then(serde_json::Value::as_array);
+                                        for token in added.into_iter().flatten() {
+                                            let content = token
+                                                .get("content")
+                                                .and_then(serde_json::Value::as_str)
+                                                .unwrap_or("");
+                                            let special = token
+                                                .get("special")
+                                                .and_then(serde_json::Value::as_bool)
+                                                .unwrap_or(false);
+                                            if special {
+                                                if content == "<bos>" {
+                                                    ct.bos_token = Some(BeginEndUnkPadTok(
+                                                        Either::Left(content.to_string()),
+                                                    ));
+                                                } else if content == "<eos>" {
+                                                    ct.eos_token = Some(BeginEndUnkPadTok(
+                                                        Either::Left(content.to_string()),
+                                                    ));
+                                                } else if content == "<unk>" {
+                                                    ct.unk_token = Some(BeginEndUnkPadTok(
+                                                        Either::Left(content.to_string()),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                ct
+                            });
                         template.chat_template =
                             Some(ChatTemplateValue(Either::Left(content.clone())));
                         template
@@ -541,9 +579,7 @@ pub(crate) fn get_chat_template(
         Some(_) => template,
         None => {
             if let Some(template_content) = template_content {
-                info!(
-                    "`tokenizer_config.json` does not contain a chat template, attempting to use specified JINJA chat template."
-                );
+                info!("`tokenizer_config.json` does not contain a chat template, attempting to use specified JINJA chat template.");
                 let mut deser: HashMap<String, Value> =
                     serde_json::from_str(&template_content).unwrap();
 
@@ -567,9 +603,7 @@ pub(crate) fn get_chat_template(
                         }
                     }
                     None => {
-                        warn!(
-                            "No specified chat template. No chat template will be used. Only prompts will be accepted, not messages."
-                        );
+                        warn!("No specified chat template. No chat template will be used. Only prompts will be accepted, not messages.");
                         deser.insert("chat_template".to_string(), Value::Null);
                     }
                 }
@@ -578,9 +612,7 @@ pub(crate) fn get_chat_template(
                     .expect("Serialization of modified chat template failed.");
                 serde_json::from_str(&ser).unwrap()
             } else {
-                warn!(
-                    "No chat template source found. No chat template will be used. Only prompts will be accepted, not messages."
-                );
+                warn!("No chat template source found. No chat template will be used. Only prompts will be accepted, not messages.");
                 template
             }
         }

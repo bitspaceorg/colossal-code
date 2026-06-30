@@ -6,7 +6,7 @@ use super::{
     PreProcessingMixin, Processor, TokenSource,
 };
 use crate::device_map::{self, DeviceMapper};
-use crate::distributed::WorkerTransferData;
+use crate::distributed::{use_ring, WorkerTransferData};
 use crate::pipeline::{ChatTemplate, EmbeddingModulePaths, Modalities, SupportedModality};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
@@ -123,6 +123,7 @@ impl InputsProcessor for SpeechInputsProcessor {
         _no_kv_cache: bool,
         _last_n_context_len: Option<(usize, usize)>,
         _return_raw_logits: bool,
+        _sliding_window: Option<usize>,
         _other_config: Option<Arc<dyn Any>>,
         _paged_attn_metadata: Option<PagedAttentionMeta>,
         _mapper: Option<&dyn DeviceMapper>,
@@ -187,8 +188,8 @@ impl Loader for SpeechLoader {
                 ));
                 let model_id = std::path::Path::new(&self.model_id);
 
-                let weight = api_get_file!(api, "model.safetensors", &model_id);
-                let config = api_get_file!(api, "config.json", &model_id);
+                let weight = api_get_file!(api, "model.safetensors", &model_id, &revision);
+                let config = api_get_file!(api, "config.json", &model_id, &revision);
                 weights.push(weight);
                 config
             };
@@ -216,7 +217,7 @@ impl Loader for SpeechLoader {
                 ));
                 let model_id = std::path::Path::new(&dac_model);
 
-                let weight = api_get_file!(api, "model.safetensors", &model_id);
+                let weight = api_get_file!(api, "model.safetensors", &model_id, &revision);
                 weights.push(weight);
             }
 
@@ -255,7 +256,11 @@ impl Loader for SpeechLoader {
             anyhow::bail!("Device mapping is not supported for speech models.")
         }
 
-        mistralrs_quant::set_immediate_isq(in_situ_quant, vec![Regex::new(".*")?]);
+        mistralrs_quant::set_immediate_isq(
+            in_situ_quant,
+            vec![Regex::new(".*")?],
+            mistralrs_quant::IsqCaptureMode::Immediate,
+        );
 
         let cfg: DiaConfig = serde_json::from_str(&std::fs::read_to_string(&paths.config)?)?;
 
@@ -266,9 +271,9 @@ impl Loader for SpeechLoader {
         let use_nccl = mistralrs_quant::distributed::use_nccl();
         let available_devices = if let Ok(payload) = env::var(distributed::IS_DAEMON_FLAG) {
             let payload: WorkerTransferData = serde_json::from_str(&payload)?;
-            let WorkerTransferData::Init { id: _, worker_rank } = payload;
+            let WorkerTransferData::Init { worker_rank, .. } = payload;
             vec![candle_core::Device::new_cuda(worker_rank + 1)?]
-        } else if use_nccl {
+        } else if use_nccl || use_ring() {
             vec![candle_core::Device::new_cuda(0)?]
         } else {
             device_map::get_all_similar_devices(device)?

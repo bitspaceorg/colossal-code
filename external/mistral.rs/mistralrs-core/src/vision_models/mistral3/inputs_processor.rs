@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::paged_attention::block_hash::MultimodalKind;
 use std::{any::Any, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
@@ -90,6 +91,7 @@ impl InputsProcessor for Mistral3ImageProcessor {
         no_kv_cache: bool,
         last_n_context_len: Option<(usize, usize)>,
         return_raw_logits: bool,
+        sliding_window: Option<usize>,
         other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<PagedAttentionMeta>,
         mapper: Option<&dyn DeviceMapper>,
@@ -199,7 +201,9 @@ impl InputsProcessor for Mistral3ImageProcessor {
                         ) {
                             let ranges = find_image_placeholder_ranges(&ids, img_tok_id);
                             seq.set_mm_features(build_mm_features_from_ranges(
-                                &ranges, &hashes, "img",
+                                &ranges,
+                                &hashes,
+                                MultimodalKind::Image,
                             ));
                         }
                     }
@@ -258,6 +262,7 @@ impl InputsProcessor for Mistral3ImageProcessor {
                 return_raw_logits,
                 paged_attn_metadata.as_mut(),
                 mapper,
+                sliding_window,
             )
             .unwrap()
         } else {
@@ -273,6 +278,7 @@ impl InputsProcessor for Mistral3ImageProcessor {
                 return_raw_logits,
                 paged_attn_metadata.as_mut(),
                 mapper,
+                sliding_window,
             )
             .unwrap()
         };
@@ -312,6 +318,11 @@ impl InputsProcessor for Mistral3ImageProcessor {
             }),
             paged_attn_meta,
             flash_meta,
+            recurrent_batch_kind: if is_prompt {
+                crate::pipeline::RecurrentBatchKind::Prefill
+            } else {
+                crate::pipeline::RecurrentBatchKind::Decode
+            },
         });
         Ok(InputProcessorOutput {
             inputs,

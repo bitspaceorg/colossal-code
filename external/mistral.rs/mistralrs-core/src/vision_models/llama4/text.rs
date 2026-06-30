@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::layers_masker::CausalMaskConfig;
 use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::{Embedding, Module};
 use mistralrs_quant::{
@@ -10,17 +11,15 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
-    attention::SdpaParams,
+    attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
-    layers::{embedding, Activation, CausalMasker, Llama3RotaryEmbedding, RmsNorm, Sdpa},
-    layers_masker::PastKvLenCache,
+    layers::{embedding, CausalMasker, Llama3RotaryEmbedding, RmsNorm, Sdpa},
     moe::{MoEExperts, MoEExpertsConfig},
-    ops::{TopKLastDimOp, TopKOutput},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
-        extract_logits,
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, KvCache, NormalCache, NormalLoadingMetadata, NormalModel,
+        EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalLoadingMetadata,
+        NormalModel,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -73,7 +72,7 @@ impl CausalSelfAttention {
             cfg.num_key_value_heads,
             cfg.hidden_size / cfg.num_attention_heads,
             comm,
-        );
+        )?;
         let k_proj = ColumnParallelLayer::new_with_shard(
             size_in,
             size_kv,
@@ -128,7 +127,7 @@ impl CausalSelfAttention {
                     cfg.num_key_value_heads,
                     cfg.num_attention_heads,
                     comm,
-                ),
+                )?,
                 softcap: None,
                 softmax_scale: 1.0 / (head_dim as f32).sqrt(),
                 sliding_window: None,
@@ -147,17 +146,15 @@ impl CausalSelfAttention {
         &self,
         x: &Tensor,
         position_ids: &Tensor,
-        attention_mask: &Option<Tensor>,
-        seqlen_offsets: &[usize],
+        attention_mask: &AttentionMask,
         kv_cache: &mut KvCache,
-        metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
+        ctx: &mut ModelForwardContext<'_>,
+        layer_idx: usize,
     ) -> Result<Tensor> {
         let (b_sz, seq_len, _) = x.dims3()?;
 
-        let mut q = self.q_proj.forward_autocast(x)?;
-        let mut k = self.k_proj.forward_autocast(x)?;
-        let mut v = self.v_proj.forward_autocast(x)?;
+        let (mut q, mut k, mut v) =
+            crate::ops::qkv_projections(x, &*self.q_proj, &*self.k_proj, &*self.v_proj)?;
 
         q = q
             .reshape((b_sz, seq_len, self.num_attention_heads, self.head_dim))?
@@ -170,7 +167,10 @@ impl CausalSelfAttention {
             .transpose(1, 2)?;
 
         if self.use_rope {
-            (q, k) = self.rotary_emb.forward(&q, &k, seqlen_offsets)?;
+            let rope_positions = ctx
+                .text_positions(q.device(), q.dim(2)?)?
+                .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+            (q, k) = self.rotary_emb.forward(&q, &k, rope_positions)?;
         }
 
         if let Some(qk_norm) = &self.norm {
@@ -190,13 +190,15 @@ impl CausalSelfAttention {
                 .to_dtype(q.dtype())?;
         }
 
+        let metadata = ctx.paged_layer(layer_idx);
+        let flash_params = ctx.flash_params();
         let mut y = match &self.paged_attn {
             Some(paged_attn) => match metadata {
                 Some(((key_cache, value_cache), input_metadata)) => paged_attn.forward(
                     &q,
                     &k,
                     &v,
-                    attention_mask.clone().as_ref(),
+                    attention_mask,
                     Some(key_cache),
                     Some(value_cache),
                     input_metadata,
@@ -208,12 +210,12 @@ impl CausalSelfAttention {
                     // Generating the dummy metadata with the assumption that we are not generating text (only processing prompts).
                     let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
                     // Sanity check.
-                    assert!(attention_mask.is_some());
+                    assert!(!matches!(attention_mask, AttentionMask::None));
                     paged_attn.forward(
                         &q,
                         &k,
                         &v,
-                        attention_mask.clone().as_ref(),
+                        attention_mask,
                         None,
                         None,
                         &input_metadata,
@@ -229,80 +231,25 @@ impl CausalSelfAttention {
                     &q.contiguous()?,
                     &k.contiguous()?,
                     &v.contiguous()?,
-                    attention_mask.clone().as_ref(),
+                    attention_mask,
                     Some(flash_params),
                     &self.sdpa_params,
                 )?
             }
         };
 
-        y = if attention_mask.is_some() {
+        y = if !matches!(attention_mask, AttentionMask::None) {
             y.transpose(1, 2)?.reshape((b_sz, seq_len, ()))?
         } else {
             y.reshape((b_sz, seq_len, ()))?
         };
-        self.o_proj.forward_autocast(&y)
+        self.o_proj.forward(&y)
     }
 }
-
-struct Mlp {
-    gate: Arc<dyn QuantMethod>,
-    up: Arc<dyn QuantMethod>,
-    down: Arc<dyn QuantMethod>,
-    act: Activation,
-}
-
-impl Mlp {
-    fn new(
-        vb: ShardedVarBuilder,
-        hidden_size: usize,
-        intermediate_size: usize,
-        quantization_config: &Option<QuantizedConfig>,
-        hidden_act: Activation,
-        comm: &Arc<mistralrs_quant::Comm>,
-    ) -> Result<Self> {
-        Ok(Self {
-            gate: ColumnParallelLayer::new(
-                hidden_size,
-                intermediate_size,
-                quantization_config,
-                false,
-                comm,
-                vb.pp("gate_proj"),
-            )?,
-            up: ColumnParallelLayer::new(
-                hidden_size,
-                intermediate_size,
-                quantization_config,
-                false,
-                comm,
-                vb.pp("up_proj"),
-            )?,
-            down: RowParallelLayer::new(
-                intermediate_size,
-                hidden_size,
-                quantization_config,
-                false,
-                comm,
-                vb.pp("down_proj"),
-            )?,
-            act: hidden_act,
-        })
-    }
-
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let lhs = self.gate.forward_autocast(xs)?;
-        let rhs = self.up.forward_autocast(xs)?;
-
-        self.down
-            .forward_autocast(&crate::ops::mul_and_act(&lhs, &rhs, self.act)?)
-    }
-}
-
 /// MoE layer for Llama4 using the unified MoEExperts
 struct TextMoe {
     experts: MoEExperts,
-    shared_expert: Mlp,
+    shared_expert: crate::layers::Mlp,
     router: Arc<dyn QuantMethod>,
     topk: usize,
 }
@@ -340,7 +287,7 @@ impl TextMoe {
             vb.pp("router").set_device(layer_device),
         )?;
 
-        let shared_expert = Mlp::new(
+        let shared_expert = crate::layers::Mlp::new(
             vb.pp("shared_expert"),
             cfg.hidden_size,
             cfg.intermediate_size,
@@ -360,23 +307,28 @@ impl TextMoe {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (bs, seq_len, hidden_dim) = xs.dims3()?;
         let xs_flat = xs.reshape(((), hidden_dim))?;
-        let router_logits = self.router.forward_autocast(&xs_flat)?;
+        let router_logits = self.router.forward(&xs_flat)?;
 
-        let TopKOutput {
-            values: router_top_value,
-            indices: router_indices,
-        } = router_logits.topk(self.topk)?;
+        let topk = crate::ops::moe_router_topk(
+            &router_logits,
+            crate::ops::MoeRouterTopKConfig {
+                top_k: self.topk,
+                score_function: crate::ops::MoeRouterScoreFunction::Raw,
+                selected_weight: crate::ops::MoeRouterSelectedWeight::Sigmoid,
+                renormalize: false,
+                norm_min: 0.0,
+                output_scale: 1.0,
+                logit_clip: None,
+            },
+            None,
+            None,
+        )?;
 
-        let router_scores = candle_nn::ops::sigmoid(&router_top_value.to_dtype(DType::F32)?)?
-            .to_dtype(router_top_value.dtype())?;
-
-        // Forward through routed experts (is_prefill determined internally)
         let routed_out = self
             .experts
-            .forward(xs, router_scores, &router_indices)?
+            .forward(xs, topk.values, &topk.indices)?
             .reshape((bs, seq_len, hidden_dim))?;
 
-        // Forward through shared expert and add
         let out = self.shared_expert.forward(xs)?;
 
         out + routed_out
@@ -384,7 +336,7 @@ impl TextMoe {
 }
 
 enum MoeOrMlp {
-    Mlp(Mlp),
+    Mlp(crate::layers::Mlp),
     Moe(TextMoe),
 }
 
@@ -445,7 +397,7 @@ impl Block {
             )?;
             MoeOrMlp::Moe(moe)
         } else {
-            let mlp = Mlp::new(
+            let mlp = crate::layers::Mlp::new(
                 mapper.set_device(layer_idx, vb.pp("feed_forward"), loading_isq),
                 cfg.hidden_size,
                 cfg.intermediate_size_mlp,
@@ -479,29 +431,26 @@ impl Block {
         &self,
         x: &Tensor,
         position_ids: &Tensor,
-        attention_mask: &Option<Tensor>,
+        attention_mask: &AttentionMask,
         chunked_mask: &Option<Tensor>,
-        seqlen_offsets: &[usize],
         kv_cache: &mut KvCache,
-        metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
+        ctx: &mut ModelForwardContext<'_>,
+        layer_idx: usize,
     ) -> Result<Tensor> {
         let residual = x;
         let x = self.rms_1.forward(x)?;
         let mask = if self.use_chunked_attention {
-            chunked_mask
+            match chunked_mask {
+                Some(t) => AttentionMask::Custom(t.clone()),
+                None => AttentionMask::None,
+            }
         } else {
-            attention_mask
+            attention_mask.clone()
         };
-        let x = (self.attn.forward(
-            &x,
-            position_ids,
-            mask,
-            seqlen_offsets,
-            kv_cache,
-            metadata,
-            flash_params,
-        )? + residual)?;
+        let x = (self
+            .attn
+            .forward(&x, position_ids, &mask, kv_cache, ctx, layer_idx)?
+            + residual)?;
         let residual = &x;
         let x = (self.ff.forward(&self.rms_2.forward(&x)?)? + residual)?;
         Ok(x)
@@ -572,10 +521,13 @@ impl TextModel {
                 mapper.set_nm_device(vb_lm_head, normal_loading_metadata.loading_isq),
             )?
         } else {
-            ReplicatedLayer::from_linear(candle_nn::Linear::new(
-                mapper.cast_nm_device(wte.embeddings(), normal_loading_metadata.loading_isq)?,
-                None,
-            ))?
+            ReplicatedLayer::from_linear(
+                candle_nn::Linear::new(
+                    mapper.cast_nm_device(wte.embeddings(), normal_loading_metadata.loading_isq)?,
+                    None,
+                ),
+                mapper.set_nm_device(vb_lm_head, normal_loading_metadata.loading_isq),
+            )?
         };
         let ln_f = RmsNorm::new(
             cfg.hidden_size,
@@ -667,73 +619,61 @@ impl TextModel {
         &self,
         input_ids: &Tensor,
         input_embeds: Tensor,
-        seqlen_offsets: &[usize],
-        context_lens: Vec<(usize, usize)>,
-        metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
+        ctx: &mut ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         let mut x = input_embeds;
         let cache = &mut self.kv_cache.normal().0;
-        let cache_for_mask = metadata
-            .as_ref()
-            .map(|(_, _)| &seqlen_offsets as &dyn PastKvLenCache)
-            .unwrap_or(cache as &dyn PastKvLenCache);
+        let position_ids = ctx
+            .text_positions(input_ids.device(), input_ids.dim(1)?)?
+            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?
+            .to_dtype(DType::I32)?;
+        let mask_cache = ctx.mask_cache(cache);
 
-        let position_ids = Tensor::new(
-            seqlen_offsets.iter().map(|o| *o as i32).collect::<Vec<_>>(),
-            input_ids.device(),
-        )?;
-
-        let mask = CausalMasker.make_causal_mask_matrix(
+        let mask = CausalMasker.make_causal_mask(
             input_ids,
-            cache_for_mask,
+            &mask_cache,
             x.dtype(),
-            self.blocks[0].attn.num_attention_heads,
+            &CausalMaskConfig::default(),
         )?;
         let chunked_mask = CausalMasker.make_chunked_mask_matrix(
             input_ids,
             self.attention_chunk_size,
-            cache_for_mask,
+            &mask_cache,
             x.dtype(),
             self.blocks[0].attn.num_attention_heads,
         )?;
-        // PagedAttention prompt chunking
-        let mask = mask.filter(|_| {
-            metadata
-                .as_ref()
-                .map(|(_, meta)| meta.is_first_prompt_chunk)
-                .unwrap_or(true)
-        });
-        // PagedAttention prompt chunking
-        let chunked_mask = chunked_mask.filter(|_| {
-            metadata
-                .as_ref()
-                .map(|(_, meta)| meta.is_first_prompt_chunk)
-                .unwrap_or(true)
-        });
+        let mask = if ctx.is_first_prompt_chunk() {
+            mask
+        } else {
+            AttentionMask::None
+        };
+        let chunked_mask = if ctx.is_first_prompt_chunk() {
+            chunked_mask
+        } else {
+            None
+        };
         let mask = DeviceMappedMask::new(mask, &*self.mapper)?;
-        let chunked_mask = DeviceMappedMask::new(chunked_mask, &*self.mapper)?;
         for (block_idx, block) in self.blocks.iter().enumerate() {
             x = self.mapper.map(x, block_idx)?;
-            let mask_for_layer = mask.as_ref().map(|m| m.get(x.device()).clone());
-            let chunked_mask_for_layer = chunked_mask.as_ref().map(|m| m.get(x.device()).clone());
+            let mask_for_layer = mask.get(x.device());
+            let chunked_mask_for_layer = chunked_mask
+                .as_ref()
+                .map(|m| m.to_device(x.device()))
+                .transpose()?;
             x = block.forward(
                 &x,
                 &position_ids.to_device(x.device())?,
                 &mask_for_layer,
                 &chunked_mask_for_layer,
-                seqlen_offsets,
                 &mut cache[block_idx],
-                metadata
-                    .as_ref()
-                    .map(|(kv_cache, metadata)| (kv_cache[block_idx].clone(), *metadata)),
-                flash_params,
+                ctx,
+                block_idx,
             )?;
         }
         let x = x.to_device(&self.device)?;
         let x = self.ln_f.forward(&x)?;
-        let x = extract_logits(&x, context_lens)?;
-        self.lm_head.forward_autocast(&x)
+        let x = ctx.logits(&x)?;
+        self.lm_head.forward(&x)
     }
 
     pub fn residual_tensors_m(&self, uvb_m: UnVarBuilder) -> Vec<(String, Tensor)> {
@@ -751,55 +691,16 @@ impl TextModel {
 }
 
 impl IsqModel for TextModel {
-    fn get_layers(
-        &mut self,
-    ) -> (
-        Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)>,
-        &dyn DeviceMapper,
-    ) {
-        let mut tensors = Vec::new();
-        tensors.push((&mut self.lm_head, None));
-        for (i, layer) in self.blocks.iter_mut().enumerate() {
-            tensors.push((&mut layer.attn.q_proj, Some(i)));
-            tensors.push((&mut layer.attn.k_proj, Some(i)));
-            tensors.push((&mut layer.attn.v_proj, Some(i)));
-            tensors.push((&mut layer.attn.o_proj, Some(i)));
-            match &mut layer.ff {
-                MoeOrMlp::Mlp(x) => {
-                    tensors.push((&mut x.gate, Some(i)));
-                    tensors.push((&mut x.up, Some(i)));
-                    tensors.push((&mut x.down, Some(i)));
-                }
-                MoeOrMlp::Moe(x) => {
-                    tensors.push((&mut x.router, Some(i)));
-                    for layer in x.experts.get_isq_layers() {
-                        tensors.push((layer, Some(i)));
-                    }
-                    tensors.push((&mut x.shared_expert.gate, Some(i)));
-                    tensors.push((&mut x.shared_expert.up, Some(i)));
-                    tensors.push((&mut x.shared_expert.down, Some(i)));
-                }
-            }
-        }
-        (tensors, &*self.mapper)
-    }
-
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
         self.residual_tensors_m(uvb.pp("model"))
     }
 }
 
+impl crate::speculative::SpeculativeTargetMixin for TextModel {}
+
 impl NormalModel for TextModel {
-    fn forward(
-        &self,
-        _input_ids: &Tensor,
-        _seqlen_offsets: &[usize],
-        _context_lens: Vec<(usize, usize)>,
-        _position_ids: Vec<usize>,
-        _metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
-        _flash_params: &FlashParams,
-    ) -> Result<Tensor> {
+    fn forward(&self, _input_ids: &Tensor, _ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
         unreachable!()
     }
     fn xlora_forward(
@@ -819,9 +720,6 @@ impl NormalModel for TextModel {
     }
     fn cache(&self) -> &crate::pipeline::EitherCache {
         &self.kv_cache
-    }
-    fn cache_mut(&mut self) -> &mut crate::pipeline::EitherCache {
-        &mut self.kv_cache
     }
     fn device(&self) -> &Device {
         &self.device

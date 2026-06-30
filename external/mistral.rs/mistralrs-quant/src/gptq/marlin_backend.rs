@@ -296,9 +296,7 @@ impl MarlinRepack {
                 }
             }
         } else {
-            candle_core::bail!(
-                "Not compiled with marlin kernels, but attempted to use one. Please raise an issue."
-            );
+            candle_core::bail!("Not compiled with marlin kernels, but attempted to use one. Please raise an issue.");
         }
 
         drop(out_guard);

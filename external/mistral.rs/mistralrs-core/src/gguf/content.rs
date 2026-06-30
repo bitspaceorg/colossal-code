@@ -9,7 +9,7 @@ use candle_core::{
     Device, Result,
 };
 use indexmap::IndexMap;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::DEBUG;
 
@@ -125,9 +125,7 @@ impl<'a, R: std::io::Seek + std::io::Read> Content<'a, R> {
                 accum
             });
         if n_splits.len() > 1 {
-            candle_core::bail!(
-                "GGUF files have differing `split.count` values: {n_splits:?}. Perhaps the GGUF files do not match?"
-            );
+            candle_core::bail!("GGUF files have differing `split.count` values: {n_splits:?}. Perhaps the GGUF files do not match?");
         }
         #[allow(clippy::cast_possible_truncation)]
         if !n_splits.is_empty() && n_readers != n_splits[0] as usize {
@@ -224,7 +222,7 @@ impl<'a, R: std::io::Seek + std::io::Read> Content<'a, R> {
             }
         }
 
-        info!("Model config:");
+        debug!("Model config:");
         keys.sort();
         let mut output_keys = IndexMap::new();
         for name in keys {
@@ -237,7 +235,7 @@ impl<'a, R: std::io::Seek + std::io::Read> Content<'a, R> {
             }
         }
         for (name, val) in output_keys {
-            println!("{name}: {val}")
+            debug!("{name}: {val}");
         }
 
         if DEBUG.load(std::sync::atomic::Ordering::Relaxed) {
@@ -246,9 +244,7 @@ impl<'a, R: std::io::Seek + std::io::Read> Content<'a, R> {
                 serde_json::to_string_pretty(&tensors).expect("Serialization failed."),
             )?;
 
-            info!(
-                "Debug is enabled, wrote the names and information about each tensor to `mistralrs_gguf_tensors.txt`."
-            );
+            info!("Debug is enabled, wrote the names and information about each tensor to `mistralrs_gguf_tensors.txt`.");
         }
 
         anyhow::Ok(())

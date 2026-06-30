@@ -243,9 +243,15 @@ fn anthropic_tool_choice_to_value(tool_choice: ToolChoice) -> Value {
     match tool_choice {
         ToolChoice::None => json!({ "type": "none" }),
         ToolChoice::Auto => json!({ "type": "auto" }),
+        ToolChoice::Required => json!({ "type": "any" }),
+        ToolChoice::AllowedTools(_) | ToolChoice::Builtin(_) => json!({ "type": "auto" }),
         ToolChoice::Tool(tool) => json!({
             "type": "tool",
             "name": prefixed_tool_name(&tool.function.name),
+        }),
+        ToolChoice::NamedFunction(tool) => json!({
+            "type": "tool",
+            "name": prefixed_tool_name(&tool.name),
         }),
     }
 }
@@ -599,6 +605,7 @@ async fn process_anthropic_sse(
                                         system_fingerprint: String::new(),
                                         object: "chat.completion.chunk".to_string(),
                                         usage: None,
+                                        session_id: None,
                                     };
                                     if tx.send(Response::Chunk(chunk)).is_err() {
                                         return Ok(());
@@ -672,6 +679,9 @@ async fn process_anthropic_sse(
                         system_fingerprint: String::new(),
                         object: "chat.completion".to_string(),
                         usage,
+                        agentic_tool_calls: None,
+                        files: None,
+                        session_id: None,
                     };
                     let _ = tx.send(Response::Done(done));
                     return Ok(());

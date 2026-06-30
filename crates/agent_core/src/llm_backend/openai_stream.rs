@@ -222,6 +222,9 @@ pub fn send_final_done(
         system_fingerprint: fingerprint.unwrap_or_default(),
         object: "chat.completion".to_string(),
         usage,
+        agentic_tool_calls: None,
+        files: None,
+        session_id: None,
     };
 
     tx.send(Response::Done(done)).is_ok()
@@ -486,6 +489,7 @@ pub async fn process_sse_stream(
                     system_fingerprint: chunk_fingerprint.clone(),
                     object: chunk_object.clone(),
                     usage: None,
+                    session_id: None,
                 };
 
                 if tx.send(Response::Chunk(chunk_response)).is_err() {

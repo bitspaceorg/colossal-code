@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use std::{collections::HashMap, ops::Mul, sync::Arc};
+use std::{ops::Mul, sync::Arc};
 
 use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::{Conv2d, Conv2dConfig, Embedding, LayerNorm, LayerNormConfig, Module};
@@ -9,7 +9,7 @@ use mistralrs_quant::{
 };
 
 use crate::{
-    attention::SdpaParams,
+    attention::{AttentionMask, SdpaParams},
     layers::{conv2d_no_bias, embedding, layer_norm, GetFloatInfo, Sdpa},
     pipeline::{text_models_inputs_processor::FlashParams, IsqModel},
     utils::unvarbuilder::UnVarBuilder,
@@ -192,21 +192,9 @@ impl MLlamaVisionAttention {
     }
 
     // https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/models/mllama/modeling_mllama.py#L243
-    fn forward(&self, hidden_state: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
-        let mut hidden_state = hidden_state.clone();
-        let original_dtype = hidden_state.dtype();
-        if let Some(t) = self.q_proj.quantized_act_type() {
-            hidden_state = hidden_state.to_dtype(t)?;
-        }
-        let mut q = self.q_proj.forward(&hidden_state)?;
-        let mut k = self.k_proj.forward(&hidden_state)?;
-        let mut v = self.v_proj.forward(&hidden_state)?;
-        if self.q_proj.quantized_act_type().is_some() {
-            q = q.to_dtype(original_dtype)?;
-            k = k.to_dtype(original_dtype)?;
-            v = v.to_dtype(original_dtype)?;
-        }
-
+    fn forward(&self, hidden_state: &Tensor, attention_mask: &AttentionMask) -> Result<Tensor> {
+        let (mut q, mut k, mut v) =
+            crate::ops::qkv_projections(hidden_state, &*self.q_proj, &*self.k_proj, &*self.v_proj)?;
         // Should be same, no caching...
         let (bs, q_sq, _) = q.dims3()?;
         let (_, k_sq, _) = k.dims3()?;
@@ -221,15 +209,9 @@ impl MLlamaVisionAttention {
             .reshape((bs, k_sq, self.num_heads, self.head_dim))?
             .transpose(1, 2)?;
 
-        let flash_params = FlashParams {
-            max_q: 0,
-            max_k: 0,
-            cumulative_seqlens_q: HashMap::new(),
-            cumulative_seqlens_k: HashMap::new(),
-            causal: false,
-        };
+        let flash_params = FlashParams::empty(false);
 
-        let mut attn_output = Sdpa
+        let attn_output = Sdpa
             .run_attention(
                 &q.contiguous()?,
                 &k.contiguous()?,
@@ -243,13 +225,7 @@ impl MLlamaVisionAttention {
             .reshape((bs, q_sq, ()))?
             .to_dtype(q.dtype())?;
 
-        if let Some(t) = self.q_proj.quantized_act_type() {
-            attn_output = attn_output.to_dtype(t)?;
-        }
-        let mut res = self.o_proj.forward(&attn_output)?;
-        if self.q_proj.quantized_act_type().is_some() {
-            res = res.to_dtype(original_dtype)?;
-        }
+        let res = self.o_proj.forward(&attn_output)?;
         Ok(res)
     }
 }
@@ -289,17 +265,9 @@ impl MLlamaMlp {
 
     // https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/models/mllama/modeling_mllama.py#L223
     fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
-        let original_dtype = hidden_states.dtype();
-        let mut hidden_states = hidden_states.clone();
-        if let Some(t) = self.fc1.quantized_act_type() {
-            hidden_states = hidden_states.to_dtype(t)?;
-        }
-        hidden_states = self
+        let hidden_states = self
             .fc2
-            .forward(&self.act.forward(&self.fc1.forward(&hidden_states)?)?)?;
-        if self.fc1.quantized_act_type().is_some() {
-            hidden_states = hidden_states.to_dtype(original_dtype)?;
-        }
+            .forward(&self.act.forward(&self.fc1.forward(hidden_states)?)?)?;
         Ok(hidden_states)
     }
 }
@@ -357,7 +325,7 @@ impl MLlamaVisionEncoderLayer {
     }
 
     // https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/models/mllama/modeling_mllama.py#L348
-    fn forward(&self, hidden_state: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
+    fn forward(&self, hidden_state: &Tensor, attention_mask: &AttentionMask) -> Result<Tensor> {
         // Self attn
         let residual = hidden_state;
         let mut hidden_state = self.input_layernorm.forward(hidden_state)?;
@@ -412,7 +380,7 @@ impl MLlamaVisionEncoder {
     fn forward_with_states(
         &self,
         hidden_state: &Tensor,
-        attention_mask: Option<&Tensor>,
+        attention_mask: &AttentionMask,
         intermediate_layers_indices: Option<&[usize]>,
     ) -> Result<(Tensor, Vec<Tensor>)> {
         let mut hidden_state = hidden_state.clone();
@@ -666,7 +634,7 @@ impl MLlamaVisionModel {
         let (mut hidden_state, all_intermediate_hidden_states) =
             self.transformer.forward_with_states(
                 &hidden_state,
-                Some(&attention_mask),
+                &AttentionMask::Custom(attention_mask.clone()),
                 Some(&self.intermediate_layers_indices),
             )?;
 
@@ -694,7 +662,7 @@ impl MLlamaVisionModel {
         ))?;
         (hidden_state, _) = self.global_transformer.forward_with_states(
             &hidden_state,
-            Some(&attention_mask),
+            &AttentionMask::Custom(attention_mask.clone()),
             None,
         )?;
 
@@ -742,43 +710,9 @@ impl MLlamaVisionModel {
         let class_embedding = self.class_embedding.expand((bs, 1, hidden_size))?;
         Tensor::cat(&[class_embedding, hidden_state.clone()], 1)
     }
-
-    pub fn get_isq_layers(&mut self) -> Vec<&mut std::sync::Arc<dyn mistralrs_quant::QuantMethod>> {
-        let mut layers = Vec::new();
-        for layer in &mut self.global_transformer.layers {
-            layers.push(&mut layer.self_attn.q_proj);
-            layers.push(&mut layer.self_attn.k_proj);
-            layers.push(&mut layer.self_attn.v_proj);
-            layers.push(&mut layer.self_attn.o_proj);
-
-            layers.push(&mut layer.mlp.fc1);
-            layers.push(&mut layer.mlp.fc2);
-        }
-        for layer in &mut self.transformer.layers {
-            layers.push(&mut layer.self_attn.q_proj);
-            layers.push(&mut layer.self_attn.k_proj);
-            layers.push(&mut layer.self_attn.v_proj);
-            layers.push(&mut layer.self_attn.o_proj);
-
-            layers.push(&mut layer.mlp.fc1);
-            layers.push(&mut layer.mlp.fc2);
-        }
-        layers
-    }
 }
 
 impl IsqModel for MLlamaVisionModel {
-    fn get_layers(
-        &mut self,
-    ) -> (
-        Vec<(
-            &mut std::sync::Arc<dyn mistralrs_quant::QuantMethod>,
-            Option<usize>,
-        )>,
-        &dyn crate::device_map::DeviceMapper,
-    ) {
-        unreachable!("MLlamaVision model cannot be quantized.");
-    }
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
 

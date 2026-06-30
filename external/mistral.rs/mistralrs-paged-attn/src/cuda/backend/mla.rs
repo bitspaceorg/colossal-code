@@ -197,8 +197,8 @@ pub fn concat_and_cache_mla(
         }
         _ => {
             candle_core::bail!(
-                "concat_and_cache_mla expects matching dtype for ckv/k_pe/caches and i64 slot_mapping"
-            )
+                    "concat_and_cache_mla expects matching dtype for ckv/k_pe/caches and i64 slot_mapping"
+                )
         }
     };
 
@@ -606,7 +606,7 @@ pub fn flashinfer_mla_decode(
             }
         };
 
-        unsafe {
+        let status = unsafe {
             ffi_flashinfer_mla_decode(
                 q_nope_ptr as *const core::ffi::c_void,
                 q_pe_ptr as *const core::ffi::c_void,
@@ -630,7 +630,10 @@ pub fn flashinfer_mla_decode(
                 kv_chunk_ptr as *const i32,
                 dtype_code,
                 dev.cuda_stream().cu_stream(),
-            );
+            )
+        };
+        if status != 0 {
+            candle_core::bail!("flashinfer_mla_decode failed with status {status}");
         }
     }
 

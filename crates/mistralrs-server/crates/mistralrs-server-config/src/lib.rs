@@ -9,7 +9,8 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use config::{Config, Environment, File, FileFormat};
 use mistralrs_core::{
-    AutoDeviceMapParams, McpClientConfig, ModelDType, ModelSelected, TokenSource as UpTokenSource,
+    AutoDeviceMapParams, McpClientConfig, ModelDType, ModelSelected, SearchEmbeddingModel,
+    TokenSource as UpTokenSource,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -797,7 +798,8 @@ pub trait BuilderShim {
     fn set_no_kv_cache(&mut self, disabled: Option<bool>);
     fn set_prefix_cache_n(&mut self, size: Option<usize>);
     fn set_token_source(&mut self, source: Option<UpTokenSource>);
-    fn set_search_options(&mut self, enabled: Option<bool>, bert_model: Option<&str>);
+    fn set_search_options(&mut self, enabled: Option<bool>, bert_model: Option<&str>)
+    -> Result<()>;
     fn set_mcp_client(&mut self, config: Option<&McpClientConfig>);
     fn configure_paged_attention(&mut self, cfg: Option<&PagedAttentionConfig>);
     fn configure_models(
@@ -840,14 +842,19 @@ impl BuilderShim for RealBuilderShim {
         }
     }
 
-    fn set_search_options(&mut self, enabled: Option<bool>, bert_model: Option<&str>) {
+    fn set_search_options(
+        &mut self,
+        enabled: Option<bool>,
+        bert_model: Option<&str>,
+    ) -> Result<()> {
         if let Some(flag) = enabled {
             self.update_builder(|builder| builder.with_enable_search(flag));
         }
         if let Some(model) = bert_model {
-            let model = model.to_string();
-            self.update_builder(|builder| builder.with_search_bert_model(model));
+            let model = parse_search_embedding_model(model)?;
+            self.update_builder(|builder| builder.with_search_embedding_model(model));
         }
+        Ok(())
     }
 
     fn set_mcp_client(&mut self, config: Option<&McpClientConfig>) {
@@ -978,6 +985,15 @@ fn parse_dtype(value: Option<&str>) -> Result<ModelDType> {
     }
 }
 
+fn parse_search_embedding_model(value: &str) -> Result<SearchEmbeddingModel> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "bge-small" => Ok(SearchEmbeddingModel::EmbeddingGemma300M),
+        _ => value
+            .parse()
+            .map_err(|err| anyhow!("invalid search embedding model '{value}': {err}")),
+    }
+}
+
 impl MistralBuilderConfig {
     /// Dispatches to the provided factory without performing any engine work.
     pub fn to_mock_builder(&self, factory: &dyn ServerBuilderFactory) -> Result<()> {
@@ -1000,7 +1016,7 @@ impl MistralBuilderConfig {
         shim.set_no_kv_cache(self.no_kv_cache);
         shim.set_prefix_cache_n(self.prefix_cache_n);
         shim.set_token_source(self.token_source.as_ref().map(TokenSource::to_upstream));
-        shim.set_search_options(self.enable_search, self.search_bert_model.as_deref());
+        shim.set_search_options(self.enable_search, self.search_bert_model.as_deref())?;
 
         let mcp_config = self
             .mcp_client
@@ -1185,9 +1201,14 @@ mod tests {
             self.token_source = source.map(|value| value.to_string());
         }
 
-        fn set_search_options(&mut self, enabled: Option<bool>, bert_model: Option<&str>) {
+        fn set_search_options(
+            &mut self,
+            enabled: Option<bool>,
+            bert_model: Option<&str>,
+        ) -> Result<()> {
             self.search_enabled = enabled;
             self.search_model = bert_model.map(|value| value.to_string());
+            Ok(())
         }
 
         fn set_mcp_client(&mut self, config: Option<&McpClientConfig>) {

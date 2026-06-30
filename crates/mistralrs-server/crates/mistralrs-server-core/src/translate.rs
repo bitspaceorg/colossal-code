@@ -3,20 +3,18 @@ use std::collections::HashMap;
 use either::Either;
 use indexmap::IndexMap;
 use mistralrs_core::{
-    Constraint, Function, MessageContent as CoreMessageContent, NormalRequest, RequestMessage,
-    Response, SamplingParams, Tool as CoreTool, ToolChoice as CoreToolChoice, ToolType,
+    Constraint, Function, MessageContent as CoreMessageContent, NamedFunctionToolChoice,
+    NormalRequest, RequestMessage, Response, SamplingParams, Tool as CoreTool,
+    ToolChoice as CoreToolChoice, ToolType,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc::Sender;
 use upstream_mistralrs_server_core::util::parse_image_url;
 
 use crate::{
-    ChatContent, ChatMessage, ChatRequest, ContextControls, EmbeddingInput, EmbeddingRequest,
-    GenerateRequest, MessageRole, ModelManagerError, StructuredOutputSchema, ToolCall, ToolChoice,
-    ToolDefinition,
+    ChatContent, ChatMessage, ChatRequest, ContextControls, GenerateRequest, MessageRole,
+    ModelManagerError, StructuredOutputSchema, ToolCall, ToolChoice, ToolDefinition,
 };
-
-use mistralrs_core::EmbeddingRequest as EngineEmbeddingRequest;
 
 /// Builds sampling params shared by chat and completion flows.
 pub fn to_sampling_params(
@@ -77,26 +75,60 @@ pub fn build_generate_request(
         logits_processors: None,
         return_raw_logits: false,
         web_search_options: None,
+        enable_code_execution: false,
+        enable_shell: false,
+        shell_options: None,
+        code_execution_permission: None,
+        code_execution_approval_notifier: None,
+        agent_permission: None,
+        agent_approval_handler: None,
+        agent_approval_notifier: None,
+        max_tool_rounds: None,
+        tool_dispatch_url: None,
         model_id: Some(req.model.clone()),
+        truncate_sequence: false,
+        session_id: None,
+        files: None,
+        input_files: Vec::new(),
     })
 }
 
 /// Creates an embedding request for the upstream engine.
 pub fn build_embedding_request(
-    req: &EmbeddingRequest,
+    model: &str,
+    input: String,
     tx: Sender<Response>,
     request_id: usize,
-) -> EngineEmbeddingRequest {
-    let inputs = match &req.input {
-        EmbeddingInput::Single(value) => vec![value.clone()],
-        EmbeddingInput::Multiple(values) => values.clone(),
-    };
-    EngineEmbeddingRequest {
-        inputs,
-        normalize: req.normalize,
-        id: request_id,
-        model_id: Some(req.model.clone()),
+) -> NormalRequest {
+    NormalRequest {
+        messages: RequestMessage::Embedding { prompt: input },
+        sampling_params: SamplingParams::deterministic(),
         response: tx,
+        return_logprobs: false,
+        is_streaming: false,
+        id: request_id,
+        constraint: Constraint::None,
+        suffix: None,
+        tools: None,
+        tool_choice: None,
+        logits_processors: None,
+        return_raw_logits: false,
+        web_search_options: None,
+        enable_code_execution: false,
+        enable_shell: false,
+        shell_options: None,
+        code_execution_permission: None,
+        code_execution_approval_notifier: None,
+        agent_permission: None,
+        agent_approval_handler: None,
+        agent_approval_notifier: None,
+        max_tool_rounds: None,
+        tool_dispatch_url: None,
+        model_id: Some(model.to_string()),
+        truncate_sequence: false,
+        session_id: None,
+        files: None,
+        input_files: Vec::new(),
     }
 }
 
@@ -108,6 +140,7 @@ pub async fn build_chat_request(
     streaming: bool,
 ) -> Result<NormalRequest, ModelManagerError> {
     let (messages, image_urls) = convert_chat_messages(&req.messages)?;
+    let (tools, tool_choice) = convert_tools(&req.tools, &req.tool_choice)?;
     let sampling_params = to_sampling_params(
         req.temperature,
         req.max_tokens,
@@ -119,6 +152,7 @@ pub async fn build_chat_request(
         RequestMessage::Chat {
             messages,
             enable_thinking: req.enable_thinking,
+            reasoning_effort: None,
         }
     } else {
         let mut images = Vec::with_capacity(image_urls.len());
@@ -128,15 +162,15 @@ pub async fn build_chat_request(
                 .map_err(|err| ModelManagerError::Other(err.to_string()))?;
             images.push(parsed);
         }
-        RequestMessage::VisionChat {
+        RequestMessage::MultimodalChat {
             messages,
             images,
             audios: Vec::new(),
+            videos: Vec::new(),
             enable_thinking: req.enable_thinking,
+            reasoning_effort: None,
         }
     };
-
-    let (tools, tool_choice) = convert_tools(&req.tools, &req.tool_choice)?;
 
     Ok(NormalRequest {
         messages: request_message,
@@ -152,7 +186,21 @@ pub async fn build_chat_request(
         logits_processors: None,
         return_raw_logits: false,
         web_search_options: None,
+        enable_code_execution: false,
+        enable_shell: false,
+        shell_options: None,
+        code_execution_permission: None,
+        code_execution_approval_notifier: None,
+        agent_permission: None,
+        agent_approval_handler: None,
+        agent_approval_notifier: None,
+        max_tool_rounds: None,
+        tool_dispatch_url: None,
         model_id: Some(req.model.clone()),
+        truncate_sequence: false,
+        session_id: None,
+        files: None,
+        input_files: Vec::new(),
     })
 }
 
@@ -183,20 +231,22 @@ fn convert_tools(
                     Value::Object(map) => Some(map.clone().into_iter().collect()),
                     other => Some(HashMap::from([("schema".to_string(), other.clone())])),
                 },
+                strict: None,
             },
         })
         .collect();
     let converted_choice = match choice {
-        ToolChoice::Auto => None,
+        ToolChoice::Auto => Some(CoreToolChoice::Auto),
         ToolChoice::None => Some(CoreToolChoice::None),
-        ToolChoice::Tool(name) => Some(
-            tools
-                .iter()
-                .find(|tool| tool.function.name == *name)
-                .cloned()
-                .map(CoreToolChoice::Tool)
-                .ok_or_else(|| ModelManagerError::Other(format!("unknown tool: {name}")))?,
-        ),
+        ToolChoice::Tool(name) => {
+            if !tools.iter().any(|tool| tool.function.name == *name) {
+                return Err(ModelManagerError::Other(format!("unknown tool: {name}")));
+            }
+            Some(CoreToolChoice::NamedFunction(NamedFunctionToolChoice {
+                tp: ToolType::Function,
+                name: name.clone(),
+            }))
+        }
     };
     Ok(((!tools.is_empty()).then_some(tools), converted_choice))
 }
@@ -326,10 +376,7 @@ fn tool_call_entry(call: &ToolCall) -> IndexMap<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        ChatContent, ChatMessage, ContextControls, EmbeddingInput, EmbeddingRequest, MessageRole,
-        ToolDefinition,
-    };
+    use crate::{ChatContent, ChatMessage, ContextControls, MessageRole, ToolDefinition};
     use serde_json::json;
     use tokio::sync::mpsc;
 
@@ -360,14 +407,11 @@ mod tests {
     #[test]
     fn build_embedding_request_single_input() {
         let (tx, _rx) = mpsc::channel(1);
-        let req = EmbeddingRequest {
-            model: "demo".into(),
-            input: EmbeddingInput::Single("hello".into()),
-            normalize: true,
-        };
-        let engine = build_embedding_request(&req, tx, 11);
-        assert_eq!(engine.inputs, vec!["hello".to_string()]);
-        assert!(engine.normalize);
+        let engine = build_embedding_request("demo", "hello".into(), tx, 11);
+        assert!(matches!(
+            engine.messages,
+            RequestMessage::Embedding { ref prompt } if prompt == "hello"
+        ));
         assert_eq!(engine.id, 11);
         assert_eq!(engine.model_id.as_deref(), Some("demo"));
     }
@@ -375,14 +419,11 @@ mod tests {
     #[test]
     fn build_embedding_request_multiple_inputs() {
         let (tx, _rx) = mpsc::channel(1);
-        let req = EmbeddingRequest {
-            model: "demo".into(),
-            input: EmbeddingInput::Multiple(vec!["a".into(), "b".into()]),
-            normalize: false,
-        };
-        let engine = build_embedding_request(&req, tx, 2);
-        assert_eq!(engine.inputs, vec!["a".to_string(), "b".to_string()]);
-        assert!(!engine.normalize);
+        let engine = build_embedding_request("demo", "a".into(), tx, 2);
+        assert!(matches!(
+            engine.messages,
+            RequestMessage::Embedding { ref prompt } if prompt == "a"
+        ));
     }
 
     #[test]
@@ -432,6 +473,7 @@ mod tests {
             stream: false,
             tools: Vec::new(),
             tool_choice: ToolChoice::Auto,
+            enable_thinking: None,
             keep_alive: None,
             logit_bias: None,
             structured_output: None,
@@ -440,9 +482,9 @@ mod tests {
         let normal = build_chat_request(&request, tx, 1, false)
             .await
             .expect("build");
-        if let RequestMessage::VisionChat { .. } = normal.messages {
+        if let RequestMessage::MultimodalChat { .. } = normal.messages {
         } else {
-            panic!("expected vision chat request");
+            panic!("expected multimodal chat request");
         }
     }
 }

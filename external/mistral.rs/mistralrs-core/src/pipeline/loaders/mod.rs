@@ -1,8 +1,8 @@
 pub(crate) mod auto_device_map;
 mod diffusion_loaders;
 mod embedding_loaders;
+mod multimodal_loaders;
 mod normal_loaders;
-mod vision_loaders;
 pub use auto_device_map::AutoDeviceMapParams;
 use auto_device_map::NonMappedSubModel;
 
@@ -22,17 +22,19 @@ use tokio::sync::Mutex;
 
 pub use normal_loaders::{
     AutoNormalLoader, DeepSeekV2Loader, DeepSeekV3Loader, GLM4Loader, GLM4MoeLiteLoader,
-    GLM4MoeLoader, Gemma2Loader, GemmaLoader, GptOssLoader, GraniteMoeHybridLoader, LlamaLoader,
-    MistralLoader, MixtralLoader, NormalLoaderType, NormalLoadingMetadata, NormalModel,
-    NormalModelLoader, Phi2Loader, Phi3Loader, Phi3_5MoELoader, Qwen2Loader, Qwen3Loader,
-    Qwen3MoELoader, Qwen3NextLoader, SmolLm3Loader, Starcoder2Loader,
+    GLM4MoeLoader, Gemma2Loader, GemmaLoader, GptOssLoader, GraniteMoeHybridLoader,
+    HunYuanDenseV1Loader, HunYuanMoEV1Loader, Lfm2Loader, LlamaLoader, MistralLoader,
+    MixtralLoader, NormalLoaderType, NormalLoadingMetadata, NormalModel, NormalModelLoader,
+    Phi2Loader, Phi3Loader, Phi3_5MoELoader, Qwen2Loader, Qwen3Loader, Qwen3MoELoader,
+    Qwen3NextLoader, SmolLm3Loader, Starcoder2Loader,
 };
 
-pub use vision_loaders::{
-    AutoVisionLoader, Gemma3Loader, Gemma3nLoader, Idefics2Loader, Idefics3Loader, LLaVALoader,
-    LLaVANextLoader, MiniCpmOLoader, Mistral3Loader, Phi3VLoader, Phi4MMLoader, Qwen2VLLoader,
-    Qwen2_5VLLoader, Qwen3VLLoader, Qwen3VLMoELoader, VLlama4Loader, VLlamaLoader,
-    VisionLoaderType, VisionModel, VisionModelLoader, VoxtralLoader,
+pub use multimodal_loaders::{
+    AutoMultimodalLoader, DiffusionGemmaLoader, Gemma3Loader, Gemma3nLoader, Gemma4Loader,
+    Idefics2Loader, Idefics3Loader, LLaVALoader, LLaVANextLoader, Lfm2VlLoader, MiniCpmOLoader,
+    Mistral3Loader, MultimodalLoaderType, MultimodalModel, MultimodalModelLoader, Phi3VLoader,
+    Phi4MMLoader, Qwen2VLLoader, Qwen2_5VLLoader, Qwen3VLLoader, Qwen3VLMoELoader, Qwen3_5Loader,
+    Qwen3_5MoeLoader, VLlama4Loader, VLlamaLoader, VoxtralLoader,
 };
 
 pub use embedding_loaders::{
@@ -77,10 +79,10 @@ pub trait ModelPaths: AsAny + Debug + Send + Sync {
     /// Filepath for general model configuration.
     fn get_gen_conf_filename(&self) -> Option<&PathBuf>;
 
-    /// Get the preprocessor config (for the vision models). This is used to pre process images.
+    /// Get the preprocessor config (for the multimodal models). This is used to pre process images.
     fn get_preprocessor_config(&self) -> &Option<PathBuf>;
 
-    /// Get the processor config (for the vision models). This is primarily used for the chat template.
+    /// Get the processor config (for the multimodal models). This is primarily used for the chat template.
     fn get_processor_config(&self) -> &Option<PathBuf>;
 
     /// Get the explicit chat template.
@@ -297,12 +299,6 @@ pub enum ModelKind {
         quant: QuantizationKind,
     },
 
-    #[strum(to_string = "speculative: target: `{target}`, draft: `{draft}`")]
-    Speculative {
-        target: Box<ModelKind>,
-        draft: Box<ModelKind>,
-    },
-
     #[strum(to_string = "anymoe: target: `{target}`")]
     AnyMoe { target: Box<ModelKind> },
 }
@@ -358,12 +354,6 @@ impl ModelKind {
         match self {
             Normal | Adapter { .. } => vec![None],
             GgufQuantized { quant } | GgufAdapter { quant, .. } => vec![Some(*quant)],
-            Speculative { target, draft } => {
-                let t = *target.clone();
-                let d = *draft.clone();
-
-                [t.quantized_kind(), d.quantized_kind()].concat()
-            }
             AnyMoe { target } => target.quantized_kind(),
         }
     }
@@ -383,12 +373,6 @@ impl ModelKind {
         match self {
             Normal | GgufQuantized { .. } => vec![None],
             Adapter { adapter } | GgufAdapter { adapter, .. } => vec![Some(*adapter)],
-            Speculative { target, draft } => {
-                let t = *target.clone();
-                let d = *draft.clone();
-
-                [t.adapted_kind(), d.adapted_kind()].concat()
-            }
             AnyMoe { target } => target.adapted_kind(),
         }
     }
@@ -415,7 +399,7 @@ impl QuantizationConfigShim {
 
 pub trait DeviceMappedModelLoader {
     /// Maximum activation size of non-mapped parts of this model.
-    /// Useful for the vision models which may prefer to keep the vison components on the GPU.
+    /// Useful for the multimodal models which may prefer to keep the vison components on the GPU.
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,

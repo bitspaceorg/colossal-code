@@ -2,19 +2,17 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device};
-use hf_hub::{
-    api::sync::{ApiBuilder, ApiRepo},
-    Cache, Repo, RepoType,
-};
+use hf_hub::{api::sync::ApiRepo, Cache, Repo, RepoType};
 use serde::{Deserialize, Serialize};
 
 use crate::device_map::{DeviceLayerMapMetadata, DeviceMapMetadata};
 use crate::model_loader::{get_auto_device_map_params, get_model_dtype};
+use crate::pipeline::hf::build_api_with_cache;
 use crate::pipeline::{
-    AutoDeviceMapParams, AutoEmbeddingLoader, AutoNormalLoader, AutoVisionLoader,
-    DeviceMappedModelLoader, EmbeddingLoaderType, NormalLoaderType, TokenSource, VisionLoaderType,
+    AutoDeviceMapParams, AutoEmbeddingLoader, AutoMultimodalLoader, AutoNormalLoader,
+    DeviceMappedModelLoader, EmbeddingLoaderType, MultimodalLoaderType, NormalLoaderType,
+    TokenSource,
 };
-use crate::utils::tokens::get_token;
 use crate::{paged_attn_supported, IsqType, ModelSelected, TryIntoDType, GLOBAL_HF_CACHE};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -120,7 +118,7 @@ enum TuneBackend {
 #[derive(Clone, Copy, Debug)]
 enum TuneKind {
     Normal,
-    Vision,
+    Multimodal,
     Embedding,
 }
 
@@ -169,7 +167,7 @@ fn hf_cache_path_from_model(model: &ModelSelected) -> Option<PathBuf> {
         ModelSelected::Plain { hf_cache_path, .. }
         | ModelSelected::Lora { hf_cache_path, .. }
         | ModelSelected::XLora { hf_cache_path, .. }
-        | ModelSelected::VisionPlain { hf_cache_path, .. }
+        | ModelSelected::MultimodalPlain { hf_cache_path, .. }
         | ModelSelected::Embedding { hf_cache_path, .. }
         | ModelSelected::Run { hf_cache_path, .. } => hf_cache_path.clone(),
         _ => None,
@@ -187,7 +185,7 @@ fn model_id_from_selected(model: &ModelSelected) -> String {
             model_id: Some(model_id),
             ..
         }
-        | ModelSelected::VisionPlain { model_id, .. }
+        | ModelSelected::MultimodalPlain { model_id, .. }
         | ModelSelected::Embedding { model_id, .. }
         | ModelSelected::Run { model_id, .. } => model_id.clone(),
         ModelSelected::GGUF {
@@ -237,13 +235,7 @@ fn load_config_artifacts(
         .unwrap_or_else(Cache::from_env);
     GLOBAL_HF_CACHE.get_or_init(|| cache.clone());
 
-    let mut api = ApiBuilder::from_cache(cache)
-        .with_progress(false)
-        .with_token(get_token(token_source)?);
-    if let Some(cache_dir) = crate::hf_hub_cache_dir() {
-        api = api.with_cache_dir(cache_dir);
-    }
-    let api = api.build()?;
+    let api = build_api_with_cache(token_source, false, Some(cache))?;
     let revision = hf_revision.unwrap_or_else(|| "main".to_string());
     let api = api.repo(Repo::with_revision(
         model_id.to_string(),
@@ -292,8 +284,8 @@ fn infer_kind(config: &str, sentence_transformers: bool) -> Result<TuneKind> {
         anyhow::bail!("Expected exactly one architecture in config");
     }
     let name = &cfg.architectures[0];
-    if VisionLoaderType::from_causal_lm_name(name).is_ok() {
-        return Ok(TuneKind::Vision);
+    if MultimodalLoaderType::from_causal_lm_name(name).is_ok() {
+        return Ok(TuneKind::Multimodal);
     }
     if EmbeddingLoaderType::from_causal_lm_name(name).is_ok() {
         return Ok(TuneKind::Embedding);
@@ -384,7 +376,7 @@ fn total_vram(devices: &[Device]) -> u64 {
     devices
         .iter()
         .filter(|d| !matches!(d, Device::Cpu))
-        .filter_map(|d| MemoryUsage.get_total_memory(d).ok())
+        .filter_map(|d| MemoryUsage.query(d).ok().map(|m| m.total()))
         .sum::<usize>() as u64
 }
 
@@ -395,7 +387,7 @@ fn available_vram(devices: &[Device]) -> u64 {
     devices
         .iter()
         .filter(|d| !matches!(d, Device::Cpu))
-        .filter_map(|d| MemoryUsage.get_memory_available(d).ok())
+        .filter_map(|d| MemoryUsage.query(d).ok().map(|m| m.available()))
         .sum::<usize>() as u64
 }
 
@@ -498,14 +490,14 @@ pub fn auto_tune(req: AutoTuneRequest) -> Result<AutoTuneResult> {
     )?;
 
     let kind = match &req.model {
-        ModelSelected::VisionPlain { .. } => TuneKind::Vision,
+        ModelSelected::MultimodalPlain { .. } => TuneKind::Multimodal,
         ModelSelected::Embedding { .. } => TuneKind::Embedding,
         _ => infer_kind(&config, sentence_transformers)?,
     };
 
     let mut params = get_auto_device_map_params(&req.model)?;
-    if matches!(kind, TuneKind::Vision) {
-        params = params.maybe_promote_to_vision();
+    if matches!(kind, TuneKind::Multimodal) {
+        params = params.maybe_promote_to_multimodal();
     }
 
     let devices = select_devices(req.force_cpu)?;
@@ -518,11 +510,11 @@ pub fn auto_tune(req: AutoTuneRequest) -> Result<AutoTuneResult> {
     };
 
     let loader_normal = AutoNormalLoader;
-    let loader_vision = AutoVisionLoader;
+    let loader_multimodal = AutoMultimodalLoader;
     let loader_embedding = AutoEmbeddingLoader;
     let loader: &dyn DeviceMappedModelLoader = match kind {
         TuneKind::Normal => &loader_normal,
-        TuneKind::Vision => &loader_vision,
+        TuneKind::Multimodal => &loader_multimodal,
         TuneKind::Embedding => &loader_embedding,
     };
 
@@ -541,8 +533,8 @@ pub fn auto_tune(req: AutoTuneRequest) -> Result<AutoTuneResult> {
     if matches!(kind, TuneKind::Embedding) {
         notes.push("Detected embedding model configuration.".to_string());
     }
-    if matches!(kind, TuneKind::Vision) {
-        notes.push("Detected vision model configuration.".to_string());
+    if matches!(kind, TuneKind::Multimodal) {
+        notes.push("Detected multimodal model configuration.".to_string());
     }
 
     // Get total VRAM for calculations

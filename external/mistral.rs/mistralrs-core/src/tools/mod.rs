@@ -1,21 +1,24 @@
+pub(crate) mod grammar;
+pub(crate) mod parsers;
 mod request;
 mod response;
+pub(crate) mod state;
+pub(crate) mod strategy;
 
 use candle_core::Result;
-use regex::Regex;
+pub(crate) use parsers::ToolCallFormat;
 pub use request::*;
 pub use response::*;
 use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde_json::{Map, Value};
+pub(crate) use state::ToolCallState;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::Pipeline;
 use mistralrs_mcp::CalledFunction;
 
-// Re-export the types so they're accessible as tools::Type
 pub use mistralrs_mcp::{ToolCallback, ToolCallbackWithTool};
 
 /// Collection of callbacks keyed by tool name.
@@ -25,71 +28,17 @@ pub type ToolCallbacks = HashMap<String, Arc<ToolCallback>>;
 pub type ToolCallbacksWithTools = HashMap<String, ToolCallbackWithTool>;
 
 fn contains_tool_call_prefix(prefix: &str) -> bool {
-    prefix.contains("<tool_call>")
-        || prefix.contains("<｜tool▁call▁begin｜>")
-        || prefix.contains("<|python_tag|>")
-        || prefix.contains("[TOOL_CALLS]")
+    parsers::contains_tool_call_prefix(prefix)
 }
 
 fn process_model_specific_message(message: &str) -> Result<String> {
-    static DEEPSEEK_REGEX: OnceLock<Regex> = OnceLock::new();
-    static QWEN_REGEX: OnceLock<Regex> = OnceLock::new();
-
-    // These are reasoning models so we need a regex.
-    let deepseek_regex = DEEPSEEK_REGEX.get_or_init(|| Regex::new(
-        r"(?s)<｜tool▁call▁begin｜>function<｜tool▁sep｜>(?P<name>[^\n]+)\n```json\n(?P<json>.+?)\n```<｜tool▁call▁end｜>",
-    ).unwrap());
-    let qwen_regex = QWEN_REGEX
-        .get_or_init(|| Regex::new(r"(?s)<tool_call>(?P<inner>.*?)</tool_call>").unwrap());
-
-    if let Some(message) = message.strip_prefix("<|python_tag|>") {
-        // Llama case
-        Ok(message.to_string())
-    } else if qwen_regex.is_match(message) {
-        if let Some(caps) = qwen_regex.captures(message) {
-            let inner = caps.name("inner").unwrap().as_str();
-            return Ok(inner.trim().to_string());
-        }
-        Ok(message.to_string())
-    } else if let Some(message) = message
-        .strip_prefix("[TOOL_CALLS][")
-        .and_then(|s| s.strip_suffix("]"))
-    {
-        // Mistral Nemo case
-        Ok(message.to_string())
-    } else if deepseek_regex.find(message).is_some() {
-        #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-        struct ToolCall {
-            name: String,
-            arguments: Value,
-        }
-        let mut calls = Vec::new();
-        for caps in deepseek_regex.captures_iter(message) {
-            let name = caps
-                .name("name")
-                .ok_or("Could not capture function name")
-                .map_err(candle_core::Error::msg)?
-                .as_str()
-                .trim()
-                .to_string();
-            let json_str = caps
-                .name("json")
-                .ok_or("Could not capture JSON arguments")
-                .map_err(candle_core::Error::msg)?
-                .as_str()
-                .trim();
-            let arguments: Value =
-                serde_json::from_str(json_str).map_err(candle_core::Error::msg)?;
-            calls.push(ToolCall { name, arguments });
-        }
-        Ok(serde_json::to_string(&calls).map_err(candle_core::Error::msg)?)
-    } else {
-        Ok(message.to_string())
-    }
+    parsers::process_model_specific_message(message)
 }
 
 pub struct ToolCallingMatcher {
     tool_choice: ToolChoice,
+    known_tool_names: Option<std::collections::HashSet<String>>,
+    tools: Option<Arc<Vec<crate::Tool>>>,
 }
 
 // Same as CalledFunction, but has different cases for variations on the names
@@ -156,8 +105,87 @@ fn fix_broken_json(raw: &str) -> anyhow::Result<String> {
 }
 
 impl ToolCallingMatcher {
-    pub fn new(tool_choice: ToolChoice) -> anyhow::Result<Self> {
-        Ok(Self { tool_choice })
+    #[cfg(test)]
+    pub fn new(tool_choice: ToolChoice, tools: Option<&[crate::Tool]>) -> anyhow::Result<Self> {
+        Self::new_with_format(tool_choice, tools, None)
+    }
+
+    pub fn new_with_format(
+        tool_choice: ToolChoice,
+        tools: Option<&[crate::Tool]>,
+        _preferred_tool_call_format: Option<ToolCallFormat>,
+    ) -> anyhow::Result<Self> {
+        let selected_tools = match &tool_choice {
+            ToolChoice::Builtin(choice) => {
+                anyhow::bail!(
+                    "tool_choice forcing hosted tool `{}` is not supported.",
+                    choice.tp.kind()
+                );
+            }
+            ToolChoice::AllowedTools(choice) => {
+                let tools = tools.unwrap_or_default();
+                let mut seen = std::collections::HashSet::new();
+                let mut matching_tools = Vec::new();
+                for allowed_tool in &choice.tools {
+                    let AllowedToolChoice::Function { name } = allowed_tool else {
+                        anyhow::bail!(
+                            "tool_choice.allowed_tools contains hosted tool `{}`; hosted tool forcing is not supported.",
+                            allowed_tool.kind()
+                        );
+                    };
+                    if !seen.insert(name.as_str()) {
+                        continue;
+                    }
+                    let Some(tool) = tools.iter().find(|tool| tool.function.name == *name) else {
+                        anyhow::bail!("tool_choice references unknown tool `{name}`.");
+                    };
+                    matching_tools.push(tool.clone());
+                }
+                if matching_tools.is_empty() {
+                    anyhow::bail!("tool_choice.allowed_tools requires at least one function tool.");
+                }
+                Some(matching_tools)
+            }
+            _ => {
+                if let Some(name) = tool_choice.forced_function_name() {
+                    let tools = tools.unwrap_or_default();
+                    let matching_tools = tools
+                        .iter()
+                        .filter(|tool| tool.function.name == name)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if matching_tools.is_empty() {
+                        anyhow::bail!("tool_choice references unknown tool `{name}`.");
+                    }
+                    Some(matching_tools)
+                } else {
+                    tools.map(|tools| tools.to_vec())
+                }
+            }
+        };
+        let known_tool_names = selected_tools.as_ref().map(|t| {
+            t.iter()
+                .map(|tool| tool.function.name.clone())
+                .collect::<std::collections::HashSet<_>>()
+        });
+        let tools_arc = selected_tools.map(Arc::new);
+        Ok(Self {
+            tool_choice,
+            known_tool_names,
+            tools: tools_arc,
+        })
+    }
+
+    pub fn requires_tool_call(&self) -> bool {
+        self.tool_choice.requires_tool_call()
+    }
+
+    pub(crate) fn allows_tool_call(&self) -> bool {
+        !matches!(self.tool_choice, ToolChoice::None)
+    }
+
+    pub(crate) fn tools(&self) -> Option<&[crate::Tool]> {
+        self.tools.as_ref().map(|tools| tools.as_slice())
     }
 
     // Checks if the `message_prefix` could be a tool call. If false, either
@@ -166,16 +194,12 @@ impl ToolCallingMatcher {
     // If the start of a message could be a tool call, then it looks like an incomplete JSON of a given structure, e.g. `{"name": "foo", "param`.
     //
     // Returns a tuple of `(could_be_tool, is_complete_tool)`.
-    pub fn prefix_could_be_tool(
-        &self,
-        _pipeline: &dyn Pipeline,
-        message_prefix: &str,
-    ) -> Result<(bool, bool)> {
+    pub fn prefix_could_be_tool(&self, message_prefix: &str) -> Result<(bool, bool)> {
         if matches!(self.tool_choice, ToolChoice::None) {
             return Ok((false, false));
         }
         let message_prefix = process_model_specific_message(message_prefix)?;
-        let message_prefix = fix_broken_json(&message_prefix).unwrap();
+        let message_prefix = fix_broken_json(&message_prefix).map_err(candle_core::Error::msg)?;
 
         // Check if the prefix could be a JSON serialization of any of the following types.
         Ok([
@@ -194,20 +218,36 @@ impl ToolCallingMatcher {
         .unwrap_or((contains_tool_call_prefix(&message_prefix), false)))
     }
 
-    pub fn get_call(
-        &self,
-        _pipeline: &dyn Pipeline,
-        message: &str,
-    ) -> anyhow::Result<Vec<ToolCallResponse>> {
-        if matches!(self.tool_choice, ToolChoice::None) {
-            return Ok(Vec::new());
-        }
-        let message = process_model_specific_message(message)?;
-        let message = fix_broken_json(&message).unwrap();
+    pub fn get_call(&self, message: &str) -> anyhow::Result<Vec<ToolCallResponse>> {
+        self.get_call_with_content(message).map(|(_, calls)| calls)
+    }
 
-        if let Ok(deser) = serde_json::from_str::<CalledFunctionParameters>(&message) {
+    pub fn get_call_with_content(
+        &self,
+        message: &str,
+    ) -> anyhow::Result<(Option<String>, Vec<ToolCallResponse>)> {
+        if matches!(self.tool_choice, ToolChoice::None) {
+            return Ok((Some(message.to_string()), Vec::new()));
+        }
+        let (message, content) =
+            if let Some((message, content)) = parsers::extract_model_specific_message(message)? {
+                let content = content.trim_start().to_string();
+                let content = if content.is_empty() {
+                    None
+                } else {
+                    Some(content)
+                };
+                (message, content)
+            } else {
+                (process_model_specific_message(message)?, None)
+            };
+        let message = fix_broken_json(&message)?;
+
+        let mut calls = if let Ok(deser) =
+            serde_json::from_str::<CalledFunctionParameters>(&message)
+        {
             let id = format!("call-{}", Uuid::new_v4());
-            Ok(vec![ToolCallResponse {
+            vec![ToolCallResponse {
                 index: 0,
                 id,
                 tp: ToolCallType::Function,
@@ -215,9 +255,9 @@ impl ToolCallingMatcher {
                     name: deser.name,
                     arguments: serde_json::to_string(&deser.parameters)?,
                 },
-            }])
+            }]
         } else if let Ok(deser) = serde_json::from_str::<Vec<CalledFunctionParameters>>(&message) {
-            Ok(deser
+            deser
                 .into_iter()
                 .enumerate()
                 .map(|(idx, deser)| {
@@ -232,13 +272,34 @@ impl ToolCallingMatcher {
                         },
                     })
                 })
-                .collect::<anyhow::Result<Vec<_>>>()?)
+                .collect::<anyhow::Result<Vec<_>>>()?
         } else {
-            if matches!(self.tool_choice, ToolChoice::Tool(_)) {
+            if self.tool_choice.requires_tool_call() {
                 anyhow::bail!("Tool choice was required but no tools were called.")
             }
-            Ok(Vec::new())
+            return Ok((Some(message), Vec::new()));
+        };
+
+        // Filter out hallucinated tool names.
+        if let Some(ref known) = self.known_tool_names {
+            let before = calls.len();
+            calls.retain(|tc| {
+                let valid = known.contains(&tc.function.name);
+                if !valid {
+                    tracing::warn!(
+                        "Dropping hallucinated tool call `{}` (not in defined tools: {:?})",
+                        tc.function.name,
+                        known
+                    );
+                }
+                valid
+            });
+            if calls.is_empty() && before > 0 && self.tool_choice.requires_tool_call() {
+                anyhow::bail!("Tool choice was required but model called unknown tools.");
+            }
         }
+
+        Ok((content, calls))
     }
 }
 
@@ -260,23 +321,118 @@ where
     }
 }
 
-/// Takes raw UTf8 text and parses any possible tool calls from it.
-pub fn parse_text_tools<'a>(
-    pipeline: &dyn Pipeline,
-    raw_text: &'a str,
-    matcher: Option<Arc<ToolCallingMatcher>>,
-) -> anyhow::Result<(Option<&'a str>, Vec<ToolCallResponse>)> {
-    let mut tool_calls = Vec::new();
-    let mut text_new = Some(raw_text);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Function, Tool, ToolType};
+    use serde_json::json;
 
-    if let Some(ref matcher) = matcher {
-        let calls = matcher
-            .get_call(pipeline, raw_text)
-            .map_err(candle_core::Error::msg)?;
-        if !calls.is_empty() {
-            text_new = None;
-            tool_calls = calls;
+    fn test_tool(name: &str) -> Tool {
+        Tool {
+            tp: ToolType::Function,
+            function: Function {
+                description: None,
+                name: name.to_string(),
+                parameters: None,
+                strict: None,
+            },
         }
-    };
-    Ok((text_new, tool_calls))
+    }
+
+    #[test]
+    fn deserializes_responses_named_function_tool_choice() {
+        let choice: ToolChoice =
+            serde_json::from_value(json!({ "type": "function", "name": "get_weather" })).unwrap();
+
+        let ToolChoice::NamedFunction(choice) = choice else {
+            panic!("expected named function tool choice");
+        };
+        assert_eq!(choice.name, "get_weather");
+    }
+
+    #[test]
+    fn deserializes_chat_function_tool_choice() {
+        let choice: ToolChoice = serde_json::from_value(json!({
+            "type": "function",
+            "function": { "name": "get_weather" }
+        }))
+        .unwrap();
+
+        let ToolChoice::Tool(tool) = choice else {
+            panic!("expected chat function tool choice");
+        };
+        assert_eq!(tool.function.name, "get_weather");
+    }
+
+    #[test]
+    fn tool_call_allowed_tools_deserializes_required_function_subset() {
+        let choice: ToolChoice = serde_json::from_value(json!({
+            "type": "allowed_tools",
+            "mode": "required",
+            "tools": [{ "type": "function", "name": "get_weather" }]
+        }))
+        .unwrap();
+
+        let ToolChoice::AllowedTools(choice) = choice else {
+            panic!("expected allowed_tools tool choice");
+        };
+        assert_eq!(choice.mode, AllowedToolsMode::Required);
+        assert_eq!(choice.tools.len(), 1);
+    }
+
+    #[test]
+    fn specific_tool_choice_rejects_unknown_tool() {
+        let tools = vec![test_tool("get_weather")];
+        let choice: ToolChoice =
+            serde_json::from_value(json!({ "type": "function", "name": "get_customer" })).unwrap();
+
+        assert!(ToolCallingMatcher::new(choice, Some(&tools)).is_err());
+    }
+
+    #[test]
+    fn specific_tool_choice_constrains_called_tool() {
+        let tools = vec![test_tool("get_weather"), test_tool("get_customer")];
+        let choice: ToolChoice =
+            serde_json::from_value(json!({ "type": "function", "name": "get_weather" })).unwrap();
+        let matcher = ToolCallingMatcher::new(choice, Some(&tools)).unwrap();
+
+        assert!(matcher
+            .get_call(r#"{"name":"get_customer","parameters":{}}"#)
+            .is_err());
+        let calls = matcher
+            .get_call(r#"{"name":"get_weather","parameters":{}}"#)
+            .unwrap();
+        assert_eq!(calls[0].function.name, "get_weather");
+    }
+
+    #[test]
+    fn tool_call_allowed_tools_required_constrains_called_tool() {
+        let tools = vec![test_tool("get_weather"), test_tool("get_customer")];
+        let choice: ToolChoice = serde_json::from_value(json!({
+            "type": "allowed_tools",
+            "mode": "required",
+            "tools": [{ "type": "function", "name": "get_weather" }]
+        }))
+        .unwrap();
+        let matcher = ToolCallingMatcher::new(choice, Some(&tools)).unwrap();
+
+        assert!(matcher.requires_tool_call());
+        assert!(matcher
+            .get_call(r#"{"name":"get_customer","parameters":{}}"#)
+            .is_err());
+        let calls = matcher
+            .get_call(r#"{"name":"get_weather","parameters":{}}"#)
+            .unwrap();
+        assert_eq!(calls[0].function.name, "get_weather");
+    }
+
+    #[test]
+    fn tool_call_rejects_forced_hosted_tool_choice() {
+        let tools = vec![test_tool("get_weather")];
+        let choice: ToolChoice =
+            serde_json::from_value(json!({ "type": "web_search_preview" })).unwrap();
+
+        assert!(matches!(choice, ToolChoice::Builtin(_)));
+        assert!(ToolCallingMatcher::new(choice, Some(&tools)).is_err());
+    }
 }

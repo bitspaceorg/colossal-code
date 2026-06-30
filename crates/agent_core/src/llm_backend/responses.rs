@@ -224,10 +224,7 @@ fn responses_tool_choice_to_value(tool_choice: ToolChoice) -> Value {
     match tool_choice {
         ToolChoice::None => Value::String("none".to_string()),
         ToolChoice::Auto => Value::String("auto".to_string()),
-        ToolChoice::Tool(tool) => json!({
-            "type": "function",
-            "name": tool.function.name,
-        }),
+        other => serde_json::to_value(other).unwrap_or(Value::Null),
     }
 }
 
@@ -719,6 +716,7 @@ fn make_text_chunk(
         system_fingerprint: String::new(),
         object: "chat.completion.chunk".to_string(),
         usage: None,
+        session_id: None,
     }
 }
 
@@ -769,6 +767,9 @@ fn make_done_response(
         system_fingerprint: String::new(),
         object: "chat.completion".to_string(),
         usage,
+        agentic_tool_calls: None,
+        files: None,
+        session_id: None,
     }
 }
 

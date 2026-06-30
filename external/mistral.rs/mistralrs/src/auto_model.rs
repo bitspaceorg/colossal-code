@@ -1,6 +1,6 @@
 use candle_core::Device;
 use mistralrs_core::*;
-use mistralrs_core::{SearchCallback, Tool, ToolCallback};
+use mistralrs_core::{SearchCallback, Tool, ToolCallback, ToolCallbackKind};
 
 use crate::{IsqBits, IsqSetting};
 use std::collections::HashMap;
@@ -11,14 +11,14 @@ use crate::model_builder_trait::{build_auto_pipeline, build_model_from_pipeline}
 use crate::Model;
 
 #[derive(Clone)]
-/// Configure a model with automatic detection of model type (text, vision, embedding, etc.).
+/// Configure a model with automatic detection of model type (text, multimodal, embedding, etc.).
 ///
 /// This builder works like the CLI `run` command: it reads the model's `config.json` at build time
-/// to determine whether it should be loaded as a text, vision, or embedding model.
+/// to determine whether it should be loaded as a text, multimodal, or embedding model.
 ///
 /// Use this when you don't know (or don't care) whether a model ID corresponds to a text or
-/// vision architecture. For example, `google/gemma-3-4b-it` is detected as vision,
-/// while `Qwen/Qwen3-4B` is detected as text — both work seamlessly.
+/// multimodal architecture. For example, `google/gemma-4-E4B-it` is detected as multimodal,
+/// while `Qwen/Qwen3-4B` is detected as text, both work seamlessly.
 ///
 /// # Example
 ///
@@ -45,7 +45,7 @@ pub struct ModelBuilder {
     pub(crate) model_id: String,
     pub(crate) token_source: TokenSource,
     pub(crate) hf_revision: Option<String>,
-    pub(crate) write_uqff: Option<PathBuf>,
+    pub(crate) write_uqff: Option<UqffWriteConfig>,
     pub(crate) from_uqff: Option<Vec<PathBuf>>,
     pub(crate) imatrix: Option<PathBuf>,
     pub(crate) calibration_file: Option<PathBuf>,
@@ -56,8 +56,8 @@ pub struct ModelBuilder {
     pub(crate) hf_cache_path: Option<PathBuf>,
     pub(crate) search_embedding_model: Option<SearchEmbeddingModel>,
     pub(crate) search_callback: Option<Arc<SearchCallback>>,
-    pub(crate) tool_callbacks: HashMap<String, Arc<ToolCallback>>,
-    pub(crate) tool_callbacks_with_tools: HashMap<String, ToolCallbackWithTool>,
+    pub(crate) tool_callbacks: HashMap<String, ToolCallbackWithTool>,
+    pub(crate) mtp_config: Option<MtpConfig>,
     pub(crate) device: Option<Device>,
     pub(crate) matformer_config_path: Option<PathBuf>,
     pub(crate) matformer_slice_name: Option<String>,
@@ -77,6 +77,8 @@ pub struct ModelBuilder {
     pub(crate) max_edge: Option<u32>,
     pub(crate) no_kv_cache: bool,
     pub(crate) mcp_client_config: Option<McpClientConfig>,
+    pub(crate) code_exec_config: Option<mistralrs_core::CodeExecutionConfig>,
+    pub(crate) shell_config: Option<mistralrs_core::ShellConfig>,
 }
 
 impl ModelBuilder {
@@ -114,7 +116,7 @@ impl ModelBuilder {
             search_embedding_model: None,
             search_callback: None,
             tool_callbacks: HashMap::new(),
-            tool_callbacks_with_tools: HashMap::new(),
+            mtp_config: None,
             device: None,
             matformer_config_path: None,
             matformer_slice_name: None,
@@ -122,6 +124,8 @@ impl ModelBuilder {
             max_edge: None,
             no_kv_cache: false,
             mcp_client_config: None,
+            code_exec_config: None,
+            shell_config: None,
         }
     }
 
@@ -135,6 +139,18 @@ impl ModelBuilder {
         self
     }
 
+    /// Enable Python code execution. **Security**: lets the model run arbitrary code on the host with full network and filesystem access.
+    pub fn with_code_execution(mut self, config: mistralrs_core::CodeExecutionConfig) -> Self {
+        self.code_exec_config = Some(config);
+        self
+    }
+
+    /// Enable shell execution.
+    pub fn with_shell_execution(mut self, config: mistralrs_core::ShellConfig) -> Self {
+        self.shell_config = Some(config);
+        self
+    }
+
     /// Disable KV cache. Trade performance for memory usage. Only applies to text models.
     pub fn with_no_kv_cache(mut self) -> Self {
         self.no_kv_cache = true;
@@ -142,7 +158,7 @@ impl ModelBuilder {
     }
 
     /// Automatically resize and pad images to this maximum edge length. Aspect ratio is preserved.
-    /// Only applies to vision models that support this (e.g., Qwen2-VL, Idefics 2).
+    /// Only applies to multimodal models that support this (e.g., Qwen2-VL, Idefics 2).
     pub fn with_max_edge(mut self, max_edge: u32) -> Self {
         self.max_edge = Some(max_edge);
         self

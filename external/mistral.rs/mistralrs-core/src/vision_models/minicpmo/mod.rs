@@ -6,19 +6,20 @@ use std::{
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 pub use config::MiniCpmOConfig;
 pub use inputs_processor::MiniCpmOProcessor;
-use mistralrs_quant::{CollectedImatrixData, QuantMethod, ShardedVarBuilder};
+use mistralrs_quant::ShardedVarBuilder;
 use resampler::Resampler;
 
+use crate::attention::AttentionMask;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
-    device_map::DeviceMapper,
     models::qwen2,
     paged_attention::{
-        encoder_cache::EncoderCacheManager, AttentionImplementation, ModelConfigMetadata,
+        encoder_cache::{CacheModality, EncoderCacheManager},
+        AttentionImplementation, ModelConfigMetadata,
     },
     pipeline::{
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, NormalLoadingMetadata, NormalModel, VisionModel,
+        EitherCache, IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata,
+        NormalModel,
     },
     utils::unvarbuilder::UnVarBuilder,
 };
@@ -126,7 +127,7 @@ impl MiniCpmOModel {
                         .lock()
                         .expect("encoder cache lock poisoned");
                     for (i, &hash) in image_hashes.iter().enumerate() {
-                        if let Some(cached) = guard.get(hash) {
+                        if let Some(cached) = guard.get(CacheModality::Image, hash) {
                             per_image_features[i] = Some(cached[0].clone());
                         } else {
                             miss_indices.push(i);
@@ -158,7 +159,7 @@ impl MiniCpmOModel {
 
                         let vpm_out = self.vpm.forward(
                             &single_pv,
-                            Some(&patch_attn_mask),
+                            &AttentionMask::Custom(patch_attn_mask.clone()),
                             Some(&tgt_size_tensor),
                         )?;
                         let feats = self.resampler.forward(&vpm_out, &tgt_size_vec)?;
@@ -169,7 +170,11 @@ impl MiniCpmOModel {
                                 .encoder_cache
                                 .lock()
                                 .expect("encoder cache lock poisoned");
-                            guard.insert(image_hashes[idx], vec![feats.clone()]);
+                            guard.insert(
+                                CacheModality::Image,
+                                image_hashes[idx],
+                                vec![feats.clone()],
+                            );
                         }
                         per_image_features[idx] = Some(feats);
                     }
@@ -232,15 +237,18 @@ impl MiniCpmOModel {
                         let end_idx = i + vision_batch_size;
                         let tmp_hs = self.vpm.forward(
                             &all_pixel_values.i(start_idx..end_idx)?,
-                            Some(&patch_attn_mask.i(start_idx..end_idx)?),
+                            &AttentionMask::Custom(patch_attn_mask.i(start_idx..end_idx)?),
                             Some(&tgt_sizes.i(start_idx..end_idx)?),
                         )?;
                         hs.push(tmp_hs);
                     }
                     Tensor::cat(&hs, 0)?
                 } else {
-                    self.vpm
-                        .forward(&all_pixel_values, Some(&patch_attn_mask), Some(&tgt_sizes))?
+                    self.vpm.forward(
+                        &all_pixel_values,
+                        &AttentionMask::Custom(patch_attn_mask.clone()),
+                        Some(&tgt_sizes),
+                    )?
                 };
                 vision_embedding = self.resampler.forward(&vision_embedding, &tgt_sizes_vec)?;
                 vision_embedding
@@ -296,7 +304,6 @@ impl MiniCpmOModel {
         Ok(vllm_embedding)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &self,
         input_ids: &Tensor,
@@ -304,10 +311,7 @@ impl MiniCpmOModel {
         tgt_sizes: Option<Vec<Tensor>>,
         image_bound: Option<Vec<Tensor>>,
         image_hashes: &[u64],
-        seqlen_offsets: &[usize],
-        context_lens: Vec<(usize, usize)>,
-        metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
+        ctx: &mut ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         let vllm_embedding = self.get_vllm_embedding(
             input_ids,
@@ -318,14 +322,7 @@ impl MiniCpmOModel {
             image_hashes,
         )?;
 
-        self.llm.forward_embed(
-            input_ids,
-            vllm_embedding,
-            seqlen_offsets,
-            context_lens,
-            metadata,
-            flash_params,
-        )
+        self.llm.forward_embed(input_ids, vllm_embedding, ctx)
     }
 }
 
@@ -337,12 +334,13 @@ pub(crate) struct MiniCpmOSpecificArgs {
     pub(crate) image_hashes: Vec<u64>,
 }
 
-impl VisionModel for MiniCpmOModel {
+impl crate::speculative::SpeculativeTargetMixin for MiniCpmOModel {}
+
+impl crate::block_diffusion::BlockDiffusionMixin for MiniCpmOModel {}
+
+impl MultimodalModel for MiniCpmOModel {
     fn cache(&self) -> &EitherCache {
         self.llm.cache()
-    }
-    fn cache_mut(&mut self) -> &mut EitherCache {
-        self.llm.cache_mut()
     }
     fn config(&self) -> &ModelConfigMetadata {
         self.llm.config()
@@ -357,12 +355,8 @@ impl VisionModel for MiniCpmOModel {
         &self,
         input_ids: &Tensor,
         _pixel_values: Option<Tensor>,
-        seqlen_offsets: &[usize],
-        context_lens: Vec<(usize, usize)>,
-        _position_ids: Vec<usize>,
         model_specific_args: Box<dyn Any>, // pixel attention mask, or image sizes, or anything else
-        metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
+        ctx: &mut crate::pipeline::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         let MiniCpmOSpecificArgs {
             pixel_values_all,
@@ -378,10 +372,7 @@ impl VisionModel for MiniCpmOModel {
             tgt_sizes,
             image_bound,
             &image_hashes,
-            seqlen_offsets,
-            context_lens,
-            metadata,
-            flash_params,
+            ctx,
         )
     }
     fn default_model_specific_args(&self, _input_ids: &Tensor) -> Box<dyn Any> {
@@ -408,15 +399,6 @@ impl VisionModel for MiniCpmOModel {
 }
 
 impl IsqModel for MiniCpmOModel {
-    fn get_layers(
-        &mut self,
-    ) -> (
-        Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)>,
-        &dyn DeviceMapper,
-    ) {
-        self.llm.get_layers()
-    }
-
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
 
@@ -426,18 +408,6 @@ impl IsqModel for MiniCpmOModel {
             .extend(self.resampler.residual_tensors());
 
         uvb.to_safetensors()
-    }
-
-    // NOTE: We ONLY calibrate the text bits of these models, so we should only track/return those parts!!
-
-    /// This is used for imatrix generation internally. Begin stats tracking.
-    fn begin_track_stats(&mut self) -> anyhow::Result<()> {
-        self.llm.begin_track_stats()
-    }
-
-    /// End stats tracking and return the imatrix data
-    fn extract_imatrix_data(&mut self) -> candle_core::Result<CollectedImatrixData> {
-        self.llm.extract_imatrix_data()
     }
 }
 

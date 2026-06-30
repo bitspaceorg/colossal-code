@@ -79,7 +79,7 @@ pub(crate) fn from_mmaped_safetensors(
     let use_no_mmap = std::env::var(MISTRALRS_NO_MMAP).is_ok_and(|x| x == "1");
     if xlora_paths.is_empty() && !use_no_mmap {
         if !silent {
-            tracing::info!("Loading model using mmap strategy.");
+            tracing::debug!("Loading model using mmap strategy.");
         }
         return Ok(unsafe {
             ShardedSafeTensors::sharded(
@@ -175,14 +175,13 @@ pub(crate) fn from_mmaped_safetensors(
         ws.extend(h.join().unwrap()?);
     }
 
-    let backend = Box::new(ws);
-
     // TODO(EricLBuehler): separation of concerns.
     // This is to have WNA16 for GPTQ which is required. No bf16 for GPTQ
-    Ok(ShardedSafeTensors::wrap(
-        backend,
+    Ok(ShardedSafeTensors::wrap_with_dummy_regexes(
+        ws,
         dtype.unwrap_or(DType::F16),
         base_device.clone(),
+        make_dummy_regexes,
     ))
 }
 
@@ -207,11 +206,9 @@ pub(crate) fn load_preload_adapters(
                 |_| false,
             )?;
 
-            let backend = Box::new(loaded_tensors);
-
             // TODO(EricLBuehler): separation of concerns.
             // This is to have WNA16 for GPTQ which is required. No bf16 for GPTQ
-            let vb = ShardedSafeTensors::wrap(backend, dtype, device.clone());
+            let vb = ShardedSafeTensors::wrap(loaded_tensors, dtype, device.clone());
 
             map.insert(name.clone(), (vb, config.clone()));
         }
@@ -241,13 +238,13 @@ trait LoadTensors {
             .to_str()
             .expect("Expected to convert")
         {
-            "safetensors" => Box::new(SafetensorBackend(unsafe { MmapedSafetensors::new(path)? })),
-            "pth" | "pt" | "bin" => Box::new(PickleBackend(candle_core::pickle::PthTensors::new(
-                path, None,
-            )?)),
-            other => candle_core::bail!(
-                "Unexpected extension `{other}`, this should have been handled by `get_model_paths`."
-            ),
+            "safetensors" => Box::new(SafetensorBackend(unsafe {
+                MmapedSafetensors::new(path)?
+            })),
+            "pth" | "pt" | "bin" => Box::new(PickleBackend(
+                candle_core::pickle::PthTensors::new(path, None)?
+            )),
+            other => candle_core::bail!("Unexpected extension `{other}`, this should have been handled by `get_model_paths`."),
         };
 
         // Extracts the tensor name and processes it, filtering tensors and deriving the key name:

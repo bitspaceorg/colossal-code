@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::paged_attention::block_hash::MultimodalKind;
 use std::{
     any::Any,
     collections::{HashMap, HashSet},
@@ -134,6 +135,7 @@ impl InputsProcessor for Llama4ImageProcessor {
         no_kv_cache: bool,
         last_n_context_len: Option<(usize, usize)>,
         return_raw_logits: bool,
+        sliding_window: Option<usize>,
         other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<PagedAttentionMeta>,
         mapper: Option<&dyn DeviceMapper>,
@@ -285,7 +287,9 @@ impl InputsProcessor for Llama4ImageProcessor {
                         ) {
                             let ranges = find_image_delimited_ranges(&ids, start_id, end_id);
                             seq.set_mm_features(build_mm_features_from_ranges(
-                                &ranges, &hashes, "img",
+                                &ranges,
+                                &hashes,
+                                MultimodalKind::Image,
                             ));
                         }
                     }
@@ -327,6 +331,7 @@ impl InputsProcessor for Llama4ImageProcessor {
                 return_raw_logits,
                 paged_attn_metadata.as_mut(),
                 mapper,
+                sliding_window,
             )
             .unwrap()
         } else {
@@ -342,6 +347,7 @@ impl InputsProcessor for Llama4ImageProcessor {
                 return_raw_logits,
                 paged_attn_metadata.as_mut(),
                 mapper,
+                sliding_window,
             )
             .unwrap()
         };
@@ -377,6 +383,11 @@ impl InputsProcessor for Llama4ImageProcessor {
             model_specific_args: Box::new(Llama4ModelSpecificArgs { image_hashes }),
             paged_attn_meta,
             flash_meta,
+            recurrent_batch_kind: if is_prompt {
+                crate::pipeline::RecurrentBatchKind::Prefill
+            } else {
+                crate::pipeline::RecurrentBatchKind::Decode
+            },
         });
         Ok(InputProcessorOutput {
             inputs,

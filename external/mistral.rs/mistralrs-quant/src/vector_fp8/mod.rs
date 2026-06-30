@@ -10,9 +10,9 @@ pub use ops::{fp8_vector_dequantize, fp8_vector_quantize};
 pub(crate) mod ffi;
 
 use crate::{
-    generate_isq, generate_isq_imatrix,
+    generate_isq, generate_isq_imatrix, has_missing_required_tensors,
     hqq::{ISQ_HQQ_DEFAULT_OPT_STEPS, ISQ_HQQ_GROUP_SIZE},
-    AfqBits, AfqGroupSize, AfqLayer, DummyLayer, FP8Linear, GgufMatMul, HqqAxis, HqqBits,
+    make_dummy_or_error, AfqBits, AfqGroupSize, AfqLayer, FP8Linear, GgufMatMul, HqqAxis, HqqBits,
     HqqConfig, HqqLayer, IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard,
     QuantizedSerde, Shard, ShardedVarBuilder, UnquantLinear,
 };
@@ -51,7 +51,7 @@ impl QuantMethod for VectorFP8Linear {
         ops::fp8_vector_dequantize(&self.weight, &self.weight_scale_inv, self.dequant_dtype)
     }
 
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    fn forward_raw(&self, x: &Tensor) -> Result<Tensor> {
         // Dequantize matmul always.
         let weight = self.dequantize_w()?;
         // Dispatch to unquant. This uses some cublaslt for bias & on cuda always, so it is better
@@ -72,6 +72,16 @@ impl QuantMethod for VectorFP8Linear {
 
     fn dtype_and_device(&self) -> (DType, candle_core::Device) {
         (DType::F8E4M3, self.weight.device().clone())
+    }
+
+    fn plan_isq(&self, request: &crate::IsqRequest) -> Result<crate::IsqPlanParams> {
+        Ok(crate::plan_weight_isq(
+            self.dequant_dtype,
+            self.weight.device().clone(),
+            self.weight.dims().to_vec(),
+            request,
+            true,
+        ))
     }
 
     fn apply_isq(
@@ -197,6 +207,21 @@ impl QuantMethod for VectorFP8Linear {
                 };
                 Ok(Arc::new(crate::F8Q8Linear::from_weight(&w, b)?))
             }
+            Some(IsqType::MXFP4) => {
+                let _acquired_quantize_guard = guard.acquire(&device);
+                if imatrix_weight.is_some() {
+                    candle_core::bail!("MXFP4 does not support imatrix.");
+                }
+
+                n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let w = weight.to_device(&device)?;
+                let b = self
+                    .bias
+                    .as_ref()
+                    .map(|b| b.to_device(&device))
+                    .transpose()?;
+                crate::MXFP4Layer::quantize(&w, b, &device)
+            }
             None => {
                 let _acquired_quantize_guard = guard.acquire(&device);
                 // Ignore imatrix altogether
@@ -253,10 +278,8 @@ pub fn vector_fp8_linear_b(
         return crate::linear_b(in_dim, out_dim, bias, &None, vb);
     }
 
-    // Handle the case where the layer is dummy (no tensors)
-    if !(vb.contains_tensor("weight") && vb.contains_tensor("weight_scale_inv")) {
-        let layer = <DummyLayer as QuantMethod>::new(QuantMethodConfig::Dummy)?;
-        return Ok(Arc::new(layer) as Arc<dyn QuantMethod>);
+    if has_missing_required_tensors(&vb, &["weight", "weight_scale_inv"]) {
+        return make_dummy_or_error("vector_fp8_linear", &vb, &["weight", "weight_scale_inv"]);
     }
 
     let weight = vb.get_with_hints_dtype((out_dim, in_dim), "weight", hints, DType::F8E4M3)?;

@@ -1,13 +1,13 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use candle_core::{DType, IndexOp, Result, Tensor, D};
 use candle_nn::{BatchNorm, Conv1d, Conv1dConfig, LayerNorm, Linear, ModuleT};
 use mistralrs_quant::{Convolution, QuantMethod, ShardedVarBuilder};
 
 use crate::{
-    attention::SdpaParams,
+    attention::{AttentionMask, SdpaParams},
     layers::{self, Activation, Sdpa},
     pipeline::text_models_inputs_processor::FlashParams,
     vision_models::conformer::{
@@ -71,14 +71,13 @@ impl Attention {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: Option<&Tensor>,
+        attention_mask: &AttentionMask,
         relative_attention_bias: Option<&Tensor>,
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
 
-        let mut q = self.q_proj.forward(xs)?;
-        let mut k = self.k_proj.forward(xs)?;
-        let mut v = self.v_proj.forward(xs)?;
+        let (mut q, mut k, mut v) =
+            crate::ops::qkv_projections(xs, &*self.q_proj, &*self.k_proj, &*self.v_proj)?;
 
         q = q
             .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
@@ -90,7 +89,7 @@ impl Attention {
             .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
             .transpose(1, 2)?;
 
-        let attention_mask = match (attention_mask, relative_attention_bias) {
+        let combined_mask = match (attention_mask.as_option_tensor(), relative_attention_bias) {
             (Some(attention_mask), Some(relative_attention_bias)) => Some(
                 attention_mask
                     .unsqueeze(1)?
@@ -100,19 +99,17 @@ impl Attention {
             (None, None) => None,
             (None, Some(relative_attention_bias)) => Some(relative_attention_bias.contiguous()?),
         };
-        let flash_params = FlashParams {
-            max_q: 0,
-            max_k: 0,
-            cumulative_seqlens_q: HashMap::new(),
-            cumulative_seqlens_k: HashMap::new(),
-            causal: false,
+        let combined_mask = match combined_mask {
+            Some(t) => AttentionMask::Custom(t),
+            None => AttentionMask::None,
         };
+        let flash_params = FlashParams::empty(false);
 
         let attn_weights = Sdpa.run_attention(
             &q.contiguous()?,
             &k.contiguous()?,
             &v.contiguous()?,
-            attention_mask.as_ref(),
+            &combined_mask,
             Some(&flash_params),
             &SdpaParams {
                 n_kv_groups: 1,
@@ -162,10 +159,12 @@ impl FeedForward {
         let projected = normed.apply(&self.up)?;
 
         // GLU: split in half and gate
-        let chunks = projected.chunk(2, D::Minus1)?;
-        let x = &chunks[0];
-        let gate = chunks[1].apply(&self.act)?;
-        let gated = (x * gate)?;
+        let gated = crate::ops::split_mul_and_act_order(
+            &projected,
+            projected.dim(D::Minus1)? / 2,
+            self.act,
+            crate::ops::GatedActivationOrder::UpGate,
+        )?;
 
         gated.apply(&self.down)
     }
@@ -300,9 +299,9 @@ impl GLUPointWiseConv {
         let result = if let Some((b1, b2)) = &self.b1_b2 {
             let first_with_bias = first_half.broadcast_add(b1)?;
             let second_with_bias = second_half.broadcast_add(b2)?;
-            first_with_bias.mul(&second_with_bias.apply(&self.act)?)?
+            crate::ops::mul_and_act(&second_with_bias, &first_with_bias, self.act)?
         } else {
-            first_half.mul(&second_half.apply(&self.act)?)?
+            crate::ops::mul_and_act(second_half, first_half, self.act)?
         };
 
         // Back to (B, T, D)
@@ -518,9 +517,14 @@ impl EncoderLayer {
 
         // Self attention with pre-norm
         let norm_x = x.apply(&self.layer_norm_att)?;
-        let attn_out = self
-            .self_attn
-            .forward(&norm_x, mask, relative_attention_bias)?;
+        let attn_out = self.self_attn.forward(
+            &norm_x,
+            &match mask {
+                Some(t) => AttentionMask::Custom(t.clone()),
+                None => AttentionMask::None,
+            },
+            relative_attention_bias,
+        )?;
         x = (x + attn_out)?;
 
         // Conv module

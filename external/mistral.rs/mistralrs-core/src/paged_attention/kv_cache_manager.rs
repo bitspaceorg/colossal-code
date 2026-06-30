@@ -34,7 +34,7 @@ struct RequestBlocks {
     num_cached_blocks: usize,
 }
 
-/// KV Cache Manager — manages block allocation and prefix caching.
+/// KV Cache Manager, manages block allocation and prefix caching.
 ///
 /// Each instance handles one "type" of KV cache layer (e.g., full attention).
 /// For models with alternating sliding window layers (Gemma2, GPT-OSS),
@@ -104,6 +104,10 @@ impl KVCacheManager {
         self.block_pool.num_free_blocks()
     }
 
+    pub fn num_gpu_blocks(&self) -> usize {
+        self.block_pool.num_gpu_blocks()
+    }
+
     /// Whether prefix caching is enabled.
     pub fn caching_enabled(&self) -> bool {
         self.enable_caching
@@ -140,23 +144,18 @@ impl KVCacheManager {
                 break;
             }
 
-            // Look up this block hash across all group IDs
             if let Some(ids) = self
                 .block_pool
                 .get_cached_block(block_hash, &self.kv_cache_group_ids)
             {
-                // For simplicity, take the first group's block.
-                // Multi-group support would need to return all group block IDs
-                // to construct separate block tables per group.
-                debug_assert_eq!(
-                    ids.len(),
-                    1,
-                    "Multi-group prefix cache lookup not yet implemented: found {} groups",
-                    ids.len()
-                );
-                cached_block_ids.push(ids[0]);
+                let Some(first) = ids.first().copied() else {
+                    break;
+                };
+                if ids.iter().any(|&id| id != first) {
+                    break;
+                }
+                cached_block_ids.push(first);
             } else {
-                // Chain is broken — no further blocks can match
                 break;
             }
         }
@@ -190,7 +189,7 @@ impl KVCacheManager {
         let num_required_blocks = num_tokens.div_ceil(self.block_size);
 
         if let Some(req) = self.req_to_blocks.get(&request_id) {
-            // Running request — just need to allocate additional blocks
+            // Running request, just need to allocate additional blocks
             let num_existing = req.block_ids.len();
             let num_new_blocks = num_required_blocks.saturating_sub(num_existing);
 
@@ -207,12 +206,12 @@ impl KVCacheManager {
             return Some(new_block_ids);
         }
 
-        // New request — incorporate computed blocks + allocate new ones
+        // New request, incorporate computed blocks + allocate new ones
         let num_computed = computed_blocks.len();
         let num_new_blocks = num_required_blocks.saturating_sub(num_computed);
 
         // Count evictable blocks among computed blocks (blocks with ref_cnt == 0
-        // that are in the free list — touching them will remove them from the
+        // that are in the free list, touching them will remove them from the
         // free list, so we need to account for this in the capacity check).
         let num_evictable = if self.enable_caching {
             computed_blocks
@@ -270,6 +269,36 @@ impl KVCacheManager {
         }
     }
 
+    /// Trim a running request's allocation to `num_tokens`.
+    ///
+    /// This is useful when a speculative path over-allocates temporary lookahead
+    /// slots and then needs to release unneeded tail blocks.
+    pub fn trim_request_to_num_tokens(&mut self, request_id: usize, num_tokens: usize) {
+        let num_required_blocks = num_tokens.div_ceil(self.block_size);
+
+        let mut removed_blocks = {
+            let Some(req) = self.req_to_blocks.get_mut(&request_id) else {
+                return;
+            };
+
+            if num_required_blocks >= req.block_ids.len() {
+                req.num_cached_blocks = req.num_cached_blocks.min(req.block_ids.len());
+                return;
+            }
+
+            let removed = req
+                .block_ids
+                .drain(num_required_blocks..)
+                .collect::<Vec<_>>();
+            req.num_cached_blocks = req.num_cached_blocks.min(req.block_ids.len());
+            removed
+        };
+
+        // Free in reverse order for LRU eviction priority.
+        removed_blocks.reverse();
+        self.block_pool.free_blocks(&removed_blocks);
+    }
+
     /// Cache newly-full blocks after tokens are computed.
     ///
     /// Called after each step (prefill or decode) to register full blocks
@@ -294,7 +323,9 @@ impl KVCacheManager {
             None => return,
         };
 
-        let num_full_blocks = num_computed_tokens / self.block_size;
+        // Clamp to allocated blocks: callers may pass token counts that run ahead of
+        // allocation (e.g. block generation appends many tokens per step).
+        let num_full_blocks = (num_computed_tokens / self.block_size).min(req.block_ids.len());
         if req.num_cached_blocks >= num_full_blocks {
             return;
         }
@@ -492,6 +523,21 @@ mod tests {
     }
 
     #[test]
+    fn test_prefix_cache_hit_with_group_aliases() {
+        let mut mgr = KVCacheManager::new(16, 4, true, vec![0, 1]);
+        let tokens: Vec<u32> = (1..=8).collect();
+        let hashes = compute_block_hashes(&tokens, 4, &[], &[]);
+
+        mgr.allocate_slots(1, 8, &[]).unwrap();
+        mgr.cache_blocks(1, &hashes, 8);
+        mgr.free(1);
+
+        let computed = mgr.get_computed_blocks(&hashes, 12);
+        assert_eq!(computed.num_computed_tokens, 8);
+        assert_eq!(computed.block_ids.len(), 2);
+    }
+
+    #[test]
     fn test_cache_blocks_incremental() {
         let mut mgr = KVCacheManager::new(16, 4, true, vec![0]);
 
@@ -560,6 +606,33 @@ mod tests {
         assert_eq!(table[2], 0);
         assert_eq!(table[3], 0);
         assert_eq!(table[4], 0);
+    }
+
+    #[test]
+    fn test_trim_request_allocation() {
+        let mut mgr = KVCacheManager::new(8, 4, false, vec![0]);
+        mgr.allocate_slots(1, 12, &[]).unwrap();
+        assert_eq!(mgr.num_blocks_for_request(1), 3);
+        assert_eq!(mgr.num_free_blocks(), 4); // 8 - 1 null - 3 alloc
+
+        mgr.trim_request_to_num_tokens(1, 8); // 2 blocks
+        assert_eq!(mgr.num_blocks_for_request(1), 2);
+        assert_eq!(mgr.num_free_blocks(), 5);
+    }
+
+    #[test]
+    fn test_trim_clamps_cached_blocks() {
+        let mut mgr = KVCacheManager::new(16, 4, true, vec![0]);
+        let tokens: Vec<u32> = (1..=16).collect();
+        let hashes = compute_block_hashes(&tokens, 4, &[], &[]);
+
+        mgr.allocate_slots(1, 16, &[]).unwrap();
+        mgr.cache_blocks(1, &hashes, 16);
+        assert_eq!(mgr.num_cached_blocks(1), 4);
+
+        mgr.trim_request_to_num_tokens(1, 8);
+        assert_eq!(mgr.num_blocks_for_request(1), 2);
+        assert_eq!(mgr.num_cached_blocks(1), 2);
     }
 
     #[test]

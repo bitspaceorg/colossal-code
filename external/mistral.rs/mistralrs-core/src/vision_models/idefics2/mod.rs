@@ -12,20 +12,21 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::attention::AttentionMask;
 use crate::{
     amoe::{AnyMoeBaseModelMixin, MlpLayer},
-    device_map::DeviceMapper,
     layers::{
         conv2d, embedding, layer_norm, linear, linear_no_bias, repeat_kv, Activation, CausalMasker,
         MatMul, QLinear, RmsNorm,
     },
     models::mistral::Model as Mistral,
     paged_attention::{
-        encoder_cache::EncoderCacheManager, AttentionImplementation, ModelConfigMetadata,
+        encoder_cache::{CacheModality, EncoderCacheManager},
+        AttentionImplementation, ModelConfigMetadata,
     },
     pipeline::{
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, NormalLoadingMetadata, NormalModel, VisionModel,
+        EitherCache, IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata,
+        NormalModel,
     },
     utils::unvarbuilder::UnVarBuilder,
     AnyMoeConfig, AnyMoeExpertType,
@@ -409,7 +410,7 @@ impl Attention {
         })
     }
 
-    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, attention_mask: &AttentionMask) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
 
         let original_dtype = xs.dtype();
@@ -440,7 +441,10 @@ impl Attention {
             (MatMul.matmul(&q.contiguous()?, &k.transpose(2, 3)?.contiguous()?)? * self.scale)?;
 
         let attn_weights = CausalMasker.apply_mask_one_and_zero(
-            &attention_mask.map(|x| x.to_dtype(DType::U8).unwrap()),
+            &match attention_mask {
+                AttentionMask::Custom(t) => Some(t.to_dtype(DType::U8).unwrap()),
+                _ => None,
+            },
             attn_weights,
             &self.neg_inf,
         )?;
@@ -543,7 +547,7 @@ impl EncoderLayer {
         })
     }
 
-    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, attention_mask: &AttentionMask) -> Result<Tensor> {
         let residual = xs.clone();
 
         let hidden_states = self.layer_norm_1.forward(xs)?;
@@ -571,7 +575,7 @@ impl Encoder {
         Ok(Self { layers })
     }
 
-    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, attention_mask: &AttentionMask) -> Result<Tensor> {
         let mut hidden_states = xs.clone();
         for layer in &self.layers {
             hidden_states = layer.forward(&hidden_states, attention_mask)?;
@@ -604,9 +608,9 @@ impl VisionTransformer {
         })
     }
 
-    fn forward(&self, pixel_values: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
+    fn forward(&self, pixel_values: &Tensor, attention_mask: &AttentionMask) -> Result<Tensor> {
         let bs = pixel_values.dim(0)?;
-        let patch_attention_mask = if let Some(attn_mask) = attention_mask {
+        let patch_attention_mask = if let AttentionMask::Custom(attn_mask) = attention_mask {
             attn_mask.clone()
         } else {
             let patch_size = self.config.patch_size;
@@ -625,17 +629,15 @@ impl VisionTransformer {
             .embeddings
             .forward(pixel_values, &patch_attention_mask)?;
 
-        let attention_mask = if attention_mask.is_none() {
-            None
+        let attention_mask2 = if matches!(attention_mask, AttentionMask::None) {
+            AttentionMask::None
         } else {
             let mask = patch_attention_mask
                 .reshape((patch_attention_mask.dim(0)?, ()))?
                 .to_dtype(hidden_states.dtype())?;
-            Some(CausalMasker.expand_mask(&mask, hidden_states.dtype(), None)?)
+            AttentionMask::Custom(CausalMasker.expand_mask(&mask, hidden_states.dtype(), None)?)
         };
-        let hidden_states = self
-            .encoder
-            .forward(&hidden_states, attention_mask.as_ref())?;
+        let hidden_states = self.encoder.forward(&hidden_states, &attention_mask2)?;
         hidden_states.apply(&self.post_layernorm)
     }
 
@@ -1094,17 +1096,13 @@ impl Idefics2 {
         Ok(new_inputs_embeds)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn forward_inner(
         &self,
         input_ids: &Tensor,
         pixel_values: Option<Tensor>,
-        seqlen_offsets: &[usize],
-        context_lens: Vec<(usize, usize)>,
         pixel_attention_mask: Option<Tensor>,
         image_hashes: &[u64],
-        metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
+        ctx: &mut ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         let input_embeds = if let Some(pixel_values) = pixel_values {
             // == START VISUAL INPUTS INTEGRATION ==
@@ -1189,7 +1187,7 @@ impl Idefics2 {
                         .lock()
                         .expect("encoder cache lock poisoned");
                     for (i, &hash) in image_hashes.iter().enumerate() {
-                        if let Some(cached) = guard.get(hash) {
+                        if let Some(cached) = guard.get(CacheModality::Image, hash) {
                             per_image[i] = Some(cached[0].clone());
                         } else {
                             miss_indices.push(i);
@@ -1200,7 +1198,9 @@ impl Idefics2 {
                     for &i in &miss_indices {
                         let pv = pixel_values.get(i)?.unsqueeze(0)?;
                         let mask = patch_attention_mask.get(i)?.unsqueeze(0)?;
-                        let hidden = self.vision_model.forward(&pv, Some(&mask))?;
+                        let hidden = self
+                            .vision_model
+                            .forward(&pv, &AttentionMask::Custom(mask.clone()))?;
                         let hidden = self
                             .connector
                             .forward(&hidden, &mask.reshape((1_usize, ()))?)?;
@@ -1210,7 +1210,11 @@ impl Idefics2 {
                                 .encoder_cache
                                 .lock()
                                 .expect("encoder cache lock poisoned");
-                            guard.insert(image_hashes[i], vec![result.clone()]);
+                            guard.insert(
+                                CacheModality::Image,
+                                image_hashes[i],
+                                vec![result.clone()],
+                            );
                         }
                         per_image[i] = Some(result);
                     }
@@ -1219,9 +1223,10 @@ impl Idefics2 {
                 Tensor::stack(&slices, 0)?
             } else {
                 // No caching: original path
-                let image_hidden_states = self
-                    .vision_model
-                    .forward(&pixel_values, Some(&patch_attention_mask))?;
+                let image_hidden_states = self.vision_model.forward(
+                    &pixel_values,
+                    &AttentionMask::Custom(patch_attention_mask.clone()),
+                )?;
                 self.connector.forward(
                     &image_hidden_states,
                     &patch_attention_mask.reshape((pixel_values.dim(0)?, ()))?,
@@ -1237,30 +1242,11 @@ impl Idefics2 {
             self.text_model.get_input_embeddings(input_ids)?
         };
 
-        self.text_model.forward_embeds(
-            input_ids,
-            input_embeds,
-            seqlen_offsets,
-            context_lens,
-            metadata,
-            flash_params,
-        )
+        self.text_model.forward_embeds(input_ids, input_embeds, ctx)
     }
 }
 
 impl IsqModel for Idefics2 {
-    fn get_layers(
-        &mut self,
-    ) -> (
-        Vec<(
-            &mut std::sync::Arc<dyn mistralrs_quant::QuantMethod>,
-            Option<usize>,
-        )>,
-        &dyn DeviceMapper,
-    ) {
-        self.text_model.get_layers()
-    }
-
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
 
@@ -1310,17 +1296,17 @@ impl AnyMoeBaseModelMixin for Idefics2 {
     }
 }
 
-impl VisionModel for Idefics2 {
+impl crate::speculative::SpeculativeTargetMixin for Idefics2 {}
+
+impl crate::block_diffusion::BlockDiffusionMixin for Idefics2 {}
+
+impl MultimodalModel for Idefics2 {
     fn forward(
         &self,
         input_ids: &Tensor,
         pixel_values: Option<Tensor>,
-        seqlen_offsets: &[usize],
-        context_lens: Vec<(usize, usize)>,
-        _: Vec<usize>, // Ignore, it is for phi3
         model_specific_args: Box<dyn Any>,
-        metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
+        ctx: &mut crate::pipeline::ModelForwardContext<'_>,
     ) -> candle_core::Result<Tensor> {
         let Idefics2SpecificArgs {
             pixel_attention_mask,
@@ -1331,19 +1317,13 @@ impl VisionModel for Idefics2 {
         self.forward_inner(
             input_ids,
             pixel_values,
-            seqlen_offsets,
-            context_lens,
             pixel_attention_mask,
             &image_hashes,
-            metadata,
-            flash_params,
+            ctx,
         )
     }
     fn cache(&self) -> &EitherCache {
         self.text_model.cache()
-    }
-    fn cache_mut(&mut self) -> &mut EitherCache {
-        self.text_model.cache_mut()
     }
     fn device(&self) -> &Device {
         self.text_model.device()

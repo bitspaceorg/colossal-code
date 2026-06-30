@@ -345,7 +345,7 @@ mod tests {
             EngineResponse::CompletionChunk(chunk) => {
                 assert_eq!(chunk.id, "1");
             }
-            other => panic!("unexpected event: {other:?}"),
+            _ => panic!("unexpected event"),
         }
     }
 }

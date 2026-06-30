@@ -1,6 +1,8 @@
 mod amoe;
 mod auto;
 pub mod chat_template;
+#[cfg(feature = "cuda")]
+pub(crate) mod cuda_graph;
 mod diffusion;
 mod embedding;
 mod ggml;
@@ -8,21 +10,24 @@ mod gguf;
 pub(crate) mod hf;
 mod inputs_processor;
 mod isq;
+mod isq_flow;
+pub use isq_flow::CalibrationStatus;
 pub(crate) mod llg;
 mod loaders;
 mod macros;
+mod multimodal;
 mod normal;
 mod paths;
 mod processing;
+mod prompt_chunks;
 mod response;
-mod sampling;
-mod speculative;
+pub(crate) mod sampling;
 mod speech;
-mod vision;
 
 pub use super::diffusion_models::DiffusionGenerationParams;
 use crate::amoe::{AnyMoeConfig, AnyMoeExpertType, AnyMoeTrainingInputs, AnyMoeTrainingResult};
 use crate::device_map::DeviceMapper;
+use crate::layers_masker::PastKvLenCache;
 use crate::paged_attention::{CacheConfig, CacheEngine, ModelConfigLike};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::PagedAttentionConfig;
@@ -30,29 +35,35 @@ pub use amoe::{AnyMoeLoader, AnyMoePipeline};
 pub use auto::{AutoLoader, AutoLoaderBuilder};
 use chat_template::ChatTemplate;
 pub use diffusion::{DiffusionLoader, DiffusionLoaderBuilder};
+pub(crate) use embedding::EmbeddingLoadContext;
 pub use embedding::{EmbeddingLoader, EmbeddingLoaderBuilder, EmbeddingSpecificConfig};
 pub use ggml::{GGMLLoader, GGMLLoaderBuilder, GGMLSpecificConfig};
 pub use gguf::{GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig};
 use image::DynamicImage;
 pub use inputs_processor::InputProcessorOutput;
 pub(crate) use isq::IsqModelLoader;
-pub use isq::{parse_isq_value, IsqModel, IsqOrganization, UQFF_MULTI_FILE_DELIMITER};
+pub use isq::{
+    expand_isq_value, expand_uqff_shards, parse_isq_value, parse_uqff_shard,
+    resolve_uqff_shorthand, IsqModel, IsqOrganization, UqffWriteConfig, UQFF_MULTI_FILE_DELIMITER,
+};
 use llguidance::toktrie::TokEnv;
 pub use loaders::{
-    AdapterKind, AutoDeviceMapParams, AutoEmbeddingLoader, AutoNormalLoader, AutoVisionLoader,
-    DeepSeekV2Loader, DeepSeekV3Loader, DeviceMappedModelLoader, DiffusionLoaderType,
-    DiffusionModel, DiffusionModelLoader, EmbeddingGemmaLoader, EmbeddingLoaderType,
-    EmbeddingModel, EmbeddingModelLoader, EmbeddingModelPaths, EmbeddingModule,
-    EmbeddingModulePaths, EmbeddingModuleType, FluxLoader, GLM4Loader, GLM4MoeLiteLoader,
-    GLM4MoeLoader, Gemma2Loader, Gemma3Loader, Gemma3nLoader, GemmaLoader, GptOssLoader,
-    GraniteMoeHybridLoader, Idefics2Loader, Idefics3Loader, LLaVALoader, LLaVANextLoader,
+    AdapterKind, AutoDeviceMapParams, AutoEmbeddingLoader, AutoMultimodalLoader, AutoNormalLoader,
+    DeepSeekV2Loader, DeepSeekV3Loader, DeviceMappedModelLoader, DiffusionGemmaLoader,
+    DiffusionLoaderType, DiffusionModel, DiffusionModelLoader, EmbeddingGemmaLoader,
+    EmbeddingLoaderType, EmbeddingModel, EmbeddingModelLoader, EmbeddingModelPaths,
+    EmbeddingModule, EmbeddingModulePaths, EmbeddingModuleType, FluxLoader, GLM4Loader,
+    GLM4MoeLiteLoader, GLM4MoeLoader, Gemma2Loader, Gemma3Loader, Gemma3nLoader, Gemma4Loader,
+    GemmaLoader, GptOssLoader, GraniteMoeHybridLoader, HunYuanDenseV1Loader, HunYuanMoEV1Loader,
+    Idefics2Loader, Idefics3Loader, LLaVALoader, LLaVANextLoader, Lfm2Loader, Lfm2VlLoader,
     LlamaLoader, Loader, LocalModelPaths, MiniCpmOLoader, Mistral3Loader, MistralLoader,
-    MixtralLoader, ModelKind, ModelPaths, NormalLoaderType, NormalLoadingMetadata, NormalModel,
-    NormalModelLoader, Phi2Loader, Phi3Loader, Phi3VLoader, Phi3_5MoELoader, Phi4MMLoader,
-    PrettyName, QuantizationKind, Qwen2Loader, Qwen2VLLoader, Qwen2_5VLLoader,
-    Qwen3EmbeddingLoader, Qwen3Loader, Qwen3MoELoader, Qwen3NextLoader, Qwen3VLLoader,
-    Qwen3VLMoELoader, SmolLm3Loader, Starcoder2Loader, TokenSource, VLlama4Loader, VLlamaLoader,
-    VisionLoaderType, VisionModel, VisionModelLoader, VoxtralLoader,
+    MixtralLoader, ModelKind, ModelPaths, MultimodalLoaderType, MultimodalModel,
+    MultimodalModelLoader, NormalLoaderType, NormalLoadingMetadata, NormalModel, NormalModelLoader,
+    Phi2Loader, Phi3Loader, Phi3VLoader, Phi3_5MoELoader, Phi4MMLoader, PrettyName,
+    QuantizationKind, Qwen2Loader, Qwen2VLLoader, Qwen2_5VLLoader, Qwen3EmbeddingLoader,
+    Qwen3Loader, Qwen3MoELoader, Qwen3NextLoader, Qwen3VLLoader, Qwen3VLMoELoader, Qwen3_5Loader,
+    Qwen3_5MoeLoader, SmolLm3Loader, Starcoder2Loader, TokenSource, VLlama4Loader, VLlamaLoader,
+    VoxtralLoader,
 };
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn get_device_layers_for_loader(
@@ -81,6 +92,7 @@ pub(crate) fn get_device_layers_for_loader(
     )
 }
 use mistralrs_quant::IsqType;
+pub use multimodal::{MultimodalLoader, MultimodalLoaderBuilder, MultimodalSpecificConfig};
 pub use normal::{NormalLoader, NormalLoaderBuilder, NormalSpecificConfig};
 pub(crate) use paths::{get_chat_template, get_model_paths, get_xlora_paths};
 pub use paths::{AdapterPaths, LoraAdapterPaths};
@@ -88,34 +100,525 @@ pub(crate) use processing::{
     apply_chat_template, BasicProcessor, MessagesAction, Processor, ProcessorCreator,
 };
 use rand_isaac::Isaac64Rng;
-pub use speculative::{SpeculativeConfig, SpeculativeLoader, SpeculativePipeline};
 pub use speech::{SpeechLoader, SpeechPipeline};
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
 use tokenizers::Tokenizer;
-pub use vision::{VisionLoader, VisionLoaderBuilder, VisionSpecificConfig};
 
 use anyhow::Result;
-use candle_core::{DType, Device, IndexOp, Tensor, Var};
+use candle_core::{DType, Device, DeviceLocation, IndexOp, Tensor, Var};
 
+use crate::paged_attention::block_hash::{compute_block_hashes, MultimodalAttentionPolicy};
 use crate::sequence::Sequence;
+
+use prompt_chunks::build_prompt_chunk_plan;
 
 pub use self::inputs_processor::{
     text_models_inputs_processor, InputsProcessor, InputsProcessorType,
 };
-use self::text_models_inputs_processor::PagedAttentionMeta;
-pub use crate::kv_cache::{
-    Cache, CacheManager, EitherCache, KvCache, LayerCaches, NormalCache, NormalCacheType,
+use self::text_models_inputs_processor::{
+    FlashParams, PagedAttentionInputMetadata, PagedAttentionMeta,
 };
+
+const DEFAULT_PAGED_PREFILL_CHUNK_SIZE: usize = 4096;
+pub use crate::kv_cache::{
+    Cache, CacheManager, EitherCache, HybridLayerCache, KvCache, LayerCaches, NormalCache,
+    NormalCacheType,
+};
+
+pub(crate) type DeviceTensorMap = HashMap<DeviceLocation, Tensor>;
+
+pub(crate) fn metadata_rope_positions<'a>(
+    metadata: &'a PagedAttentionInputMetadata,
+    device: &Device,
+) -> Option<&'a Tensor> {
+    metadata
+        .rope_positions
+        .as_ref()
+        .and_then(|positions| positions.get(&device.location()))
+}
+
+#[allow(dead_code)]
+pub(crate) enum ForwardCache<'a> {
+    Normal(&'a mut [KvCache]),
+    Paged {
+        kv_cache: &'a [(Tensor, Tensor)],
+        metadata: &'a PagedAttentionInputMetadata,
+    },
+    None,
+}
+
+#[allow(dead_code)]
+impl<'a> ForwardCache<'a> {
+    pub(crate) fn from_paged(
+        metadata: Option<(&'a [(Tensor, Tensor)], &'a PagedAttentionInputMetadata)>,
+    ) -> Self {
+        match metadata {
+            Some((kv_cache, metadata)) => Self::Paged { kv_cache, metadata },
+            None => Self::None,
+        }
+    }
+
+    pub(crate) fn paged_metadata(
+        &self,
+    ) -> Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)> {
+        match self {
+            Self::Paged { kv_cache, metadata } => Some((kv_cache.to_vec(), metadata)),
+            Self::Normal(_) | Self::None => None,
+        }
+    }
+
+    pub(crate) fn paged_layer(
+        &self,
+        layer_idx: usize,
+    ) -> Option<((Tensor, Tensor), &PagedAttentionInputMetadata)> {
+        match self {
+            Self::Paged { kv_cache, metadata } => Some((kv_cache[layer_idx].clone(), metadata)),
+            Self::Normal(_) | Self::None => None,
+        }
+    }
+
+    pub(crate) fn rope_positions(&self, device: &Device) -> Option<&Tensor> {
+        match self {
+            Self::Paged { metadata, .. } => metadata_rope_positions(metadata, device),
+            Self::Normal(_) | Self::None => None,
+        }
+    }
+
+    pub(crate) fn is_final_prompt_chunk(&self) -> bool {
+        match self {
+            Self::Paged { metadata, .. } => metadata.is_final_prompt_chunk,
+            Self::Normal(_) | Self::None => true,
+        }
+    }
+
+    pub(crate) fn is_first_prompt_chunk(&self) -> bool {
+        match self {
+            Self::Paged { metadata, .. } => metadata.is_first_prompt_chunk,
+            Self::Normal(_) | Self::None => true,
+        }
+    }
+
+    pub(crate) fn normal_mut(&mut self) -> Option<&mut [KvCache]> {
+        match self {
+            Self::Normal(cache) => Some(cache),
+            Self::Paged { .. } | Self::None => None,
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) enum ForwardPositions<'a> {
+    Text { seqlen_offsets: &'a [usize] },
+    Mrope { position_ids: &'a Tensor },
+    None,
+}
+
+pub(crate) enum ForwardMaskCache<'a> {
+    Normal(&'a [KvCache]),
+    Paged(&'a [usize]),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecurrentBatchKind {
+    Prefill,
+    Decode,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RecurrentMetadata {
+    batch_kind: RecurrentBatchKind,
+    state_indices: Tensor,
+    state_indices_host: Option<Vec<u32>>,
+}
+
+impl RecurrentMetadata {
+    pub(crate) fn new(
+        batch_kind: RecurrentBatchKind,
+        state_indices: Tensor,
+        state_indices_host: Option<Vec<u32>>,
+    ) -> Self {
+        Self {
+            batch_kind,
+            state_indices,
+            state_indices_host,
+        }
+    }
+
+    pub(crate) fn batch_kind(&self) -> RecurrentBatchKind {
+        self.batch_kind
+    }
+
+    pub(crate) fn state_indices(&self) -> &Tensor {
+        &self.state_indices
+    }
+
+    pub(crate) fn state_indices_host(&self) -> Option<&[u32]> {
+        self.state_indices_host.as_deref()
+    }
+}
+
+impl PastKvLenCache for ForwardMaskCache<'_> {
+    fn get_past_kv_len(&self) -> candle_core::Result<usize> {
+        match self {
+            Self::Normal(cache) => Ok(cache
+                .iter()
+                .map(KvCache::current_seq_len)
+                .max()
+                .unwrap_or(0)),
+            Self::Paged(offsets) => offsets.get_past_kv_len(),
+        }
+    }
+}
+
+pub(crate) struct ModelForwardContext<'a> {
+    cache: ForwardCache<'a>,
+    positions: ForwardPositions<'a>,
+    rope_positions: HashMap<(DeviceLocation, usize), Tensor>,
+    context_lens: &'a [(usize, usize)],
+    position_ids: &'a [usize],
+    flash_params: &'a FlashParams,
+    recurrent_metadata: Option<RecurrentMetadata>,
+    recurrent_batch_kind: Option<RecurrentBatchKind>,
+    requires_full_prefill_queries: bool,
+}
+
+#[allow(dead_code)]
+impl<'a> ModelForwardContext<'a> {
+    pub(crate) fn new(
+        seqlen_offsets: &'a [usize],
+        context_lens: &'a [(usize, usize)],
+        position_ids: &'a [usize],
+        metadata: Option<(&'a [(Tensor, Tensor)], &'a PagedAttentionInputMetadata)>,
+        flash_params: &'a FlashParams,
+    ) -> Self {
+        Self {
+            cache: ForwardCache::from_paged(metadata),
+            positions: ForwardPositions::Text { seqlen_offsets },
+            rope_positions: HashMap::new(),
+            context_lens,
+            position_ids,
+            flash_params,
+            recurrent_metadata: None,
+            recurrent_batch_kind: None,
+            requires_full_prefill_queries: false,
+        }
+    }
+
+    pub(crate) fn with_cache(
+        cache: ForwardCache<'a>,
+        seqlen_offsets: &'a [usize],
+        context_lens: &'a [(usize, usize)],
+        position_ids: &'a [usize],
+        flash_params: &'a FlashParams,
+    ) -> Self {
+        Self {
+            cache,
+            positions: ForwardPositions::Text { seqlen_offsets },
+            rope_positions: HashMap::new(),
+            context_lens,
+            position_ids,
+            flash_params,
+            recurrent_metadata: None,
+            recurrent_batch_kind: None,
+            requires_full_prefill_queries: false,
+        }
+    }
+
+    pub(crate) fn with_recurrent_batch_kind(
+        mut self,
+        recurrent_batch_kind: RecurrentBatchKind,
+    ) -> Self {
+        self.recurrent_batch_kind = Some(recurrent_batch_kind);
+        self
+    }
+
+    pub(crate) fn with_recurrent_metadata(
+        mut self,
+        recurrent_metadata: Option<RecurrentMetadata>,
+    ) -> Self {
+        if let Some(metadata) = recurrent_metadata.as_ref() {
+            self.recurrent_batch_kind = Some(metadata.batch_kind());
+        }
+        self.recurrent_metadata = recurrent_metadata;
+        self
+    }
+
+    pub(crate) fn require_full_prefill_queries(&mut self) {
+        self.requires_full_prefill_queries = true;
+    }
+
+    pub(crate) fn requires_full_prefill_queries(&self) -> bool {
+        self.requires_full_prefill_queries
+    }
+
+    pub(crate) fn cache(&self) -> &ForwardCache<'a> {
+        &self.cache
+    }
+
+    pub(crate) fn cache_mut(&mut self) -> &mut ForwardCache<'a> {
+        &mut self.cache
+    }
+
+    pub(crate) fn is_paged(&self) -> bool {
+        matches!(self.cache, ForwardCache::Paged { .. })
+    }
+
+    pub(crate) fn seqlen_offsets(&self) -> &[usize] {
+        match self.positions {
+            ForwardPositions::Text { seqlen_offsets } => seqlen_offsets,
+            ForwardPositions::Mrope { .. } | ForwardPositions::None => &[],
+        }
+    }
+
+    pub(crate) fn context_lens(&self) -> &[(usize, usize)] {
+        self.context_lens
+    }
+
+    pub(crate) fn context_lens_vec(&self) -> Vec<(usize, usize)> {
+        self.context_lens.to_vec()
+    }
+
+    pub(crate) fn position_ids(&self) -> &[usize] {
+        self.position_ids
+    }
+
+    pub(crate) fn position_ids_vec(&self) -> Vec<usize> {
+        self.position_ids.to_vec()
+    }
+
+    pub(crate) fn flash_params(&self) -> &FlashParams {
+        self.flash_params
+    }
+
+    pub(crate) fn recurrent_metadata(&self) -> Option<&RecurrentMetadata> {
+        self.recurrent_metadata.as_ref()
+    }
+
+    pub(crate) fn recurrent_batch_kind(&self) -> Option<RecurrentBatchKind> {
+        self.recurrent_batch_kind
+    }
+
+    pub(crate) fn prompt_chunk_attention_policy(&self) -> MultimodalAttentionPolicy {
+        self.paged_input_metadata()
+            .map_or(MultimodalAttentionPolicy::Causal, |metadata| {
+                metadata.prompt_chunk_attention_policy
+            })
+    }
+
+    pub(crate) fn paged_metadata(
+        &self,
+    ) -> Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)> {
+        self.cache.paged_metadata()
+    }
+
+    pub(crate) fn paged_input_metadata(&self) -> Option<&PagedAttentionInputMetadata> {
+        match &self.cache {
+            ForwardCache::Paged { metadata, .. } => Some(*metadata),
+            ForwardCache::Normal(_) | ForwardCache::None => None,
+        }
+    }
+
+    pub(crate) fn paged_layer(
+        &self,
+        layer_idx: usize,
+    ) -> Option<((Tensor, Tensor), &PagedAttentionInputMetadata)> {
+        self.cache.paged_layer(layer_idx)
+    }
+
+    pub(crate) fn text_positions(
+        &mut self,
+        device: &Device,
+        seq_len: usize,
+    ) -> candle_core::Result<Option<&Tensor>> {
+        if self.cache.rope_positions(device).is_some() {
+            return Ok(self.cache.rope_positions(device));
+        }
+        let ForwardPositions::Text { seqlen_offsets } = self.positions else {
+            return Ok(None);
+        };
+        let location = device.location();
+        let key = (location, seq_len);
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.rope_positions.entry(key) {
+            entry.insert(text_positions_tensor(seqlen_offsets, seq_len, device)?);
+        }
+        Ok(self.rope_positions.get(&key))
+    }
+
+    pub(crate) fn text_positions_from_offsets(
+        &self,
+        seqlen_offsets: &[usize],
+        seq_len: usize,
+        device: &Device,
+    ) -> candle_core::Result<Tensor> {
+        text_positions_tensor(seqlen_offsets, seq_len, device)
+    }
+
+    pub(crate) fn is_first_prompt_chunk(&self) -> bool {
+        self.cache.is_first_prompt_chunk()
+    }
+
+    pub(crate) fn is_final_prompt_chunk(&self) -> bool {
+        self.cache.is_final_prompt_chunk()
+    }
+
+    pub(crate) fn mask_cache<'b>(&'b self, normal_cache: &'b [KvCache]) -> ForwardMaskCache<'b> {
+        match self.cache {
+            ForwardCache::Paged { .. } => ForwardMaskCache::Paged(self.seqlen_offsets()),
+            ForwardCache::Normal(_) | ForwardCache::None => ForwardMaskCache::Normal(normal_cache),
+        }
+    }
+
+    pub(crate) fn logits(&self, logits: &Tensor) -> candle_core::Result<Tensor> {
+        LogitsSelection::from_context_lens(logits, self.context_lens, &[logits.device().clone()])?
+            .select(logits)
+    }
+}
+
+pub(crate) fn text_positions_tensor(
+    seqlen_offsets: &[usize],
+    seq_len: usize,
+    device: &Device,
+) -> candle_core::Result<Tensor> {
+    let mut positions = Vec::with_capacity(seqlen_offsets.len() * seq_len);
+    for offset in seqlen_offsets {
+        for seq_idx in 0..seq_len {
+            positions.push(u32::try_from(offset + seq_idx).map_err(candle_core::Error::wrap)?);
+        }
+    }
+    Tensor::from_vec(positions, (seqlen_offsets.len() * seq_len,), device)
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum LogitsSelection {
+    Decode {
+        start: usize,
+        len: usize,
+    },
+    Indices {
+        indices: DeviceTensorMap,
+        batch: usize,
+        len: usize,
+    },
+    All,
+}
+
+impl LogitsSelection {
+    pub(crate) fn from_context_lens(
+        source: &Tensor,
+        context_lens: &[(usize, usize)],
+        devices: &[Device],
+    ) -> candle_core::Result<Self> {
+        let dims = source.dims();
+        if dims.len() < 2 {
+            candle_core::bail!("logits selection source must have rank >= 2");
+        }
+        let batch = dims[0];
+        let seq_len = dims[1];
+        if context_lens.len() != batch {
+            candle_core::bail!(
+                "logits selection batch mismatch: {} spans for batch {batch}",
+                context_lens.len()
+            );
+        }
+        let Some((first_start, first_len)) = context_lens.first().copied() else {
+            candle_core::bail!("logits selection requires at least one span");
+        };
+        for (start, len) in context_lens.iter().copied() {
+            let end = start
+                .checked_add(len)
+                .ok_or_else(|| candle_core::Error::msg("logits selection span overflow"))?;
+            if end > seq_len {
+                candle_core::bail!(
+                    "logits selection span ({start}, {len}) exceeds sequence length {seq_len}"
+                );
+            }
+        }
+        if context_lens.iter().all(|span| *span == (0, seq_len)) {
+            return Ok(Self::All);
+        }
+        if context_lens
+            .iter()
+            .all(|span| *span == (first_start, first_len))
+        {
+            return Ok(Self::Decode {
+                start: first_start,
+                len: first_len,
+            });
+        }
+
+        if context_lens.iter().any(|(_, len)| *len != first_len) {
+            candle_core::bail!("ragged logits selection spans are not supported");
+        }
+
+        let mut flat_indices = Vec::with_capacity(batch * first_len);
+        for (batch_idx, (start, len)) in context_lens.iter().copied().enumerate() {
+            let end = start + len;
+            for pos in start..end {
+                let idx = batch_idx
+                    .checked_mul(seq_len)
+                    .and_then(|idx| idx.checked_add(pos))
+                    .ok_or_else(|| candle_core::Error::msg("logits selection index overflow"))?;
+                flat_indices.push(u32::try_from(idx).map_err(candle_core::Error::wrap)?);
+            }
+        }
+
+        let cpu_indices = Tensor::from_vec(flat_indices, (batch * first_len,), &Device::Cpu)?;
+        let mut indices = HashMap::new();
+        for device in devices {
+            indices.insert(device.location(), cpu_indices.to_device(device)?);
+        }
+        Ok(Self::Indices {
+            indices,
+            batch,
+            len: first_len,
+        })
+    }
+
+    pub(crate) fn select(&self, logits: &Tensor) -> candle_core::Result<Tensor> {
+        match self {
+            Self::All => Ok(logits.clone()),
+            Self::Decode { start, len } => {
+                let seq_len = logits.dim(1)?;
+                if *start == 0 && *len == seq_len {
+                    Ok(logits.clone())
+                } else {
+                    logits.narrow(1, *start, *len)
+                }
+            }
+            Self::Indices {
+                indices,
+                batch,
+                len,
+            } => {
+                let (logits_batch, seq_len, hidden) = logits.dims3()?;
+                if logits_batch != *batch {
+                    candle_core::bail!(
+                        "logits selection batch mismatch: logits batch {logits_batch}, selection batch {batch}"
+                    );
+                }
+                let indices = indices
+                    .get(&logits.device().location())
+                    .ok_or_else(|| candle_core::Error::msg("missing logits selection indices"))?;
+                let flat = logits.reshape((logits_batch * seq_len, hidden))?;
+                flat.index_select(indices, 0)?
+                    .reshape((*batch, *len, hidden))
+            }
+        }
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum SupportedModality {
     Text,
     Audio,
     Vision,
+    Video,
     Embedding,
 }
 
@@ -125,6 +628,7 @@ impl Debug for SupportedModality {
             Self::Text => write!(f, "📝 Text"),
             Self::Audio => write!(f, "🔊 Audio"),
             Self::Vision => write!(f, "🖼️ Vision"),
+            Self::Video => write!(f, "🎬 Video"),
             Self::Embedding => write!(f, "🔢 Embedding"),
         }
     }
@@ -162,6 +666,7 @@ impl GeneralMetadata {
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum CacheInstruction {
     In,
     Out,
@@ -184,6 +689,23 @@ pub trait PreProcessingMixin: MetadataMixin {
 
 pub trait IsqPipelineMixin {
     fn re_isq_model(&mut self, dtype: IsqType) -> Result<()>;
+
+    /// Start collecting activation statistics from live traffic on every ISQ-tracked layer.
+    fn begin_calibration(&mut self) -> Result<()> {
+        anyhow::bail!("This pipeline does not support online calibration.")
+    }
+
+    fn calibration_status(&self) -> Result<isq_flow::CalibrationStatus> {
+        anyhow::bail!("This pipeline does not support online calibration.")
+    }
+
+    /// Requantize with the collected statistics and swap the layers into the live model.
+    fn apply_calibration(
+        &mut self,
+        _save_cimatrix: Option<std::path::PathBuf>,
+    ) -> Result<isq_flow::CalibrationStatus> {
+        anyhow::bail!("This pipeline does not support online calibration.")
+    }
 }
 
 pub trait CacheManagerMixin {
@@ -204,9 +726,6 @@ pub trait CacheManagerMixin {
         load_preallocated_cache: bool,
     );
     fn cache(&self) -> &EitherCache;
-    fn do_preallocated_cache(&self) -> bool {
-        matches!(self.cache(), EitherCache::Normal(_))
-    }
 }
 
 pub trait MetadataMixin {
@@ -215,7 +734,12 @@ pub trait MetadataMixin {
     fn tokenizer(&self) -> Option<Arc<Tokenizer>>;
     fn name(&self) -> String;
     fn reset_non_granular_state(&self);
+    /// Destroy decode graphs at teardown, while the engine thread's cuTile modules are still loaded.
+    fn cleanup_cuda_graphs(&self) {}
     fn get_metadata(&self) -> Arc<GeneralMetadata>;
+    fn generation_defaults(&self) -> Option<crate::ModelGenerationDefaults> {
+        None
+    }
     fn device_mapper(&self) -> Option<&dyn DeviceMapper>;
 }
 
@@ -274,11 +798,11 @@ pub trait AnyMoePipelineMixin {
 }
 
 /// Category of the model. This can also be used to extract model-category specific tools,
-/// such as the vision model prompt prefixer.
+/// such as the multimodal model prompt prefixer.
 #[derive(Clone)]
 pub enum ModelCategory {
     Text,
-    Vision {
+    Multimodal {
         prefixer: Arc<dyn MultimodalPromptPrefixer>,
     },
     Diffusion,
@@ -291,7 +815,9 @@ impl std::fmt::Debug for ModelCategory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ModelCategory::Text => write!(f, "ModelCategory::Text"),
-            ModelCategory::Vision { .. } => write!(f, "ModelCategory::Vision {{ prefixer: .. }}"),
+            ModelCategory::Multimodal { .. } => {
+                write!(f, "ModelCategory::Multimodal {{ prefixer: .. }}")
+            }
             ModelCategory::Diffusion => write!(f, "ModelCategory::Diffusion"),
             ModelCategory::Audio => write!(f, "ModelCategory::Audio"),
             ModelCategory::Speech => write!(f, "ModelCategory::Speech"),
@@ -304,14 +830,14 @@ impl PartialEq for ModelCategory {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Text, Self::Text) => true,
-            (Self::Vision { .. }, Self::Vision { .. }) => true,
+            (Self::Multimodal { .. }, Self::Multimodal { .. }) => true,
             (Self::Audio, Self::Audio) => true,
             (Self::Speech, Self::Speech) => true,
             (Self::Diffusion, Self::Diffusion) => true,
             (Self::Embedding, Self::Embedding) => true,
             (
                 Self::Text
-                | Self::Vision { .. }
+                | Self::Multimodal { .. }
                 | Self::Diffusion
                 | Self::Audio
                 | Self::Speech
@@ -332,8 +858,13 @@ pub trait MultimodalPromptPrefixer: Send + Sync {
     fn prefix_audio(&self, _audio_indexes: Vec<usize>, prompt: &str) -> String {
         prompt.to_string()
     }
+    /// Prefix for inclusion in messages (may do nothing if the chat template handles it).
+    fn prefix_video(&self, _video_indexes: Vec<usize>, prompt: &str) -> String {
+        prompt.to_string()
+    }
 }
 
+#[derive(Clone)]
 pub enum CacheBackendMetadata {
     DefaultInstructions {
         pre_op: CacheInstruction,
@@ -363,6 +894,10 @@ pub enum ForwardInputsResult {
         rates: Vec<usize>,
         channels: Vec<usize>,
     },
+    BlockGeneration {
+        token_blocks: Vec<Vec<u32>>,
+        denoise_time: std::time::Duration,
+    },
 }
 
 impl ForwardInputsResult {
@@ -389,6 +924,13 @@ impl ForwardInputsResult {
                 rates: vec![rates[bs_idx]],
                 channels: vec![channels[bs_idx]],
             }),
+            Self::BlockGeneration {
+                token_blocks,
+                denoise_time,
+            } => Ok(Self::BlockGeneration {
+                token_blocks: vec![token_blocks[bs_idx].clone()],
+                denoise_time: *denoise_time,
+            }),
         }
     }
 
@@ -405,13 +947,9 @@ impl ForwardInputsResult {
             }),
             Self::Image { .. } => Ok(self.clone()),
             Self::Speech { .. } => Ok(self.clone()),
+            Self::BlockGeneration { .. } => Ok(self.clone()),
         }
     }
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct FileListCache {
-    files: Vec<String>,
 }
 
 #[async_trait::async_trait]
@@ -430,6 +968,69 @@ pub trait Pipeline:
         return_raw_logits: bool,
     ) -> Result<ForwardInputsResult, candle_core::Error>;
 
+    fn attach_speculative(
+        &mut self,
+        _config: crate::speculative::SpeculativeConfig,
+    ) -> Result<(), candle_core::Error> {
+        candle_core::bail!("This pipeline does not support speculative decoding attachment.")
+    }
+
+    /// Append pre-sampled token blocks (block-diffusion canvases) to the sequences via the
+    /// standard per-token finalize path. Overridden by pipelines whose models emit
+    /// `ForwardInputsResult::BlockGeneration`.
+    async fn sample_block_gen(
+        &self,
+        _input_seqs: &mut [&mut Sequence],
+        _token_blocks: Vec<Vec<u32>>,
+        _denoise_times: Vec<std::time::Duration>,
+        _prefix_cacher: &mut PrefixCacheManagerV2,
+        _disable_eos_stop: bool,
+    ) -> Result<(), candle_core::Error> {
+        candle_core::bail!("This pipeline does not support block generation.")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn try_sample_speculative_causal_gen(
+        &mut self,
+        _input_seqs: &mut [&mut Sequence],
+        _logits: &[Tensor],
+        _prefix_cacher: &mut PrefixCacheManagerV2,
+        _disable_eos_stop: bool,
+        _rng: Arc<std::sync::Mutex<Isaac64Rng>>,
+        _metadata: Option<PagedAttentionMeta>,
+    ) -> Result<bool, candle_core::Error> {
+        Ok(false)
+    }
+
+    fn snapshot_paged_recurrent_prefix(
+        &mut self,
+        seq: &Sequence,
+        prefix_cacher: &mut PrefixCacheManagerV2,
+        block_size: usize,
+        cached_tokens: usize,
+    ) -> Result<(), candle_core::Error> {
+        if cached_tokens == 0
+            || !cached_tokens.is_multiple_of(block_size)
+            || !self.cache().is_hybrid()
+        {
+            return Ok(());
+        }
+        let Some(slot_idx) = seq.recurrent_state_idx() else {
+            return Ok(());
+        };
+
+        let snapshots = self.cache().hybrid().snapshot_recurrent_state(slot_idx)?;
+        if snapshots.is_empty() {
+            return Ok(());
+        }
+        let block_hashes = compute_block_hashes(seq.get_toks(), block_size, seq.mm_features(), &[]);
+        let n_blocks = cached_tokens / block_size;
+        if block_hashes.len() >= n_blocks {
+            prefix_cacher.add_paged_recurrent_prefix(block_hashes[..n_blocks].to_vec(), snapshots);
+        }
+        Ok(())
+    }
+
     /// Returns the total of model execution time.
     #[allow(clippy::too_many_arguments)]
     async fn step(
@@ -444,6 +1045,10 @@ pub trait Pipeline:
     ) -> Result<Duration, candle_core::Error> {
         match backend_metadata {
             CacheBackendMetadata::DefaultInstructions { pre_op, post_op } => {
+                if !is_prompt && !return_raw_logits {
+                    crate::speculative::driver::clear_staged_speculative_tokens(input_seqs);
+                }
+
                 let inputs_iter =
                     std::iter::once(self.get_processor().inputs_processor().process_inputs(
                         self.tokenizer(),
@@ -454,6 +1059,7 @@ pub trait Pipeline:
                         self.get_metadata().no_kv_cache,
                         None,
                         return_raw_logits,
+                        self.get_metadata().sliding_window,
                         self.get_input_processor_config(),
                         None,
                         self.device_mapper(),
@@ -562,7 +1168,7 @@ pub trait Pipeline:
                 let logits = logits
                     .into_iter()
                     .map(|l| {
-                        let l = l.expect("Did not get any inputs. This is shocking.");
+                        let l = l.expect("missing forward result");
                         if logits_on_cpu {
                             l.to_device(&Device::Cpu)
                         } else {
@@ -575,26 +1181,41 @@ pub trait Pipeline:
                     ForwardInputsResult::RawLogits { .. }
                     | ForwardInputsResult::Embeddings { .. } => unreachable!(),
                     ForwardInputsResult::CausalGeneration { .. } => {
-                        self.sample_causal_gen(
-                            input_seqs,
-                            logits
-                                .into_iter()
-                                .map(|r| {
-                                    #[allow(irrefutable_let_patterns)]
-                                    let ForwardInputsResult::CausalGeneration { logits } = r
-                                    else {
-                                        unreachable!(
-                                            "All results must have same type, `CausalGeneration`"
-                                        )
-                                    };
-                                    logits
-                                })
-                                .collect::<Vec<_>>(),
-                            prefix_cacher,
-                            disable_eos_stop,
-                            rng,
-                        )
-                        .await?;
+                        let logits = logits
+                            .into_iter()
+                            .map(|r| {
+                                #[allow(irrefutable_let_patterns)]
+                                let ForwardInputsResult::CausalGeneration { logits } = r
+                                else {
+                                    unreachable!(
+                                        "All results must have same type, `CausalGeneration`"
+                                    )
+                                };
+                                logits
+                            })
+                            .collect::<Vec<_>>();
+                        if is_prompt
+                            || return_raw_logits
+                            || !self
+                                .try_sample_speculative_causal_gen(
+                                    input_seqs,
+                                    &logits,
+                                    prefix_cacher,
+                                    disable_eos_stop,
+                                    rng.clone(),
+                                    None,
+                                )
+                                .await?
+                        {
+                            self.sample_causal_gen(
+                                input_seqs,
+                                logits,
+                                prefix_cacher,
+                                disable_eos_stop,
+                                rng,
+                            )
+                            .await?;
+                        }
                     }
                     ForwardInputsResult::Image { .. } => {
                         response::send_image_responses(
@@ -660,57 +1281,274 @@ pub trait Pipeline:
                         response::send_speech_responses(input_seqs, &pcms, &rates, &channels)
                             .await?;
                     }
+                    ForwardInputsResult::BlockGeneration { .. } => {
+                        let mut denoise_times = Vec::with_capacity(logits.len());
+                        let token_blocks = logits
+                            .into_iter()
+                            .map(|r| {
+                                #[allow(irrefutable_let_patterns)]
+                                let ForwardInputsResult::BlockGeneration {
+                                    token_blocks,
+                                    denoise_time,
+                                } = r
+                                else {
+                                    unreachable!(
+                                        "All results must have same type, `BlockGeneration`"
+                                    )
+                                };
+                                denoise_times.push(denoise_time);
+                                token_blocks
+                                    .into_iter()
+                                    .next()
+                                    .expect("Must have at least 1 element.")
+                            })
+                            .collect::<Vec<_>>();
+                        self.sample_block_gen(
+                            input_seqs,
+                            token_blocks,
+                            denoise_times,
+                            prefix_cacher,
+                            disable_eos_stop,
+                        )
+                        .await?;
+                    }
                 }
                 let end = Instant::now();
                 exec_duration += end.duration_since(start);
 
                 Ok(exec_duration)
             }
-            CacheBackendMetadata::PagedAttention { metadata } => {
-                let inputs_iter =
-                    std::iter::once(self.get_processor().inputs_processor().process_inputs(
-                        self.tokenizer(),
-                        input_seqs,
-                        is_prompt,
-                        self.get_metadata().is_xlora,
-                        &self.device(),
-                        self.get_metadata().no_kv_cache,
-                        None,
-                        return_raw_logits,
-                        self.get_input_processor_config(),
-                        Some(metadata),
-                        self.device_mapper(),
-                    ));
-
-                let mut logits = vec![None; input_seqs.len()];
-                let len_inputs = 1;
-                let mut raw_out_logits = vec![vec![None; len_inputs]; input_seqs.len()];
-                let mut embedding_logits = vec![None; input_seqs.len()];
-
-                let mut exec_duration = Duration::ZERO;
-                for (i, inputs) in inputs_iter.into_iter().enumerate() {
-                    let InputProcessorOutput {
-                        inputs,
-                        seq_indices,
-                    } = inputs.map_err(candle_core::Error::msg)?;
-
-                    let start = Instant::now();
-                    let raw_logits = self.forward_inputs(inputs, return_raw_logits)?;
-                    let end = Instant::now();
-                    exec_duration += end.duration_since(start);
-
-                    for (logit_idx, seq_idx) in seq_indices.into_iter().enumerate() {
-                        if let ForwardInputsResult::RawLogits { logits } = &raw_logits {
-                            raw_out_logits[seq_idx][i] =
-                                Some(logits.i(logit_idx)?.to_device(&Device::Cpu)?);
-                        } else if let ForwardInputsResult::Embeddings { embeddings } = &raw_logits {
-                            embedding_logits[seq_idx] =
-                                Some(embeddings.i(logit_idx)?.to_device(&Device::Cpu)?);
+            CacheBackendMetadata::PagedAttention { mut metadata } => {
+                let block_size = metadata.block_size;
+                let speculative_metadata = metadata.clone();
+                // For hybrid models, build state_indices tensor from sequences'
+                // recurrent_state_idx so recurrent layers are active during forward.
+                // Paged attention manages KV caches separately, but recurrent state
+                // pool access still needs the indices tensor to be set.
+                if self.cache().is_hybrid() {
+                    let mut hybrid_cache = self.cache().hybrid();
+                    let recurrent_device = hybrid_cache.caches.iter().find_map(|c| {
+                        if let HybridLayerCache::Recurrent(pool) = c {
+                            Some(pool.device().clone())
                         } else {
-                            logits[seq_idx] = Some(raw_logits.index_bs(logit_idx)?);
+                            None
+                        }
+                    });
+                    if let Some(device) = recurrent_device {
+                        #[allow(clippy::cast_possible_truncation)]
+                        let indices: Vec<u32> = input_seqs
+                            .iter()
+                            .filter_map(|seq| seq.recurrent_state_idx().map(|idx| idx as u32))
+                            .collect();
+                        if indices.len() == input_seqs.len() {
+                            if let Ok(si) =
+                                Tensor::from_vec(indices.clone(), (input_seqs.len(),), &device)
+                            {
+                                hybrid_cache.set_state_indices_with_host(Some(si), Some(indices));
+                            }
                         }
                     }
                 }
+
+                let chunk_size = if is_prompt
+                    && !return_raw_logits
+                    && !self.get_metadata().is_xlora
+                    && self.device().is_cuda()
+                {
+                    Some(DEFAULT_PAGED_PREFILL_CHUNK_SIZE)
+                } else {
+                    None
+                };
+                if chunk_size.is_some() {
+                    self.get_processor()
+                        .inputs_processor()
+                        .prepare_for_paged_prompt_planning(
+                            self.tokenizer(),
+                            input_seqs,
+                            &self.device(),
+                            self.get_input_processor_config(),
+                            Some(&mut metadata),
+                        )
+                        .map_err(|e| candle_core::Error::msg(e.to_string()))?;
+                    for seq in input_seqs.iter_mut() {
+                        seq.clip_prefix_cache_len_for_non_causal_mm_features(metadata.block_size);
+                    }
+                }
+                let has_deferred_multimodal_prompt = input_seqs.iter().any(|seq| {
+                    (seq.has_images() || seq.has_audios() || seq.has_videos())
+                        && seq.mm_features().is_empty()
+                });
+                let chunk_plans = (!has_deferred_multimodal_prompt)
+                    .then(|| {
+                        chunk_size.map(|chunk_size| {
+                            input_seqs
+                                .iter()
+                                .map(|seq| {
+                                    build_prompt_chunk_plan(
+                                        seq.get_toks().len(),
+                                        seq.prefix_cache_len(),
+                                        chunk_size,
+                                        seq.mm_features(),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .flatten();
+                let should_chunk = chunk_plans
+                    .as_ref()
+                    .is_some_and(|plans| plans.iter().any(|plan| plan.len() > 1));
+                let (logits, raw_out_logits, embedding_logits, mut exec_duration) = {
+                    let inputs_iter = if let (Some(chunk_plans), true) = (chunk_plans, should_chunk)
+                    {
+                        let originals = input_seqs
+                            .iter()
+                            .map(|seq| (seq.get_toks().to_vec(), seq.prefix_cache_len()))
+                            .collect::<Vec<_>>();
+                        let mut plan_indices = vec![0usize; chunk_plans.len()];
+                        let mut inputs = Vec::new();
+                        while plan_indices
+                            .iter()
+                            .zip(chunk_plans.iter())
+                            .any(|(plan_idx, plan)| *plan_idx < plan.len())
+                        {
+                            let attention_policy = plan_indices
+                                .iter()
+                                .zip(chunk_plans.iter())
+                                .find_map(|(plan_idx, plan)| plan.get(*plan_idx))
+                                .expect("at least one chunk plan is active")
+                                .attention_policy;
+                            let active_indices = plan_indices
+                                .iter()
+                                .zip(chunk_plans.iter())
+                                .enumerate()
+                                .filter_map(|(idx, (plan_idx, plan))| {
+                                    plan.get(*plan_idx)
+                                        .filter(|chunk| chunk.attention_policy == attention_policy)
+                                        .map(|_| idx)
+                                })
+                                .collect::<Vec<_>>();
+
+                            let mut recurrent_boundaries = Vec::new();
+                            for &seq_idx in &active_indices {
+                                let chunk = chunk_plans[seq_idx][plan_indices[seq_idx]];
+                                let seq = &mut input_seqs[seq_idx];
+                                seq.set_prefix_cache_len(chunk.start);
+                                seq.set_prefill_toks(originals[seq_idx].0[..chunk.end].to_vec());
+                                if chunk.end % block_size == 0 {
+                                    recurrent_boundaries.push((seq_idx, chunk.end));
+                                }
+                            }
+
+                            let mut chunk_metadata = metadata.clone();
+                            chunk_metadata.prompt_chunk_attention_policy = attention_policy;
+                            chunk_metadata.is_final_prompt_chunk = active_indices
+                                .iter()
+                                .all(|&idx| plan_indices[idx] + 1 == chunk_plans[idx].len());
+                            let mut active_input_seqs = input_seqs
+                                .iter_mut()
+                                .enumerate()
+                                .filter_map(|(idx, seq)| {
+                                    active_indices.contains(&idx).then_some(&mut **seq)
+                                })
+                                .collect::<Vec<_>>();
+                            chunk_metadata.set_noncausal_mm_context(active_input_seqs.as_slice());
+                            let mut processed =
+                                self.get_processor().inputs_processor().process_inputs(
+                                    self.tokenizer(),
+                                    active_input_seqs.as_mut_slice(),
+                                    is_prompt,
+                                    self.get_metadata().is_xlora,
+                                    &self.device(),
+                                    self.get_metadata().no_kv_cache,
+                                    None,
+                                    return_raw_logits,
+                                    self.get_metadata().sliding_window,
+                                    self.get_input_processor_config(),
+                                    Some(chunk_metadata),
+                                    self.device_mapper(),
+                                );
+                            drop(active_input_seqs);
+                            if let Ok(processed) = &mut processed {
+                                for seq_idx in &mut processed.seq_indices {
+                                    *seq_idx = active_indices[*seq_idx];
+                                }
+                            }
+                            inputs.push((processed, recurrent_boundaries));
+                            for &seq_idx in &active_indices {
+                                plan_indices[seq_idx] += 1;
+                            }
+                        }
+                        for (seq, (tokens, prefix_len)) in
+                            input_seqs.iter_mut().zip(originals.iter())
+                        {
+                            seq.set_prefix_cache_len(*prefix_len);
+                            seq.set_prefill_toks(tokens.clone());
+                        }
+                        inputs
+                    } else {
+                        metadata.set_noncausal_mm_context(input_seqs);
+                        vec![(
+                            self.get_processor().inputs_processor().process_inputs(
+                                self.tokenizer(),
+                                input_seqs,
+                                is_prompt,
+                                self.get_metadata().is_xlora,
+                                &self.device(),
+                                self.get_metadata().no_kv_cache,
+                                None,
+                                return_raw_logits,
+                                self.get_metadata().sliding_window,
+                                self.get_input_processor_config(),
+                                Some(metadata),
+                                self.device_mapper(),
+                            ),
+                            Vec::new(),
+                        )]
+                    };
+
+                    let mut logits = vec![None; input_seqs.len()];
+                    let len_inputs = inputs_iter.len();
+                    let mut raw_out_logits = vec![vec![None; len_inputs]; input_seqs.len()];
+                    let mut embedding_logits = vec![None; input_seqs.len()];
+
+                    let mut exec_duration = Duration::ZERO;
+                    for (i, (inputs, recurrent_boundaries)) in inputs_iter.into_iter().enumerate() {
+                        let InputProcessorOutput {
+                            inputs,
+                            seq_indices,
+                        } = inputs.map_err(candle_core::Error::msg)?;
+
+                        let start = Instant::now();
+                        let raw_logits = self.forward_inputs(inputs, return_raw_logits)?;
+                        let end = Instant::now();
+                        exec_duration += end.duration_since(start);
+
+                        for (seq_idx, end) in recurrent_boundaries {
+                            self.snapshot_paged_recurrent_prefix(
+                                &*input_seqs[seq_idx],
+                                prefix_cacher,
+                                block_size,
+                                end,
+                            )?;
+                        }
+
+                        for (logit_idx, seq_idx) in seq_indices.into_iter().enumerate() {
+                            if let ForwardInputsResult::RawLogits { logits } = &raw_logits {
+                                raw_out_logits[seq_idx][i] =
+                                    Some(logits.i(logit_idx)?.to_device(&Device::Cpu)?);
+                            } else if let ForwardInputsResult::Embeddings { embeddings } =
+                                &raw_logits
+                            {
+                                embedding_logits[seq_idx] =
+                                    Some(embeddings.i(logit_idx)?.to_device(&Device::Cpu)?);
+                            } else {
+                                logits[seq_idx] = Some(raw_logits.index_bs(logit_idx)?);
+                            }
+                        }
+                    }
+                    (logits, raw_out_logits, embedding_logits, exec_duration)
+                };
 
                 if raw_out_logits[0][0].is_some() {
                     let start = Instant::now();
@@ -754,7 +1592,7 @@ pub trait Pipeline:
                 let logits = logits
                     .into_iter()
                     .map(|l| {
-                        let l = l.expect("Did not get any inputs. This is shocking.");
+                        let l = l.expect("missing forward result");
                         if logits_on_cpu {
                             l.to_device(&Device::Cpu)
                         } else {
@@ -762,29 +1600,43 @@ pub trait Pipeline:
                         }
                     })
                     .collect::<candle_core::Result<Vec<_>>>()?;
-
                 match &logits[0] {
                     ForwardInputsResult::RawLogits { .. }
                     | ForwardInputsResult::Embeddings { .. } => unreachable!(),
                     ForwardInputsResult::CausalGeneration { .. } => {
-                        self.sample_causal_gen(
-                            input_seqs,
-                            logits
-                                .into_iter()
-                                .map(|r| {
-                                    #[allow(irrefutable_let_patterns)]
-                                    let ForwardInputsResult::CausalGeneration { logits } = r
-                                    else {
-                                        unreachable!("All results must have same type")
-                                    };
-                                    logits
-                                })
-                                .collect::<Vec<_>>(),
-                            prefix_cacher,
-                            disable_eos_stop,
-                            rng,
-                        )
-                        .await?;
+                        let logits = logits
+                            .into_iter()
+                            .map(|r| {
+                                #[allow(irrefutable_let_patterns)]
+                                let ForwardInputsResult::CausalGeneration { logits } = r
+                                else {
+                                    unreachable!("All results must have same type")
+                                };
+                                logits
+                            })
+                            .collect::<Vec<_>>();
+                        if is_prompt
+                            || return_raw_logits
+                            || !self
+                                .try_sample_speculative_causal_gen(
+                                    input_seqs,
+                                    &logits,
+                                    prefix_cacher,
+                                    disable_eos_stop,
+                                    rng.clone(),
+                                    Some(speculative_metadata),
+                                )
+                                .await?
+                        {
+                            self.sample_causal_gen(
+                                input_seqs,
+                                logits,
+                                prefix_cacher,
+                                disable_eos_stop,
+                                rng,
+                            )
+                            .await?;
+                        }
                     }
                     ForwardInputsResult::Image { .. } => {
                         response::send_image_responses(
@@ -850,6 +1702,37 @@ pub trait Pipeline:
                         response::send_speech_responses(input_seqs, &pcms, &rates, &channels)
                             .await?;
                     }
+                    ForwardInputsResult::BlockGeneration { .. } => {
+                        let mut denoise_times = Vec::with_capacity(logits.len());
+                        let token_blocks = logits
+                            .into_iter()
+                            .map(|r| {
+                                #[allow(irrefutable_let_patterns)]
+                                let ForwardInputsResult::BlockGeneration {
+                                    token_blocks,
+                                    denoise_time,
+                                } = r
+                                else {
+                                    unreachable!(
+                                        "All results must have same type, `BlockGeneration`"
+                                    )
+                                };
+                                denoise_times.push(denoise_time);
+                                token_blocks
+                                    .into_iter()
+                                    .next()
+                                    .expect("Must have at least 1 element.")
+                            })
+                            .collect::<Vec<_>>();
+                        self.sample_block_gen(
+                            input_seqs,
+                            token_blocks,
+                            denoise_times,
+                            prefix_cacher,
+                            disable_eos_stop,
+                        )
+                        .await?;
+                    }
                 }
                 let end = Instant::now();
                 exec_duration += end.duration_since(start);
@@ -880,11 +1763,8 @@ pub(crate) fn extract_logits(
     logits: &Tensor,
     context_lens: Vec<(usize, usize)>,
 ) -> candle_core::Result<Tensor> {
-    let mut toks = Vec::new();
-    for (dim, (start, len)) in logits.chunk(logits.dims()[0], 0)?.iter().zip(context_lens) {
-        toks.push(dim.narrow(1, start, len)?);
-    }
-    Tensor::cat(&toks, 0)
+    LogitsSelection::from_context_lens(logits, &context_lens, &[logits.device().clone()])?
+        .select(logits)
 }
 
 #[cfg(test)]
@@ -977,53 +1857,17 @@ mod tests {
     fn test_chat_templates() {
         let templates = [
             // ChatML: https://huggingface.co/teknium/OpenHermes-2.5-Mistral-7B
-            (
-                true,
-                "<s>",
-                "</s>",
-                "<unk>",
-                "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}",
-            ),
+            (true, "<s>", "</s>", "<unk>", "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"),
             // mistralai/Mistral-7B-Instruct-v0.1
-            (
-                false,
-                "<s>",
-                "</s>",
-                "<unk>",
-                "{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token + ' ' }}{% else %}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}",
-            ),
+            (false, "<s>", "</s>", "<unk>", "{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token + ' ' }}{% else %}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}"),
             // meta-llama/Llama-2-13b-chat-hf
-            (
-                true,
-                "<s>",
-                "</s>",
-                "<unk>",
-                "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 and system_message != false %}{% set content = '<<SYS>>\\n' + system_message + '\\n<</SYS>>\\n\\n' + message['content'] %}{% else %}{% set content = message['content'] %}{% endif %}{% if message['role'] == 'user' %}{{ bos_token + '[INST] ' + content.strip() + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ ' '  + content.strip() + ' ' + eos_token }}{% endif %}{% endfor %}",
-            ),
+            (true, "<s>", "</s>", "<unk>", "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 and system_message != false %}{% set content = '<<SYS>>\\n' + system_message + '\\n<</SYS>>\\n\\n' + message['content'] %}{% else %}{% set content = message['content'] %}{% endif %}{% if message['role'] == 'user' %}{{ bos_token + '[INST] ' + content.strip() + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ ' '  + content.strip() + ' ' + eos_token }}{% endif %}{% endfor %}"),
             // mistralai/Mixtral-8x7B-Instruct-v0.1
-            (
-                false,
-                "<s>",
-                "</s>",
-                "<unk>",
-                "{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token}}{% else %}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}",
-            ),
+            (false, "<s>", "</s>", "<unk>", "{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token}}{% else %}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}"),
             // google/gemma-7b-it
-            (
-                false,
-                "<bos>",
-                "<eos>",
-                "<unk>",
-                "{{ bos_token }}{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if (message['role'] == 'assistant') %}{% set role = 'model' %}{% else %}{% set role = message['role'] %}{% endif %}{{ '<start_of_turn>' + role + '\n' + message['content'] | trim + '<end_of_turn>\n' }}{% endfor %}{% if add_generation_prompt %}{{'<start_of_turn>model\n'}}{% endif %}",
-            ),
+            (false, "<bos>", "<eos>", "<unk>", "{{ bos_token }}{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if (message['role'] == 'assistant') %}{% set role = 'model' %}{% else %}{% set role = message['role'] %}{% endif %}{{ '<start_of_turn>' + role + '\n' + message['content'] | trim + '<end_of_turn>\n' }}{% endfor %}{% if add_generation_prompt %}{{'<start_of_turn>model\n'}}{% endif %}"),
             // HuggingFaceM4/idefics2-8b-chatty
-            (
-                true,
-                "<s>",
-                "</s>",
-                "<unk>",
-                "{% for message in messages %}{{message['role'].capitalize()}}{% if message['content'][0]['type'] == 'image' %}{{':'}}{% else %}{{': '}}{% endif %}{% for line in message['content'] %}{% if line['type'] == 'text' %}{{line['text']}}{% elif line['type'] == 'image' %}{{ '<image>' }}{% endif %}{% endfor %}<end_of_utterance>\n{% endfor %}{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}",
-            ),
+            (true, "<s>", "</s>", "<unk>", "{% for message in messages %}{{message['role'].capitalize()}}{% if message['content'][0]['type'] == 'image' %}{{':'}}{% else %}{{': '}}{% endif %}{% for line in message['content'] %}{% if line['type'] == 'text' %}{{line['text']}}{% elif line['type'] == 'image' %}{{ '<image>' }}{% endif %}{% endfor %}<end_of_utterance>\n{% endfor %}{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}"),
         ];
         let expected_outputs = [
             // ChatML: https://huggingface.co/teknium/OpenHermes-2.5-Mistral-7B
@@ -1072,13 +1916,7 @@ mod tests {
     fn test_image_chat_templates() {
         let templates = [
             // HuggingFaceM4/idefics2-8b-chatty
-            (
-                true,
-                "<s>",
-                "</s>",
-                "<unk>",
-                "{% for message in messages %}{{message['role'].capitalize()}}{% if message['content'][0]['type'] == 'image' %}{{':'}}{% else %}{{': '}}{% endif %}{% for line in message['content'] %}{% if line['type'] == 'text' %}{{line['text']}}{% elif line['type'] == 'image' %}{{ '<image>' }}{% endif %}{% endfor %}<end_of_utterance>\n{% endfor %}{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}",
-            ),
+            (true, "<s>", "</s>", "<unk>", "{% for message in messages %}{{message['role'].capitalize()}}{% if message['content'][0]['type'] == 'image' %}{{':'}}{% else %}{{': '}}{% endif %}{% for line in message['content'] %}{% if line['type'] == 'text' %}{{line['text']}}{% elif line['type'] == 'image' %}{{ '<image>' }}{% endif %}{% endfor %}<end_of_utterance>\n{% endfor %}{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}"),
         ];
         let expected_outputs = [
             // HuggingFaceM4/idefics2-8b-chatty

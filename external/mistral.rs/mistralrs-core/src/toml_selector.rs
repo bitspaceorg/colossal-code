@@ -8,8 +8,8 @@ use crate::{
     pipeline::{EmbeddingLoaderType, IsqOrganization},
     AnyMoeLoader, AutoDeviceMapParams, EmbeddingLoaderBuilder, EmbeddingSpecificConfig,
     GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoaderBuilder, GGUFSpecificConfig, Loader,
-    ModelDType, NormalLoaderBuilder, NormalLoaderType, NormalSpecificConfig, SpeculativeConfig,
-    SpeculativeLoader, Topology, VisionLoaderBuilder, VisionLoaderType, VisionSpecificConfig,
+    ModelDType, MultimodalLoaderBuilder, MultimodalLoaderType, MultimodalSpecificConfig,
+    NormalLoaderBuilder, NormalLoaderType, NormalSpecificConfig, Topology, UqffWriteConfig,
     GGUF_MULTI_FILE_DELIMITER, UQFF_MULTI_FILE_DELIMITER,
 };
 
@@ -63,7 +63,7 @@ pub enum TomlModelSelected {
         organization: Option<IsqOrganization>,
 
         /// UQFF path to write to.
-        write_uqff: Option<PathBuf>,
+        write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ.
         from_uqff: Option<String>,
@@ -114,7 +114,7 @@ pub enum TomlModelSelected {
         topology: Option<String>,
 
         /// UQFF path to write to.
-        write_uqff: Option<PathBuf>,
+        write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ.
         from_uqff: Option<String>,
@@ -150,7 +150,7 @@ pub enum TomlModelSelected {
         topology: Option<String>,
 
         /// UQFF path to write to.
-        write_uqff: Option<PathBuf>,
+        write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ.
         from_uqff: Option<String>,
@@ -390,13 +390,13 @@ pub enum TomlModelSelected {
         max_batch_size: usize,
     },
 
-    /// Select a vision plain model, without quantization or adapters
-    VisionPlain {
+    /// Select a multimodal plain model, without quantization or adapters
+    MultimodalPlain {
         /// Model ID to load from. This may be a HF hub repo or a local path.
         model_id: String,
 
         /// The architecture of the model.
-        arch: Option<VisionLoaderType>,
+        arch: Option<MultimodalLoaderType>,
 
         /// Model data type. Defaults to `auto`.
         #[serde(default = "default_dtype")]
@@ -406,7 +406,7 @@ pub enum TomlModelSelected {
         topology: Option<String>,
 
         /// UQFF path to write to.
-        write_uqff: Option<PathBuf>,
+        write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ.
         from_uqff: Option<String>,
@@ -468,7 +468,7 @@ pub enum TomlModelSelected {
 
         /// UQFF path to write to.
         #[serde(default)]
-        write_uqff: Option<PathBuf>,
+        write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;)
         #[serde(default)]
@@ -478,15 +478,6 @@ pub enum TomlModelSelected {
         #[serde(default)]
         hf_cache_path: Option<PathBuf>,
     },
-}
-
-#[derive(Deserialize)]
-pub struct SpeculativeTomlModelSelected {
-    /// Gamma value for the model
-    gamma: usize,
-
-    /// Base model
-    draft_model: TomlModelSelected,
 }
 
 #[derive(Deserialize)]
@@ -519,8 +510,10 @@ pub struct TomlSelector {
     /// Selected model
     model: TomlModelSelected,
 
-    /// Speculative model selector
-    speculative: Option<SpeculativeTomlModelSelected>,
+    /// Legacy target/draft speculative decoding was removed. Keep this field
+    /// only to reject old configs explicitly instead of silently ignoring them.
+    #[serde(default)]
+    speculative: Option<serde::de::IgnoredAny>,
 
     /// AnyMoE config
     anymoe: Option<AnyMoeTomlModelSelected>,
@@ -545,7 +538,7 @@ pub fn get_toml_selected_model_dtype(model: &TomlSelector) -> ModelDType {
         TomlModelSelected::Plain { dtype, .. }
         | TomlModelSelected::Lora { dtype, .. }
         | TomlModelSelected::XLora { dtype, .. }
-        | TomlModelSelected::VisionPlain { dtype, .. }
+        | TomlModelSelected::MultimodalPlain { dtype, .. }
         | TomlModelSelected::GGUF { dtype, .. }
         | TomlModelSelected::GGML { dtype, .. }
         | TomlModelSelected::XLoraGGUF { dtype, .. }
@@ -609,13 +602,13 @@ pub fn get_toml_selected_model_device_map_params(
             max_batch_size,
         }),
         TomlModelSelected::Embedding { .. } => Ok(AutoDeviceMapParams::default_text()),
-        TomlModelSelected::VisionPlain {
+        TomlModelSelected::MultimodalPlain {
             max_seq_len,
             max_batch_size,
             max_image_length,
             max_num_images,
             ..
-        } => Ok(AutoDeviceMapParams::Vision {
+        } => Ok(AutoDeviceMapParams::Multimodal {
             max_seq_len,
             max_batch_size,
             max_image_shape: (max_image_length, max_image_length),
@@ -931,7 +924,7 @@ fn loader_from_selected(
             )?,
         )
         .build(),
-        TomlModelSelected::VisionPlain {
+        TomlModelSelected::MultimodalPlain {
             model_id,
             arch,
             dtype: _,
@@ -947,8 +940,8 @@ fn loader_from_selected(
             imatrix,
             hf_cache_path,
             organization,
-        } => VisionLoaderBuilder::new(
-            VisionSpecificConfig {
+        } => MultimodalLoaderBuilder::new(
+            MultimodalSpecificConfig {
                 topology: Topology::from_option_path(topology)?,
                 write_uqff,
                 from_uqff: from_uqff.map(|x| {
@@ -990,6 +983,8 @@ fn loader_from_selected(
                         .map(|x| x.unwrap())
                         .collect::<Vec<_>>()
                 }),
+                imatrix: None,
+                calibration_file: None,
                 hf_cache_path,
             },
             tokenizer_json,
@@ -1010,19 +1005,12 @@ impl TryInto<Box<dyn Loader>> for (TomlSelector, TomlLoaderArgs) {
             tokenizer_json: selector.tokenizer_json,
             jinja_explicit: args.jinja_explicit,
         };
+        if selector.speculative.is_some() {
+            anyhow::bail!(
+                "legacy target/draft speculative decoding in TOML configs was removed; use MTP through --mtp-model or the MTP API instead"
+            );
+        }
         let loader = loader_from_selected(args.clone(), selector.model)?;
-        let loader = if let Some(speculative) = selector.speculative {
-            let draft_loader = loader_from_selected(args, speculative.draft_model)?;
-            Box::new(SpeculativeLoader {
-                target: loader,
-                draft: draft_loader,
-                config: SpeculativeConfig {
-                    gamma: speculative.gamma,
-                },
-            })
-        } else {
-            loader
-        };
         let loader = if let Some(AnyMoeTomlModelSelected {
             config,
             dataset_json,
