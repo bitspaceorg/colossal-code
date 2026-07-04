@@ -11,6 +11,11 @@ impl App {
         let command = self.input.trim().to_string();
         let dispatch = dispatch_slash_command(&command);
 
+        self.audit_event(
+            "command.dispatched",
+            serde_json::json!({ "command": command }),
+        );
+
         // Reset streaming tokens for new message (keep generation_stats for context tracking)
         self.streaming_completion_tokens = 0;
 

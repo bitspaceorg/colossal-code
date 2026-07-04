@@ -121,6 +121,16 @@ impl App {
         let from = self.capture_timeline_state();
         let to = self.timeline_state_for_rewind_point(&point, selected_index, restore_scope);
         let code_restored = self.restore_timeline_state(&to, restore_scope.restores_code());
+        self.audit_event(
+            "rewind.performed",
+            serde_json::json!({
+                "scope": restore_scope.label(),
+                "preview": point.preview,
+                "message_count": point.message_count,
+                "fs_checkpoint_id": point.fs_checkpoint_id.as_ref().map(|id| id.0.clone()),
+                "code_restored": code_restored,
+            }),
+        );
         self.rewind_undo_stack.push(TimelineRestoreRecord {
             from,
             to,
@@ -145,6 +155,10 @@ impl App {
     pub(crate) fn undo_rewind_restore(&mut self) -> bool {
         if let Some(record) = self.rewind_undo_stack.pop() {
             let code_restored = self.restore_timeline_state(&record.from, record.code_restored);
+            self.audit_event(
+                "rewind.undone",
+                serde_json::json!({ "code_restored": code_restored }),
+            );
             let status = if record.code_restored && !code_restored {
                 "Rewind undone • no filesystem checkpoint • /redo available"
             } else {
@@ -161,6 +175,10 @@ impl App {
     pub(crate) fn redo_rewind_restore(&mut self) -> bool {
         if let Some(record) = self.rewind_redo_stack.pop() {
             let code_restored = self.restore_timeline_state(&record.to, record.code_restored);
+            self.audit_event(
+                "rewind.redone",
+                serde_json::json!({ "code_restored": code_restored }),
+            );
             let status = if record.code_restored && !code_restored {
                 "Rewind redone • no filesystem checkpoint • /undo available"
             } else {
@@ -188,6 +206,14 @@ impl App {
             RewindRestoreScope::CodeAndConversation,
         );
         let code_restored = self.restore_timeline_state(&to, true);
+        self.audit_event(
+            "rewind.undone",
+            serde_json::json!({
+                "mode": "snapshot_step",
+                "preview": point.preview,
+                "code_restored": code_restored,
+            }),
+        );
         self.rewind_redo_stack.push(TimelineRestoreRecord {
             from: to.clone(),
             to: from,
@@ -275,6 +301,22 @@ impl App {
             &self.isolated_changes.review_entries,
             self.current_execution_checkpoint_id.clone(),
         ) {
+            if let (Some(writer), Some(conversation_id)) = (
+                &self.db_writer,
+                &self.persistence_state.current_conversation_id,
+            ) {
+                writer.send(crate::app::persistence::db::writer::WriteOp::RewindPoint {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    conversation_id: conversation_id.clone(),
+                    tool_call_id: self.audit.last_tool_call_id.clone(),
+                    preview: rewind_point.preview.clone(),
+                    message_count: rewind_point.message_count as i64,
+                    fs_checkpoint_id: rewind_point
+                        .fs_checkpoint_id
+                        .as_ref()
+                        .map(|id| id.0.clone()),
+                });
+            }
             self.rewind_points.push(rewind_point);
             self.current_file_changes.clear();
             if self.rewind_points.len() > 50 {

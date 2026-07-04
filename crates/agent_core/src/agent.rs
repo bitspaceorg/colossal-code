@@ -686,6 +686,11 @@ impl Agent {
                                 let _ = tx.send(AgentMessage::ExecutionState(pending_count));
                             }
                             if let Ok(checkpoint) = self.current_execution_checkpoint().await {
+                                if let Some(full) = &checkpoint {
+                                    let _ = tx.send(AgentMessage::ExecutionCheckpointCaptured(
+                                        full.clone(),
+                                    ));
+                                }
                                 let _ = tx.send(AgentMessage::ExecutionCheckpoint(
                                     checkpoint.map(|checkpoint| checkpoint.id),
                                 ));
@@ -745,6 +750,11 @@ impl Agent {
                                 let _ = tx.send(AgentMessage::ExecutionState(pending_count));
                             }
                             if let Ok(checkpoint) = self.current_execution_checkpoint().await {
+                                if let Some(full) = &checkpoint {
+                                    let _ = tx.send(AgentMessage::ExecutionCheckpointCaptured(
+                                        full.clone(),
+                                    ));
+                                }
                                 let _ = tx.send(AgentMessage::ExecutionCheckpoint(
                                     checkpoint.map(|checkpoint| checkpoint.id),
                                 ));

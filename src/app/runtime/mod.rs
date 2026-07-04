@@ -1,6 +1,6 @@
 pub mod agent_stream;
 mod agent_stream_handlers;
-mod agent_stream_policy;
+pub(crate) mod agent_stream_policy;
 mod connect_dispatch;
 pub mod driver;
 pub mod event_loop;

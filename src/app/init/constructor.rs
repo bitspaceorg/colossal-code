@@ -20,8 +20,15 @@ impl App {
         let (input_tx, input_rx) = mpsc::unbounded_channel::<AgentMessage>();
         let (output_tx, output_rx) = mpsc::unbounded_channel::<AgentMessage>();
 
-        let history_file_path = Self::get_history_file_path()?;
-        let command_history = Self::load_history(&history_file_path);
+        let history_cwd = Self::history_cwd_key();
+        if !(cfg!(test) && std::env::var("COCODE_DB_PATH").is_err()) {
+            // One-time legacy JSON import, then adopt this project's old
+            // history file on first open.
+            let _ = crate::app::persistence::db::import::run_if_needed();
+            crate::app::persistence::db::import::ensure_history_for_cwd(&history_cwd);
+        }
+        let command_history =
+            crate::app::persistence::db::reader::load_history_for_cwd(&history_cwd);
 
         let _ = Self::initialize_config_file();
         let _ = Self::initialize_conversations_dir();
@@ -285,7 +292,6 @@ impl App {
             command_history,
             history_index: None,
             temp_input: None,
-            history_file_path,
             queued_messages: Vec::new(),
             editing_queue_index: None,
             show_queue_choice: false,
@@ -309,6 +315,14 @@ impl App {
             show_summary_history: false,
             summary_history_selected: 0,
             persistence_state: PersistenceState::default(),
+            // Unit tests construct App directly; never let them write the
+            // real database (COCODE_DB_PATH still overrides for e2e runs).
+            db_writer: if cfg!(test) && std::env::var("COCODE_DB_PATH").is_err() {
+                None
+            } else {
+                crate::app::persistence::db::writer::DbWriter::spawn().ok()
+            },
+            audit: crate::app::persistence::db::audit::AuditState::default(),
             nav_snapshot: None,
             session_manager: SessionManager::new(),
             autocomplete_active: false,

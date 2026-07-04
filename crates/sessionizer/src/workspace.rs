@@ -152,10 +152,17 @@ pub struct WorkspaceAuditEvent {
     pub message: String,
 }
 
+/// Isolated execution is the default; NITE_ISOLATED_EXECUTION_ROOT=0
+/// (or false/no/off) opts out.
 pub fn isolated_execution_enabled() -> bool {
     std::env::var("NITE_ISOLATED_EXECUTION_ROOT")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
+        .map(|value| {
+            !matches!(
+                value.trim(),
+                "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF"
+            )
+        })
+        .unwrap_or(true)
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::{ApplyResult, ExecutionReviewEntry, FsCheckpointId};
+use crate::{ApplyResult, ExecutionReviewEntry, FsCheckpoint, FsCheckpointId};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecCommandResult {
@@ -92,6 +92,9 @@ pub enum AgentMessage {
     RefreshExecutionState,
     ExecutionState(usize),
     ExecutionCheckpoint(Option<FsCheckpointId>),
+    /// Full checkpoint (manifest included) captured after a tool call,
+    /// emitted for audit/persistence alongside `ExecutionCheckpoint`.
+    ExecutionCheckpointCaptured(FsCheckpoint),
     ExecutionReviewEntries(Vec<ExecutionReviewEntry>),
     ApplyExecutionChanges,
     ExecutionChangesApplied(ApplyResult),

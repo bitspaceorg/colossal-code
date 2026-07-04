@@ -1,12 +1,9 @@
 use color_eyre::Result;
-use serde_json::{Value, json};
 use std::time::SystemTime;
 
-use crate::app::persistence;
-use crate::app::{
-    App, ConversationMetadata, EnhancedSavedConversation, MessageState, MessageType,
-    SavedConversation, SavedUIMessage,
-};
+use crate::app::persistence::db::writer::{ConversationRecord, MessageRecord, WriteOp};
+use crate::app::persistence::db::{now_ms, reader, system_time_ms};
+use crate::app::{App, ConversationMetadata, MessageState, MessageType};
 
 impl App {
     pub(crate) fn build_title_summary(&self) -> String {
@@ -32,22 +29,9 @@ impl App {
             .join("\n")
     }
 
-    async fn conversation_title_or_fallback(&self, preview: &str) -> String {
-        let summary = self.build_title_summary();
-        if summary.is_empty() {
-            return preview.to_string();
-        }
-        let Some(agent) = &self.agent else {
-            return preview.to_string();
-        };
-        match agent.generate_conversation_title(&summary).await {
-            Ok(Some(title)) if !title.trim().is_empty() => title,
-            _ => preview.to_string(),
-        }
-    }
-
     pub(crate) fn initialize_conversations_dir() -> Result<()> {
-        persistence::conversations::initialize_conversations_dir()
+        // Legacy JSON directory; kept only as the import source.
+        crate::app::persistence::conversations::initialize_conversations_dir()
     }
 
     pub(crate) async fn save_conversation(&mut self) -> Result<()> {
@@ -56,6 +40,9 @@ impl App {
         if self.messages.is_empty() {
             return Ok(());
         }
+        let Some(writer) = self.db_writer.clone() else {
+            return Err(color_eyre::eyre::eyre!("audit database unavailable"));
+        };
 
         // Export agent conversation for LLM context restoration
         let agent_conversation = match &self.agent {
@@ -63,11 +50,14 @@ impl App {
             None => None,
         };
 
-        // Build UI messages with full state
-        let mut ui_messages = Vec::new();
+        // Build message projection rows with full state
+        let conversation_id = match &self.persistence_state.current_conversation_id {
+            Some(id) => id.clone(),
+            None => uuid::Uuid::new_v4().to_string(),
+        };
 
+        let mut records = Vec::with_capacity(self.messages.len());
         for i in 0..self.messages.len() {
-            let content = self.messages[i].clone();
             let message_type = self
                 .message_types
                 .get(i)
@@ -83,14 +73,21 @@ impl App {
                 .get(i)
                 .copied()
                 .unwrap_or_else(SystemTime::now);
-            let metadata = self.message_metadata.get(i).and_then(|m| m.clone());
+            let metadata = self
+                .message_metadata
+                .get(i)
+                .and_then(|m| m.as_ref())
+                .and_then(|m| serde_json::to_string(m).ok());
 
-            ui_messages.push(SavedUIMessage {
-                content,
-                message_type,
-                message_state,
-                timestamp,
+            records.push(MessageRecord {
+                id: format!("{conversation_id}:{i}"),
+                seq: i as i64,
+                msg_type: serde_json::to_string(&message_type)?,
+                msg_state: serde_json::to_string(&message_state)?,
+                content: self.messages[i].clone(),
                 metadata,
+                tool_call_id: None,
+                created_at_ms: system_time_ms(timestamp),
             });
         }
 
@@ -103,94 +100,35 @@ impl App {
             .map(|(_, msg)| msg.chars().take(100).collect::<String>())
             .unwrap_or_else(|| "No preview available".to_string());
 
-        // Check if we're updating existing conversation or creating new one
-        let (conversation_id, created_at, file_path, forked_from, forked_at, existing_title) =
-            if let (Some(id), Some(path)) = (
-                &self.persistence_state.current_conversation_id,
-                &self.persistence_state.current_conversation_path,
-            ) {
-                // UPDATE EXISTING - preserve ID, created_at, and fork metadata
-                let (existing_created_at, existing_forked_from, existing_forked_at, existing_title) =
-                    if let Ok(content) = persistence::conversations::read_conversation_file(path) {
-                        if let Ok(existing) =
-                            serde_json::from_str::<EnhancedSavedConversation>(&content)
-                        {
-                            (
-                                existing.created_at,
-                                existing.forked_from,
-                                existing.forked_at,
-                                existing.title,
-                            )
-                        } else {
-                            (SystemTime::now(), None, None, None)
-                        }
-                    } else {
-                        (SystemTime::now(), None, None, None)
-                    };
-
-                (
-                    id.clone(),
-                    existing_created_at,
-                    path.clone(),
-                    existing_forked_from,
-                    existing_forked_at,
-                    existing_title,
-                )
-            } else {
-                // CREATE NEW - generate new ID
-                persistence::conversations::initialize_conversations_dir()?;
-                let conversations_dir = Self::get_conversations_dir()?;
-
-                let new_id = uuid::Uuid::new_v4().to_string();
-                let new_path = conversations_dir.join(format!("{}.json", new_id));
-                let now = SystemTime::now();
-
-                (
-                    new_id,
-                    now,
-                    new_path,
-                    self.persistence_state.current_forked_from.clone(),
-                    self.persistence_state.current_forked_at,
-                    None,
-                )
-            };
-
-        // Create/update conversation
-        let now = SystemTime::now();
         let title = self
             .persistence_state
             .current_conversation_title
             .clone()
-            .or(existing_title)
             .filter(|title| !title.trim().is_empty());
-        let conversation = EnhancedSavedConversation {
+
+        // created_at only applies on first insert; updates preserve it.
+        // A NULL title never overwrites a stored one (COALESCE in the upsert).
+        writer.send(WriteOp::UpsertConversation(ConversationRecord {
             id: conversation_id.clone(),
-            created_at,
-            updated_at: now,
+            title: title.clone(),
+            preview,
             git_branch: Self::get_current_git_branch(),
             working_directory: std::env::current_dir()
                 .ok()
-                .and_then(|p| p.to_str().map(|s| s.to_string()))
-                .unwrap_or_else(|| String::from("unknown")),
-            message_count: ui_messages.len(),
-            title: title.clone(),
-            preview,
-            ui_messages,
-            agent_conversation,
-            forked_from,
-            forked_at,
-        };
-
-        // Ensure directory exists
-        persistence::conversations::initialize_conversations_dir()?;
-
-        // Save to file
-        let json = serde_json::to_string_pretty(&conversation)?;
-        persistence::conversations::write_conversation_file(&file_path, &json)?;
+                .and_then(|p| p.to_str().map(|s| s.to_string())),
+            forked_from: self.persistence_state.current_forked_from.clone(),
+            forked_at_ms: self.persistence_state.current_forked_at.map(system_time_ms),
+            created_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+            agent_context: agent_conversation,
+        }));
+        writer.send(WriteOp::ReplaceMessages {
+            conversation_id: conversation_id.clone(),
+            messages: records,
+        });
 
         // Track this conversation for future updates
         self.persistence_state.current_conversation_id = Some(conversation_id);
-        self.persistence_state.current_conversation_path = Some(file_path);
         self.persistence_state.current_conversation_title = title;
 
         Ok(())
@@ -200,54 +138,11 @@ impl App {
         &mut self,
         metadata: &ConversationMetadata,
     ) -> Result<()> {
-        // Read the conversation file
-        let content = persistence::conversations::read_conversation_file(&metadata.file_path)?;
-
-        // Try to load as enhanced format first, fall back to old format
-        let (ui_messages, agent_conversation, title) =
-            if let Ok(enhanced) = serde_json::from_str::<EnhancedSavedConversation>(&content) {
-                (
-                    enhanced.ui_messages,
-                    enhanced.agent_conversation,
-                    enhanced.title,
-                )
-            } else if let Ok(old_conv) = serde_json::from_str::<SavedConversation>(&content) {
-                // Convert old format to UI messages (basic conversion)
-                let ui_msgs: Vec<SavedUIMessage> = old_conv
-                    .messages
-                    .iter()
-                    .map(|m| {
-                        let message_type = if m.role == "user" {
-                            MessageType::User
-                        } else {
-                            MessageType::Agent
-                        };
-
-                        SavedUIMessage {
-                            content: m.content.clone(),
-                            message_type,
-                            message_state: MessageState::Sent,
-                            timestamp: old_conv.created_at,
-                            metadata: None,
-                        }
-                    })
-                    .collect();
-
-                // Build agent conversation JSON from old format
-                let messages: Vec<Value> = old_conv
-                    .messages
-                    .iter()
-                    .map(|m| json!({"role": m.role, "content": m.content}))
-                    .collect();
-                let agent_json = serde_json::to_string(&messages).ok();
-
-                (ui_msgs, agent_json, old_conv.title)
-            } else {
-                return Err(color_eyre::eyre::eyre!("Failed to parse conversation file"));
-            };
+        let loaded = reader::load_conversation(&metadata.id)?
+            .ok_or_else(|| color_eyre::eyre::eyre!("Conversation not found in database"))?;
 
         // Restore agent conversation for LLM context
-        if let (Some(agent), Some(agent_json)) = (&self.agent, &agent_conversation) {
+        if let (Some(agent), Some(agent_json)) = (&self.agent, &loaded.agent_context) {
             agent.restore_conversation(agent_json).await.map_err(|e| {
                 color_eyre::eyre::eyre!("Failed to restore agent conversation: {}", e)
             })?;
@@ -262,31 +157,24 @@ impl App {
         self.message_timestamps.clear();
 
         // Restore UI messages with complete state
-        for ui_msg in ui_messages {
-            self.messages.push(ui_msg.content);
-            self.message_types.push(ui_msg.message_type);
-            self.message_states.push(ui_msg.message_state);
-            self.message_metadata.push(ui_msg.metadata);
-            self.message_timestamps.push(ui_msg.timestamp);
+        for message in loaded.messages {
+            self.messages.push(message.content);
+            self.message_types.push(message.message_type);
+            self.message_states.push(message.message_state);
+            self.message_metadata.push(message.metadata);
+            self.message_timestamps.push(message.timestamp);
         }
 
-        // Update the conversation file's timestamp (only if NOT in fork mode)
-        if !self.is_fork_mode {
-            if let Ok(mut enhanced) = serde_json::from_str::<EnhancedSavedConversation>(&content) {
-                enhanced.updated_at = SystemTime::now();
-                let json = serde_json::to_string_pretty(&enhanced)?;
-                persistence::conversations::write_conversation_file(&metadata.file_path, &json)?;
-            }
-        }
+        let title = loaded.title;
 
         // Track this conversation for future updates (unless in fork mode)
         if self.is_fork_mode {
-            // In fork mode: don't track the ID/path so a new conversation is created on save
-            // Fork metadata is already set in the 'f' key handler
+            // In fork mode: don't track the ID so a new conversation is
+            // created on save. Fork metadata is already set in the 'f'
+            // key handler.
             self.persistence_state.current_conversation_id = None;
             self.persistence_state.current_conversation_path = None;
             self.persistence_state.current_conversation_title = title;
-            // Reset fork mode flag
             self.is_fork_mode = false;
 
             // Close resume panel and show fork confirmation
@@ -301,10 +189,23 @@ impl App {
             // Trigger immediate save to create the fork
             self.persistence_state.save_pending = true;
         } else {
+            if let Some(writer) = &self.db_writer {
+                writer.send(WriteOp::TouchConversation {
+                    id: metadata.id.clone(),
+                });
+            }
             self.persistence_state.current_conversation_id = Some(metadata.id.clone());
-            self.persistence_state.current_conversation_path = Some(metadata.file_path.clone());
+            self.persistence_state.current_conversation_path = None;
             self.persistence_state.current_conversation_title = title;
         }
+
+        self.audit_event(
+            "conversation.resumed",
+            serde_json::json!({
+                "conversation_id": metadata.id,
+                "forked": self.persistence_state.current_conversation_id.is_none(),
+            }),
+        );
 
         Ok(())
     }

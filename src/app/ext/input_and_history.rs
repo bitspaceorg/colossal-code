@@ -1,7 +1,5 @@
-use crate::app;
 use crate::app::App;
 use crate::app::commands::ReviewOptions;
-use color_eyre::Result;
 use ratatui::crossterm::event::KeyEvent;
 
 impl App {
@@ -26,13 +24,12 @@ impl App {
         false
     }
 
-    pub(crate) fn get_history_file_path() -> Result<std::path::PathBuf> {
-        let cwd = std::env::current_dir()?;
-        app::persistence::history::history_file_path_for_cwd(&cwd)
-    }
-
-    pub(crate) fn load_history(history_file: &std::path::Path) -> Vec<String> {
-        app::persistence::history::load_history(history_file)
+    /// Key prompt history by working directory, matching the legacy
+    /// per-cwd history files.
+    pub(crate) fn history_cwd_key() -> String {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "unknown".to_string())
     }
 
     pub(crate) fn build_review_prompt(&self, options: &ReviewOptions, context: &str) -> String {

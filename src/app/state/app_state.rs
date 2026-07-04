@@ -304,7 +304,6 @@ pub(crate) struct App {
     pub(crate) command_history: Vec<String>,
     pub(crate) history_index: Option<usize>,
     pub(crate) temp_input: Option<String>,
-    pub(crate) history_file_path: std::path::PathBuf,
     // Message queue system
     pub(crate) queued_messages: Vec<String>, // Queue of messages waiting to be sent
     pub(crate) editing_queue_index: Option<usize>, // Index of queue message being edited (if any)
@@ -329,6 +328,9 @@ pub(crate) struct App {
     pub(crate) show_summary_history: bool,
     pub(crate) summary_history_selected: usize,
     pub(crate) persistence_state: PersistenceState,
+    // Audit database (event log + projections); None if the DB failed to open
+    pub(crate) db_writer: Option<crate::app::persistence::db::writer::DbWriter>,
+    pub(crate) audit: crate::app::persistence::db::audit::AuditState,
     // Navigation mode snapshot - frozen UI state while nav mode is active
     pub(crate) nav_snapshot: Option<AppSnapshot>,
     // Session manager window

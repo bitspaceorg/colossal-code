@@ -189,6 +189,10 @@ impl App {
     }
 
     pub(crate) fn apply_approval_prompt_choice(&mut self, approved: bool, interrupt: bool) {
+        self.audit_event(
+            "approval.answered",
+            serde_json::json!({ "approved": approved, "interrupt": interrupt }),
+        );
         if interrupt {
             if let Some(tx) = &self.agent_tx {
                 let _ = tx.send(AgentMessage::ApprovalResponse(false));
@@ -335,11 +339,14 @@ impl App {
                 .drain(0..self.command_history.len() - 1000);
         }
 
-        // Write to file - escape newlines and backslashes
-        let _ = crate::app::persistence::history::save_history(
-            &self.history_file_path,
-            &self.command_history,
-        );
+        if let Some(writer) = &self.db_writer {
+            writer.send(
+                crate::app::persistence::db::writer::WriteOp::HistoryAppend {
+                    cwd: Self::history_cwd_key(),
+                    entry: command.to_string(),
+                },
+            );
+        }
     }
 
     /// Ensure conversation ID exists, generating one if needed
@@ -540,6 +547,11 @@ impl App {
                     self.agent_state.agent_interrupted = false; // Reset interrupted flag for new message
                     let _ = tx.send(AgentMessage::UserInput(user_message.clone()));
                 }
+                self.audit_event_large(
+                    "user.input",
+                    serde_json::json!({}),
+                    vec![("content".to_string(), user_message.clone().into_bytes())],
+                );
 
                 // Trigger survey check after message is sent
                 let question = SurveyQuestion::new(

@@ -12,11 +12,40 @@ use crate::app::state::orchestrator::ToolCallStatus;
 use crate::app::state::ui_message_event::UiMessageEvent;
 use crate::app::{App, StepToolCallEntry, TodoItem};
 
+/// The fully streamed assistant text for the turn: the last agent-typed
+/// message that is real content rather than a UI marker.
+fn latest_agent_response(messages: &[String], types: &[MessageType]) -> Option<String> {
+    messages
+        .iter()
+        .zip(types.iter())
+        .rev()
+        .find(|(content, message_type)| {
+            matches!(message_type, MessageType::Agent)
+                && !content.trim().is_empty()
+                && UiMessageEvent::parse(content).is_none()
+        })
+        .map(|(content, _)| content.clone())
+}
+
 pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
     let mut outcome = AgentStreamOutcome::new();
     let active_model_display_name = app.active_model_display_name();
     if let Some(rx) = &mut app.agent_rx {
         while let Ok(msg) = rx.try_recv() {
+            // Audit tee: record ground truth before any UI filtering below.
+            let final_response = if matches!(msg, AgentMessage::Done) {
+                latest_agent_response(&app.messages, &app.message_types)
+            } else {
+                None
+            };
+            crate::app::persistence::db::audit::record_agent_message(
+                &app.db_writer,
+                &mut app.audit,
+                app.persistence_state.current_conversation_id.as_deref(),
+                &msg,
+                final_response.as_deref(),
+            );
+
             // Skip processing agent messages if we've interrupted
             if app.agent_state.agent_interrupted {
                 match msg {

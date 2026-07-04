@@ -45,11 +45,13 @@ base64 = "0.22"
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 keyring = "3.6"
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [dev-dependencies]
 chrono = "0.4"
 agent_protocol = { path = "./crates/agent_protocol" }
 insta = "1.38"
+tempfile = "3.14"
 
 [features]
 syntax-highlighting = ["edtui/syntax-highlighting"]

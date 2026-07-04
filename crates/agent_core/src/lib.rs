@@ -48,7 +48,7 @@ pub use thinking_helpers::{
 };
 
 pub use colossal_linux_sandbox::workspace::{
-    ApplyConflict, ApplyResult, ExecutionReviewEntry, FsCheckpoint, FsCheckpointId,
+    ApplyConflict, ApplyResult, ExecutionReviewEntry, FsCheckpoint, FsCheckpointId, FsManifest,
 };
 pub use exec_command::{exec_command_output_to_yaml, execute_tool_binary, execute_tool_call};
 

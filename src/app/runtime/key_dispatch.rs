@@ -25,6 +25,13 @@ impl App {
         if Self::is_shift_tab(key) {
             let previous_mode = self.safety_state.assistant_mode;
             self.safety_state.assistant_mode = self.safety_state.assistant_mode.next();
+            self.audit_event(
+                "mode.changed",
+                serde_json::json!({
+                    "from": previous_mode.stats_key(),
+                    "to": self.safety_state.assistant_mode.stats_key(),
+                }),
+            );
             let reminder = crate::app::AssistantMode::transition_reminder(
                 previous_mode,
                 self.safety_state.assistant_mode,
