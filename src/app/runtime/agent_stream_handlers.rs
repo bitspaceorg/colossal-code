@@ -33,7 +33,8 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
     if let Some(rx) = &mut app.agent_rx {
         while let Ok(msg) = rx.try_recv() {
             // Audit tee: record ground truth before any UI filtering below.
-            let final_response = if matches!(msg, AgentMessage::Done) {
+            let is_done = matches!(msg, AgentMessage::Done);
+            let final_response = if is_done {
                 latest_agent_response(&app.messages, &app.message_types)
             } else {
                 None
@@ -44,6 +45,7 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                 app.persistence_state.current_conversation_id.as_deref(),
                 &msg,
                 final_response.as_deref(),
+                is_done.then_some(app.thinking_raw_content.as_str()),
             );
 
             // Skip processing agent messages if we've interrupted
@@ -860,6 +862,18 @@ pub(super) fn drain_agent_rx_impl(app: &mut App) -> AgentStreamOutcome {
                             app.context_inject_expected = true;
                             let _ = tx.send(AgentMessage::ClearContext);
                             let _ = tx.send(AgentMessage::InjectContext(summary.clone()));
+                        }
+
+                        if let Some(writer) = &app.db_writer {
+                            writer.send(crate::app::persistence::db::writer::WriteOp::Event {
+                                conversation_id: app
+                                    .persistence_state
+                                    .current_conversation_id
+                                    .clone(),
+                                kind: "compaction.performed".to_string(),
+                                data: serde_json::json!({ "auto": was_auto_summarize }),
+                                large: vec![("summary".to_string(), summary.clone().into_bytes())],
+                            });
                         }
 
                         // Add the summary as the new context (summary is guaranteed non-empty here)

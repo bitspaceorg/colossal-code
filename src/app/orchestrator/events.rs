@@ -66,13 +66,50 @@ impl App {
                 prefix,
                 tool_name,
                 arguments,
-            } => self.handle_tool_call_started(prefix, tool_name, arguments),
+            } => {
+                // Subagent tool calls bypass the AgentMessage tee, so
+                // audit them here with the step prefix baked into the name.
+                if let (Some(writer), Some(conversation_id)) = (
+                    &self.db_writer,
+                    &self.persistence_state.current_conversation_id,
+                ) {
+                    let qualified = format!("{prefix}:{tool_name}");
+                    let id = self.audit.open_tool_call(&qualified);
+                    writer.send(
+                        crate::app::persistence::db::writer::WriteOp::ToolCallStarted {
+                            id,
+                            conversation_id: conversation_id.clone(),
+                            tool_name: qualified,
+                            arguments: arguments.clone(),
+                        },
+                    );
+                }
+                self.handle_tool_call_started(prefix, tool_name, arguments)
+            }
             OrchestratorEvent::ToolCallCompleted {
                 prefix,
-                tool_name: _,
-                result: _,
+                tool_name,
+                result,
                 is_error,
-            } => self.handle_tool_call_completed(prefix, is_error),
+            } => {
+                if let (Some(writer), Some(conversation_id)) = (
+                    &self.db_writer,
+                    &self.persistence_state.current_conversation_id,
+                ) {
+                    let qualified = format!("{prefix}:{tool_name}");
+                    if let Some(id) = self.audit.close_tool_call(&qualified) {
+                        writer.send(
+                            crate::app::persistence::db::writer::WriteOp::ToolCallCompleted {
+                                id,
+                                conversation_id: conversation_id.clone(),
+                                status: if is_error { "failed" } else { "completed" }.to_string(),
+                                result: result.clone(),
+                            },
+                        );
+                    }
+                }
+                self.handle_tool_call_completed(prefix, is_error)
+            }
             OrchestratorEvent::AgentMessage { prefix, message } => {
                 self.handle_sub_agent_message(prefix, message)
             }

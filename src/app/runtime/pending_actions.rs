@@ -179,6 +179,11 @@ impl App {
                     // Clear raw thinking content for new conversation turn
                     self.thinking_raw_content.clear();
 
+                    self.audit_event_large(
+                        "user.input",
+                        serde_json::json!({ "queued": true }),
+                        vec![("content".to_string(), queued_msg.clone().into_bytes())],
+                    );
                     if let Some(tx) = &self.agent_tx {
                         self.agent_state.agent_processing = true;
                         let _ = tx.send(AgentMessage::UserInput(queued_msg));

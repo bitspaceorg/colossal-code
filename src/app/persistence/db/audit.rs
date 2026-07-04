@@ -95,7 +95,7 @@ fn review_delta(
 }
 
 impl AuditState {
-    fn open_tool_call(&mut self, tool_name: &str) -> String {
+    pub(crate) fn open_tool_call(&mut self, tool_name: &str) -> String {
         let id = uuid::Uuid::new_v4().to_string();
         self.open_tool_calls
             .push((id.clone(), tool_name.to_string()));
@@ -103,7 +103,7 @@ impl AuditState {
         id
     }
 
-    fn close_tool_call(&mut self, tool_name: &str) -> Option<String> {
+    pub(crate) fn close_tool_call(&mut self, tool_name: &str) -> Option<String> {
         let index = self
             .open_tool_calls
             .iter()
@@ -139,13 +139,15 @@ impl crate::app::App {
 }
 
 /// Record one agent stream message into the audit log. `final_response`
-/// is the fully streamed assistant message, supplied only at `Done`.
+/// and `raw_thinking` are the fully streamed assistant message and
+/// chain-of-thought for the turn, supplied only at `Done`.
 pub(crate) fn record_agent_message(
     writer: &Option<DbWriter>,
     audit: &mut AuditState,
     conversation_id: Option<&str>,
     msg: &AgentMessage,
     final_response: Option<&str>,
+    raw_thinking: Option<&str>,
 ) {
     let Some(writer) = writer else { return };
     let conversation = conversation_id.map(|id| id.to_string());
@@ -201,6 +203,14 @@ pub(crate) fn record_agent_message(
             });
         }
         AgentMessage::Done => {
+            if let Some(thinking) = raw_thinking.filter(|t| !t.trim().is_empty()) {
+                writer.send(WriteOp::Event {
+                    conversation_id: conversation.clone(),
+                    kind: "thinking.finalized".to_string(),
+                    data: json!({}),
+                    large: vec![("content".to_string(), thinking.as_bytes().to_vec())],
+                });
+            }
             let mut op = event("assistant.message", json!({}));
             if let (WriteOp::Event { large, .. }, Some(content)) = (&mut op, final_response) {
                 large.push(("content".to_string(), content.as_bytes().to_vec()));
@@ -428,7 +438,7 @@ mod tests {
         let some_writer = Some(writer.clone());
         let conversation = Some("c1");
         let mut record = |audit: &mut AuditState, msg: &AgentMessage| {
-            record_agent_message(&some_writer, audit, conversation, msg, None);
+            record_agent_message(&some_writer, audit, conversation, msg, None, None);
         };
 
         record(
@@ -467,6 +477,7 @@ mod tests {
             conversation,
             &AgentMessage::Done,
             Some("final answer"),
+            Some("let me think"),
         );
         record(
             &mut audit,
@@ -494,6 +505,7 @@ mod tests {
                 "tool.effects_observed",
                 "apply.review_ready",
                 "generation.stats",
+                "thinking.finalized",
                 "assistant.message",
                 "apply.applied",
             ]
@@ -554,12 +566,14 @@ mod tests {
             conversation,
             &AgentMessage::ToolCallStarted("write_file".into(), "{}".into()),
             None,
+            None,
         );
         record_agent_message(
             &some_writer,
             &mut audit,
             conversation,
             &AgentMessage::ToolCallCompleted("write_file".into(), "ok".into()),
+            None,
             None,
         );
         let first_tool = audit.last_tool_call_id.clone();
@@ -568,6 +582,7 @@ mod tests {
             &mut audit,
             conversation,
             &AgentMessage::ExecutionReviewEntries(vec![review_entry("a.txt", "", "one\n")]),
+            None,
             None,
         );
 
@@ -578,12 +593,14 @@ mod tests {
             conversation,
             &AgentMessage::ToolCallStarted("exec_command".into(), "{}".into()),
             None,
+            None,
         );
         record_agent_message(
             &some_writer,
             &mut audit,
             conversation,
             &AgentMessage::ToolCallCompleted("exec_command".into(), "ok".into()),
+            None,
             None,
         );
         let second_tool = audit.last_tool_call_id.clone();
@@ -595,6 +612,7 @@ mod tests {
                 review_entry("a.txt", "", "one\ntwo\n"),
                 review_entry("b.txt", "", "new\n"),
             ]),
+            None,
             None,
         );
         writer.flush();
