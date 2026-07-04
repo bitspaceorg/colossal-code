@@ -152,6 +152,27 @@ pub struct WorkspaceAuditEvent {
     pub message: String,
 }
 
+/// Directory names never scanned, snapshotted, reviewed, or applied:
+/// VCS internals and build/dependency caches that would otherwise make
+/// manifests and checkpoints scale with build output instead of source.
+pub const SCAN_EXCLUDED_DIRS: &[&str] = &[
+    ".git",
+    "target",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    ".cache",
+];
+
+/// Subset excluded when materializing a private workspace copy; `.git`
+/// stays so git commands keep working inside the sandbox.
+const WORKSPACE_COPY_EXCLUDED_DIRS: &[&str] =
+    &["target", "node_modules", "__pycache__", ".venv", ".cache"];
+
+fn dir_name_excluded(name: &std::ffi::OsStr, excluded: &[&str]) -> bool {
+    excluded.iter().any(|dir| name == std::ffi::OsStr::new(dir))
+}
+
 /// Isolated execution is the default; NITE_ISOLATED_EXECUTION_ROOT=0
 /// (or false/no/off) opts out.
 pub fn isolated_execution_enabled() -> bool {
@@ -175,8 +196,94 @@ pub(crate) fn workspace_env_test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|err| err.into_inner())
 }
 
+const OWNER_MARKER_FILE: &str = "owner.pid";
+
+/// Remove execution roots and checkpoint stores left behind by sessions
+/// whose owning process is gone (crashes, kills, pre-marker versions).
+/// Runs once per process before the first workspace is created.
+pub fn sweep_stale_execution_state() {
+    sweep_stale_execution_state_in(&std::env::temp_dir());
+}
+
+fn sweep_stale_execution_state_in(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("nite-exec-root-")
+            || name.starts_with("nite-exec-checkpoints-")
+            || name.starts_with("sessionizer-workspace-"))
+        {
+            continue;
+        }
+        if !path.is_dir() {
+            continue;
+        }
+        if !execution_state_is_stale(&path) {
+            continue;
+        }
+        unmount_workspace_best_effort(&path.join("workspace"));
+        let _ = std::fs::remove_dir_all(&path);
+    }
+}
+
+fn execution_state_is_stale(root: &Path) -> bool {
+    match std::fs::read_to_string(root.join(OWNER_MARKER_FILE)) {
+        Ok(raw) => match raw.trim().parse::<u32>() {
+            Ok(pid) => pid != std::process::id() && !process_is_alive(pid),
+            Err(_) => true,
+        },
+        // Pre-marker dirs: only reap once they are clearly abandoned, so a
+        // concurrently running older build keeps its live workspace.
+        Err(_) => std::fs::metadata(root)
+            .and_then(|meta| meta.modified())
+            .map(|modified| {
+                modified
+                    .elapsed()
+                    .map(|age| age.as_secs() > 60 * 60)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_is_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_is_alive(_pid: u32) -> bool {
+    // No cheap portable liveness probe; err on the side of keeping data.
+    true
+}
+
+fn unmount_workspace_best_effort(mount_point: &Path) {
+    if !mount_point.exists() {
+        return;
+    }
+    for program in ["fusermount3", "fusermount", "umount"] {
+        let unmounted = std::process::Command::new(program)
+            .arg("-u")
+            .arg(mount_point)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if unmounted {
+            return;
+        }
+    }
+}
+
 impl SessionWorkspace {
     pub fn initialize(base_workspace: PathBuf) -> Result<Self> {
+        {
+            static SWEEP: std::sync::Once = std::sync::Once::new();
+            SWEEP.call_once(sweep_stale_execution_state);
+        }
         let base_workspace = base_workspace
             .canonicalize()
             .with_context(|| format!("resolve workspace root {}", base_workspace.display()))?;
@@ -215,7 +322,11 @@ impl SessionWorkspace {
             .with_context(|| format!("create private workspace {}", private_workspace.display()))?;
         std::fs::create_dir_all(&managed_tmp)
             .with_context(|| format!("create managed tmp {}", managed_tmp.display()))?;
-        copy_tree(&base_workspace, &private_workspace)?;
+        copy_tree(
+            &base_workspace,
+            &private_workspace,
+            WORKSPACE_COPY_EXCLUDED_DIRS,
+        )?;
 
         let mut env = Self {
             base_workspace: base_workspace.clone(),
@@ -246,6 +357,7 @@ impl SessionWorkspace {
                 env.private_workspace.display()
             ),
         );
+        env.write_owner_markers()?;
         let checkpoint = env.checkpoint_agent_fs()?;
         env.current_checkpoint = Some(checkpoint);
         Ok(env)
@@ -266,7 +378,11 @@ impl SessionWorkspace {
             .with_context(|| format!("create private workspace {}", private_workspace.display()))?;
         std::fs::create_dir_all(&managed_tmp)
             .with_context(|| format!("create managed tmp {}", managed_tmp.display()))?;
-        copy_tree(&base_workspace, &private_workspace)?;
+        copy_tree(
+            &base_workspace,
+            &private_workspace,
+            WORKSPACE_COPY_EXCLUDED_DIRS,
+        )?;
 
         let mut env = Self {
             base_workspace: base_workspace.clone(),
@@ -297,6 +413,7 @@ impl SessionWorkspace {
                 env.private_workspace.display()
             ),
         );
+        env.write_owner_markers()?;
         let checkpoint = env.checkpoint_agent_fs()?;
         env.current_checkpoint = Some(checkpoint);
         Ok(env)
@@ -348,6 +465,7 @@ impl SessionWorkspace {
                 env.private_workspace.display()
             ),
         );
+        env.write_owner_markers()?;
         let checkpoint = env.checkpoint_agent_fs()?;
         env.current_checkpoint = Some(checkpoint);
         Ok(Some(env))
@@ -429,6 +547,7 @@ impl SessionWorkspace {
                 env.private_workspace.display()
             ),
         );
+        env.write_owner_markers()?;
         let checkpoint = env.checkpoint_agent_fs()?;
         env.current_checkpoint = Some(checkpoint);
         Ok(Some(env))
@@ -453,6 +572,18 @@ impl SessionWorkspace {
             kind,
             message,
         });
+    }
+
+    fn write_owner_markers(&self) -> Result<()> {
+        let pid = std::process::id().to_string();
+        std::fs::create_dir_all(&self.checkpoints_root)
+            .with_context(|| format!("create {}", self.checkpoints_root.display()))?;
+        std::fs::write(self.session_root.join(OWNER_MARKER_FILE), &pid)
+            .with_context(|| format!("write owner marker in {}", self.session_root.display()))?;
+        std::fs::write(self.checkpoints_root.join(OWNER_MARKER_FILE), &pid).with_context(|| {
+            format!("write owner marker in {}", self.checkpoints_root.display())
+        })?;
+        Ok(())
     }
 
     pub fn destroy(mut self) -> Result<()> {
@@ -503,7 +634,24 @@ impl SessionWorkspace {
         }
         std::fs::create_dir_all(&snapshot_root)
             .with_context(|| format!("create checkpoint root {}", snapshot_root.display()))?;
-        copy_tree(&self.private_workspace, &snapshot_root)?;
+        // Snapshot only the delta against the session baseline: restore
+        // resets to base and replays these paths, so unchanged files
+        // never cost disk. Deletions live in the manifest alone.
+        let delta = self.baseline_manifest.diff(&checkpoint.manifest);
+        for change in &delta.changes {
+            match change {
+                FsChange::Created { path, entry }
+                | FsChange::Modified {
+                    path, after: entry, ..
+                }
+                | FsChange::TypeChanged {
+                    path, after: entry, ..
+                } => {
+                    copy_manifest_entry(&self.private_workspace, &snapshot_root, path, entry)?;
+                }
+                FsChange::Deleted { .. } => {}
+            }
+        }
         std::fs::write(
             self.checkpoint_metadata_path(&checkpoint.id),
             serde_json::to_vec(&checkpoint)?,
@@ -619,9 +767,31 @@ impl SessionWorkspace {
             ));
         }
 
-        self.current_source_root = snapshot_root;
+        // Reset to pristine base, then replay the checkpoint's delta on
+        // top; the snapshot holds exactly the paths that differed from
+        // baseline when the checkpoint was taken.
+        self.current_source_root = self.base_workspace.clone();
         self.rebuild_private_workspace()?;
         self.baseline_manifest = FsManifest::scan(&self.base_workspace)?;
+        let delta = self.baseline_manifest.diff(&metadata.manifest);
+        for change in &delta.changes {
+            match change {
+                FsChange::Created { path, entry }
+                | FsChange::Modified {
+                    path, after: entry, ..
+                }
+                | FsChange::TypeChanged {
+                    path, after: entry, ..
+                } => {
+                    copy_manifest_entry(&snapshot_root, &self.private_workspace, path, entry)?;
+                }
+                FsChange::Deleted { path, .. } => {
+                    let target = self.private_workspace.join(path);
+                    let _ = std::fs::remove_file(&target);
+                    let _ = std::fs::remove_dir_all(&target);
+                }
+            }
+        }
         self.current_checkpoint = Some(metadata.clone());
         self.record_audit(
             WorkspaceAuditEventKind::CheckpointCreated,
@@ -644,7 +814,11 @@ impl SessionWorkspace {
                         self.private_workspace.display()
                     )
                 })?;
-                copy_tree(&self.current_source_root, &self.private_workspace)?;
+                copy_tree(
+                    &self.current_source_root,
+                    &self.private_workspace,
+                    WORKSPACE_COPY_EXCLUDED_DIRS,
+                )?;
             }
             #[cfg(target_os = "windows")]
             WorkspaceBackend::WindowsCopy => {
@@ -654,7 +828,11 @@ impl SessionWorkspace {
                         self.private_workspace.display()
                     )
                 })?;
-                copy_tree(&self.current_source_root, &self.private_workspace)?;
+                copy_tree(
+                    &self.current_source_root,
+                    &self.private_workspace,
+                    WORKSPACE_COPY_EXCLUDED_DIRS,
+                )?;
             }
             #[cfg(target_os = "macos")]
             WorkspaceBackend::Clone => {
@@ -724,7 +902,13 @@ impl SessionWorkspace {
             Err(read_err) => {
                 let snapshot_root = self.checkpoint_snapshot_root(checkpoint_id);
                 if snapshot_root.exists() {
-                    let manifest = FsManifest::scan(&snapshot_root)?;
+                    // Delta snapshots hold only changed paths; merge over
+                    // the baseline so unchanged files aren't treated as
+                    // deletions during restore.
+                    let mut manifest = self.baseline_manifest.clone();
+                    manifest
+                        .entries
+                        .extend(FsManifest::scan(&snapshot_root)?.entries);
                     return Ok(FsCheckpoint {
                         id: checkpoint_id.clone(),
                         manifest,
@@ -1070,8 +1254,44 @@ fn remove_existing_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
-    for entry in walkdir::WalkDir::new(src).follow_links(false) {
+/// Materialize a single manifest entry from one tree into another.
+fn copy_manifest_entry(
+    src_root: &Path,
+    dst_root: &Path,
+    relative: &Path,
+    entry: &FsEntry,
+) -> Result<()> {
+    let src = src_root.join(relative);
+    let dst = dst_root.join(relative);
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create directory {}", parent.display()))?;
+    }
+    match &entry.kind {
+        FsEntryKind::Directory => {
+            std::fs::create_dir_all(&dst)
+                .with_context(|| format!("create directory {}", dst.display()))?;
+        }
+        FsEntryKind::File => {
+            std::fs::copy(&src, &dst)
+                .with_context(|| format!("copy {} to {}", src.display(), dst.display()))?;
+        }
+        FsEntryKind::Symlink { target } => {
+            let _ = std::fs::remove_file(&dst);
+            create_symlink(target, &dst)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_tree(src: &Path, dst: &Path, excluded: &[&str]) -> Result<()> {
+    let walker = walkdir::WalkDir::new(src)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            !(entry.file_type().is_dir() && dir_name_excluded(entry.file_name(), excluded))
+        });
+    for entry in walker {
         let entry = entry?;
         let path = entry.path();
         let relative = path.strip_prefix(src)?;
@@ -1106,6 +1326,11 @@ fn scan_path(root: &Path, current: &Path, entries: &mut BTreeMap<PathBuf, FsEntr
         let path = entry.path();
         let relative = path.strip_prefix(root)?.to_path_buf();
         let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_dir()
+            && dir_name_excluded(entry.file_name().as_os_str(), SCAN_EXCLUDED_DIRS)
+        {
+            continue;
+        }
         let file_type = metadata.file_type();
         let kind = if file_type.is_symlink() {
             FsEntryKind::Symlink {
@@ -1388,6 +1613,100 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("create test dir");
         dir
+    }
+
+    #[test]
+    fn manifest_scan_skips_excluded_directories() {
+        let temp = make_test_dir("scan-exclusions");
+        std::fs::create_dir_all(temp.join("src")).expect("mkdir src");
+        std::fs::write(temp.join("src/main.rs"), "fn main() {}").expect("seed src");
+        for excluded in [".git", "target", "node_modules"] {
+            std::fs::create_dir_all(temp.join(excluded)).expect("mkdir excluded");
+            std::fs::write(temp.join(excluded).join("junk"), "junk").expect("seed junk");
+        }
+
+        let manifest = FsManifest::scan(&temp).expect("scan");
+
+        assert!(manifest.entries.contains_key(Path::new("src/main.rs")));
+        assert!(
+            manifest.entries.keys().all(|path| !path.starts_with(".git")
+                && !path.starts_with("target")
+                && !path.starts_with("node_modules")),
+            "excluded dirs must not appear in the manifest"
+        );
+    }
+
+    #[test]
+    fn checkpoint_snapshots_store_only_the_delta_and_restore_replays_it() {
+        let temp = make_test_dir("delta-checkpoints");
+        std::fs::write(temp.join("base.txt"), "original").expect("seed file");
+        let mut workspace = SessionWorkspace::initialize(temp.clone()).expect("init workspace");
+        let initial = workspace
+            .current_checkpoint()
+            .expect("initial checkpoint")
+            .id
+            .clone();
+
+        std::fs::write(workspace.private_workspace().join("base.txt"), "changed").expect("modify");
+        std::fs::write(workspace.private_workspace().join("created.txt"), "new").expect("create");
+        let checkpoint = workspace.checkpoint_agent_fs().expect("checkpoint");
+
+        // The snapshot holds only the two changed paths, not the tree.
+        let snapshot_root = workspace.checkpoint_snapshot_root(&checkpoint.id);
+        let snapshot_files: Vec<String> = walkdir::WalkDir::new(&snapshot_root)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(snapshot_files.len(), 2, "snapshot: {snapshot_files:?}");
+
+        // Restoring the initial checkpoint rewinds both changes.
+        workspace
+            .restore_checkpoint(&initial)
+            .expect("restore initial");
+        assert_eq!(
+            std::fs::read_to_string(workspace.private_workspace().join("base.txt")).unwrap(),
+            "original"
+        );
+        assert!(!workspace.private_workspace().join("created.txt").exists());
+
+        // And restoring the later checkpoint replays the delta again.
+        workspace
+            .restore_checkpoint(&checkpoint.id)
+            .expect("restore later");
+        assert_eq!(
+            std::fs::read_to_string(workspace.private_workspace().join("base.txt")).unwrap(),
+            "changed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.private_workspace().join("created.txt")).unwrap(),
+            "new"
+        );
+        workspace.destroy().expect("destroy");
+    }
+
+    #[test]
+    fn sweep_removes_dead_owner_roots_and_keeps_live_ones() {
+        let arena = make_test_dir("sweep-arena");
+        let dead = arena.join("nite-exec-root-dead");
+        let live = arena.join("nite-exec-root-live");
+        let fresh_unmarked = arena.join("nite-exec-checkpoints-unmarked");
+        for dir in [&dead, &live, &fresh_unmarked] {
+            std::fs::create_dir_all(dir).expect("mkdir");
+        }
+        std::fs::write(dead.join(OWNER_MARKER_FILE), "999999999").expect("dead marker");
+        std::fs::write(live.join(OWNER_MARKER_FILE), std::process::id().to_string())
+            .expect("live marker");
+
+        sweep_stale_execution_state_in(&arena);
+
+        assert!(!dead.exists(), "dead-owner root must be swept");
+        assert!(live.exists(), "live-owner root must be kept");
+        assert!(
+            fresh_unmarked.exists(),
+            "fresh unmarked root must survive (grace period)"
+        );
     }
 
     #[test]
@@ -2052,5 +2371,13 @@ mod tests {
             event.kind == WorkspaceAuditEventKind::FileEventObserved
                 && event.message.contains("after-discard.txt")
         }));
+    }
+}
+
+impl Drop for SessionWorkspace {
+    fn drop(&mut self) {
+        // Best-effort: unmount and remove the private root when a session
+        // is dropped in-process; the startup sweep covers hard exits.
+        let _ = self.teardown_backend();
     }
 }
