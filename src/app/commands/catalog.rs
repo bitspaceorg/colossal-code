@@ -23,6 +23,8 @@ pub(crate) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/rewind",
         "restore the code and/or conversation to a previous point",
     ),
+    ("/undo", "undo the last rewind, or step back one snapshot"),
+    ("/redo", "redo the last undone rewind or step-back"),
     (
         "/safety",
         "configure safety mode (yolo/regular/readonly) and permissions",

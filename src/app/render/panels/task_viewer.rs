@@ -128,7 +128,7 @@ impl App {
                     message_type: &message.message_type,
                 })
                 .collect();
-            lines.extend(self.render_transcript_lines(max_width, &entries));
+            lines.extend(self.render_transcript_lines(max_width, &entries, lines.len()));
 
             if let Some(stats) = context.generation_stats.clone() {
                 let stats_text = format!(

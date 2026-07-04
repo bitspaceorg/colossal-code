@@ -2,8 +2,9 @@ use std::time::SystemTime;
 
 use crate::app::{
     APPROX_CHARS_PER_TOKEN, App, COMPACTION_HISTORY_RESERVE_TOKENS,
-    DEFAULT_COMPACTION_HISTORY_BUDGET, FileChange, MIN_COMPACTION_HISTORY_BUDGET, MessageState,
-    MessageType, RewindPoint, UIMessageMetadata, UiMessageEvent,
+    DEFAULT_COMPACTION_HISTORY_BUDGET, FileChange, IsolatedChangesState,
+    MIN_COMPACTION_HISTORY_BUDGET, MessageState, MessageType, RewindPoint, RewindRestoreScope,
+    TimelineRestoreRecord, TimelineStateSnapshot, UIMessageMetadata, UiMessageEvent,
 };
 
 impl App {
@@ -11,8 +12,196 @@ impl App {
         self.show_rewind = false;
         self.rewind_points.clear();
         self.rewind_selected = 0;
+        self.rewind_undo_stack.clear();
+        self.rewind_redo_stack.clear();
         self.current_execution_checkpoint_id = None;
         self.current_file_changes.clear();
+    }
+
+    pub(crate) fn capture_timeline_state(&self) -> TimelineStateSnapshot {
+        TimelineStateSnapshot {
+            messages: self.messages.clone(),
+            message_types: self.message_types.clone(),
+            message_states: self.message_states.clone(),
+            message_metadata: self.message_metadata.clone(),
+            message_timestamps: self.message_timestamps.clone(),
+            rewind_points: self.rewind_points.clone(),
+            current_execution_checkpoint_id: self.current_execution_checkpoint_id.clone(),
+            current_file_changes: self.current_file_changes.clone(),
+            isolated_changes: self.isolated_changes.clone(),
+        }
+    }
+
+    pub(crate) fn restore_timeline_state(
+        &mut self,
+        snapshot: &TimelineStateSnapshot,
+        restore_code: bool,
+    ) -> bool {
+        self.messages = snapshot.messages.clone();
+        self.message_types = snapshot.message_types.clone();
+        self.message_states = snapshot.message_states.clone();
+        self.message_metadata = snapshot.message_metadata.clone();
+        self.message_timestamps = snapshot.message_timestamps.clone();
+        self.rewind_points = snapshot.rewind_points.clone();
+        self.current_file_changes = snapshot.current_file_changes.clone();
+        self.isolated_changes = snapshot.isolated_changes.clone();
+        self.current_execution_checkpoint_id = snapshot.current_execution_checkpoint_id.clone();
+        self.show_rewind = false;
+        self.rewind_selected = self.rewind_points.len().saturating_sub(1);
+        self.rewind_focus = crate::app::RewindFocus::default();
+
+        if restore_code {
+            return self.request_execution_checkpoint_restore(
+                snapshot.current_execution_checkpoint_id.clone(),
+            );
+        }
+
+        true
+    }
+
+    pub(crate) fn request_execution_checkpoint_restore(
+        &mut self,
+        checkpoint_id: Option<agent_core::FsCheckpointId>,
+    ) -> bool {
+        match (&self.agent_tx, checkpoint_id) {
+            (Some(tx), Some(checkpoint_id)) => {
+                let _ = tx.send(agent_core::AgentMessage::RestoreExecutionCheckpoint(
+                    checkpoint_id,
+                ));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn restore_isolated_changes_for_point(point: &RewindPoint) -> IsolatedChangesState {
+        IsolatedChangesState {
+            pending_count: point.review_entries.len(),
+            last_prompted_count: point.review_entries.len(),
+            info_shown: false,
+            conflict_paths: Vec::new(),
+            review_entries: point.review_entries.clone(),
+            review_selected: 0,
+            show_review_panel: false,
+        }
+    }
+
+    pub(crate) fn timeline_state_for_rewind_point(
+        &self,
+        point: &RewindPoint,
+        selected_index: usize,
+        restore_scope: RewindRestoreScope,
+    ) -> TimelineStateSnapshot {
+        let mut snapshot = self.capture_timeline_state();
+        snapshot.rewind_points = self.rewind_points[..=selected_index].to_vec();
+        snapshot.current_file_changes.clear();
+
+        if restore_scope.restores_conversation() {
+            snapshot.messages = point.messages.clone();
+            snapshot.message_types = point.message_types.clone();
+            snapshot.message_states = point.message_states.clone();
+            snapshot.message_metadata = point.message_metadata.clone();
+            snapshot.message_timestamps = point.message_timestamps.clone();
+        }
+
+        if restore_scope.restores_code() {
+            snapshot.current_execution_checkpoint_id = point.fs_checkpoint_id.clone();
+            snapshot.isolated_changes = Self::restore_isolated_changes_for_point(point);
+        }
+
+        snapshot
+    }
+
+    pub(crate) fn apply_rewind_point(
+        &mut self,
+        point: RewindPoint,
+        selected_index: usize,
+        restore_scope: RewindRestoreScope,
+    ) {
+        let from = self.capture_timeline_state();
+        let to = self.timeline_state_for_rewind_point(&point, selected_index, restore_scope);
+        let code_restored = self.restore_timeline_state(&to, restore_scope.restores_code());
+        self.rewind_undo_stack.push(TimelineRestoreRecord {
+            from,
+            to,
+            code_restored,
+        });
+        self.rewind_redo_stack.clear();
+        self.status_message = Some(if restore_scope.restores_code() && !code_restored {
+            format!(
+                "{} • {} • no filesystem checkpoint • /undo available",
+                restore_scope.default_status_label(),
+                point.preview
+            )
+        } else {
+            format!(
+                "{} • {} • /undo available",
+                restore_scope.default_status_label(),
+                point.preview
+            )
+        });
+    }
+
+    pub(crate) fn undo_rewind_restore(&mut self) -> bool {
+        if let Some(record) = self.rewind_undo_stack.pop() {
+            let code_restored = self.restore_timeline_state(&record.from, record.code_restored);
+            let status = if record.code_restored && !code_restored {
+                "Rewind undone • no filesystem checkpoint • /redo available"
+            } else {
+                "Rewind undone • /redo available"
+            };
+            self.rewind_redo_stack.push(record);
+            self.status_message = Some(status.to_string());
+            return true;
+        }
+
+        false
+    }
+
+    pub(crate) fn redo_rewind_restore(&mut self) -> bool {
+        if let Some(record) = self.rewind_redo_stack.pop() {
+            let code_restored = self.restore_timeline_state(&record.to, record.code_restored);
+            let status = if record.code_restored && !code_restored {
+                "Rewind redone • no filesystem checkpoint • /undo available"
+            } else {
+                "Rewind redone • /undo available"
+            };
+            self.rewind_undo_stack.push(record);
+            self.status_message = Some(status.to_string());
+            return true;
+        }
+
+        false
+    }
+
+    pub(crate) fn undo_last_snapshot_step(&mut self) -> bool {
+        if self.rewind_points.len() < 2 {
+            return false;
+        }
+
+        let selected_index = self.rewind_points.len() - 2;
+        let point = self.rewind_points[selected_index].clone();
+        let from = self.capture_timeline_state();
+        let to = self.timeline_state_for_rewind_point(
+            &point,
+            selected_index,
+            RewindRestoreScope::CodeAndConversation,
+        );
+        let code_restored = self.restore_timeline_state(&to, true);
+        self.rewind_redo_stack.push(TimelineRestoreRecord {
+            from: to.clone(),
+            to: from,
+            code_restored,
+        });
+        self.status_message = Some(if code_restored {
+            format!("Undid last snapshot • {} • /redo available", point.preview)
+        } else {
+            format!(
+                "Undid last snapshot • {} • no filesystem checkpoint • /redo available",
+                point.preview
+            )
+        });
+        true
     }
 
     pub(crate) fn track_file_change(&mut self, tool_name: &str, arguments: &str, _result: &str) {

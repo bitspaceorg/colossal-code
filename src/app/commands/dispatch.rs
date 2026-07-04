@@ -13,6 +13,8 @@ pub(crate) enum SlashCommandDispatch {
     Connect,
     Resume,
     Rewind,
+    Undo,
+    Redo,
     Fork,
     Vim,
     Todos,
@@ -68,6 +70,8 @@ impl From<ParsedSlashCommand> for SlashCommandDispatch {
             ParsedSlashCommand::Connect => Self::Connect,
             ParsedSlashCommand::Resume => Self::Resume,
             ParsedSlashCommand::Rewind => Self::Rewind,
+            ParsedSlashCommand::Undo => Self::Undo,
+            ParsedSlashCommand::Redo => Self::Redo,
             ParsedSlashCommand::Fork => Self::Fork,
             ParsedSlashCommand::Vim => Self::Vim,
             ParsedSlashCommand::Todos => Self::Todos,
@@ -108,6 +112,18 @@ mod tests {
     fn dispatches_shells_command() {
         let dispatch = dispatch_slash_command("/shells");
         assert!(matches!(dispatch, SlashCommandDispatch::Shells));
+    }
+
+    #[test]
+    fn dispatches_undo_and_redo_commands() {
+        assert!(matches!(
+            dispatch_slash_command("/undo"),
+            SlashCommandDispatch::Undo
+        ));
+        assert!(matches!(
+            dispatch_slash_command("/redo"),
+            SlashCommandDispatch::Redo
+        ));
     }
 
     #[test]

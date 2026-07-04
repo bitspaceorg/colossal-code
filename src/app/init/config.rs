@@ -319,6 +319,7 @@ impl App {
         };
         self.available_models = models;
         self.model_selected_index = 0;
+        self.refresh_context_window();
 
         Ok(())
     }
@@ -332,6 +333,7 @@ impl App {
         };
         self.available_models = models;
         self.model_selected_index = 0;
+        self.refresh_context_window();
         Ok(())
     }
 
@@ -345,11 +347,47 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::resolve_auto_summarize_threshold;
+    use crate::app::App;
     use crate::app::persistence::config::load_config_value_from_content;
     use crate::app::{
         AUTO_SUMMARIZE_THRESHOLD_VERSION, DEFAULT_AUTO_SUMMARIZE_THRESHOLD,
         LEGACY_AUTO_SUMMARIZE_THRESHOLD,
     };
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("lock env")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(previous) = &self.previous {
+                    std::env::set_var(self.key, previous);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
 
     #[test]
     fn legacy_threshold_migrates_to_new_default() {
@@ -381,5 +419,19 @@ mod tests {
         let value = load_config_value_from_content(content, "scroll");
 
         assert_eq!(value.as_deref(), Some("true"));
+    }
+
+    #[tokio::test]
+    async fn load_models_refreshes_current_context_window() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let _context = EnvVarGuard::set("NITE_DEFAULT_CONTEXT_TOKENS", "32768");
+        let mut app = App::new().await.expect("create app");
+        app.current_model = Some("custom-model".to_string());
+        app.current_context_tokens = None;
+
+        app.load_models().expect("reload models");
+
+        assert_eq!(app.current_context_tokens, Some(32768));
     }
 }

@@ -166,12 +166,13 @@ impl App {
     }
 
     pub(crate) fn compose_main_message_lines(
-        &self,
+        &mut self,
         max_width: usize,
         append_plan: bool,
         append_subagent_thinking: bool,
     ) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
+        self.visible_edit_file_artifacts.clear();
         let tips: Vec<Line<'static>> = self
             .render_tips()
             .into_iter()
@@ -182,8 +183,8 @@ impl App {
             lines.push(Line::from(" "));
         }
 
-        let messages = self.get_messages();
-        let message_types = self.get_message_types();
+        let messages = self.get_messages().to_vec();
+        let message_types = self.get_message_types().to_vec();
         let entries: Vec<TranscriptEntry<'_>> = messages
             .iter()
             .zip(message_types.iter())
@@ -192,7 +193,7 @@ impl App {
                 message_type,
             })
             .collect();
-        lines.extend(self.render_transcript_lines(max_width, &entries));
+        lines.extend(self.render_transcript_lines(max_width, &entries, lines.len()));
 
         if append_plan {
             self.append_tool_plan_view_lines(&mut lines, max_width);

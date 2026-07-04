@@ -1,5 +1,6 @@
 use ratatui::text::Line;
 
+use crate::app::app_state::VisibleEditDiffArtifact;
 use crate::app::{App, MessageType, UiMessageEvent};
 
 pub(crate) struct TranscriptEntry<'a> {
@@ -9,9 +10,10 @@ pub(crate) struct TranscriptEntry<'a> {
 
 impl App {
     pub(crate) fn render_transcript_lines(
-        &self,
+        &mut self,
         max_width: usize,
         entries: &[TranscriptEntry<'_>],
+        row_offset: usize,
     ) -> Vec<Line<'static>> {
         let message_types: Vec<MessageType> = entries
             .iter()
@@ -33,62 +35,51 @@ impl App {
                     result,
                     raw_arguments,
                 }) = UiMessageEvent::parse(message)
-                && let Some(next_message) = entries.get(idx + 1).map(|next| next.content)
-                && let Some(note) = App::approval_note_label(next_message)
             {
-                lines.extend(
-                    self.render_tool_call_completed_with_note(
-                        &tool_name,
-                        &args,
+                let note = entries
+                    .get(idx + 1)
+                    .map(|next| next.content)
+                    .and_then(App::approval_note_label);
+                let rendered = self.render_tool_call_completed_with_note_for_message(
+                    &tool_name,
+                    &args,
+                    &result,
+                    raw_arguments.as_deref(),
+                    max_width,
+                    connector,
+                    note,
+                    Some(idx),
+                );
+                if let Some(raw_arguments) = raw_arguments.as_deref()
+                    && let Some(rendered_diff) = self.rendered_edit_file_diff_for_message(
+                        raw_arguments,
                         &result,
-                        raw_arguments.as_deref(),
                         max_width,
                         connector,
-                        Some(note),
+                        idx,
                     )
-                    .lines,
-                );
+                {
+                    let start_row =
+                        row_offset + lines.len() + rendered.lines.len() - rendered_diff.lines.len();
+                    let end_row = start_row + rendered_diff.lines.len();
+                    self.visible_edit_file_artifacts
+                        .push(VisibleEditDiffArtifact {
+                            message_idx: idx,
+                            start_row,
+                            end_row,
+                            collapsed: rendered_diff.collapsed,
+                        });
+                }
+                lines.extend(rendered.lines);
+                let next_idx = idx + if note.is_some() { 2 } else { 1 };
                 if Self::should_insert_primary_agent_block_gap(
                     message,
-                    entries.get(idx + 2).map(|next| next.content),
+                    entries.get(next_idx).map(|next| next.content),
                 ) {
                     // Keep spacing between complete primary assistant blocks, including artifacts.
                     lines.push(Line::from(""));
                 }
-                idx += 2;
-                continue;
-            }
-
-            if is_agent
-                && let Some(UiMessageEvent::ToolCallCompleted {
-                    tool_name,
-                    args,
-                    result,
-                    raw_arguments,
-                }) = UiMessageEvent::parse(message)
-                && let Some(next_message) = entries.get(idx + 1).map(|next| next.content)
-                && next_message.trim()
-                    == "⎿ Changes are isolated and won't touch the workspace until applied"
-            {
-                lines.extend(
-                    self.render_tool_call_completed_with_note(
-                        &tool_name,
-                        &args,
-                        &result,
-                        raw_arguments.as_deref(),
-                        max_width,
-                        connector,
-                        Some("Isolated until applied"),
-                    )
-                    .lines,
-                );
-                if Self::should_insert_primary_agent_block_gap(
-                    message,
-                    entries.get(idx + 2).map(|next| next.content),
-                ) {
-                    lines.push(Line::from(""));
-                }
-                idx += 2;
+                idx = next_idx;
                 continue;
             }
 

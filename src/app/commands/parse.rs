@@ -36,6 +36,8 @@ pub(crate) enum ParsedSlashCommand {
     Connect,
     Resume,
     Rewind,
+    Undo,
+    Redo,
     Fork,
     Vim,
     Todos,
@@ -89,6 +91,10 @@ pub(crate) fn parse_slash_command(command: &str) -> ParsedSlashCommand {
         ParsedSlashCommand::Resume
     } else if cmd_lower == "/rewind" {
         ParsedSlashCommand::Rewind
+    } else if cmd_lower == "/undo" {
+        ParsedSlashCommand::Undo
+    } else if cmd_lower == "/redo" {
+        ParsedSlashCommand::Redo
     } else if cmd_lower == "/fork" {
         ParsedSlashCommand::Fork
     } else if cmd_lower == "/vim" {

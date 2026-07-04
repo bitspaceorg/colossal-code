@@ -436,6 +436,26 @@ pub(crate) struct RewindPoint {
     pub(crate) review_entries: Vec<agent_core::ExecutionReviewEntry>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct TimelineStateSnapshot {
+    pub(crate) messages: Vec<String>,
+    pub(crate) message_types: Vec<MessageType>,
+    pub(crate) message_states: Vec<MessageState>,
+    pub(crate) message_metadata: Vec<Option<UIMessageMetadata>>,
+    pub(crate) message_timestamps: Vec<SystemTime>,
+    pub(crate) rewind_points: Vec<RewindPoint>,
+    pub(crate) current_execution_checkpoint_id: Option<agent_core::FsCheckpointId>,
+    pub(crate) current_file_changes: Vec<FileChange>,
+    pub(crate) isolated_changes: IsolatedChangesState,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TimelineRestoreRecord {
+    pub(crate) from: TimelineStateSnapshot,
+    pub(crate) to: TimelineStateSnapshot,
+    pub(crate) code_restored: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum RewindRestoreScope {
     #[default]
@@ -475,6 +495,14 @@ impl RewindRestoreScope {
 
     pub(crate) fn restores_code(self) -> bool {
         matches!(self, Self::CodeAndConversation | Self::CodeOnly)
+    }
+
+    pub(crate) fn default_status_label(self) -> &'static str {
+        match self {
+            Self::CodeAndConversation => "Rewound code and conversation",
+            Self::ConversationOnly => "Rewound conversation",
+            Self::CodeOnly => "Rewound code",
+        }
     }
 }
 
@@ -546,7 +574,7 @@ impl Default for SafetyState {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct IsolatedChangesState {
     pub(crate) pending_count: usize,
     pub(crate) last_prompted_count: usize,

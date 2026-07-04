@@ -713,7 +713,7 @@ fn buffer_row_to_line(
         spans.push(Span::styled(run_text, style));
     }
 
-    RatatuiLine::from(spans)
+    RatatuiLine::from(spans).patch_style(Style::default())
 }
 
 pub(crate) fn build_edit_file_diff(
@@ -930,5 +930,20 @@ mod tests {
 
         assert_eq!(buffer[(10, 1)].bg, Color::Reset);
         assert_ne!(buffer[(80, 1)].bg, Color::Reset);
+    }
+
+    #[test]
+    fn diff_lines_do_not_leak_background_into_following_transcript_rows() {
+        let mut lines =
+            render_edit_file_diff_lines("old\n", "new\n", "src/main.rs", 100, Span::raw(""));
+        lines.push(RatatuiLine::from("next line"));
+
+        let area = Rect::new(0, 0, 100, lines.len() as u16);
+        let mut buffer = Buffer::empty(area);
+        Paragraph::new(ratatui::text::Text::from(lines)).render(area, &mut buffer);
+
+        let next_row = area.bottom() - 1;
+        assert_eq!(buffer[(0, next_row)].bg, Color::Reset);
+        assert_eq!(buffer[(10, next_row)].bg, Color::Reset);
     }
 }

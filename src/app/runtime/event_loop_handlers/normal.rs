@@ -368,9 +368,10 @@ mod tests {
     use std::sync::{Mutex as StdMutex, OnceLock};
 
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
 
     use super::handle_runtime_key_normal;
-    use crate::app::{App, Phase};
+    use crate::app::{App, MessageState, MessageType, Phase, UiMessageEvent};
 
     fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
@@ -423,5 +424,56 @@ mod tests {
             !app.agent_state.agent_interrupted,
             "closing /shells should not interrupt generation"
         );
+    }
+
+    #[tokio::test]
+    async fn ctrl_r_expands_visible_collapsed_edit_diff() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.phase = Phase::Input;
+        app.connect.show_connect_modal = false;
+        app.last_messages_area = Rect::new(0, 0, 120, 40);
+
+        let old_string = (0..40)
+            .map(|idx| format!("old line {idx}\\n"))
+            .collect::<String>();
+        let new_string = (0..40)
+            .map(|idx| format!("new line {idx}\\n"))
+            .collect::<String>();
+        let raw_arguments = serde_json::json!({
+            "path": "src/main.rs",
+            "old_string": old_string,
+            "new_string": new_string,
+        })
+        .to_string();
+
+        app.messages.push(
+            UiMessageEvent::ToolCallCompleted {
+                tool_name: "edit_file".to_string(),
+                args: "src/main.rs".to_string(),
+                result: "Updated src/main.rs".to_string(),
+                raw_arguments: Some(raw_arguments),
+            }
+            .to_message(),
+        );
+        app.message_types.push(MessageType::Agent);
+        app.message_states.push(MessageState::Sent);
+
+        let _ = app.compose_main_message_lines(100, false, false);
+
+        assert_eq!(app.visible_edit_file_artifacts.len(), 1);
+        assert!(
+            app.visible_edit_file_artifacts[0].end_row
+                > app.visible_edit_file_artifacts[0].start_row
+        );
+        app.visible_edit_file_artifacts[0].collapsed = true;
+
+        handle_runtime_key_normal(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        );
+
+        assert!(app.expanded_edit_file_diffs.contains(&0));
     }
 }

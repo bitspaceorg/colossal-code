@@ -9,11 +9,19 @@ use crate::app::{App, AssistantMode, HelpTab, MessageState, MessageType, UiMessa
 impl App {
     pub(crate) fn handle_slash_command(&mut self, record_message: bool) {
         let command = self.input.trim().to_string();
+        let dispatch = dispatch_slash_command(&command);
 
         // Reset streaming tokens for new message (keep generation_stats for context tracking)
         self.streaming_completion_tokens = 0;
 
-        if record_message {
+        if record_message
+            && !matches!(
+                dispatch,
+                SlashCommandDispatch::Rewind
+                    | SlashCommandDispatch::Undo
+                    | SlashCommandDispatch::Redo
+            )
+        {
             // Add command to messages as user message
             self.messages.push(command.clone());
             self.message_types.push(MessageType::User);
@@ -30,7 +38,6 @@ impl App {
         }
 
         // Parse and execute command
-        let dispatch = dispatch_slash_command(&command);
         let runtime_route = route_command_runtime(&dispatch, self.messages.len());
         if apply_command_runtime_route(self, runtime_route) {
             return;
@@ -132,16 +139,23 @@ impl App {
             SlashCommandDispatch::Rewind => {
                 // Open rewind panel to restore to previous conversation state
                 if self.rewind_points.is_empty() {
-                    self.messages
-                        .push(" ⎿ No rewind points available yet".to_string());
-                    self.message_types.push(MessageType::Agent);
-                    self.message_states.push(MessageState::Sent);
+                    self.status_message = Some("No rewind points available yet".to_string());
                 } else {
                     self.show_rewind = true;
                     self.rewind_selected = self.rewind_points.len().saturating_sub(1); // Start at most recent
                     self.rewind_restore_scope =
                         crate::app::state::message::RewindRestoreScope::default();
                     self.rewind_focus = crate::app::state::message::RewindFocus::default();
+                }
+            }
+            SlashCommandDispatch::Undo => {
+                if !self.undo_rewind_restore() && !self.undo_last_snapshot_step() {
+                    self.status_message = Some("Nothing to undo".to_string());
+                }
+            }
+            SlashCommandDispatch::Redo => {
+                if !self.redo_rewind_restore() {
+                    self.status_message = Some("Nothing to redo".to_string());
                 }
             }
             SlashCommandDispatch::Fork => {
@@ -314,6 +328,22 @@ mod tests {
     use crate::app::runtime::r#loop::route_command_runtime;
     use crate::app::{App, MessageState, MessageType, RewindPoint};
 
+    fn test_rewind_point(preview: &str, messages: Vec<String>) -> RewindPoint {
+        RewindPoint {
+            message_count: messages.len(),
+            preview: preview.to_string(),
+            message_types: vec![MessageType::User; messages.len()],
+            message_states: vec![MessageState::Sent; messages.len()],
+            message_metadata: vec![None; messages.len()],
+            message_timestamps: vec![SystemTime::UNIX_EPOCH; messages.len()],
+            messages,
+            timestamp: SystemTime::UNIX_EPOCH,
+            file_changes: Vec::new(),
+            fs_checkpoint_id: None,
+            review_entries: Vec::new(),
+        }
+    }
+
     fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| StdMutex::new(()))
@@ -474,5 +504,50 @@ mod tests {
             app.current_file_changes.is_empty(),
             "tracked file changes should be cleared"
         );
+    }
+
+    #[tokio::test]
+    async fn rewind_command_opens_modal_without_recording_command_message() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        app.rewind_points
+            .push(test_rewind_point("latest", vec!["hello".to_string()]));
+        app.input = "/rewind".to_string();
+
+        app.handle_slash_command(true);
+
+        assert!(app.show_rewind);
+        assert!(app.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn undo_then_redo_roundtrips_latest_snapshot() {
+        let _lock = env_test_lock();
+        let _backend = EnvVarGuard::set("NITE_BACKEND_MODE", "none");
+        let mut app = App::new().await.expect("create app");
+        let older = test_rewind_point("older", vec!["first".to_string()]);
+        let newer = test_rewind_point("newer", vec!["first".to_string(), "second".to_string()]);
+        app.rewind_points = vec![older, newer];
+        app.messages = vec!["first".to_string(), "second".to_string()];
+        app.message_types = vec![MessageType::User, MessageType::User];
+        app.message_states = vec![MessageState::Sent, MessageState::Sent];
+        app.message_metadata = vec![None, None];
+        app.message_timestamps = vec![SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH];
+
+        app.input = "/undo".to_string();
+        app.handle_slash_command(true);
+
+        assert_eq!(app.messages, vec!["first".to_string()]);
+        assert_eq!(app.rewind_points.len(), 1);
+
+        app.input = "/redo".to_string();
+        app.handle_slash_command(true);
+
+        assert_eq!(
+            app.messages,
+            vec!["first".to_string(), "second".to_string()]
+        );
+        assert_eq!(app.rewind_points.len(), 2);
     }
 }

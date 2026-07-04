@@ -10,7 +10,6 @@ use ratatui::{
 
 use crate::app::{
     App,
-    render::edit_file_diff::build_edit_file_diff,
     state::message::{RewindFocus, RewindRestoreScope},
 };
 
@@ -267,9 +266,9 @@ impl App {
             return;
         }
 
-        let Some(entry) = point.review_entries.first() else {
+        if point.file_changes.is_empty() {
             let note = if point.fs_checkpoint_id.is_some() {
-                "No file diff preview was captured for this rewind point. The filesystem snapshot can still be restored."
+                "No file summary was captured for this rewind point. The filesystem snapshot can still be restored."
             } else {
                 "No filesystem checkpoint was captured for this rewind point."
             };
@@ -282,16 +281,27 @@ impl App {
             return;
         };
 
-        let rendered = build_edit_file_diff(
-            &entry.old_string,
-            &entry.new_string,
-            &entry.path.display().to_string(),
-            inner.width as usize,
-            Span::raw(""),
-            true,
-        );
+        let lines = point
+            .file_changes
+            .iter()
+            .map(|change| {
+                Line::from(vec![
+                    Span::styled(&change.path, Style::default().fg(Color::White)),
+                    Span::raw(" "),
+                    Span::styled(
+                        format!("+{}", change.insertions),
+                        Style::default().fg(Color::Green),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        format!("-{}", change.deletions),
+                        Style::default().fg(Color::Red),
+                    ),
+                ])
+            })
+            .collect::<Vec<_>>();
         frame.render_widget(
-            Paragraph::new(Text::from(rendered.lines)).wrap(Wrap { trim: false }),
+            Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
             inner,
         );
     }

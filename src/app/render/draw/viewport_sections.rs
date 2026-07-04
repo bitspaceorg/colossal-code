@@ -8,7 +8,10 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::App;
 
 impl App {
-    pub(crate) fn build_navigation_message_lines(&self, wrap_width: usize) -> Vec<Line<'static>> {
+    pub(crate) fn build_navigation_message_lines(
+        &mut self,
+        wrap_width: usize,
+    ) -> Vec<Line<'static>> {
         self.compose_main_message_lines(wrap_width, false, false)
     }
 
