@@ -8,17 +8,24 @@ use crate::app::render::thinking::create_thinking_highlight_spans;
 
 impl App {
     pub(crate) fn reset_orchestrator_views(&mut self) {
-        self.orchestrator_history.clear();
-        self.latest_summaries.clear();
         self.orchestrator_sessions.clear();
         self.session_manager.clear_orchestrator_entries();
+        self.step_tool_calls.clear();
+        self.sub_agent_contexts.clear();
+        self.reset_orchestrator_views_keeping_transcripts();
+    }
+
+    /// Reset spec-run chrome but keep the session list and subagent
+    /// transcripts so the Alt+W viewer still works after a run finishes
+    /// (they're cleared when the next spec starts or the chat changes).
+    pub(crate) fn reset_orchestrator_views_keeping_transcripts(&mut self) {
+        self.orchestrator_history.clear();
+        self.latest_summaries.clear();
         self.spec_pane_selected = 0;
         self.spec_pane_show_history = false;
         self.spec_step_drawer_open = false;
         self.show_history_panel = false;
         self.history_panel_selected = 0;
-        self.step_tool_calls.clear();
-        self.sub_agent_contexts.clear();
         self.expanded_sub_agent = None;
         self.expanded_sub_agent_before_alt_w = None;
         self.mode_before_sub_agent = None;

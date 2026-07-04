@@ -152,6 +152,7 @@ impl App {
         // Clear current UI state
         self.clear_rewind_state();
         self.subagent_conversations.clear();
+        self.reset_orchestrator_views();
         self.messages.clear();
         self.message_types.clear();
         self.message_states.clear();
@@ -208,6 +209,9 @@ impl App {
                 "forked": self.persistence_state.current_conversation_id.is_none(),
             }),
         );
+
+        // Make this chat's persisted sub-chats navigable via Alt+W.
+        self.rehydrate_subagent_sessions(&metadata.id);
 
         Ok(())
     }

@@ -365,6 +365,7 @@ impl App {
 
             // Reset conversation tracking so the first real follow-up message creates a new save.
             self.subagent_conversations.clear();
+            self.reset_orchestrator_views();
             self.persistence_state.current_conversation_id = None;
             self.persistence_state.current_conversation_path = None;
             self.persistence_state.current_conversation_title = None;

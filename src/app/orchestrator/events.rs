@@ -172,7 +172,8 @@ impl App {
         // Next run gets fresh child conversations even with equal prefixes.
         self.subagent_conversations.clear();
         self.teardown_orchestrator_handles();
-        self.reset_orchestrator_views();
+        // Keep session list + transcripts viewable (Alt+W) after the run.
+        self.reset_orchestrator_views_keeping_transcripts();
         self.orchestration_in_progress = false;
         self.status_message = Some(message.to_string());
     }
