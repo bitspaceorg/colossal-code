@@ -187,21 +187,50 @@ impl App {
     }
 }
 
+/// Best-effort browser launch. All child output is detached from the
+/// terminal: the TUI owns the screen, and openers like xdg-open print
+/// their fallback-chain errors to stderr, corrupting the draw. The
+/// device panel always shows the URL and code for manual opening, so a
+/// silent failure here costs nothing.
 fn open_url(url: &str) -> std::io::Result<()> {
+    fn spawn_detached(mut command: Command) -> std::io::Result<()> {
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        Ok(())
+    }
+
     #[cfg(target_os = "linux")]
     {
-        Command::new("xdg-open").arg(url).spawn()?;
-        return Ok(());
+        // $BROWSER is the standard override and the escape hatch on
+        // systems where xdg-open has no registered handler.
+        if let Ok(browser) = std::env::var("BROWSER") {
+            let browser = browser.trim();
+            if !browser.is_empty() {
+                let mut command = Command::new(browser);
+                command.arg(url);
+                if spawn_detached(command).is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        return spawn_detached(command);
     }
     #[cfg(target_os = "macos")]
     {
-        Command::new("open").arg(url).spawn()?;
-        return Ok(());
+        let mut command = Command::new("open");
+        command.arg(url);
+        return spawn_detached(command);
     }
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd").args(["/C", "start", url]).spawn()?;
-        return Ok(());
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", url]);
+        return spawn_detached(command);
     }
     #[allow(unreachable_code)]
     Ok(())

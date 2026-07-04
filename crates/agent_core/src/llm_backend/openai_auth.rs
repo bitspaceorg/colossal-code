@@ -81,12 +81,19 @@ impl OpenAiAuthState {
             return None;
         }
 
+        // Only refresh at startup when the stored access token is absent
+        // or close to expiry. OpenAI rotates the refresh token on every
+        // use, so gratuitous refreshes invalidate the token held by any
+        // other running instance (refresh_token_reused).
+        let has_valid_access = !initial_access_token.trim().is_empty()
+            && access_expires_at.is_some_and(|value| value > current_timestamp() + 300);
+
         Some(Self {
             access_token: Mutex::new(initial_access_token),
             refresh_token: Mutex::new(refresh_token),
             access_expires_at: Mutex::new(access_expires_at),
             account_id: Mutex::new(account_id),
-            needs_initial_refresh: Mutex::new(true),
+            needs_initial_refresh: Mutex::new(!has_valid_access),
             auth_file,
             active_connection_id,
         })
@@ -114,29 +121,42 @@ impl OpenAiAuthState {
         }
 
         let refresh_token = self.refresh_token.lock().await.clone();
-        let Some(refresh_token) = refresh_token else {
+        let Some(mut refresh_token) = refresh_token else {
             return Ok(());
         };
 
-        let response = client
-            .post(format!("{OPENAI_AUTH_ISSUER}/oauth/token"))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .form(&[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh_token.as_str()),
-                ("client_id", OPENAI_CLIENT_ID),
-            ])
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "OpenAI token refresh failed ({status}): {body}"
-            ));
-        }
-
-        let refreshed: RefreshResponse = response.json().await?;
+        let refreshed: RefreshResponse = match request_refresh(client, &refresh_token).await? {
+            Ok(refreshed) => refreshed,
+            Err((status, body)) => {
+                // Another instance may have rotated the refresh token and
+                // persisted the replacement; adopt it and retry once.
+                let persisted = body
+                    .contains("refresh_token_reused")
+                    .then(|| {
+                        read_persisted_refresh_token(&self.auth_file, &self.active_connection_id)
+                    })
+                    .flatten()
+                    .filter(|persisted| persisted != &refresh_token);
+                match persisted {
+                    Some(persisted) => {
+                        refresh_token = persisted;
+                        match request_refresh(client, &refresh_token).await? {
+                            Ok(refreshed) => refreshed,
+                            Err((status, body)) => {
+                                return Err(anyhow::anyhow!(
+                                    "OpenAI token refresh failed ({status}): {body}"
+                                ));
+                            }
+                        }
+                    }
+                    None => {
+                        return Err(anyhow::anyhow!(
+                            "OpenAI token refresh failed ({status}): {body}"
+                        ));
+                    }
+                }
+            }
+        };
         let new_refresh = refreshed.refresh_token.clone().unwrap_or(refresh_token);
         let expires_at = now + refreshed.expires_in.unwrap_or(3600);
 
@@ -181,6 +201,59 @@ impl HttpBackend {
         }
         self.chatgpt_account_id.clone()
     }
+}
+
+/// One refresh round-trip; `Ok(Err(..))` carries an HTTP-level rejection
+/// so callers can distinguish rotation conflicts from transport errors.
+async fn request_refresh(
+    client: &reqwest::Client,
+    refresh_token: &str,
+) -> Result<std::result::Result<RefreshResponse, (reqwest::StatusCode, String)>> {
+    let response = client
+        .post(format!("{OPENAI_AUTH_ISSUER}/oauth/token"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", OPENAI_CLIENT_ID),
+        ])
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Ok(Err((status, body)));
+    }
+    Ok(Ok(response.json().await?))
+}
+
+/// Latest refresh token as persisted by whichever instance rotated last:
+/// keyring first, auth file as fallback (mirrors persist_refreshed_tokens).
+fn read_persisted_refresh_token(
+    auth_file: &Option<PathBuf>,
+    active_connection_id: &Option<String>,
+) -> Option<String> {
+    let connection_id = active_connection_id.as_ref()?;
+    if let Ok(entry) = Entry::new(
+        KEYRING_SERVICE,
+        &format!("connection:{connection_id}:refresh_token"),
+    ) {
+        if let Ok(secret) = entry.get_password() {
+            let secret = secret.trim();
+            if !secret.is_empty() {
+                return Some(secret.to_string());
+            }
+        }
+    }
+    let path = auth_file.as_ref()?;
+    let content = fs::read_to_string(path).ok()?;
+    let store: RuntimeAuthStore = serde_json::from_str(&content).ok()?;
+    store
+        .connections
+        .iter()
+        .find(|entry| &entry.id == connection_id)?
+        .refresh_token
+        .clone()
 }
 
 fn persist_refreshed_tokens(
