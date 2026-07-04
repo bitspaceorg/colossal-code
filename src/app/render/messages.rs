@@ -123,7 +123,7 @@ impl App {
                 Self::connector_prefix(connector, false),
                 Span::styled("  ⎿  ", Style::default().fg(Color::DarkGray)),
             ];
-            if tool_name == "edit_file" {
+            if tool_name == "edit_file" || tool_name == "revert" {
                 spans.extend(Self::render_edit_file_result_spans(
                     first_line,
                     result_color,
@@ -151,9 +151,11 @@ impl App {
             ]));
         }
 
-        if tool_name == "edit_file"
+        if (tool_name == "edit_file" || tool_name == "revert")
             && let Some(raw_args) = raw_arguments
-            && (result.starts_with("Created ") || result.starts_with("Updated "))
+            && (result.starts_with("Created ")
+                || result.starts_with("Updated ")
+                || result.starts_with("Reverted "))
             && let Some((path, old_string, new_string)) =
                 Self::extract_edit_file_diff_inputs(raw_args)
         {
@@ -193,7 +195,10 @@ impl App {
         connector: AgentConnector,
         message_idx: usize,
     ) -> Option<RenderedEditFileDiff> {
-        if !(result.starts_with("Created ") || result.starts_with("Updated ")) {
+        if !(result.starts_with("Created ")
+            || result.starts_with("Updated ")
+            || result.starts_with("Reverted "))
+        {
             return None;
         }
 

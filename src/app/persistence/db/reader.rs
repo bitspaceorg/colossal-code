@@ -154,3 +154,77 @@ pub(crate) fn load_history_for_cwd(cwd: &str) -> Vec<String> {
     };
     rows.flatten().collect()
 }
+
+pub(crate) struct RevertedFileChange {
+    pub(crate) path: String,
+    pub(crate) insertions: i64,
+    pub(crate) deletions: i64,
+    /// Content at the rewind target (None when the file was created after it).
+    pub(crate) before: Option<String>,
+    /// Content just before the rewind (None when the file had been deleted).
+    pub(crate) after: Option<String>,
+}
+
+/// Everything the filesystem lost by rewinding: fs_effects observed after
+/// `since_ms`, folded per path — earliest before-content, latest
+/// after-content, summed line stats. Contents are omitted for oversized
+/// or non-UTF-8 blobs (rows then render stats-only).
+pub(crate) fn reverted_changes_since(
+    conversation_id: &str,
+    since_ms: i64,
+) -> Result<Vec<RevertedFileChange>> {
+    const MAX_DIFF_CONTENT_BYTES: usize = 512 * 1024;
+
+    let conn = super::open()?;
+    let mut stmt = conn.prepare(
+        "SELECT path, before_hash, after_hash, insertions, deletions
+         FROM fs_effect
+         WHERE conversation_id = ?1 AND observed_at_ms > ?2
+         ORDER BY observed_at_ms, id",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![conversation_id, since_ms], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let mut folded: Vec<(String, Option<String>, Option<String>, i64, i64)> = Vec::new();
+    for (path, before_hash, after_hash, insertions, deletions) in rows {
+        match folded.iter_mut().find(|entry| entry.0 == path) {
+            Some(entry) => {
+                entry.2 = after_hash;
+                entry.3 += insertions;
+                entry.4 += deletions;
+            }
+            None => folded.push((path, before_hash, after_hash, insertions, deletions)),
+        }
+    }
+
+    let load = |hash: Option<String>| -> Option<String> {
+        let hash = hash?;
+        let bytes = super::blob_get(&conn, &hash).ok()??;
+        if bytes.len() > MAX_DIFF_CONTENT_BYTES {
+            return None;
+        }
+        String::from_utf8(bytes).ok()
+    };
+
+    Ok(folded
+        .into_iter()
+        .map(
+            |(path, before_hash, after_hash, insertions, deletions)| RevertedFileChange {
+                path,
+                insertions,
+                deletions,
+                before: load(before_hash),
+                after: load(after_hash),
+            },
+        )
+        .collect())
+}

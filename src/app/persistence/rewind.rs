@@ -112,12 +112,130 @@ impl App {
         snapshot
     }
 
+    /// Files changed after the given rewind point, from the in-memory
+    /// per-turn stats — the fallback when the audit database has no
+    /// fs_effect rows (non-isolated mode). Must run before the restore
+    /// mutates timeline state.
+    fn fallback_reverted_stats(&self, selected_index: usize) -> Vec<FileChange> {
+        let mut folded: Vec<FileChange> = Vec::new();
+        let later_points = self
+            .rewind_points
+            .get(selected_index + 1..)
+            .unwrap_or_default();
+        let spans = later_points
+            .iter()
+            .flat_map(|point| point.file_changes.iter())
+            .chain(self.current_file_changes.iter());
+        for change in spans {
+            match folded.iter_mut().find(|entry| entry.path == change.path) {
+                Some(entry) => {
+                    entry.insertions += change.insertions;
+                    entry.deletions += change.deletions;
+                }
+                None => folded.push(change.clone()),
+            }
+        }
+        folded
+    }
+
+    /// Push the "what did this rewind undo" summary into the transcript:
+    /// one +N/-M row per reverted file, expandable to the full diff when
+    /// the audit database still holds both sides' contents.
+    fn push_rewind_diff_summary(&mut self, since: SystemTime, fallback: Vec<FileChange>) {
+        use crate::app::persistence::db::reader::{RevertedFileChange, reverted_changes_since};
+
+        let mut reverted: Vec<RevertedFileChange> = Vec::new();
+        if let (Some(writer), Some(conversation_id)) = (
+            &self.db_writer,
+            &self.persistence_state.current_conversation_id,
+        ) {
+            writer.flush();
+            reverted = reverted_changes_since(
+                conversation_id,
+                crate::app::persistence::db::system_time_ms(since),
+            )
+            .unwrap_or_default();
+        }
+        if reverted.is_empty() {
+            reverted = fallback
+                .into_iter()
+                .map(|change| RevertedFileChange {
+                    path: change.path,
+                    insertions: change.insertions as i64,
+                    deletions: change.deletions as i64,
+                    before: None,
+                    after: None,
+                })
+                .collect();
+        }
+        if reverted.is_empty() {
+            return;
+        }
+
+        let total_insertions: i64 = reverted.iter().map(|file| file.insertions).sum();
+        let total_deletions: i64 = reverted.iter().map(|file| file.deletions).sum();
+        self.push_agent_feedback_message(format!(
+            " ⎿ {} file{} reverted • +{} -{}",
+            reverted.len(),
+            if reverted.len() == 1 { "" } else { "s" },
+            total_insertions,
+            total_deletions,
+        ));
+
+        self.audit_event(
+            "rewind.diff_summary",
+            serde_json::json!({
+                "files": reverted
+                    .iter()
+                    .map(|file| serde_json::json!({
+                        "path": file.path,
+                        "insertions": file.insertions,
+                        "deletions": file.deletions,
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+        );
+
+        for file in reverted {
+            // The diff shows the work that was rolled back: old = state at
+            // the rewind target, new = state just before the rewind.
+            let raw_arguments = (file.before.is_some() || file.after.is_some()).then(|| {
+                serde_json::json!({
+                    "path": file.path,
+                    "old_string": file.before.unwrap_or_default(),
+                    "new_string": file.after.unwrap_or_default(),
+                })
+                .to_string()
+            });
+            let marker = UiMessageEvent::ToolCallCompleted {
+                tool_name: "revert".to_string(),
+                args: file.path.clone(),
+                result: format!(
+                    "Reverted {} • +{} • -{}",
+                    file.path, file.insertions, file.deletions
+                ),
+                raw_arguments,
+            }
+            .to_message();
+            self.push_agent_feedback_message(marker);
+        }
+    }
+
+    fn push_agent_feedback_message(&mut self, content: String) {
+        self.messages.push(content);
+        self.message_types.push(MessageType::Agent);
+        self.message_states.push(MessageState::Sent);
+        self.message_metadata.push(None);
+        self.message_timestamps.push(SystemTime::now());
+    }
+
     pub(crate) fn apply_rewind_point(
         &mut self,
         point: RewindPoint,
         selected_index: usize,
         restore_scope: RewindRestoreScope,
     ) {
+        let fallback_stats = self.fallback_reverted_stats(selected_index);
         let from = self.capture_timeline_state();
         let to = self.timeline_state_for_rewind_point(&point, selected_index, restore_scope);
         let code_restored = self.restore_timeline_state(&to, restore_scope.restores_code());
@@ -150,6 +268,9 @@ impl App {
                 point.preview
             )
         });
+        if restore_scope.restores_code() {
+            self.push_rewind_diff_summary(point.timestamp, fallback_stats);
+        }
     }
 
     pub(crate) fn undo_rewind_restore(&mut self) -> bool {
@@ -199,6 +320,7 @@ impl App {
 
         let selected_index = self.rewind_points.len() - 2;
         let point = self.rewind_points[selected_index].clone();
+        let fallback_stats = self.fallback_reverted_stats(selected_index);
         let from = self.capture_timeline_state();
         let to = self.timeline_state_for_rewind_point(
             &point,
@@ -227,6 +349,7 @@ impl App {
                 point.preview
             )
         });
+        self.push_rewind_diff_summary(point.timestamp, fallback_stats);
         true
     }
 
