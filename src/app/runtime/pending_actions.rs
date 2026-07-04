@@ -322,6 +322,7 @@ impl App {
                     Ok(_) => {
                         // If fork mode, reset conversation ID (next save will create new file)
                         if is_fork {
+                            self.subagent_conversations.clear();
                             self.persistence_state.current_conversation_id = None;
                             self.persistence_state.current_conversation_path = None;
                         }
@@ -363,6 +364,7 @@ impl App {
             self.message_timestamps.clear();
 
             // Reset conversation tracking so the first real follow-up message creates a new save.
+            self.subagent_conversations.clear();
             self.persistence_state.current_conversation_id = None;
             self.persistence_state.current_conversation_path = None;
             self.persistence_state.current_conversation_title = None;

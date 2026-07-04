@@ -110,6 +110,7 @@ impl App {
         // A NULL title never overwrites a stored one (COALESCE in the upsert).
         writer.send(WriteOp::UpsertConversation(ConversationRecord {
             id: conversation_id.clone(),
+            parent_id: None,
             title: title.clone(),
             preview,
             git_branch: Self::get_current_git_branch(),
@@ -150,6 +151,7 @@ impl App {
 
         // Clear current UI state
         self.clear_rewind_state();
+        self.subagent_conversations.clear();
         self.messages.clear();
         self.message_types.clear();
         self.message_states.clear();

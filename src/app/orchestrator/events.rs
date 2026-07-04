@@ -67,22 +67,21 @@ impl App {
                 tool_name,
                 arguments,
             } => {
-                // Subagent tool calls bypass the AgentMessage tee, so
-                // audit them here with the step prefix baked into the name.
-                if let (Some(writer), Some(conversation_id)) = (
-                    &self.db_writer,
-                    &self.persistence_state.current_conversation_id,
-                ) {
-                    let qualified = format!("{prefix}:{tool_name}");
-                    let id = self.audit.open_tool_call(&qualified);
-                    writer.send(
-                        crate::app::persistence::db::writer::WriteOp::ToolCallStarted {
-                            id,
-                            conversation_id: conversation_id.clone(),
-                            tool_name: qualified,
-                            arguments: arguments.clone(),
-                        },
-                    );
+                // Subagent tool calls bypass the AgentMessage tee; audit
+                // them into the step's child conversation. Correlation
+                // keys stay prefix-qualified so steps can't collide.
+                if let Some(child_id) = self.subagent_conversation_id(&prefix) {
+                    if let Some(writer) = &self.db_writer {
+                        let id = self.audit.open_tool_call(&format!("{prefix}:{tool_name}"));
+                        writer.send(
+                            crate::app::persistence::db::writer::WriteOp::ToolCallStarted {
+                                id,
+                                conversation_id: child_id,
+                                tool_name: tool_name.clone(),
+                                arguments: arguments.clone(),
+                            },
+                        );
+                    }
                 }
                 self.handle_tool_call_started(prefix, tool_name, arguments)
             }
@@ -92,20 +91,21 @@ impl App {
                 result,
                 is_error,
             } => {
-                if let (Some(writer), Some(conversation_id)) = (
-                    &self.db_writer,
-                    &self.persistence_state.current_conversation_id,
-                ) {
-                    let qualified = format!("{prefix}:{tool_name}");
-                    if let Some(id) = self.audit.close_tool_call(&qualified) {
-                        writer.send(
-                            crate::app::persistence::db::writer::WriteOp::ToolCallCompleted {
-                                id,
-                                conversation_id: conversation_id.clone(),
-                                status: if is_error { "failed" } else { "completed" }.to_string(),
-                                result: result.clone(),
-                            },
-                        );
+                if let Some(child_id) = self.subagent_conversation_id(&prefix) {
+                    if let Some(writer) = &self.db_writer {
+                        if let Some(id) =
+                            self.audit.close_tool_call(&format!("{prefix}:{tool_name}"))
+                        {
+                            writer.send(
+                                crate::app::persistence::db::writer::WriteOp::ToolCallCompleted {
+                                    id,
+                                    conversation_id: child_id,
+                                    status: if is_error { "failed" } else { "completed" }
+                                        .to_string(),
+                                    result: result.clone(),
+                                },
+                            );
+                        }
                     }
                 }
                 self.handle_tool_call_completed(prefix, is_error)
@@ -169,6 +169,8 @@ impl App {
     }
 
     fn handle_orchestrator_stopped(&mut self, message: &str) {
+        // Next run gets fresh child conversations even with equal prefixes.
+        self.subagent_conversations.clear();
         self.teardown_orchestrator_handles();
         self.reset_orchestrator_views();
         self.orchestration_in_progress = false;
@@ -221,7 +223,92 @@ impl App {
         }
     }
 
+    /// Child conversation for a subagent step, created in the audit
+    /// database on first use. Subagent runs are chats *inside* the
+    /// current chat: hidden from /resume, navigable from their parent.
+    fn subagent_conversation_id(&mut self, prefix: &str) -> Option<String> {
+        let parent_id = self.persistence_state.current_conversation_id.clone()?;
+        let writer = self.db_writer.clone()?;
+        if let Some(existing) = self.subagent_conversations.get(prefix) {
+            return Some(existing.clone());
+        }
+        let title = self
+            .current_spec
+            .as_ref()
+            .and_then(|spec| Self::find_step_by_prefix(&spec.steps, prefix))
+            .map(|step| format!("{} · {}", prefix, step.title))
+            .unwrap_or_else(|| format!("Step {}", prefix));
+        let id = uuid::Uuid::new_v4().to_string();
+        writer.send(
+            crate::app::persistence::db::writer::WriteOp::EnsureChildConversation {
+                id: id.clone(),
+                parent_id,
+                title,
+            },
+        );
+        self.subagent_conversations
+            .insert(prefix.to_string(), id.clone());
+        Some(id)
+    }
+
+    /// Persist one subagent transcript item into its child conversation.
+    fn record_sub_agent_message(&mut self, prefix: &str, message: &SubAgentMessage) {
+        let Some(child_id) = self.subagent_conversation_id(prefix) else {
+            return;
+        };
+        let Some(writer) = self.db_writer.clone() else {
+            return;
+        };
+        use crate::app::persistence::db::writer::WriteOp;
+        let append = |msg_type: &str, content: &str| WriteOp::AppendMessage {
+            conversation_id: child_id.clone(),
+            msg_type: format!("\"{msg_type}\""), // serde string form of MessageType
+            msg_state: "\"Sent\"".to_string(),
+            content: content.to_string(),
+            metadata: None,
+        };
+        match message {
+            SubAgentMessage::UserPrompt { content } => {
+                writer.send(append("User", content));
+                writer.send(WriteOp::Event {
+                    conversation_id: Some(child_id),
+                    kind: "user.input".to_string(),
+                    data: serde_json::json!({ "subagent": prefix }),
+                    large: vec![("content".to_string(), content.clone().into_bytes())],
+                });
+            }
+            SubAgentMessage::Text { content } => {
+                writer.send(append("Agent", content));
+                writer.send(WriteOp::Event {
+                    conversation_id: Some(child_id),
+                    kind: "assistant.message".to_string(),
+                    data: serde_json::json!({ "subagent": prefix }),
+                    large: vec![("content".to_string(), content.clone().into_bytes())],
+                });
+            }
+            SubAgentMessage::Thinking {
+                content,
+                duration_secs,
+            } => {
+                // duration 0 marks the start (content carried there).
+                if *duration_secs == 0 && !content.trim().is_empty() {
+                    writer.send(WriteOp::Event {
+                        conversation_id: Some(child_id),
+                        kind: "thinking.finalized".to_string(),
+                        data: serde_json::json!({ "subagent": prefix }),
+                        large: vec![("content".to_string(), content.clone().into_bytes())],
+                    });
+                }
+            }
+            // Tool calls are audited via OrchestratorEvent::ToolCall*;
+            // stats mirror the parent's generation.stats event kind.
+            SubAgentMessage::ToolCall { .. } => {}
+            _ => {}
+        }
+    }
+
     fn handle_sub_agent_message(&mut self, prefix: String, message: SubAgentMessage) {
+        self.record_sub_agent_message(&prefix, &message);
         let context = self
             .sub_agent_contexts
             .entry(prefix.clone())

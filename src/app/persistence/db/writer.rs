@@ -47,6 +47,7 @@ pub(crate) struct FsEffectRecord {
 #[derive(Debug, Clone)]
 pub(crate) struct ConversationRecord {
     pub(crate) id: String,
+    pub(crate) parent_id: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) preview: String,
     pub(crate) git_branch: Option<String>,
@@ -70,6 +71,22 @@ pub(crate) enum WriteOp {
     },
     /// Full conversation projection upsert (save path).
     UpsertConversation(ConversationRecord),
+    /// Create a subagent child conversation under its parent chat.
+    EnsureChildConversation {
+        id: String,
+        parent_id: String,
+        title: String,
+    },
+    /// Append one message to a conversation's transcript (subagent
+    /// transcripts stream in message-by-message, unlike the main chat's
+    /// whole-projection saves).
+    AppendMessage {
+        conversation_id: String,
+        msg_type: String,
+        msg_state: String,
+        content: String,
+        metadata: Option<String>,
+    },
     /// Bump updated_at on resume without rewriting the row.
     TouchConversation {
         id: String,
@@ -277,10 +294,11 @@ fn apply(conn: &mut Connection, op: WriteOp) -> Result<()> {
         }
         WriteOp::UpsertConversation(record) => {
             tx.execute(
-                "INSERT INTO conversation (id, title, preview, git_branch, working_directory,
+                "INSERT INTO conversation (id, parent_id, title, preview, git_branch, working_directory,
                                            forked_from, forked_at_ms, created_at_ms, updated_at_ms, agent_context)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                  ON CONFLICT(id) DO UPDATE SET
+                   parent_id = COALESCE(excluded.parent_id, parent_id),
                    title = COALESCE(excluded.title, title),
                    preview = excluded.preview,
                    git_branch = excluded.git_branch,
@@ -291,6 +309,7 @@ fn apply(conn: &mut Connection, op: WriteOp) -> Result<()> {
                    agent_context = excluded.agent_context",
                 rusqlite::params![
                     record.id,
+                    record.parent_id,
                     record.title,
                     record.preview,
                     record.git_branch,
@@ -301,6 +320,58 @@ fn apply(conn: &mut Connection, op: WriteOp) -> Result<()> {
                     record.updated_at_ms,
                     record.agent_context,
                 ],
+            )?;
+        }
+        WriteOp::EnsureChildConversation {
+            id,
+            parent_id,
+            title,
+        } => {
+            ensure_conversation(&tx, &parent_id)?;
+            let inserted = tx.execute(
+                "INSERT OR IGNORE INTO conversation (id, parent_id, title, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                rusqlite::params![id, parent_id, title, now_ms()],
+            )?;
+            if inserted > 0 {
+                append_event(
+                    &tx,
+                    Some(&parent_id),
+                    "conversation.child_created",
+                    &json!({ "child_id": id, "title": title }),
+                )?;
+            }
+        }
+        WriteOp::AppendMessage {
+            conversation_id,
+            msg_type,
+            msg_state,
+            content,
+            metadata,
+        } => {
+            ensure_conversation(&tx, &conversation_id)?;
+            let seq: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(seq) + 1, 0) FROM message WHERE conversation_id = ?1",
+                [&conversation_id],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "INSERT INTO message (id, conversation_id, seq, msg_type, msg_state, content, metadata, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    format!("{conversation_id}:{seq}"),
+                    conversation_id,
+                    seq,
+                    msg_type,
+                    msg_state,
+                    content,
+                    metadata,
+                    now_ms(),
+                ],
+            )?;
+            tx.execute(
+                "UPDATE conversation SET updated_at_ms = ?2 WHERE id = ?1",
+                rusqlite::params![conversation_id, now_ms()],
             )?;
         }
         WriteOp::TouchConversation { id } => {
@@ -773,5 +844,100 @@ mod tests {
             )
             .expect("count");
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn child_conversations_nest_and_hide_from_top_level_listing() {
+        let (_dir, writer, reader) = writer_and_reader();
+        // Parent chat with one message.
+        writer.send(WriteOp::ReplaceMessages {
+            conversation_id: "parent".into(),
+            messages: vec![MessageRecord {
+                id: "parent:0".into(),
+                seq: 0,
+                msg_type: "\"User\"".into(),
+                msg_state: "\"Sent\"".into(),
+                content: "run the spec".into(),
+                metadata: None,
+                tool_call_id: None,
+                created_at_ms: 1,
+            }],
+        });
+        // Subagent child chat with a streamed transcript.
+        writer.send(WriteOp::EnsureChildConversation {
+            id: "child".into(),
+            parent_id: "parent".into(),
+            title: "1.1 · implement".into(),
+        });
+        writer.send(WriteOp::EnsureChildConversation {
+            id: "child".into(),
+            parent_id: "parent".into(),
+            title: "duplicate ignored".into(),
+        });
+        writer.send(WriteOp::AppendMessage {
+            conversation_id: "child".into(),
+            msg_type: "\"User\"".into(),
+            msg_state: "\"Sent\"".into(),
+            content: "step prompt".into(),
+            metadata: None,
+        });
+        writer.send(WriteOp::AppendMessage {
+            conversation_id: "child".into(),
+            msg_type: "\"Agent\"".into(),
+            msg_state: "\"Sent\"".into(),
+            content: "step answer".into(),
+            metadata: None,
+        });
+        writer.flush();
+        assert_eq!(writer.error_count(), 0);
+
+        let (parent_id, title): (Option<String>, Option<String>) = reader
+            .query_row(
+                "SELECT parent_id, title FROM conversation WHERE id = 'child'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("child row");
+        assert_eq!(parent_id.as_deref(), Some("parent"));
+        assert_eq!(title.as_deref(), Some("1.1 · implement"));
+
+        let seqs: Vec<i64> = reader
+            .prepare("SELECT seq FROM message WHERE conversation_id = 'child' ORDER BY seq")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("collect");
+        assert_eq!(seqs, vec![0, 1]);
+
+        // Top-level listing excludes the child; child listing finds it.
+        let top_level: i64 = reader
+            .query_row(
+                "SELECT count(*) FROM conversation WHERE parent_id IS NULL
+                 AND EXISTS (SELECT 1 FROM message m WHERE m.conversation_id = conversation.id)",
+                [],
+                |row| row.get(0),
+            )
+            .expect("top level");
+        assert_eq!(top_level, 1);
+        let children: i64 = reader
+            .query_row(
+                "SELECT count(*) FROM conversation WHERE parent_id = 'parent'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("children");
+        assert_eq!(children, 1);
+
+        // The child_created event attributes to the parent chat.
+        let event_count: i64 = reader
+            .query_row(
+                "SELECT count(*) FROM event WHERE kind = 'conversation.child_created'
+                 AND conversation_id = 'parent'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("event");
+        assert_eq!(event_count, 1);
     }
 }

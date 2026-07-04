@@ -1,7 +1,15 @@
 /// Versioned schema migrations, applied in order at open time.
 /// `PRAGMA user_version` records how many entries have been applied;
 /// append new migrations, never edit shipped ones.
-pub(crate) const MIGRATIONS: &[&str] = &[V1];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2];
+
+/// Subagent runs are child conversations of the chat that spawned them:
+/// they carry a parent_id, are hidden from the top-level /resume list,
+/// and are navigated into from their parent.
+const V2: &str = r#"
+ALTER TABLE conversation ADD COLUMN parent_id TEXT REFERENCES conversation(id);
+CREATE INDEX conversation_parent_idx ON conversation(parent_id);
+"#;
 
 const V1: &str = r#"
 CREATE TABLE conversation (

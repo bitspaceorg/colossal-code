@@ -323,6 +323,7 @@ impl App {
                 crate::app::persistence::db::writer::DbWriter::spawn().ok()
             },
             audit: crate::app::persistence::db::audit::AuditState::default(),
+            subagent_conversations: std::collections::HashMap::new(),
             nav_snapshot: None,
             session_manager: SessionManager::new(),
             autocomplete_active: false,

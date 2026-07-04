@@ -331,6 +331,8 @@ pub(crate) struct App {
     // Audit database (event log + projections); None if the DB failed to open
     pub(crate) db_writer: Option<crate::app::persistence::db::writer::DbWriter>,
     pub(crate) audit: crate::app::persistence::db::audit::AuditState,
+    // Subagent step prefix -> child conversation id in the audit database
+    pub(crate) subagent_conversations: std::collections::HashMap<String, String>,
     // Navigation mode snapshot - frozen UI state while nav mode is active
     pub(crate) nav_snapshot: Option<AppSnapshot>,
     // Session manager window

@@ -22,16 +22,49 @@ pub(crate) struct LoadedConversation {
     pub(crate) messages: Vec<LoadedMessage>,
 }
 
+/// Top-level chats only: subagent child conversations are reached by
+/// navigating into their parent, not from the /resume list.
 pub(crate) fn list_conversations() -> Result<Vec<ConversationMetadata>> {
     let conn = super::open()?;
     let mut stmt = conn.prepare(
         "SELECT c.id, c.updated_at_ms, c.git_branch, c.title, c.preview, c.forked_from,
                 (SELECT count(*) FROM message m WHERE m.conversation_id = c.id)
          FROM conversation c
-         WHERE EXISTS (SELECT 1 FROM message m WHERE m.conversation_id = c.id)
+         WHERE c.parent_id IS NULL
+           AND EXISTS (SELECT 1 FROM message m WHERE m.conversation_id = c.id)
          ORDER BY c.updated_at_ms DESC",
     )?;
     let rows = stmt.query_map([], |row| {
+        let updated_at_ms: i64 = row.get(1)?;
+        let updated_at = ms_to_system_time(updated_at_ms);
+        Ok(ConversationMetadata {
+            id: row.get(0)?,
+            time_ago_str: ConversationMetadata::calculate_time_ago(updated_at),
+            updated_at,
+            git_branch: row.get(2)?,
+            title: row.get(3)?,
+            preview: row.get(4)?,
+            forked_from: row.get(5)?,
+            message_count: row.get::<_, i64>(6)? as usize,
+            file_path: std::path::PathBuf::new(),
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Subagent runs recorded under a chat, oldest first — the entry points
+/// for navigating into a conversation's sub-chats.
+#[cfg_attr(not(test), allow(dead_code))] // drill-in UI lands next; exercised via tests
+pub(crate) fn list_child_conversations(parent_id: &str) -> Result<Vec<ConversationMetadata>> {
+    let conn = super::open()?;
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.updated_at_ms, c.git_branch, c.title, c.preview, c.forked_from,
+                (SELECT count(*) FROM message m WHERE m.conversation_id = c.id)
+         FROM conversation c
+         WHERE c.parent_id = ?1
+         ORDER BY c.created_at_ms",
+    )?;
+    let rows = stmt.query_map([parent_id], |row| {
         let updated_at_ms: i64 = row.get(1)?;
         let updated_at = ms_to_system_time(updated_at_ms);
         Ok(ConversationMetadata {
