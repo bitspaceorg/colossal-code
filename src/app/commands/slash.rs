@@ -208,6 +208,15 @@ impl App {
                 }
                 self.show_todos = !self.show_todos;
             }
+            SlashCommandDispatch::Reload => {
+                // Full terminal clear + redraw on the next frame, dropping
+                // any stale cells or cached render state.
+                self.pending_terminal_reload = true;
+                self.cached_mode_content = None;
+                self.messages.push(" ⎿ UI reloaded".to_string());
+                self.message_types.push(MessageType::Agent);
+                self.message_states.push(MessageState::Sent);
+            }
             SlashCommandDispatch::Shells => {
                 // Toggle background tasks panel
                 if self.show_background_tasks {

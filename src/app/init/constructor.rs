@@ -324,6 +324,7 @@ impl App {
             },
             audit: crate::app::persistence::db::audit::AuditState::default(),
             subagent_conversations: std::collections::HashMap::new(),
+            pending_terminal_reload: false,
             nav_snapshot: None,
             session_manager: SessionManager::new(),
             autocomplete_active: false,

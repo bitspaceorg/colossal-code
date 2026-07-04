@@ -333,6 +333,8 @@ pub(crate) struct App {
     pub(crate) audit: crate::app::persistence::db::audit::AuditState,
     // Subagent step prefix -> child conversation id in the audit database
     pub(crate) subagent_conversations: std::collections::HashMap<String, String>,
+    // /reload: clear the terminal before the next draw to drop artifacts
+    pub(crate) pending_terminal_reload: bool,
     // Navigation mode snapshot - frozen UI state while nav mode is active
     pub(crate) nav_snapshot: Option<AppSnapshot>,
     // Session manager window

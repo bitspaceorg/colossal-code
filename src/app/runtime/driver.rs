@@ -66,6 +66,10 @@ impl App {
         }
 
         self.clear_startup_screen_if_ready(terminal)?;
+        if self.pending_terminal_reload {
+            self.pending_terminal_reload = false;
+            terminal.clear()?;
+        }
         terminal.draw(|frame| self.draw(frame))?;
 
         Ok(())

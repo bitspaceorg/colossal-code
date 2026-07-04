@@ -40,6 +40,7 @@ pub(crate) enum ParsedSlashCommand {
     Redo,
     Fork,
     Vim,
+    Reload,
     Todos,
     Shells,
     New,
@@ -99,6 +100,8 @@ pub(crate) fn parse_slash_command(command: &str) -> ParsedSlashCommand {
         ParsedSlashCommand::Fork
     } else if cmd_lower == "/vim" {
         ParsedSlashCommand::Vim
+    } else if cmd_lower == "/reload" {
+        ParsedSlashCommand::Reload
     } else if cmd_lower == "/todos" {
         ParsedSlashCommand::Todos
     } else if cmd_lower == "/shells" {

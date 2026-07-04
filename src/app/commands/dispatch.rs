@@ -17,6 +17,7 @@ pub(crate) enum SlashCommandDispatch {
     Redo,
     Fork,
     Vim,
+    Reload,
     Todos,
     Shells,
     Model,
@@ -41,6 +42,7 @@ impl SlashCommandDispatch {
             SlashCommandDispatch::Help
             | SlashCommandDispatch::Connect
             | SlashCommandDispatch::Vim
+            | SlashCommandDispatch::Reload
             | SlashCommandDispatch::Todos
             | SlashCommandDispatch::Shells
             | SlashCommandDispatch::Apply => BusySlashCommandBehavior::RunImmediately,
@@ -74,6 +76,7 @@ impl From<ParsedSlashCommand> for SlashCommandDispatch {
             ParsedSlashCommand::Redo => Self::Redo,
             ParsedSlashCommand::Fork => Self::Fork,
             ParsedSlashCommand::Vim => Self::Vim,
+            ParsedSlashCommand::Reload => Self::Reload,
             ParsedSlashCommand::Todos => Self::Todos,
             ParsedSlashCommand::Shells => Self::Shells,
             ParsedSlashCommand::Model => Self::Model,
