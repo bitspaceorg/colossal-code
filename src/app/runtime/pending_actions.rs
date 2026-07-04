@@ -350,6 +350,9 @@ impl App {
             }
 
             self.clear_rewind_state();
+            // Drop any lingering banner (e.g. "Rewound … • /undo available")
+            // from the previous conversation.
+            self.status_message = None;
 
             // Clear the live agent conversation before the next save/export can occur.
             if let Some(agent) = &self.agent {

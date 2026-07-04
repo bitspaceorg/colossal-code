@@ -151,6 +151,7 @@ impl App {
 
         // Clear current UI state
         self.clear_rewind_state();
+        self.status_message = None;
         self.subagent_conversations.clear();
         self.reset_orchestrator_views();
         self.messages.clear();
