@@ -32,7 +32,7 @@ variables:
 
 .rules_first_party:
   rules: &rules_first_party
-    - changes:
+    - changes: &rules_first_party_changes
         - src/**/*
         - crates/**/*
         - tests/**/*
@@ -94,10 +94,16 @@ test:all-targets:
 
 # ── package stage ──────────────────────────────────────────────────────
 
+# Runs only on the default branch and tags: the nix build needs more disk
+# than small shared runners provide, so feature branches gate on lint+test.
 package:nix:
   <<: *nix_rust_template
   stage: package
-  rules: *rules_first_party
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes: *rules_first_party_changes
+    - if: $CI_COMMIT_TAG
+    - when: never
   retry: 1
   script:
     - |
