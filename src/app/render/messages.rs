@@ -22,6 +22,7 @@ impl App {
             None => {
                 !(message.starts_with('[')
                     || message.starts_with(" ⎿ ")
+                    || message.starts_with("Rewound ")
                     || message.trim() == "⎿ What should Nite do instead?")
             }
         }
@@ -255,6 +256,16 @@ impl App {
                 Self::connector_prefix(connector, true),
                 Span::styled("● ", Style::default().fg(Color::Red)),
                 Span::styled("Interrupted", Style::default().fg(Color::Red)),
+            ])]);
+        }
+
+        // Rewind confirmations render fully muted, tight against the
+        // revert block below them.
+        if is_agent && message.starts_with("Rewound ") && message.contains("/undo available") {
+            return Text::from(vec![Line::from(vec![
+                Self::connector_prefix(connector, true),
+                Span::styled("● ", Style::default().fg(Color::DarkGray)),
+                Span::styled(message.to_string(), Style::default().fg(Color::DarkGray)),
             ])]);
         }
 
