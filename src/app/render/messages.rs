@@ -127,7 +127,10 @@ impl App {
                 let mut spans = vec![
                     Self::connector_prefix(connector, false),
                     Span::styled(
-                        if closing { "  ⎿  " } else { "  │  " },
+                        // │ and └ share the box-drawing family, so the
+                        // spine stays stroke-continuous (⎿ hugs the left
+                        // edge of its cell and would break the line).
+                        if closing { "  └  " } else { "  │  " },
                         Style::default().fg(Color::DarkGray),
                     ),
                 ];
