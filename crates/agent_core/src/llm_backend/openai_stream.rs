@@ -457,6 +457,7 @@ pub async fn process_sse_stream(
                 }
 
                 if delta_content.is_none()
+                    && delta_reasoning_content.is_none()
                     && delta_tool_calls.is_empty()
                     && choice.finish_reason.is_none()
                 {

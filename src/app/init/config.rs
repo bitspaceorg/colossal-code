@@ -285,7 +285,31 @@ impl App {
                     self.current_model.as_deref(),
                     self.current_model_provider_id(),
                 )
-            });
+            })
+            .or_else(|| self.fetch_active_connection_context_length());
+    }
+
+    /// Ask the active OpenAI-compatible server (LM Studio, vLLM, …) for
+    /// the model's context window when no local metadata exists, caching
+    /// the answer on the model entry so later refreshes skip the network.
+    fn fetch_active_connection_context_length(&mut self) -> Option<usize> {
+        let model_id = self.current_model.clone()?;
+        let connection = self.active_connection()?;
+        let base_url = connection.base_url.clone()?;
+        let api_key = connection.api_key.clone();
+        let connection_id = connection.id.clone();
+        let length = crate::app::connect::model_discovery::fetch_openai_compatible_context_length(
+            &base_url,
+            api_key.as_deref(),
+            &model_id,
+        )?;
+        if let Some(entry) = self.available_models.iter_mut().find(|model| {
+            model.filename == model_id
+                && model.connection_id.as_deref() == Some(connection_id.as_str())
+        }) {
+            entry.context_length = Some(length);
+        }
+        Some(length)
     }
 
     pub(crate) fn save_config(&self) -> Result<()> {

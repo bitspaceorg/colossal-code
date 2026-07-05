@@ -362,6 +362,89 @@ fn fetch_provider_model_metadata(
     })
 }
 
+/// Context window advertised by an OpenAI-compatible server for one
+/// model. The standard /models listing carries no context field, but
+/// local servers extend it (LM Studio: max_context_length, vLLM:
+/// max_model_len, llama.cpp: context_window); LM Studio's /api/v0
+/// listing is checked as a fallback. Short timeout: this runs at
+/// startup/model-switch against (typically local) servers.
+pub(crate) fn fetch_openai_compatible_context_length(
+    base_url: &str,
+    api_key: Option<&str>,
+    model_id: &str,
+) -> Option<usize> {
+    let base_url = base_url.trim().trim_end_matches('/').to_string();
+    if base_url.is_empty() || model_id.trim().is_empty() {
+        return None;
+    }
+    let api_key = api_key.map(str::to_string);
+    let model_id = model_id.to_string();
+    run_blocking_request(move || {
+        let client = Client::builder().timeout(Duration::from_secs(2)).build()?;
+        let models_url = if base_url.ends_with("/v1") {
+            format!("{base_url}/models")
+        } else {
+            format!("{base_url}/v1/models")
+        };
+        if let Some(length) =
+            context_length_from_listing(&client, &models_url, api_key.as_deref(), &model_id)
+        {
+            return Ok(Some(length));
+        }
+        if let Some(origin) = base_url.strip_suffix("/v1")
+            && let Some(length) = context_length_from_listing(
+                &client,
+                &format!("{origin}/api/v0/models"),
+                api_key.as_deref(),
+                &model_id,
+            )
+        {
+            return Ok(Some(length));
+        }
+        Ok(None)
+    })
+    .ok()
+    .flatten()
+}
+
+fn context_length_from_listing(
+    client: &Client,
+    url: &str,
+    api_key: Option<&str>,
+    model_id: &str,
+) -> Option<usize> {
+    let mut request = client.get(url);
+    if let Some(key) = api_key.filter(|key| !key.trim().is_empty()) {
+        request = request.bearer_auth(key.trim());
+    }
+    let response = request.send().ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let payload: serde_json::Value = response.json().ok()?;
+    let entries = payload.get("data")?.as_array()?;
+    let entry = entries
+        .iter()
+        .find(|entry| entry.get("id").and_then(|id| id.as_str()) == Some(model_id))?;
+    // loaded_context_length is the window the server is actually running
+    // with (LM Studio); the advertised maximum only applies when nothing
+    // more specific is reported.
+    for field in [
+        "loaded_context_length",
+        "context_length",
+        "context_window",
+        "max_model_len",
+        "max_context_length",
+    ] {
+        if let Some(length) = entry.get(field).and_then(|value| value.as_u64())
+            && length > 0
+        {
+            return Some(length as usize);
+        }
+    }
+    None
+}
+
 fn run_blocking_request<T, F>(operation: F) -> Result<T>
 where
     T: Send + 'static,

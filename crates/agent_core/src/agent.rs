@@ -79,6 +79,10 @@ impl Agent {
             let mut total_generated_tokens: usize = 0;
 
             let mut in_thinking = false;
+            // Servers like LM Studio stream thinking as bare
+            // reasoning_content deltas with no <think> tags; we wrap them
+            // in virtual tags so the tag state machine handles them.
+            let mut reasoning_stream_active = false;
             let mut thinking_buffer = String::new();
             let mut allow_thinking_start = true;
             let mut pending_prefix = String::new();
@@ -204,10 +208,14 @@ impl Agent {
                                     tool_calls: None,
                                     ..
                                 } => {
-                                    let Some(content) = content
-                                        .as_ref()
-                                        .filter(|content| !content.is_empty())
-                                        .or(reasoning_content.as_ref())
+                                    let visible_content =
+                                        content.as_ref().filter(|content| !content.is_empty());
+                                    let is_reasoning_delta = visible_content.is_none()
+                                        && reasoning_content
+                                            .as_ref()
+                                            .is_some_and(|text| !text.is_empty());
+                                    let Some(content) =
+                                        visible_content.or(reasoning_content.as_ref())
                                     else {
                                         continue;
                                     };
@@ -218,9 +226,22 @@ impl Agent {
 
                                     let thinking_tags_guard = self.thinking_tags.lock().await;
                                     let open_tag = thinking_tags_guard.open_tag.clone();
+                                    let close_tag = thinking_tags_guard.close_tag.clone();
                                     drop(thinking_tags_guard);
 
                                     let mut chunk_content = content.clone();
+                                    // Wrap untagged reasoning deltas in virtual
+                                    // think tags: open on the first reasoning
+                                    // delta, close when visible content resumes.
+                                    if is_reasoning_delta {
+                                        if !reasoning_stream_active {
+                                            reasoning_stream_active = true;
+                                            chunk_content = format!("{open_tag}{chunk_content}");
+                                        }
+                                    } else if reasoning_stream_active {
+                                        reasoning_stream_active = false;
+                                        chunk_content = format!("{close_tag}{chunk_content}");
+                                    }
                                     let mut process_as_thinking = in_thinking;
 
                                     if allow_thinking_start {
