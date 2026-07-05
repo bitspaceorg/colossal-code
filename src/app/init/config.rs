@@ -289,20 +289,30 @@ impl App {
             .or_else(|| self.fetch_active_connection_context_length());
     }
 
-    /// Ask the active OpenAI-compatible server (LM Studio, vLLM, …) for
-    /// the model's context window when no local metadata exists, caching
-    /// the answer on the model entry so later refreshes skip the network.
+    /// Resolve the context window for the active connection's model when
+    /// no local metadata exists: known cloud providers (OpenAI
+    /// subscription/API, Anthropic, …) via models.dev, custom/local
+    /// servers (LM Studio, vLLM, …) by asking the server itself. The
+    /// answer is cached on the model entry so later refreshes skip the
+    /// network.
     fn fetch_active_connection_context_length(&mut self) -> Option<usize> {
         let model_id = self.current_model.clone()?;
         let connection = self.active_connection()?;
-        let base_url = connection.base_url.clone()?;
+        let provider_id = connection.provider_id.clone();
+        let base_url = connection.base_url.clone();
         let api_key = connection.api_key.clone();
         let connection_id = connection.id.clone();
-        let length = crate::app::connect::model_discovery::fetch_openai_compatible_context_length(
-            &base_url,
-            api_key.as_deref(),
-            &model_id,
-        )?;
+        let length =
+            crate::app::connect::model_discovery::provider_model_metadata(&provider_id, &model_id)
+                .and_then(|metadata| metadata.context_length)
+                .or_else(|| {
+                    let base_url = base_url.as_deref()?;
+                    crate::app::connect::model_discovery::fetch_openai_compatible_context_length(
+                        base_url,
+                        api_key.as_deref(),
+                        &model_id,
+                    )
+                })?;
         if let Some(entry) = self.available_models.iter_mut().find(|model| {
             model.filename == model_id
                 && model.connection_id.as_deref() == Some(connection_id.as_str())
