@@ -278,6 +278,9 @@ impl App {
         if restore_scope.restores_code() {
             self.push_rewind_diff_summary(point.timestamp, fallback_stats);
         }
+        // The truncated timeline and summary must survive an immediate
+        // exit; the exit path only saves when a save is pending.
+        self.persistence_state.save_pending = true;
     }
 
     pub(crate) fn undo_rewind_restore(&mut self) -> bool {
@@ -294,6 +297,7 @@ impl App {
             };
             self.rewind_redo_stack.push(record);
             self.status_message = Some(status.to_string());
+            self.persistence_state.save_pending = true;
             return true;
         }
 
@@ -314,6 +318,7 @@ impl App {
             };
             self.rewind_undo_stack.push(record);
             self.status_message = Some(status.to_string());
+            self.persistence_state.save_pending = true;
             return true;
         }
 
@@ -357,6 +362,7 @@ impl App {
             )
         });
         self.push_rewind_diff_summary(point.timestamp, fallback_stats);
+        self.persistence_state.save_pending = true;
         true
     }
 
