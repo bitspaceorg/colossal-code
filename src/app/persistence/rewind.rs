@@ -172,16 +172,6 @@ impl App {
             return;
         }
 
-        let total_insertions: i64 = reverted.iter().map(|file| file.insertions).sum();
-        let total_deletions: i64 = reverted.iter().map(|file| file.deletions).sum();
-        self.push_agent_feedback_message(format!(
-            " ⎿ {} file{} reverted • +{} -{}",
-            reverted.len(),
-            if reverted.len() == 1 { "" } else { "s" },
-            total_insertions,
-            total_deletions,
-        ));
-
         self.audit_event(
             "rewind.diff_summary",
             serde_json::json!({
@@ -196,29 +186,45 @@ impl App {
             }),
         );
 
-        for file in reverted {
-            // The diff shows the work that was rolled back: old = state at
-            // the rewind target, new = state just before the rewind.
-            let raw_arguments = (file.before.is_some() || file.after.is_some()).then(|| {
-                serde_json::json!({
-                    "path": file.path,
-                    "old_string": file.before.unwrap_or_default(),
-                    "new_string": file.after.unwrap_or_default(),
-                })
-                .to_string()
-            });
-            let marker = UiMessageEvent::ToolCallCompleted {
-                tool_name: "revert".to_string(),
-                args: file.path.clone(),
-                result: format!(
+        // One compact block: the header lists the touched files, the
+        // result carries one stats line per file. No inline diffs — the
+        // audit database still has full contents if they're ever needed.
+        let paths: Vec<&str> = reverted.iter().map(|file| file.path.as_str()).collect();
+        let args = Self::format_reverted_paths(&paths);
+        let result = reverted
+            .iter()
+            .map(|file| {
+                format!(
                     "Reverted {} • +{} • -{}",
                     file.path, file.insertions, file.deletions
-                ),
-                raw_arguments,
-            }
-            .to_message();
-            self.push_agent_feedback_message(marker);
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let marker = UiMessageEvent::ToolCallCompleted {
+            tool_name: "revert".to_string(),
+            args,
+            result,
+            raw_arguments: None,
         }
+        .to_message();
+        self.push_agent_feedback_message(marker);
+    }
+
+    /// `["a.js", "b.js", (15 more items)..., "y.js", "z.js"]`
+    fn format_reverted_paths(paths: &[&str]) -> String {
+        let quoted: Vec<String> = paths.iter().map(|path| format!("\"{path}\"")).collect();
+        if quoted.len() <= 5 {
+            return format!("[{}]", quoted.join(", "));
+        }
+        format!(
+            "[{}, {}, ({} more items)..., {}, {}]",
+            quoted[0],
+            quoted[1],
+            quoted.len() - 4,
+            quoted[quoted.len() - 2],
+            quoted[quoted.len() - 1],
+        )
     }
 
     fn push_agent_feedback_message(&mut self, content: String) {
@@ -255,19 +261,20 @@ impl App {
             code_restored,
         });
         self.rewind_redo_stack.clear();
-        self.status_message = Some(if restore_scope.restores_code() && !code_restored {
-            format!(
-                "{} • {} • no filesystem checkpoint • /undo available",
-                restore_scope.default_status_label(),
-                point.preview
-            )
+        // The confirmation lives in the transcript, right below the last
+        // surviving generation stats, rather than in the status bar.
+        let missing_checkpoint = if restore_scope.restores_code() && !code_restored {
+            " • no filesystem checkpoint"
         } else {
-            format!(
-                "{} • {} • /undo available",
-                restore_scope.default_status_label(),
-                point.preview
-            )
-        });
+            ""
+        };
+        self.push_agent_feedback_message(format!(
+            "{} to \"{}\"{} • /undo available",
+            restore_scope.default_status_label(),
+            point.preview,
+            missing_checkpoint,
+        ));
+        self.status_message = None;
         if restore_scope.restores_code() {
             self.push_rewind_diff_summary(point.timestamp, fallback_stats);
         }

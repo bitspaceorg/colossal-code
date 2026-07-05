@@ -117,45 +117,61 @@ impl App {
             Span::raw(")"),
         ]));
 
-        let mut result_iter = result.lines();
-        if let Some(first_line) = result_iter.next() {
-            let mut spans = vec![
-                Self::connector_prefix(connector, false),
-                Span::styled("  ⎿  ", Style::default().fg(Color::DarkGray)),
-            ];
-            if tool_name == "edit_file" || tool_name == "revert" {
-                spans.extend(Self::render_edit_file_result_spans(
-                    first_line,
-                    result_color,
-                ));
-            } else {
-                spans.push(Span::styled(
-                    first_line.to_string(),
-                    Style::default().fg(result_color),
-                ));
+        if tool_name == "revert" {
+            // Per-file rows joined by │, closed by ⎿ — a compact list
+            // rather than a result-plus-continuation block.
+            let rows: Vec<&str> = result.lines().collect();
+            for (index, row) in rows.iter().enumerate() {
+                let closing = index + 1 == rows.len();
+                let mut spans = vec![
+                    Self::connector_prefix(connector, false),
+                    Span::styled(
+                        if closing { "  ⎿  " } else { "  │  " },
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ];
+                spans.extend(Self::render_edit_file_result_spans(row, result_color));
+                lines.push(Line::from(spans));
             }
-            if let Some(note_text) = note {
-                spans.push(Span::styled(" • ", Style::default().fg(Color::DarkGray)));
-                spans.push(Span::styled(
-                    note_text.to_string(),
-                    Style::default().fg(Color::DarkGray),
-                ));
+        } else {
+            let mut result_iter = result.lines();
+            if let Some(first_line) = result_iter.next() {
+                let mut spans = vec![
+                    Self::connector_prefix(connector, false),
+                    Span::styled("  ⎿  ", Style::default().fg(Color::DarkGray)),
+                ];
+                if tool_name == "edit_file" {
+                    spans.extend(Self::render_edit_file_result_spans(
+                        first_line,
+                        result_color,
+                    ));
+                } else {
+                    spans.push(Span::styled(
+                        first_line.to_string(),
+                        Style::default().fg(result_color),
+                    ));
+                }
+                if let Some(note_text) = note {
+                    spans.push(Span::styled(" • ", Style::default().fg(Color::DarkGray)));
+                    spans.push(Span::styled(
+                        note_text.to_string(),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                lines.push(Line::from(spans));
             }
-            lines.push(Line::from(spans));
-        }
-        for extra_line in result_iter {
-            lines.push(Line::from(vec![
-                Self::connector_prefix(connector, false),
-                Span::styled("     ", Style::default().fg(Color::DarkGray)),
-                Span::styled(extra_line.to_string(), Style::default().fg(result_color)),
-            ]));
+            for extra_line in result_iter {
+                lines.push(Line::from(vec![
+                    Self::connector_prefix(connector, false),
+                    Span::styled("     ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(extra_line.to_string(), Style::default().fg(result_color)),
+                ]));
+            }
         }
 
-        if (tool_name == "edit_file" || tool_name == "revert")
+        if tool_name == "edit_file"
             && let Some(raw_args) = raw_arguments
-            && (result.starts_with("Created ")
-                || result.starts_with("Updated ")
-                || result.starts_with("Reverted "))
+            && (result.starts_with("Created ") || result.starts_with("Updated "))
             && let Some((path, old_string, new_string)) =
                 Self::extract_edit_file_diff_inputs(raw_args)
         {
@@ -195,10 +211,7 @@ impl App {
         connector: AgentConnector,
         message_idx: usize,
     ) -> Option<RenderedEditFileDiff> {
-        if !(result.starts_with("Created ")
-            || result.starts_with("Updated ")
-            || result.starts_with("Reverted "))
-        {
+        if !(result.starts_with("Created ") || result.starts_with("Updated ")) {
             return None;
         }
 
